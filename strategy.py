@@ -4,27 +4,29 @@ import numpy as np
 import pandas as pd
 from scipy.stats import linregress
 from datetime import datetime
+import os
 
-ARTIFACT_PREFIX = 'artifacts/plotmulti'
+ARTIFACT_PREFIX = 'plotmulti'
 SHOW_TRENDLINES = False
 
 def fetch_stock_data(symbol, start, end):
     df = yf.download(symbol, start=start, end=end, auto_adjust=True)[['Open', 'High', 'Low', 'Close', 'Volume']]
     return df.tz_localize(None)
 
-def find_trend_lines(pivots, tolerance=0.01):
+def find_trend_lines(pivots, min_points=2, tolerance=0.01):
     """
-    Calculate trend lines that connect 3 or more pivot points.
+    Calculate trend lines that connect a minimum number of pivot points.
     Each trendline is validated by checking if additional pivot points lie on or near the line.
     
     Args:
         pivots (list): List of (date, price) tuples representing pivot points.
+        min_points (int): Minimum number of points required to form a trendline.
         tolerance (float): Maximum allowed deviation (as a percentage of price) for a point to lie on the trendline.
     
     Returns:
         list: A list of (slope, intercept, start_date, end_date) for each valid trendline.
     """
-    if len(pivots) < 3:
+    if len(pivots) < min_points:
         return []
 
     trendlines = []
@@ -51,9 +53,50 @@ def find_trend_lines(pivots, tolerance=0.01):
                 if abs(predicted_price - price) / price <= tolerance:
                     count += 1
 
-            # Only keep the trendline if it connects 3 or more points
-            if count >= 3:
+            # Only keep the trendline if it connects the required number of points
+            if count >= min_points:
                 trendlines.append((slope, intercept, pivots[i][0], pivots[j][0]))
+
+    return trendlines
+
+def find_trend_lines_with_regression(pivots, min_points=3, tolerance=0.01):
+    """
+    Calculate trend lines using linear regression for subsets of pivot points.
+    
+    Args:
+        pivots (list): List of (date, price) tuples representing pivot points.
+        min_points (int): Minimum number of points required to form a trendline.
+        tolerance (float): Maximum allowed deviation (as a percentage of price) for a point to lie on the trendline.
+    
+    Returns:
+        list: A list of (slope, intercept, start_date, end_date) for each valid trendline.
+    """
+    if len(pivots) < min_points:
+        return []
+
+    trendlines = []
+    n = len(pivots)
+
+    # Iterate through subsets of pivot points
+    for i in range(n - min_points + 1):
+        subset = pivots[i:i + min_points]  # Take a subset of points
+        x = np.array([pd.Timestamp(date).timestamp() for date, _ in subset])
+        y = np.array([price for _, price in subset])
+
+        # Perform linear regression
+        slope, intercept, r_value, _, _ = linregress(x, y)
+
+        # Check how many points lie on or near the line
+        count = 0
+        for date, price in pivots:
+            x_point = pd.Timestamp(date).timestamp()
+            predicted_price = slope * x_point + intercept
+            if abs(predicted_price - price) / price <= tolerance:
+                count += 1
+
+        # Only keep the trendline if it connects the required number of points
+        if count >= min_points:
+            trendlines.append((slope, intercept, subset[0][0], subset[-1][0]))
 
     return trendlines
 
@@ -112,7 +155,26 @@ def find_pivots_multiple_lookbacks(data, lookbacks, price_threshold=0.005):
 
     return results
 
-def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'):
+def save_plot_with_directories(filename, subdirectory):
+    """
+    Save the plot in a specific subdirectory, creating the directory if it doesn't exist.
+    
+    Args:
+        filename (str): Name of the file to save (e.g., 'pivots.png').
+        subdirectory (str): Subdirectory path (e.g., 'artifacts/levels/').
+    """
+    # Create the full path
+    full_path = os.path.join(subdirectory, filename)
+    
+    # Create the subdirectory if it doesn't exist
+    os.makedirs(subdirectory, exist_ok=True)
+    
+    # Save the plot
+    plt.savefig(full_path, dpi=300, bbox_inches='tight', facecolor='black', edgecolor='none')
+    print(f"Plot saved to {full_path}")
+    plt.close()
+
+def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png', subdirectory='artifacts/levels/'):
     """
     Plot pivot points for multiple lookback values on the price chart and highlight key levels.
     
@@ -120,6 +182,7 @@ def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'
         df (pd.DataFrame): DataFrame containing price data.
         pivots_by_lookback (dict): Dictionary of pivot points for each lookback value.
         filename (str): Name of the file to save the plot.
+        subdirectory (str): Subdirectory to save the plot (e.g., 'artifacts/levels/').
     """
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -183,23 +246,123 @@ def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'
     ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
     ax.grid(alpha=0.2, color='gray')
     
-    plt.savefig(filename, dpi=300, bbox_inches='tight', 
-                facecolor='black', edgecolor='none')
-    plt.close()
+    # Save the plot in the specified subdirectory
+    save_plot_with_directories(filename, subdirectory)
+
+def plot_trendlines(df, pivots, filename='trendlines.png', subdirectory='artifacts/trendlines/'):
+    """
+    Plot trendlines based on pivot points for multiple thresholds (2 to 5 points).
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing price data.
+        pivots (list): Combined list of pivot points (highs and lows).
+        filename (str): Name of the file to save the plot.
+        subdirectory (str): Subdirectory to save the plot (e.g., 'artifacts/trendlines/').
+    """
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot price data
+    ax.plot(df.index, df['Close'], label="Closing Price", color="cyan", alpha=0.6)
+    
+    # Define colors for thresholds
+    colors = ['red', 'green', 'blue', 'orange', 'purple']
+    
+    # Loop through thresholds (2 to 5 points)
+    for min_points in range(2, 6):
+        color = colors[(min_points - 2) % len(colors)]  # Cycle through colors
+        
+        # Find trendlines for the current threshold
+        trendlines = find_trend_lines(pivots, min_points=min_points, tolerance=0.01)
+        
+        # Plot trendlines
+        for slope, intercept, start_date, end_date in trendlines:
+            x_start = pd.Timestamp(start_date).timestamp()
+            x_end = pd.Timestamp(end_date).timestamp()
+            y_start = slope * x_start + intercept
+            y_end = slope * x_end + intercept
+            
+            label = f'Trendline (Min Points={min_points})'
+            ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8, label=label)
+    
+    # Customize plot
+    ax.set_title("Price Action with Trendlines (Dynamic Thresholds)", color='white', size=14)
+    ax.set_xlabel("Date", color='white')
+    ax.set_ylabel("Price", color='white')
+    ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
+    ax.grid(alpha=0.2, color='gray')
+    
+    # Save the plot in the specified subdirectory
+    save_plot_with_directories(filename, subdirectory)
+
+def plot_trendlines_with_regression(df, pivots, filename='trendlines_regression.png', subdirectory='artifacts/trendlines/', min_threshold=3):
+    """
+    Plot trendlines based on pivot points using linear regression, filtered by a minimum threshold.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing price data.
+        pivots (list): Combined list of pivot points (highs and lows).
+        filename (str): Name of the file to save the plot.
+        subdirectory (str): Subdirectory to save the plot (e.g., 'artifacts/trendlines/').
+        min_threshold (int): Minimum number of points required to form a trendline.
+    """
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot price data
+    ax.plot(df.index, df['Close'], label="Closing Price", color="cyan", alpha=0.6)
+    
+    # Define colors for thresholds
+    colors = ['red', 'green', 'blue', 'orange', 'purple']
+    
+    # Loop through thresholds (min_threshold to 5 points)
+    for min_points in range(min_threshold, 6):
+        color = colors[(min_points - 2) % len(colors)]  # Cycle through colors
+        
+        # Find trendlines for the current threshold
+        trendlines = find_trend_lines_with_regression(pivots, min_points=min_points, tolerance=0.01)
+        
+        # Plot trendlines
+        for slope, intercept, start_date, end_date in trendlines:
+            x_start = pd.Timestamp(start_date).timestamp()
+            x_end = pd.Timestamp(end_date).timestamp()
+            y_start = slope * x_start + intercept
+            y_end = slope * x_end + intercept
+            
+            label = f'Trendline (Min Points={min_points})'
+            if label not in ax.get_legend_handles_labels()[1]:  # Avoid duplicate legend entries
+                ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8, label=label)
+            else:
+                ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8)
+    
+    # Customize plot
+    ax.set_title("Price Action with Trendlines (Linear Regression)", color='white', size=14)
+    ax.set_xlabel("Date", color='white')
+    ax.set_ylabel("Price", color='white')
+    ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
+    ax.grid(alpha=0.2, color='gray')
+    
+    # Save the plot in the specified subdirectory
+    save_plot_with_directories(filename, subdirectory)
 
 def main():
     df = fetch_stock_data("AAPL", "2024-01-01", "2025-01-01")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    filename = f"{ARTIFACT_PREFIX}_{timestamp}.png"
-
+    
     # Define lookback values to test
     lookbacks = [5, 10, 15, 20, 25]
 
     # Find pivot points for multiple lookbacks
     pivots_by_lookback = find_pivots_multiple_lookbacks(df, lookbacks, price_threshold=0.005)
 
-    # Plot the pivot points
-    plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename=filename)
+    # Combine all pivot points
+    pivots = []
+    for pivots_high, pivots_low in pivots_by_lookback.values():
+        pivots.extend(pivots_high + pivots_low)
+
+    # Plot trendlines using linear regression
+    trendlines_filename = f"{ARTIFACT_PREFIX}_trendlines_regression_{timestamp}.png"
+    plot_trendlines_with_regression(df, pivots, filename=trendlines_filename, subdirectory='artifacts/trendlines/')
 
 
 if __name__ == "__main__":
