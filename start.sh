@@ -26,7 +26,8 @@ function create_virtualenv() {
     source quant-env/bin/activate
     echo 'Virtual environment created!'
 }
-function list_menu() {
+function quant-help() {
+    echo 'COMMANDS'
     echo '========================='
     echo 'Run quant-env to activate the virtual environment'
     echo 'Run quant-install to install the required packages'
@@ -40,8 +41,7 @@ function set_aliases() {
     echo 'alias quant-install="pip install -r python_imports"' >> ~/.bashrc
     echo 'alias quant-run="python strategy.py"' >> ~/.bashrc
     echo 'alias quant-env="source quant-env/bin/activate"' >> ~/.bashrc
-    echo 'alias quant-deactivate="deactivate"' >> ~/.bashrc
-    alias quant-help='list_menu'
+    echo 'alias quant-deactivate="deactivate"' >> ~/.bashrc    
     source ~/.bashrc
 }
 
@@ -61,11 +61,10 @@ echo 'Would you like to install the required packages? (y/n)'
 read install_packages
 if [ "$install_packages" == "y" ]; then
     echo 'Installing required packages'
-    pip install -r python_imports &
-    loading_bar $!
+    pip install -r python_imports
     echo 'Packages installed!'
 else
     echo 'Skipping package installation'
 fi
 
-list_menu
+quant-help
