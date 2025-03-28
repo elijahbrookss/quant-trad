@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import linregress
+from datetime import datetime
 
+ARTIFACT_PREFIX = 'artifacts/plot'
 
 def fetch_stock_data(symbol, start, end):
     df = yf.download(symbol, start=start, end=end, auto_adjust=True)[['Open', 'High', 'Low', 'Close', 'Volume']]
@@ -124,7 +126,9 @@ def plot_pivots(df, pivots_high, pivots_low, filename='pivots.png'):
 def main():
     df = fetch_stock_data("AAPL", "2024-01-01", "2025-01-01")
     pivots_high, pivots_low = find_pivots(df, lookback=3, price_threshold=.03)
-    plot_pivots(df, pivots_high, pivots_low)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f"{ARTIFACT_PREFIX}_{timestamp}.png"
+    plot_pivots(df, pivots_high, pivots_low, filename)
 
 if __name__ == "__main__":
     main()
