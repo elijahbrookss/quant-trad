@@ -5,26 +5,42 @@ import pandas as pd
 from scipy.stats import linregress
 from datetime import datetime
 import os
+from collections import Counter
+
 
 ARTIFACT_PREFIX = 'plotmulti'
 SHOW_TRENDLINES = False
+TRENDLINE_MIN_SCORE=0
 
 def fetch_stock_data(symbol, start, end):
+    print(f"Fetching stock data for symbol: {symbol} from {start} to {end}...")
     df = yf.download(symbol, start=start, end=end, auto_adjust=True)[['Open', 'High', 'Low', 'Close', 'Volume']]
-    return df.tz_localize(None)
+    df = df.tz_localize(None)
 
-def find_trend_lines(pivots, min_points=2, tolerance=0.01):
+    # Ensure the index is a Single index
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] for col in df.columns]
+
+    print("Starting data health checks for stock data...")
+    # Check if the index has unique values
+    is_unique = df.index.is_unique
+    print(f"[INFO] Index Unique: {is_unique}")
+
+    # Confirm the type of the index
+    index_type = type(df.index)
+    print(f"[INFO] Index Type: {index_type}")
+
+    # Count duplicate entries in the index
+    duplicate_count = df.index.duplicated().sum()
+    print(f"[INFO] Duplicate Index Entries: {duplicate_count}")
+
+    print("Data health checks completed successfully.")
+    
+    return df
+
+def find_trend_lines_with_regression(pivots, df, min_points=3, tolerance=0.001, max_trendlines=500):
     """
-    Calculate trend lines that connect a minimum number of pivot points.
-    Each trendline is validated by checking if additional pivot points lie on or near the line.
-    
-    Args:
-        pivots (list): List of (date, price) tuples representing pivot points.
-        min_points (int): Minimum number of points required to form a trendline.
-        tolerance (float): Maximum allowed deviation (as a percentage of price) for a point to lie on the trendline.
-    
-    Returns:
-        list: A list of (slope, intercept, start_date, end_date) for each valid trendline.
+    Calculate trend lines using linear regression and rank them by significance.
     """
     if len(pivots) < min_points:
         return []
@@ -32,73 +48,50 @@ def find_trend_lines(pivots, min_points=2, tolerance=0.01):
     trendlines = []
     n = len(pivots)
 
-    # Iterate through all pairs of pivot points to calculate potential trendlines
-    for i in range(n - 1):
+    for i in range(n - min_points + 1):
         for j in range(i + 1, n):
-            # Get the two pivot points
+            # Get two points to form initial line
             x1 = pd.Timestamp(pivots[i][0]).timestamp()
             y1 = pivots[i][1]
             x2 = pd.Timestamp(pivots[j][0]).timestamp()
             y2 = pivots[j][1]
 
-            # Calculate slope and intercept of the line
+            # Skip if points have the same timestamp
+            if x2 == x1:
+                continue
+
+            # Calculate initial slope and intercept
             slope = (y2 - y1) / (x2 - x1)
             intercept = y1 - slope * x1
 
-            # Check how many points lie on or near the line
-            count = 0
+            # Find all points that lie on this line
+            points_on_line = []
             for date, price in pivots:
                 x = pd.Timestamp(date).timestamp()
                 predicted_price = slope * x + intercept
                 if abs(predicted_price - price) / price <= tolerance:
-                    count += 1
+                    points_on_line.append((date, price))
 
-            # Only keep the trendline if it connects the required number of points
-            if count >= min_points:
-                trendlines.append((slope, intercept, pivots[i][0], pivots[j][0]))
+            # If we have enough points, create a Trendline object
+            if len(points_on_line) >= min_points:
+                points_on_line.sort(key=lambda x: x[0])  # Ensure chronological order
+                trendline = Trendline(slope, intercept, points_on_line[0][0], 
+                                      points_on_line[-1][0], points_on_line, df)
 
-    return trendlines
+                # Check for overlap with existing trendlines
+                is_overlapping = False
+                for existing_trendline in trendlines:
+                    shared_points = set(trendline.points) & set(existing_trendline.points)
+                    # print( len(shared_points) / len(trendline.points), "shared points")
+                    if len(shared_points) / len(trendline.points) > 0.1:  # Overlap threshold (50%)
+                        is_overlapping = True
+                        break
 
-def find_trend_lines_with_regression(pivots, min_points=3, tolerance=0.01):
-    """
-    Calculate trend lines using linear regression for subsets of pivot points.
-    
-    Args:
-        pivots (list): List of (date, price) tuples representing pivot points.
-        min_points (int): Minimum number of points required to form a trendline.
-        tolerance (float): Maximum allowed deviation (as a percentage of price) for a point to lie on the trendline.
-    
-    Returns:
-        list: A list of (slope, intercept, start_date, end_date) for each valid trendline.
-    """
-    if len(pivots) < min_points:
-        return []
+                if not is_overlapping and trendline.score > TRENDLINE_MIN_SCORE:
+                    trendlines.append(trendline)
 
-    trendlines = []
-    n = len(pivots)
-
-    # Iterate through subsets of pivot points
-    for i in range(n - min_points + 1):
-        subset = pivots[i:i + min_points]  # Take a subset of points
-        x = np.array([pd.Timestamp(date).timestamp() for date, _ in subset])
-        y = np.array([price for _, price in subset])
-
-        # Perform linear regression
-        slope, intercept, r_value, _, _ = linregress(x, y)
-
-        # Check how many points lie on or near the line
-        count = 0
-        for date, price in pivots:
-            x_point = pd.Timestamp(date).timestamp()
-            predicted_price = slope * x_point + intercept
-            if abs(predicted_price - price) / price <= tolerance:
-                count += 1
-
-        # Only keep the trendline if it connects the required number of points
-        if count >= min_points:
-            trendlines.append((slope, intercept, subset[0][0], subset[-1][0]))
-
-    return trendlines
+    # Sort trendlines by score and return top N
+    return sorted(trendlines, key=lambda x: x.score, reverse=True)[:max_trendlines]
 
 def find_pivots_multiple_lookbacks(data, lookbacks, price_threshold=0.005):
     """
@@ -131,14 +124,14 @@ def find_pivots_multiple_lookbacks(data, lookbacks, price_threshold=0.005):
             end_date = data.index[i + lookback]
 
             # Get current values
-            current_high = np.array(data.loc[current_date, 'High']).item()
-            current_low = np.array(data.loc[current_date, 'Low']).item()
+            current_high = data.at[current_date, 'High']
+            current_low = data.at[current_date, 'Low']
 
             # Get range values
             high_range = data.loc[start_date:end_date, 'High'].drop(index=current_date)
             low_range = data.loc[start_date:end_date, 'Low'].drop(index=current_date)
-            high_max = np.array(high_range.max()).item()
-            low_min = np.array(low_range.min()).item()
+            high_max = high_range.max()
+            low_min = low_range.min()
 
             # Check for high pivots
             if current_high > high_max:
@@ -249,16 +242,9 @@ def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'
     # Save the plot in the specified subdirectory
     save_plot_with_directories(filename, subdirectory)
 
-def plot_trendlines(df, pivots, filename='trendlines.png', subdirectory='artifacts/trendlines/'):
-    """
-    Plot trendlines based on pivot points for multiple thresholds (2 to 5 points).
-    
-    Args:
-        df (pd.DataFrame): DataFrame containing price data.
-        pivots (list): Combined list of pivot points (highs and lows).
-        filename (str): Name of the file to save the plot.
-        subdirectory (str): Subdirectory to save the plot (e.g., 'artifacts/trendlines/').
-    """
+
+def plot_trendlines_with_regression(df, pivots, filename='trendlines_regression.png', 
+                                  subdirectory='artifacts/trendlines/', min_threshold=3):
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 6))
     
@@ -268,82 +254,161 @@ def plot_trendlines(df, pivots, filename='trendlines.png', subdirectory='artifac
     # Define colors for thresholds
     colors = ['red', 'green', 'blue', 'orange', 'purple']
     
-    # Loop through thresholds (2 to 5 points)
-    for min_points in range(2, 6):
-        color = colors[(min_points - 2) % len(colors)]  # Cycle through colors
-        
-        # Find trendlines for the current threshold
-        trendlines = find_trend_lines(pivots, min_points=min_points, tolerance=0.01)
-        
-        # Plot trendlines
-        for slope, intercept, start_date, end_date in trendlines:
-            x_start = pd.Timestamp(start_date).timestamp()
-            x_end = pd.Timestamp(end_date).timestamp()
-            y_start = slope * x_start + intercept
-            y_end = slope * x_end + intercept
-            
-            label = f'Trendline (Min Points={min_points})'
-            ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8, label=label)
+    # Track unique labels
+    unique_labels = set()
     
+    # Loop through thresholds
+    for min_points in range(min_threshold, min_threshold+10):
+        color = colors[(min_points - 2) % len(colors)]
+        
+        # Find and rank trendlines for current threshold
+        trendlines = find_trend_lines_with_regression(pivots, df, min_points=min_points)
+        
+        # Print detailed information about trendlines
+        print(f"\nTrendlines with {min_points} points:")
+        print(f"Total trendlines found: {len(trendlines)}")
+        if trendlines:
+            print(f"R² values: {[f'{t.r_squared:.2f}' for t in trendlines]}")
+            print(f"Scores: {[f'{t.score:.2f}' for t in trendlines]}")
+            print(f"Lengths (days): {[t.length for t in trendlines]}")
+            print(f"Points: {[len(t.points) for t in trendlines]}")
+            print(f"Violations: {[t.violations for t in trendlines]}")
+            print(f"Violation Ratio: {[t.violation_ratio for t in trendlines]}")
+
+        # Bucket pivot points by date
+        pivot_dates = [pd.to_datetime(date) for date, _ in pivots]
+        pivot_counts = Counter(pivot_dates)
+
+        # Convert to DataFrame
+        pivot_density_df = pd.DataFrame.from_dict(pivot_counts, orient='index', columns=['count'])
+        pivot_density_df = pivot_density_df.resample('1D').sum().fillna(0)
+
+        # Normalize for plotting (0 to 1 scale)
+        norm_counts = pivot_density_df['count'] / pivot_density_df['count'].max()
+
+        # Plot top trendlines
+        for trendline in trendlines:
+            x_start = pd.Timestamp(trendline.start_date).timestamp()
+            x_end = pd.Timestamp(trendline.end_date).timestamp()
+            y_start = trendline.slope * x_start + trendline.intercept
+            y_end = trendline.slope * x_end + trendline.intercept
+            
+            # Plot the trendline
+            label = f'Trendline (Points={min_points}, R²={trendline.r_squared:.2f})'
+            if label not in unique_labels:
+                ax.plot([trendline.start_date, trendline.end_date], [y_start, y_end],
+                       color=color, linestyle='--', alpha=0.8, label=label)
+                unique_labels.add(label)
+            else:
+                ax.plot([trendline.start_date, trendline.end_date], [y_start, y_end],
+                       color=color, linestyle='--', alpha=0.8)
+            
+            # Plot the points on the trendline
+            trendline_points_x = [pd.Timestamp(date).to_pydatetime() for date, _ in trendline.points]
+            trendline_points_y = [price for _, price in trendline.points]
+            ax.scatter(trendline_points_x, trendline_points_y, color=color, marker='o', s=50, alpha=0.8)
+
     # Customize plot
-    ax.set_title("Price Action with Trendlines (Dynamic Thresholds)", color='white', size=14)
+    ax.set_title("Price Action with Ranked Trendlines", color='white', size=14)
     ax.set_xlabel("Date", color='white')
     ax.set_ylabel("Price", color='white')
     ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
     ax.grid(alpha=0.2, color='gray')
     
-    # Save the plot in the specified subdirectory
     save_plot_with_directories(filename, subdirectory)
 
-def plot_trendlines_with_regression(df, pivots, filename='trendlines_regression.png', subdirectory='artifacts/trendlines/', min_threshold=3):
-    """
-    Plot trendlines based on pivot points using linear regression, filtered by a minimum threshold.
-    
-    Args:
-        df (pd.DataFrame): DataFrame containing price data.
-        pivots (list): Combined list of pivot points (highs and lows).
-        filename (str): Name of the file to save the plot.
-        subdirectory (str): Subdirectory to save the plot (e.g., 'artifacts/trendlines/').
-        min_threshold (int): Minimum number of points required to form a trendline.
-    """
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Plot price data
-    ax.plot(df.index, df['Close'], label="Closing Price", color="cyan", alpha=0.6)
-    
-    # Define colors for thresholds
-    colors = ['red', 'green', 'blue', 'orange', 'purple']
-    
-    # Loop through thresholds (min_threshold to 5 points)
-    for min_points in range(min_threshold, 6):
-        color = colors[(min_points - 2) % len(colors)]  # Cycle through colors
+class Trendline:
+    def __init__(self, slope, intercept, start_date, end_date, points, df):
+        self.slope = slope
+        self.intercept = intercept
+        self.start_date = start_date
+        self.end_date = end_date
+        self.points = points
+        self.df = df
+        self.violations = 0
+        self.violation_ratio=0
         
-        # Find trendlines for the current threshold
-        trendlines = find_trend_lines_with_regression(pivots, min_points=min_points, tolerance=0.01)
+        # Calculate metrics
+        self.r_squared = self._calculate_r_squared()
+        self.length = self._calculate_length()
+        self.angle = self._calculate_angle()
+        self.proximity = self._calculate_proximity()
+        self.violations = self._calculate_violations()
+
+        self.score = self._calculate_score()
+    
+    def _calculate_r_squared(self):
+        x = np.array([pd.Timestamp(date).timestamp() for date, _ in self.points])
+        y = np.array([price for _, price in self.points])
+        _, _, r_value, _, _ = linregress(x, y)
+        return r_value**2
+    
+    def _calculate_length(self):
+        return (pd.Timestamp(self.end_date) - pd.Timestamp(self.start_date)).days
+    
+    def _calculate_angle(self):
+        return abs(np.degrees(np.arctan(self.slope)))
+    
+    def _calculate_proximity(self):
+        current_price = self.df['Close'].iloc[-1]
+        current_x = pd.Timestamp(self.df.index[-1]).timestamp()
+        predicted_price = self.slope * current_x + self.intercept
+        return abs(current_price - predicted_price) / current_price
+    
+    def _calculate_score(self):
+        # Weights for different metrics
+        weights = {
+            'r_squared': 0.1,
+            'points': 0.4,
+            'length': 0.3,
+            'angle': 0.2
+        }
         
-        # Plot trendlines
-        for slope, intercept, start_date, end_date in trendlines:
-            x_start = pd.Timestamp(start_date).timestamp()
-            x_end = pd.Timestamp(end_date).timestamp()
-            y_start = slope * x_start + intercept
-            y_end = slope * x_end + intercept
+        # Normalize length to 0-1 range (assuming max length is 365 days)
+        normalized_length = min(1.0, self.length / 365)
+        
+        # Normalize angle (prefer angles between 30 and 60 degrees)
+        normalized_angle = 1.0 - min(abs(self.angle - 45) / 45, 1.0)
+        
+        # Calculate weighted score
+        score = (
+            weights['r_squared'] * self.r_squared +
+            weights['points'] * (len(self.points) / 10) +  # Normalize by assuming max 10 points
+            weights['length'] * normalized_length +
+            weights['angle'] * normalized_angle
+        )
+        
+        # # Penalize if too far from current price
+        if self.proximity.item() > 0.01:  # More than 10% away from current price
+            score *= 0.5
             
-            label = f'Trendline (Min Points={min_points})'
-            if label not in ax.get_legend_handles_labels()[1]:  # Avoid duplicate legend entries
-                ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8, label=label)
-            else:
-                ax.plot([start_date, end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8)
+        # Penalize for violations
+        violation_ratio = self.violations / max(1, self.length)
+        self.violation_ratio = violation_ratio
+        if violation_ratio > 0.25:  # More than 25% of candles violate the trendline
+            score *= 0.5
+        if violation_ratio > .5:
+            score = 0 # Trash the trendline
+
+        return score
     
-    # Customize plot
-    ax.set_title("Price Action with Trendlines (Linear Regression)", color='white', size=14)
-    ax.set_xlabel("Date", color='white')
-    ax.set_ylabel("Price", color='white')
-    ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
-    ax.grid(alpha=0.2, color='gray')
-    
-    # Save the plot in the specified subdirectory
-    save_plot_with_directories(filename, subdirectory)
+    def _calculate_violations(self, tolerance=0.01):
+        """
+        Count how many candles (dates) violate the trendline.
+        A violation is when the actual price deviates more than the tolerance.
+        """
+        violations = 0
+        for date in self.df.index:
+            if self.start_date <= date <= self.end_date:
+                x = pd.Timestamp(date).timestamp()
+                predicted = self.slope * x + self.intercept
+                # print(f"[DEBUG] Type of date: {type(date)} — Value: {date}")
+                actual = self.df.at[date, 'Close']
+
+                if abs(predicted - actual) / actual > tolerance:
+                    violations += 1
+        return violations
+
 
 def main():
     df = fetch_stock_data("AAPL", "2024-01-01", "2025-01-01")
