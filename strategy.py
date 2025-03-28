@@ -57,54 +57,6 @@ def find_trend_lines(pivots, tolerance=0.01):
 
     return trendlines
 
-def find_pivots(data, lookback=3, price_threshold=0.02):
-    """
-    Detect significant pivot points with minimum price difference from all existing pivots.
-    """
-    pivots_high = []
-    pivots_low = []
-
-    def is_price_too_close(price, existing_pivots_high, existing_pivots_low):
-        """Check if price is too close to any existing pivot (high or low)."""
-        # Check against all existing pivots (both highs and lows)
-        for _, p in existing_pivots_high + existing_pivots_low:
-            if abs(price - p) / p < price_threshold:
-                return True
-        return False
-
-    for i in range(lookback, len(data) - lookback):
-        current_date = data.index[i]
-        start_date = data.index[i - lookback]
-        end_date = data.index[i + lookback]
-
-        # Get current values
-        current_high = np.array(data.loc[current_date, 'High']).item()
-        current_low = np.array(data.loc[current_date, 'Low']).item()
-
-        # Get range values
-        high_range = data.loc[start_date:end_date, 'High'].drop(index=current_date)
-        low_range = data.loc[start_date:end_date, 'Low'].drop(index=current_date)
-        high_max = np.array(high_range.max()).item()
-        low_min = np.array(low_range.min()).item()
-
-        # Check for high pivots
-        if current_high > high_max:
-            if not is_price_too_close(current_high, pivots_high, pivots_low):
-                # Remove any existing pivots that are too close
-                pivots_high = [p for p in pivots_high 
-                             if abs(p[1] - current_high) / p[1] >= price_threshold]
-                pivots_high.append((current_date, current_high))
-
-        # Check for low pivots
-        elif current_low < low_min:
-            if not is_price_too_close(current_low, pivots_high, pivots_low):
-                # Remove any existing pivots that are too close
-                pivots_low = [p for p in pivots_low 
-                            if abs(p[1] - current_low) / p[1] >= price_threshold]
-                pivots_low.append((current_date, current_low))
-
-    return pivots_high, pivots_low
-
 def find_pivots_multiple_lookbacks(data, lookbacks, price_threshold=0.005):
     """
     Detect significant pivot points for multiple lookback values.
@@ -160,56 +112,9 @@ def find_pivots_multiple_lookbacks(data, lookbacks, price_threshold=0.005):
 
     return results
 
-def plot_pivots(df, pivots_high, pivots_low, filename='pivots.png', show_trendlines=True):
-    """
-    Plot pivot points and optionally trendlines on the price chart.
-    
-    Args:
-        df (pd.DataFrame): DataFrame containing price data.
-        pivots_high (list): List of high pivot points (date, price).
-        pivots_low (list): List of low pivot points (date, price).
-        filename (str): Name of the file to save the plot.
-        show_trendlines (bool): Whether to calculate and plot trendlines.
-    """
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Plot price data
-    ax.plot(df.index, df['Close'], label="Closing Price", color="green", alpha=0.6)
-    
-    # Combine all pivots (highs and lows) for trendline calculation
-    all_pivots = sorted(pivots_high + pivots_low, key=lambda x: x[0])  # Sort by date
-    
-    # Plot pivot points
-    for date, value in all_pivots:
-        ax.scatter(date, value, color='gold', marker='o', s=100)
-    
-    # Calculate and plot trendlines if enabled
-    if show_trendlines:
-        trendlines = find_trend_lines(all_pivots, tolerance=0.01)
-        for slope, intercept, start_date, end_date in trendlines:
-            # Generate x-values for the trendline (between start_date and end_date)
-            x_vals = np.array([pd.Timestamp(start_date).timestamp(), pd.Timestamp(end_date).timestamp()])
-            y_vals = slope * x_vals + intercept
-            
-            # Convert x_vals back to datetime for plotting
-            x_dates = [pd.Timestamp.fromtimestamp(x) for x in x_vals]
-            ax.plot(x_dates, y_vals, color='red', linestyle='-', alpha=0.8, linewidth=2)
-    
-    # Customize plot
-    ax.set_title("Price Action with Pivot Points", color='white', size=14)
-    ax.set_xlabel("Date", color='white')
-    ax.set_ylabel("Price", color='white')
-    ax.legend(facecolor='black', edgecolor='white')
-    ax.grid(alpha=0.2, color='gray')
-    
-    plt.savefig(filename, dpi=300, bbox_inches='tight', 
-                facecolor='black', edgecolor='none')
-    plt.close()
-
 def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'):
     """
-    Plot pivot points for multiple lookback values on the price chart.
+    Plot pivot points for multiple lookback values on the price chart and highlight key levels.
     
     Args:
         df (pd.DataFrame): DataFrame containing price data.
@@ -225,23 +130,57 @@ def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'
     # Define colors for each lookback value
     colors = ['red', 'green', 'blue', 'orange', 'purple']
     
+    # Combine all pivot points and track occurrences
+    pivot_counts = {}
+    for lookback, (pivots_high, pivots_low) in pivots_by_lookback.items():
+        for date, value in pivots_high + pivots_low:
+            if value not in pivot_counts:
+                pivot_counts[value] = []
+            pivot_counts[value].append(date)
+    
+    # Identify key levels (points that appear in multiple lookbacks)
+    key_levels = {value: sorted(dates) for value, dates in pivot_counts.items() if len(dates) > 1}
+    
+    # Track unique labels for the legend
+    unique_labels = set()
+    
     # Plot pivot points for each lookback value
     for i, (lookback, (pivots_high, pivots_low)) in enumerate(pivots_by_lookback.items()):
         color = colors[i % len(colors)]  # Cycle through colors if more than 5 lookbacks
         
         # Plot high pivots
         for date, value in pivots_high:
-            ax.scatter(date, value, color=color, marker='^', s=100, label=f'High (Lookback={lookback})')
+            label = f'High (Lookback={lookback})'
+            if label not in unique_labels:
+                ax.scatter(date, value, color=color, marker='^', s=100, label=label)
+                unique_labels.add(label)
+            else:
+                ax.scatter(date, value, color=color, marker='^', s=100)
         
         # Plot low pivots
         for date, value in pivots_low:
-            ax.scatter(date, value, color=color, marker='v', s=100, label=f'Low (Lookback={lookback})')
+            label = f'Low (Lookback={lookback})'
+            if label not in unique_labels:
+                ax.scatter(date, value, color=color, marker='v', s=100, label=label)
+                unique_labels.add(label)
+            else:
+                ax.scatter(date, value, color=color, marker='v', s=100)
+    
+    # Plot key levels as rays starting from the first occurrence
+    for value, dates in key_levels.items():
+        start_date = dates[0]  # First occurrence of the key level
+        label = 'Key Level'
+        if label not in unique_labels:
+            ax.plot([start_date, df.index[-1]], [value, value], color='yellow', linestyle='--', alpha=0.8, label=label)
+            unique_labels.add(label)
+        else:
+            ax.plot([start_date, df.index[-1]], [value, value], color='yellow', linestyle='--', alpha=0.8)
     
     # Customize plot
     ax.set_title("Price Action with Pivot Points (Multiple Lookbacks)", color='white', size=14)
     ax.set_xlabel("Date", color='white')
     ax.set_ylabel("Price", color='white')
-    ax.legend(facecolor='black', edgecolor='white', fontsize=8)
+    ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
     ax.grid(alpha=0.2, color='gray')
     
     plt.savefig(filename, dpi=300, bbox_inches='tight', 
@@ -250,10 +189,9 @@ def plot_pivots_multiple_lookbacks(df, pivots_by_lookback, filename='pivots.png'
 
 def main():
     df = fetch_stock_data("AAPL", "2024-01-01", "2025-01-01")
-    pivots_high, pivots_low = find_pivots(df, lookback=15, price_threshold=.01)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     filename = f"{ARTIFACT_PREFIX}_{timestamp}.png"
-    # plot_pivots(df, pivots_high, pivots_low, filename, SHOW_TRENDLINES)
+
     # Define lookback values to test
     lookbacks = [5, 10, 15, 20, 25]
 
