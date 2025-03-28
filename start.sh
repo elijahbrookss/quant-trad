@@ -38,11 +38,13 @@ function quant-help() {
 }
 
 function set_aliases() {
-    echo 'alias quant-install="pip install -r python_imports"' >> ~/.bashrc
-    echo 'alias quant-run="python strategy.py"' >> ~/.bashrc
-    echo 'alias quant-env="source quant-env/bin/activate"' >> ~/.bashrc
-    echo 'alias quant-deactivate="deactivate"' >> ~/.bashrc    
-    source ~/.bashrc
+    touch ~/.bash_aliases
+    > ~/.bash_aliases
+    echo 'alias quant-install="pip install -r python_imports"' >> ~/.bash_aliases
+    echo 'alias quant-run="python3 strategy.py"' >> ~/.bash_aliases
+    echo 'alias quant-env="source quant-env/bin/activate"' >> ~/.bash_aliases
+    echo 'alias quant-deactivate="deactivate"' >> ~/.bash_aliases    
+    source ~/.bash_aliases
 }
 
 echo 'Installing commands'
@@ -52,13 +54,16 @@ echo 'Commands installed!'
 
 echo 'Would you like to create a virtual environment? (y/n)'
 read create_env
+
 if [ "$create_env" == "y" ]; then
     create_virtualenv
 else
     echo 'Skipping virtual environment creation'
 fi
+
 echo 'Would you like to install the required packages? (y/n)'
 read install_packages
+
 if [ "$install_packages" == "y" ]; then
     echo 'Installing required packages'
     pip install -r python_imports
