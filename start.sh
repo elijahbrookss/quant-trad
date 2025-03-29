@@ -41,7 +41,7 @@ function set_aliases() {
     touch ~/.bash_aliases
     > ~/.bash_aliases
     echo 'alias quant-install="pip install -r python_imports"' >> ~/.bash_aliases
-    echo 'alias quant-run="python3 strategy.py"' >> ~/.bash_aliases
+    echo 'alias quant-run="python3 main.py"' >> ~/.bash_aliases
     echo 'alias quant-env="source quant-env/bin/activate"' >> ~/.bash_aliases
     echo 'alias quant-deactivate="deactivate"' >> ~/.bash_aliases    
     source ~/.bash_aliases
