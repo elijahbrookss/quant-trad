@@ -87,8 +87,7 @@ This script:
 ---
 
 ### Example Output
-
-*(Insert chart image here showing trendlines + pivot density)*
+![image](https://github.com/user-attachments/assets/408f75f3-cb4c-4a89-93da-4418583ab046)
 
 ---
 
