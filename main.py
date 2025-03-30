@@ -12,8 +12,8 @@ START_DATE = "2024-01-01"
 END_DATE = "2025-01-01"
 
 # Pivot Detection Configurations
-LOOKBACKS = [5, 10, 15, 20, 25]
-MIN_PRICE_DISTANCE = 1.0
+LOOKBACKS = [3, 5, 7, 10]
+MIN_PRICE_DISTANCE = 5.0
 PIVOT_FILENAME_SUFFIX = "pivot_levels"
 PIVOT_SUBDIR = "artifacts/levels/"
 PLOT_PIVOTS = True  # Set to False if you don't want to plot the pivot points

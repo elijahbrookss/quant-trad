@@ -10,7 +10,7 @@ class PivotDetector:
     Attributes:
         df (pd.DataFrame): DataFrame containing stock data with at least 'High' and 'Low' columns.
         lookbacks (List[int]): A list of lookback periods for pivot detection.
-        threshold (float): Relative threshold to treat pivots as distinct.
+        threshold (float): Minimum relative price difference (e.g., 0.5%) required for a new pivot to be considered distinct.
     """
     def __init__(self, df: pd.DataFrame, lookbacks: List[int], threshold: float = 0.005) -> None:
         self.df = df
