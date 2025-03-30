@@ -3,16 +3,14 @@ import pandas as pd
 from classes.Logger import logger
 from classes.Trendline import Trendline
 
-TRENDLINE_MIN_SCORE = 0
-
-
 class TrendlineAnalyzer:
-    def __init__(self, df, pivots, min_points=3, tolerance=0.001, max_trendlines=500):
+    def __init__(self, df, pivots, min_points=3, tolerance=0.001, max_trendlines=500, trendline_min_score=0):
         self.df = df
         self.pivots = pivots
         self.min_points = min_points
         self.tolerance = tolerance
         self.max_trendlines = max_trendlines
+        self.trendline_min_score = trendline_min_score
 
     def analyze(self):
         if len(self.pivots) < self.min_points:
@@ -40,9 +38,9 @@ class TrendlineAnalyzer:
                 if len(points_on_line) >= self.min_points:
                     points_on_line.sort(key=lambda x: x[0])
                     tl = Trendline(slope, intercept, points_on_line[0][0], points_on_line[-1][0], points_on_line, self.df)
-
+                    
                     if all(len(set(tl.points) & set(e.points)) / len(tl.points) <= 0.1 for e in trendlines):
-                        if tl.score > TRENDLINE_MIN_SCORE:
+                        if tl.score > self.trendline_min_score:
                             trendlines.append(tl)
 
         logger.info("Trendline analysis completed. Found %d trendlines", len(trendlines))
