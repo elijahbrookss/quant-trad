@@ -104,5 +104,6 @@ class TrendlineAnalyzer:
                             trendlines.append(tl)
 
         logger.info("Trendline analysis completed. Found %d trendlines", len(trendlines))
+        
         # Return trendlines sorted by score (highest first) and limited to max_trendlines
         return sorted(trendlines, key=lambda t: t.score, reverse=True)[:self.max_trendlines]

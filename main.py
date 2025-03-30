@@ -69,6 +69,7 @@ def analyze_and_plot_trendlines(stock_data, all_pivots):
         analyzer = TrendlineAnalyzer(
             stock_data.df, combined_pivots, min_points=min_pts, trendline_min_score=TRENDLINE_MIN_SCORE
         )
+        logger.info(f"Analyzing trendlines with minimum {min_pts} points.")
         trendlines_by_threshold[min_pts] = analyzer.analyze()
 
     timestamp = get_timestamp()
