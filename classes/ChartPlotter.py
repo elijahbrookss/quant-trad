@@ -55,15 +55,21 @@ class ChartPlotter:
         colors = ['red', 'green', 'blue', 'orange', 'purple']
         unique_labels = set()
 
+        # Create a stable color mapping for each threshold
+        thresholds_sorted = sorted(trendlines_by_threshold.keys())
+        threshold_color_map = {
+            t: colors[i % len(colors)] for i, t in enumerate(thresholds_sorted)
+        }
+
         for threshold, trendlines in trendlines_by_threshold.items():
             logger.debug(f"Plotting trendlines with {threshold} points, found {len(trendlines)} trendlines")
-            # Choose a color based on the threshold
-            color = colors[(threshold - 2) % len(colors)]
+            color = threshold_color_map[threshold]
+
             for tl in trendlines:
                 logger.debug(
-                    f"Trendline: {tl.start_date} to {tl.end_date}, R²={tl.r_squared:.2f}, Score={tl.score:.2f}, "
-                    f"Length={tl.length} days, Points={len(tl.points)}, Violations={tl.violations}, "
-                    f"Violation Ratio={tl.violation_ratio:.2f}"
+                    f"Trendline: {tl.start_date} to {tl.end_date}, R²={tl.r_squared:.2f}, "
+                    f"Score={tl.score:.2f}, Length={tl.length} days, Points={len(tl.points)}, "
+                    f"Violations={tl.violations}, Violation Ratio={tl.violation_ratio:.2f}"
                 )
                 # Convert start and end dates to timestamps for calculation
                 x_start = pd.Timestamp(tl.start_date).timestamp()
@@ -73,10 +79,12 @@ class ChartPlotter:
 
                 label = f'Trendline (Points={threshold}, R²={tl.r_squared:.2f})'
                 if label not in unique_labels:
-                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8, label=label)
+                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end],
+                            color=color, linestyle='--', alpha=0.8, label=label)
                     unique_labels.add(label)
                 else:
-                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end], color=color, linestyle='--', alpha=0.8)
+                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end],
+                            color=color, linestyle='--', alpha=0.8)
 
                 # Plot the pivot points used for this trendline
                 x_pts = [pd.Timestamp(d).to_pydatetime() for d, _ in tl.points]
@@ -100,7 +108,9 @@ class ChartPlotter:
         min_price_distance: float = 1.0
     ) -> None:
         """
-        Plot horizontal levels (rays) from significant pivot points across different lookback periods.
+        Plot pivot level rays from significant pivot points across different lookback periods.
+        Each ray starts at the pivot point and extends horizontally to the right.
+        Different lookback periods are assigned different colors.
 
         Args:
             lookbacks (Dict[Any, Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]]):
@@ -117,6 +127,12 @@ class ChartPlotter:
         ax.plot(self.df.index, self.df['Close'], label="Closing Price", color="cyan", alpha=0.6)
 
         colors = ['red', 'green', 'blue', 'orange', 'purple']
+
+        # Create a stable color mapping for each lookback
+        lookbacks_sorted = sorted(lookbacks.keys())
+        lookback_color_map = {
+            lb: colors[i % len(colors)] for i, lb in enumerate(lookbacks_sorted)
+        }
 
         # Collect all pivot points with associated lookback and type (high/low)
         all_pivots: List[Tuple[str, float, Any, bool]] = []
@@ -138,17 +154,22 @@ class ChartPlotter:
         logger.info(f"Found {len(filtered_pivots)} distinct levels after filtering")
 
         unique_labels = set()
+        last_date = self.df.index[-1]  # The rightmost date for the rays
         for date, price, lookback, is_high in filtered_pivots:
-            color = colors[(lookback - min(lookbacks.keys())) % len(colors)]
+            pivot_dt = pd.Timestamp(date)
+            color = lookback_color_map[lookback]
             marker = '^' if is_high else 'v'
             label = f'{"High" if is_high else "Low"} (Lookback={lookback})'
+
+            # Plot the pivot point
             if label not in unique_labels:
-                ax.scatter(date, price, color=color, marker=marker, s=100, label=label)
+                ax.scatter(pivot_dt, price, color=color, marker=marker, s=100, label=label)
                 unique_labels.add(label)
             else:
-                ax.scatter(date, price, color=color, marker=marker, s=100)
-            # Draw a horizontal ray at the level
-            ax.axhline(y=price, xmin=0, xmax=1, color=color, linestyle='--', alpha=0.4)
+                ax.scatter(pivot_dt, price, color=color, marker=marker, s=100)
+
+            # Draw a ray from the pivot point to the last date
+            ax.plot([pivot_dt, last_date], [price, price], color=color, linestyle='--', alpha=0.4)
 
         # Customize chart appearance
         ax.set_title("Price Action with Filtered Pivot Levels", color='white', size=14)
