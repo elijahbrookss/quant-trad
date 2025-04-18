@@ -3,12 +3,17 @@ from typing import List, Dict, Optional
 
 from classes.engines.StrategyEngine import StrategyEngine
 from classes.indicators.BaseIndicator import BaseIndicator
+from dataclasses import dataclass
 
 class Trade:
     def __init__(self, entry_time, entry_price, direction):
         self.entry_time = entry_time
         self.entry_price = entry_price
         self.direction = direction  # 'long' or 'short'
+
+        self.stop_price: Optional[float] = None
+        self.target_price: Optional[float] = None
+
         self.exit_time: Optional[pd.Timestamp] = None
         self.exit_price: Optional[float] = None
         self.pnl: Optional[float] = None
@@ -21,6 +26,23 @@ class Trade:
         else:
             self.pnl = self.entry_price - exit_price
 
+@dataclass
+class PerfStats:
+    expectancy: float           # avg P/L per trade
+    win_rate:  float            # fraction of trades >
+    max_dd:    float            # max draw‑down of cumulative P/L
+
+    def __str__(self) -> str:
+        return (f"\n=== Performance Summary ===\n"
+                f"Trades          : {self.n_trades:>4}\n"
+                f"Win rate        : {self.win_rate:6.2%}\n"
+                f"Expectancy      : {self.expectancy:9.2f}\n"
+                f"Max draw‑down   : {self.max_dd:9.2f}\n")
+
+    @property
+    def n_trades(self) -> int:
+        # convenient accessor
+        return self._n_trades
 
 class Backtester:
     """
@@ -112,6 +134,22 @@ class Backtester:
                 'direction': t.direction,
                 'entry_price': t.entry_price,
                 'exit_price': t.exit_price,
+                "stop_price": t.stop_price,
+                "target_price": t.target_price,
                 'pnl': t.pnl,
             })
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        pnl           = df['pnl'].fillna(0)
+        equity_curve  = pnl.cumsum()
+        expectancy    = pnl.mean()
+        win_rate      = (pnl > 0).mean()
+        running_max   = equity_curve.cummax()
+        dd_series     = equity_curve - running_max
+        max_dd        = dd_series.min()
+        stats = PerfStats(expectancy, win_rate, max_dd)
+        stats._n_trades = len(df)        # set protected field for display
+        
+        self.stats = stats
+        print(self.stats)
+
+        return df
