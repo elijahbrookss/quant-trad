@@ -19,14 +19,8 @@ class StrategyEngine:
 
         # unpack known indicators by type
         # order: DailyLevels, H4Levels, MergedVA, Trendline 4h, Trendline 15m, VWAP
-        (
-            self.daily_levels,
-            self.h4_levels,
-            self.merged_va,
-            self.tl_h4,
-            self.tl_15,
-            self.vwap_15
-        ) = indicators
+        self.ind_map = {ind.NAME: ind for ind in indicators}
+        print("StrategyEngine.ind_map keys:", list(self.ind_map.keys()))
 
     def score_bar(
         self,
@@ -42,7 +36,7 @@ class StrategyEngine:
         votes = {"long": 0, "short": 0}
 
         # 1) Merged Value-Area clusters
-        for val, poc, vah, count in self.merged_va.get_clusters():
+        for val, poc, vah, count in self.ind_map["merged_va"].get_clusters():
             if abs(price - poc) <= atr * self.atr_factor:
                 score += 2
                 votes["long"] += 1
@@ -54,35 +48,35 @@ class StrategyEngine:
                 votes["long"] += 1
 
         # 2) Daily & H4 pivot levels
-        for lvl in self.daily_levels.get_levels():
+        for lvl in self.ind_map["levels_daily"].get_levels():
             if abs(price - lvl) <= atr * self.atr_factor:
                 score += 1
                 votes["long"] += 1
-        for lvl in self.h4_levels.get_levels():
+        for lvl in self.ind_map["levels_h4"].get_levels():
             if abs(price - lvl) / price <= 0.003:
                 score += 2
                 votes["long"] += 1
 
         # 3) VWAP bands
-        v, std = self.vwap_15.get_vwap(timestamp)
-        if abs(price - v) <= std * self.vwap_15.band_k:
+        v, std = self.ind_map["vwap"].get_vwap(timestamp)
+        if abs(price - v) <= std * self.ind_map["vwap"].band_k:
             score += 1
             votes["long"] += 1
 
-        # 4) Trendline proximity
-        # use 1 ATR threshold
-        for tl in self.tl_h4.get_lines() + self.tl_15.get_lines():
-            # map timestamp to integer index
-            try:
-                idx = self.df_15.index.get_loc(timestamp)
-            except KeyError:
-                continue
-            y_line = tl.intercept + tl.slope * idx
-            dist = abs(price - y_line) / atr if atr > 0 else 0
-            if tl.score >= 0.8 and dist <= self.atr_factor:
-                score += 1
-                votes["long"] += 1
-                break
+        # # 4) Trendline proximity: use 1 ATR threshold
+        # trendlines = self.ind_map["tl_h4"].get_lines() + self.ind_map["tl_15"].get_lines()
+        # for tl in trendlines:
+        #     # map timestamp to integer index
+        #     try:
+        #         idx = self.df_15.index.get_loc(timestamp)
+        #     except KeyError:
+        #         continue
+        #     y_line = tl.intercept + tl.slope * idx
+        #     dist = abs(price - y_line) / atr if atr > 0 else 0
+        #     if tl.score >= 0.8 and dist <= self.atr_factor:
+        #         score += 1
+        #         votes["long"] += 1
+        #         break
 
         # normalize to 0–1
         max_pts = 2 + 1 + 1 + 1 + 1 + 1  # adjust if you add more rules
