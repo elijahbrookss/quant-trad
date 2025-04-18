@@ -48,7 +48,13 @@ class _BaseLevelsIndicator(BaseIndicator):
         last_px = self.df.iloc[-1]["Close"]
         self.score = 1 - min(abs(last_px - np.array(uniq)) / last_px)
         return self.result
-
+        
+    def get_levels(self) -> List[float]:
+        """Return the flattened list of pivot levels."""
+        if self.result is None:
+            self.compute()
+        return self.levels
+    
     # --------------------------------------------------------------
     def plot(self) -> Path:
         if self.result is None:

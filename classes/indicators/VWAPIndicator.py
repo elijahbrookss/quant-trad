@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Tuple
 
 from classes.indicators.BaseIndicator import BaseIndicator
 
@@ -100,3 +100,13 @@ class VWAPIndicator(BaseIndicator):
         ax.legend(facecolor='black', edgecolor='white', fontsize=8)
         path = ARTIFACT_ROOT / f"vwap_{self.session_tf}.png"
         return self._save_fig(fig, path.name)
+    
+    def get_vwap(self, timestamp: pd.Timestamp) -> Tuple[float, float]:
+        """
+        Return (VWAP, VWAP_STD) at the given timestamp.
+        """
+        if self.result is None:
+            self.compute()
+        # self.result is a DataFrame with columns ['VWAP','VWAP_STD']
+        row = self.result.loc[timestamp]
+        return float(row['VWAP']), float(row['VWAP_STD'])
