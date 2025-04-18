@@ -5,7 +5,67 @@ from pathlib import Path
 from typing import List
 import numpy as np
 import pandas as pd
+from typing import Dict, Tuple, List
 
+
+ARTIFACT_ROOT = Path("artifacts")
+
+def _merge_band(df: pd.DataFrame, factor: float = 0.25) -> float:
+    atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
+    return max(atr * factor, df["Close"].iloc[-1] * 0.001)  # floor at 0.1 %
+
+
+class _BaseLevelsIndicator(BaseIndicator):
+    NAME = "levels"
+
+    def __init__(self, df: pd.DataFrame, lookbacks=(10, 20, 50), label: str = "level"):
+        super().__init__(df)
+        self.lookbacks = lookbacks
+        self.label = label  # daily / h4 tag
+        self.levels: List[float] = []
+
+    # --------------------------------------------------------------
+    def compute(self):
+        detector = PivotDetector(self.df, self.lookbacks)
+        pivot_map: Dict[int, List[Tuple[int, float]]] = detector.detect_all()
+
+        raw_levels: List[float] = []
+        for highs, lows in pivot_map.values():
+            raw_levels.extend([p for _, p in highs])
+            raw_levels.extend([p for _, p in lows])
+        raw_levels.sort()
+
+
+        band = _merge_band(self.df)
+        uniq: List[float] = []
+        for lvl in raw_levels:
+            if not uniq or abs(lvl - uniq[-1]) > band:
+                uniq.append(lvl)
+        self.levels = uniq
+        self.result = uniq
+
+        # Score – distance of last close to nearest level (smaller = stronger)
+        last_px = self.df.iloc[-1]["Close"]
+        self.score = 1 - min(abs(last_px - np.array(uniq)) / last_px)
+        return self.result
+
+    # --------------------------------------------------------------
+    def plot(self) -> Path:
+        if self.result is None:
+            self.compute()
+        plt.style.use("dark_background")
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(self.df.index, self.df["Close"], color="cyan", alpha=0.6, label="Close")
+        for lvl in self.levels:
+            ax.axhline(lvl, linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_title(f"{self.label.capitalize()} Levels", color="white")
+        ax.legend(facecolor="black", edgecolor="white")
+        folder = ARTIFACT_ROOT / self.label
+        folder.mkdir(parents=True, exist_ok=True)
+        file = folder / f"levels_{self.label}.png"
+        fig.savefig(file, dpi=300, bbox_inches="tight", facecolor="black")
+        plt.close(fig)
+        return file
 
 
 class LevelsIndicator(BaseIndicator):
@@ -45,3 +105,18 @@ class LevelsIndicator(BaseIndicator):
         ax.legend(["Close"] + [f"Level {i+1}" for i in range(len(self.levels))], loc="upper left", fontsize=8)
         return self._save_fig(fig, "levels.png")
 
+# ------------------------------------------------------------------
+# Public subclasses
+# ------------------------------------------------------------------
+class DailyLevelsIndicator(_BaseLevelsIndicator):
+    NAME = "levels_daily"
+
+    def __init__(self, df: pd.DataFrame):
+        super().__init__(df, lookbacks=(5, 10, 20), label="daily")
+
+
+class H4LevelsIndicator(_BaseLevelsIndicator):
+    NAME = "levels_h4"
+
+    def __init__(self, df: pd.DataFrame):
+        super().__init__(df, lookbacks=(10, 25, 50), label="h4")

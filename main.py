@@ -4,9 +4,14 @@ from classes.ChartPlotter import ChartPlotter
 from classes.PivotDetector import PivotDetector
 from classes.TrendlineAnalyzer import TrendlineAnalyzer
 
-from classes.strategies.SimpleStrategy import SimpleStrategy
+# from classes.strategies.SimpleStrategy import SimpleStrategy
+from classes.DataLoader import DataLoader
+from classes.indicators.LevelsIndicator import DailyLevelsIndicator, H4LevelsIndicator
+from classes.indicators.MarketProfileIndicator import DailyMarketProfileIndicator, MergedValueAreaIndicator
+from classes.indicators.TrendlineIndicator import TrendlineIndicator
 
 if __name__ == "__main__":
+
     # symbol = "AAPL"
     # start_date = "2024-01-01"
     # end_date = "2025-01-01"
@@ -29,5 +34,21 @@ if __name__ == "__main__":
     # plot_filename = f"trendlines_regression_{timestamp}.png"
     # plotter.plot_trendlines(trendlines_by_threshold, filename=plot_filename)
 
-    strat = SimpleStrategy()
-    print("Strategy confidence:", strat.run())
+    # strat = SimpleStrategy()
+    # print("Strategy confidence:", strat.run())
+
+    # Seed database with 1 year of 15‑minute data
+    # DataLoader.ensure_schema()
+    # rows = DataLoader.ingest_history("AAPL", days=365, interval="60m")
+    # print("inserted", rows, "rows of 15‑minute data.")
+
+    df_h4  = DataLoader.get("AAPL", tf="4h",   lookback_days=365)
+    df_m30 = DataLoader.get("AAPL", tf="30min", lookback_days=120)
+
+    tl_h4  = TrendlineIndicator(df_h4,  tf_label="4h")
+    tl_m30 = TrendlineIndicator(df_m30, tf_label="30min")
+
+    for tl in (tl_h4, tl_m30):
+        tl.compute()
+        tl.plot()
+        print("Top line score", tl.score)
