@@ -9,6 +9,7 @@ from classes.DataLoader import DataLoader
 from classes.indicators.LevelsIndicator import DailyLevelsIndicator, H4LevelsIndicator
 from classes.indicators.MarketProfileIndicator import DailyMarketProfileIndicator, MergedValueAreaIndicator
 from classes.indicators.TrendlineIndicator import TrendlineIndicator
+from classes.indicators.VWAPIndicator import VWAPIndicator
 
 if __name__ == "__main__":
 
@@ -41,14 +42,19 @@ if __name__ == "__main__":
     # DataLoader.ensure_schema()
     # rows = DataLoader.ingest_history("AAPL", days=365, interval="60m")
     # print("inserted", rows, "rows of 15‑minute data.")
+    # Daily VWAP + bands
+    df_day = DataLoader.get("AAPL", tf="1d", lookback_days=365)
+    vwap_daily = VWAPIndicator(df_day, session_tf='D', band_k=2)
+    vwap_daily.compute()
+    vwap_daily.plot()  # saves artifacts/vwap/vwap_D.png
 
-    df_h4  = DataLoader.get("AAPL", tf="4h",   lookback_days=365)
-    df_m30 = DataLoader.get("AAPL", tf="30min", lookback_days=120)
+    # Monthly VWAP + bands
+    vwap_month = VWAPIndicator(df_day, session_tf='M', band_k=2)
+    vwap_month.compute()
+    vwap_month.plot()  # saves artifacts/vwap/vwap_M.png
 
-    tl_h4  = TrendlineIndicator(df_h4,  tf_label="4h")
-    tl_m30 = TrendlineIndicator(df_m30, tf_label="30min")
-
-    for tl in (tl_h4, tl_m30):
-        tl.compute()
-        tl.plot()
-        print("Top line score", tl.score)
+    # Intraday 4h VWAP session: 
+    df_h4  = DataLoader.get("AAPL", tf="4h", lookback_days=365)
+    vwap_h4 = VWAPIndicator(df_h4, session_tf='D')  # resets daily on 4h bars
+    vwap_h4.compute()
+    vwap_h4.plot()
