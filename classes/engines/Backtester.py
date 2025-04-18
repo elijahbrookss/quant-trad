@@ -57,8 +57,17 @@ class Backtester:
     def run(self) -> pd.DataFrame:
         """Simulate trades over the DataFrame."""
         position: Optional[Trade] = None
-        # Precompute ATR series for stops/targets
-        atr = (self.df['High'] - self.df['Low']).rolling(14).mean()
+
+        # ---- Wilder ATR (True Range w/ Wilder smoothing) ----
+        hl          = self.df['High'] - self.df['Low']
+        h_cp        = (self.df['High'] - self.df['Close'].shift()).abs()
+        l_cp        = (self.df['Low']  - self.df['Close'].shift()).abs()
+        tr          = pd.concat([hl, h_cp, l_cp], axis=1).max(axis=1)
+        atr_period  = 14        # keep it configurable if you like
+        atr         = tr.ewm(alpha=1/atr_period, adjust=False).mean()
+
+        # # Precompute ATR series for stops/targets
+        # atr = (self.df['High'] - self.df['Low']).rolling(14).mean()
 
         for idx, row in self.df.iterrows():
             score = row['score']
