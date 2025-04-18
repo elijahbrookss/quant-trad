@@ -1,10 +1,7 @@
 from classes.indicators.BaseIndicator import BaseIndicator
 from classes.PivotDetector import PivotDetector
 from classes.TrendlineAnalyzer import TrendlineAnalyzer
-from classes.ChartPlotter import ChartPlotter
 
-
-import functools
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
