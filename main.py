@@ -1,60 +1,58 @@
-from datetime import datetime
-from classes.StockData import StockData
-from classes.ChartPlotter import ChartPlotter
-from classes.PivotDetector import PivotDetector
-from classes.TrendlineAnalyzer import TrendlineAnalyzer
 
-# from classes.strategies.SimpleStrategy import SimpleStrategy
 from classes.DataLoader import DataLoader
 from classes.indicators.LevelsIndicator import DailyLevelsIndicator, H4LevelsIndicator
 from classes.indicators.MarketProfileIndicator import DailyMarketProfileIndicator, MergedValueAreaIndicator
 from classes.indicators.TrendlineIndicator import TrendlineIndicator
 from classes.indicators.VWAPIndicator import VWAPIndicator
+from classes.engines.StrategyEngine import StrategyEngine
+from classes.engines.Backtester import Backtester
+
 
 if __name__ == "__main__":
+    symbol = "AAPL"
 
-    # symbol = "AAPL"
-    # start_date = "2024-01-01"
-    # end_date = "2025-01-01"
-    # timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    # 1) Ensure the DB schema exists and back‑fill your data
+    DataLoader.ensure_schema()
 
-    # stock_data = StockData(symbol, start_date, end_date)
-    # detector = PivotDetector(stock_data.df, lookbacks=[5, 10, 15, 20, 25])
-    # all_pivots = detector.detect_all()
+    # 2) Load DataFrames for each timeframe
+    df_15 = DataLoader.get(symbol, tf="15m", lookback_days=120)   # execution TF
+    df_h4 = DataLoader.get(symbol, tf="4h",  lookback_days=365)   # H4 for levels & trendlines
+    df_day= DataLoader.get(symbol, tf="1d",  lookback_days=365)   # daily for levels & MP
 
-    # combined_pivots = []
-    # for high_pivots, low_pivots in all_pivots.values():
-    #     combined_pivots.extend(high_pivots + low_pivots)
+    # 3) Instantiate & compute each indicator
+    daily_lv   = DailyLevelsIndicator(df_day); daily_lv.compute()
+    h4_lv      = H4LevelsIndicator(df_h4);    h4_lv.compute()
 
-    # plotter = ChartPlotter(stock_data.df, combined_pivots)
-    # trendlines_by_threshold = {}
-    # for min_pts in range(3, 8):
-    #     analyzer = TrendlineAnalyzer(stock_data.df, combined_pivots, min_points=min_pts)
-    #     trendlines_by_threshold[min_pts] = analyzer.analyze()
+    daily_mp   = DailyMarketProfileIndicator(df_day)
+    daily_mp.compute()
+    merged_va  = MergedValueAreaIndicator(daily_mp.result, min_cluster=3)
+    merged_va.compute()
 
-    # plot_filename = f"trendlines_regression_{timestamp}.png"
-    # plotter.plot_trendlines(trendlines_by_threshold, filename=plot_filename)
+    tl_h4      = TrendlineIndicator(df_h4, tf_label="4h");  tl_h4.compute()
+    tl_15      = TrendlineIndicator(df_15, tf_label="15m"); tl_15.compute()
 
-    # strat = SimpleStrategy()
-    # print("Strategy confidence:", strat.run())
+    vwap_15    = VWAPIndicator(df_15, session_tf="D", band_k=2.0)
+    vwap_15.compute()
 
-    # Seed database with 1 year of 15‑minute data
-    # DataLoader.ensure_schema()
-    # rows = DataLoader.ingest_history("AAPL", days=365, interval="60m")
-    # print("inserted", rows, "rows of 15‑minute data.")
-    # Daily VWAP + bands
-    df_day = DataLoader.get("AAPL", tf="1d", lookback_days=365)
-    vwap_daily = VWAPIndicator(df_day, session_tf='D', band_k=2)
-    vwap_daily.compute()
-    vwap_daily.plot()  # saves artifacts/vwap/vwap_D.png
+    # 4) Wire up the StrategyEngine
+    indicators = [
+        daily_lv,
+        h4_lv,
+        merged_va,
+        tl_h4,
+        tl_15,
+        vwap_15,
+    ]
+    engine = StrategyEngine(indicators, atr_factor=0.15)
 
-    # Monthly VWAP + bands
-    vwap_month = VWAPIndicator(df_day, session_tf='M', band_k=2)
-    vwap_month.compute()
-    vwap_month.plot()  # saves artifacts/vwap/vwap_M.png
+    # 5) Run the strategy over every 15‑min bar
+    signals_df = engine.run(df_15, price_col="Close")
 
-    # Intraday 4h VWAP session: 
-    df_h4  = DataLoader.get("AAPL", tf="4h", lookback_days=365)
-    vwap_h4 = VWAPIndicator(df_h4, session_tf='D')  # resets daily on 4h bars
-    vwap_h4.compute()
-    vwap_h4.plot()
+    # 6) Inspect and save
+    print(signals_df[["score", "direction"]].tail(10))
+    signals_df.to_csv("artifacts/simple_strategy_signals.csv")
+    print("Signals written to artifacts/simple_strategy_signals.csv")
+
+    bt = Backtester(signals_df, engine, entry_threshold=0.8, stop_loss=1.0, take_profit=2.0)
+    trades_df = bt.run()
+    print(trades_df)

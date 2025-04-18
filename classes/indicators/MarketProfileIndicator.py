@@ -68,7 +68,15 @@ class DailyMarketProfileIndicator(BaseIndicator):
         fig.savefig(file, dpi=300, bbox_inches="tight")
         plt.close(fig)
         return file
-
+    
+    def get_daily_va(self, date: pd.Timestamp) -> Tuple[float, float, float]:
+        """
+        Return (VAL, POC, VAH) for the given session (date).
+        """
+        if self.result is None:
+            self.compute()
+        row = self.daily_va.loc[date.date()]
+        return float(row.val), float(row.poc), float(row.vah)
 
 class MergedValueAreaIndicator(BaseIndicator):
     """Merge consecutive daily value areas where their price ranges overlap.
@@ -118,7 +126,16 @@ class MergedValueAreaIndicator(BaseIndicator):
         self.result = self.merged
         self.score = len(self.merged)
         return self.result
-
+    
+    def get_clusters(self) -> List[Tuple[float, float, float, int]]:
+        """
+        Return list of merged clusters: 
+        each is (VAL, POC, VAH, count_of_days).
+        """
+        if self.result is None:
+            self.compute()
+        return self.merged
+    
     # ------------------------------------------------------------------
     def plot(self) -> Path:
         if self.result is None:

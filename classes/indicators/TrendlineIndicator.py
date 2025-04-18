@@ -150,3 +150,11 @@ class TrendlineIndicator(BaseIndicator):
         fig.savefig(file, dpi=300, bbox_inches="tight")
         plt.close(fig)
         return file
+    
+    def get_lines(self) -> List[TL]:
+        """
+        Return all detected TL objects for this timeframe.
+        """
+        if self.result is None:
+            self.compute()
+        return self.lines
