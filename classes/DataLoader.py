@@ -3,13 +3,13 @@ import os
 from typing import Literal, Optional
 
 import pandas as pd
-import psycopg2
+from sqlalchemy import create_engine, text
 import yfinance as yf
 
 TS_TZ = "UTC"  # store everything in UTC
 DEFAULT_DSN = os.environ.get(
     "PG_DSN",
-    "dbname=postgres user=postgres password=postgres host=localhost port=5432",
+    "postgresql+psycopg2://postgres:postgres@localhost:5432/postgres",
 )
 
 
@@ -18,11 +18,7 @@ class DataLoader:
 
     _dsn = DEFAULT_DSN
     _table = "ohlc_raw"
-
-    # --------------------------------------------------------------
-    @classmethod
-    def _conn(cls):
-        return psycopg2.connect(cls._dsn)
+    _engine = create_engine(_dsn)
 
     # --------------------------------------------------------------
     @classmethod
@@ -41,9 +37,8 @@ class DataLoader:
         );
         SELECT create_hypertable('{cls._table}', 'ts', if_not_exists => TRUE);
         """
-        with cls._conn() as conn, conn.cursor() as cur:
-            cur.execute(ddl)
-            conn.commit()
+        with cls._engine.connect() as conn:
+            conn.execute(text(ddl))
 
     # --------------------------------------------------------------
     @classmethod
@@ -74,20 +69,14 @@ class DataLoader:
         df["symbol"] = symbol
         cols = ["symbol", "ts", "open", "high", "low", "close", "volume"]
         # Upsert via COPY to temp table then INSERT ... ON CONFLICT DO NOTHING
-        with cls._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("CREATE TEMP TABLE tmp (LIKE " + cls._table + ") ON COMMIT DROP;")
-                # psycopg2 fast copy
-                from io import StringIO
-
-                buf = StringIO()
-                df[cols].to_csv(buf, index=False, header=False)
-                buf.seek(0)
-                cur.copy_from(buf, "tmp", sep=",")
-                cur.execute(
-                    f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;"
+        with cls._engine.connect() as conn:
+            with conn.begin():  # Transaction block
+                conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;"))
+                # Use pandas to_sql for bulk insert
+                df[cols].to_sql("tmp", conn, if_exists="append", index=False, method="multi")
+                conn.execute(
+                    text(f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
                 )
-            conn.commit()
         return len(df)
 
     # --------------------------------------------------------------
@@ -101,21 +90,21 @@ class DataLoader:
         """Return resampled OHLCV DataFrame indexed by bucket timestamp."""
         bucket = tf
         sql = f"""
-            SELECT time_bucket(%s, ts) AS bucket,
+            SELECT time_bucket(:bucket, ts) AS bucket,
                    first(open, ts)  AS open,
                    max(high)        AS high,
                    min(low)         AS low,
                    last(close, ts)  AS close,
                    sum(volume)      AS volume
             FROM {cls._table}
-            WHERE symbol = %s
-              AND ts >= NOW() - INTERVAL %s
+            WHERE symbol = :symbol
+              AND ts >= NOW() - INTERVAL :interval_param
             GROUP BY bucket
             ORDER BY bucket;
         """
         interval_param = f"{lookback_days} days"
-        with cls._conn() as conn:
-            df = pd.read_sql(sql, conn, params=[bucket, symbol, interval_param])
+        with cls._engine.connect() as conn:
+            df = pd.read_sql(text(sql), conn, params={"bucket": bucket, "symbol": symbol, "interval_param": interval_param})
         if df.empty:
             raise ValueError("No data found – did you ingest the symbol?")
         df.set_index("bucket", inplace=True)
