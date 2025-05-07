@@ -23,8 +23,8 @@ def run_backtest():
 
     # Ingest & load data
     DataLoader.ensure_schema()
-    for iv in conf.get("ingest_intervals", ["15m", "60m"]):
-        DataLoader.ingest_history(symbol, days=conf.get("history_days", 365), interval=iv)
+    # for iv in conf.get("ingest_intervals", ["15m", "60m"]):
+    #     DataLoader.ingest_history(symbol, days=conf.get("history_days", 365), interval=iv)
 
     df15 = DataLoader.get(symbol, tf="15m", lookback_days=conf.get("exec_days", 120))
     df4h = DataLoader.get(symbol, tf="4h",  lookback_days=conf.get("higher_days", 365))

@@ -126,6 +126,9 @@ class Backtester:
                         position.close(idx, position.target_price)
 
         # Build results DataFrame
+        if not self.trades:
+            print("No trades taken")
+            return pd.DataFrame()  # Return an empty DataFrame if no trades
         records: List[Dict] = []
         for t in self.trades:
             records.append({
