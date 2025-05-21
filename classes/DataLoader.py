@@ -1,10 +1,13 @@
 import datetime as dt
 import os
-from typing import Literal, Optional
+from typing import Literal
 
 import pandas as pd
-from sqlalchemy import create_engine, text
 import yfinance as yf
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+from classes.Logger import logger
 
 TS_TZ = "UTC"  # store everything in UTC
 DEFAULT_DSN = os.environ.get(
@@ -20,7 +23,6 @@ class DataLoader:
     _table = "ohlc_raw"
     _engine = create_engine(_dsn)
 
-    # --------------------------------------------------------------
     @classmethod
     def ensure_schema(cls):
         """Create hypertable if it doesn't yet exist."""
@@ -37,49 +39,70 @@ class DataLoader:
         );
         SELECT create_hypertable('{cls._table}', 'ts', if_not_exists => TRUE);
         """
-        with cls._engine.connect() as conn:
-            conn.execute(text(ddl))
+        try:
+            with cls._engine.connect() as conn:
+                conn.execute(text(ddl))
+            logger.info("Schema ensured for table '%s'.", cls._table)
+        except SQLAlchemyError as e:
+            logger.exception("Failed to ensure schema for '%s': %s", cls._table, e)
+            raise
 
-    # --------------------------------------------------------------
     @classmethod
-    def ingest_history(cls, symbol: str, days: int = 365, interval: str = "1m"):
+    def ingest_history(cls, symbol: str, days: int = 365, interval: str = "1m") -> int:
         """Pull yfinance candles and upsert into the hypertable."""
         end = dt.datetime.utcnow().replace(microsecond=0, tzinfo=dt.timezone.utc)
         start = end - dt.timedelta(days=days)
-        df = yf.download(
-            symbol,
-            start=start,
-            end=end,
-            interval=interval,
-            progress=False,
-            threads=False,
-        ).tz_convert(None)  # make naive UTC
-        if df.empty:
-            print("No data downloaded – check symbol / interval.")
-            return 0
-        df.reset_index(inplace=True)
-        df.rename(columns={
-            "Datetime": "ts",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
-        }, inplace=True)
-        df["symbol"] = symbol
-        cols = ["symbol", "ts", "open", "high", "low", "close", "volume"]
-        # Upsert via COPY to temp table then INSERT ... ON CONFLICT DO NOTHING
-        with cls._engine.connect() as conn:
-            with conn.begin():  # Transaction block
-                conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;"))
-                # Use pandas to_sql for bulk insert
-                df[cols].to_sql("tmp", conn, if_exists="append", index=False, method="multi")
-                conn.execute(
-                    text(f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
-                )
-        return len(df)
 
-    # --------------------------------------------------------------
+        try:
+            df = yf.download(
+                symbol,
+                start=start,
+                end=end,
+                interval=interval,
+                progress=False,
+                threads=False,
+            )
+        except Exception as e:
+            logger.exception("yfinance download failed for %s: %s", symbol, e)
+            return 0
+
+        if df is None or df.empty:
+            logger.warning("No data downloaded for %s – check symbol/interval.", symbol)
+            return 0
+
+        try:
+            # normalize index/tz and prepare columns
+            df = df.tz_convert(None).reset_index()
+            df.rename(columns={
+                "Datetime": "ts",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            }, inplace=True)
+            df["symbol"] = symbol
+            cols = ["symbol", "ts", "open", "high", "low", "close", "volume"]
+
+            # upsert via temp table
+            with cls._engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;"))
+                    df[cols].to_sql("tmp", conn, if_exists="append", index=False, method="multi")
+                    conn.execute(
+                        text(f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
+                    )
+
+            logger.info("Ingested %d rows for %s.", len(df), symbol)
+            return len(df)
+
+        except SQLAlchemyError as e:
+            logger.exception("Database error during ingest_history for %s: %s", symbol, e)
+            raise
+        except Exception as e:
+            logger.exception("Unexpected error during ingest_history for %s: %s", symbol, e)
+            raise
+
     @classmethod
     def get(
         cls,
@@ -103,11 +126,29 @@ class DataLoader:
             ORDER BY bucket;
         """
         interval_param = f"{lookback_days} days"
-        with cls._engine.connect() as conn:
-            df = pd.read_sql(text(sql), conn, params={"bucket": bucket, "symbol": symbol, "interval_param": interval_param})
+
+        try:
+            with cls._engine.connect() as conn:
+                df = pd.read_sql(
+                    text(sql),
+                    conn,
+                    params={
+                        "bucket": bucket,
+                        "symbol": symbol,
+                        "interval_param": interval_param
+                    }
+                )
+        except SQLAlchemyError as e:
+            logger.exception("Database error in get() for %s: %s", symbol, e)
+            raise
+
         if df.empty:
-            raise ValueError("No data found – did you ingest the symbol?")
+            msg = f"No data found for {symbol} in the last {lookback_days} days."
+            logger.error(msg)
+            raise ValueError(msg)
+
         df.set_index("bucket", inplace=True)
         df.index = pd.to_datetime(df.index, utc=True)
         df.rename(columns=str.title, inplace=True)  # match previous naming
+        logger.info("Retrieved %d rows for %s [%s].", len(df), symbol, tf)
         return df
