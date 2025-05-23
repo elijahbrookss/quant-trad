@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: db_up db_down db_logs db_cli
+.PHONY: db_up db_down db_logs db_cli 
 
 db_up:
 	docker compose up -d timescaledb
@@ -10,9 +10,8 @@ db_up:
 	done
 	@echo "TimescaleDB is ready!"
 	docker compose up -d pgadmin
-
-	@echo "Displaying TimescaleDB IP address..."
-	@echo "TimescaleDB IP address: $(shell docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tsdb)"
+	@echo Use the following command to view the IP address of the TimescaleDB container:
+	@echo "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tsdb"
 	@echo "You can also connect using pgAdmin at http://localhost:8080"
 
 db_down:
@@ -26,3 +25,7 @@ db_logs:
 db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"
 	@echo "Connected to TimescaleDB. Use \q to exit."
+
+env:
+	@echo "To activate the virtual environment, run:"
+	@echo "source .venv/bin/activate"

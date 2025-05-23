@@ -3,7 +3,6 @@ import os
 from typing import Literal
 
 import pandas as pd
-import yfinance as yf
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -29,6 +28,7 @@ class DataLoader:
         logger.debug("Connected to DB: %s", cls._engine.url)
         ddl_create = f"""
         CREATE TABLE IF NOT EXISTS {cls._table} (
+            datasource TEXT NOT NULL,
             symbol TEXT NOT NULL,
             ts TIMESTAMPTZ NOT NULL,
             open  DOUBLE PRECISION,
@@ -36,7 +36,8 @@ class DataLoader:
             low   DOUBLE PRECISION,
             close DOUBLE PRECISION,
             volume DOUBLE PRECISION,
-            PRIMARY KEY (symbol, ts)
+            data_ingested_ts TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (symbol, ts, datasource)
         );
         """
         ddl_hypertable= f"""
@@ -67,6 +68,9 @@ class DataLoader:
 
         try:
             df = provider.get_ohlcv(symbol, start, end, interval)
+            df["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
+            df["datasource"] = provider.get_datasource()
+
         except Exception as e:
             logger.exception("Data fetch failed for %s: %s", symbol, e)
             return 0
@@ -76,14 +80,12 @@ class DataLoader:
             return 0
 
         try:
-            cols = ["symbol", "ts", "open", "high", "low", "close", "volume"]
-
             with cls._engine.connect() as conn:
                 with conn.begin():
                     conn.execute(
                         text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;")
                     )
-                    df[cols].to_sql("tmp", conn, if_exists="append", index=False, method="multi")
+                    df.to_sql("tmp", conn, if_exists="append", index=False, method="multi")
                     conn.execute(
                         text(f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
                     )
