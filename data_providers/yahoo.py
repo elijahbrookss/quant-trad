@@ -2,8 +2,7 @@ import datetime as dt
 import pandas as pd
 import yfinance as yf
 from classes.Logger import logger
-
-
+from .base import DataSource
 from .base import BaseDataProvider
 
 class YahooFinanceProvider(BaseDataProvider):
@@ -46,3 +45,6 @@ class YahooFinanceProvider(BaseDataProvider):
         logger.debug("DataFrame columns after cleanup: %s", df.columns)
 
         return df[["symbol", "ts", "open", "high", "low", "close", "volume"]]
+    
+    def get_datasource(self):
+        return DataSource.YFINANCE.value

@@ -7,9 +7,14 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from classes.Logger import logger
-
+from .base import DataSource
 from .base import BaseDataProvider
+
+
+
 load_dotenv("secrets.env")
+
+datasource_name = "ALPACA"
 
 class AlpacaProvider(BaseDataProvider):
     def __init__(self):
@@ -54,6 +59,9 @@ class AlpacaProvider(BaseDataProvider):
         # Clean format
         df.reset_index(inplace=True)
         df["ts"] = df["timestamp"]
-        df["symbol"] = df["symbol"]
+        df["symbol"] = symbol
 
         return df[["symbol", "ts", "open", "high", "low", "close", "volume"]]
+    
+    def get_datasource(self):
+        return DataSource.ALPACA.value

@@ -21,8 +21,8 @@ from classes.DataLoader import DataLoader
 
 DataLoader.ensure_schema()
 
-# provider = YahooFinanceProvider()
-# DataLoader.ingest_history("AAPL", provider, days=30, interval="1h")
+provider = YahooFinanceProvider()
+DataLoader.ingest_history("AAPL", provider, days=30, interval="1h")
 
 provider = AlpacaProvider()
 DataLoader.ingest_history("AAPL", provider, days=15, interval="1h")
