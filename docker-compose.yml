@@ -1,5 +1,4 @@
 # docker-compose.yml
-version: "3.9"
 
 services:
   timescaledb:
@@ -9,9 +8,20 @@ services:
     ports:
       - "5432:5432"                                    # host → container
     environment:
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
     volumes:
       - pgdata:/var/lib/postgresql/data                # persistent data
-
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      - timescaledb
 volumes:
   pgdata:

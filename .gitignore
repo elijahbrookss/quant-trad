@@ -2,3 +2,4 @@ quant-env/
 classes/__pycache__/
 artifacts/
 .venv/
+secrets.env

@@ -26,7 +26,8 @@ class DataLoader:
     @classmethod
     def ensure_schema(cls):
         """Create hypertable if it doesn't yet exist."""
-        ddl = f"""
+        logger.debug("Connected to DB: %s", cls._engine.url)
+        ddl_create = f"""
         CREATE TABLE IF NOT EXISTS {cls._table} (
             symbol TEXT NOT NULL,
             ts TIMESTAMPTZ NOT NULL,
@@ -37,57 +38,51 @@ class DataLoader:
             volume DOUBLE PRECISION,
             PRIMARY KEY (symbol, ts)
         );
+        """
+        ddl_hypertable= f"""
         SELECT create_hypertable('{cls._table}', 'ts', if_not_exists => TRUE);
         """
         try:
-            with cls._engine.connect() as conn:
-                conn.execute(text(ddl))
+            with cls._engine.begin() as conn:
+                conn.execute(text(ddl_create))
+                conn.execute(text(ddl_hypertable))
             logger.info("Schema ensured for table '%s'.", cls._table)
         except SQLAlchemyError as e:
             logger.exception("Failed to ensure schema for '%s': %s", cls._table, e)
             raise
 
     @classmethod
-    def ingest_history(cls, symbol: str, days: int = 365, interval: str = "1m") -> int:
-        """Pull yfinance candles and upsert into the hypertable."""
-        end = dt.datetime.utcnow().replace(microsecond=0, tzinfo=dt.timezone.utc)
+    def ingest_history(
+        cls,
+        symbol: str,
+        provider,
+        days: int = 365,
+        interval: str = "1d"
+    ) -> int:
+        """
+        Ingest OHLCV history using the specified data provider.
+        """
+        end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         start = end - dt.timedelta(days=days)
 
         try:
-            df = yf.download(
-                symbol,
-                start=start,
-                end=end,
-                interval=interval,
-                progress=False,
-                threads=False,
-            )
+            df = provider.get_ohlcv(symbol, start, end, interval)
         except Exception as e:
-            logger.exception("yfinance download failed for %s: %s", symbol, e)
+            logger.exception("Data fetch failed for %s: %s", symbol, e)
             return 0
 
         if df is None or df.empty:
-            logger.warning("No data downloaded for %s – check symbol/interval.", symbol)
+            logger.warning("No data returned for %s – check symbol/interval.", symbol)
             return 0
 
         try:
-            # normalize index/tz and prepare columns
-            df = df.tz_convert(None).reset_index()
-            df.rename(columns={
-                "Datetime": "ts",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-            }, inplace=True)
-            df["symbol"] = symbol
             cols = ["symbol", "ts", "open", "high", "low", "close", "volume"]
 
-            # upsert via temp table
             with cls._engine.connect() as conn:
                 with conn.begin():
-                    conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;"))
+                    conn.execute(
+                        text(f"CREATE TEMP TABLE tmp (LIKE {cls._table}) ON COMMIT DROP;")
+                    )
                     df[cols].to_sql("tmp", conn, if_exists="append", index=False, method="multi")
                     conn.execute(
                         text(f"INSERT INTO {cls._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
