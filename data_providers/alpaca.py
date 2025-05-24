@@ -11,10 +11,7 @@ from .base import DataSource
 from .base import BaseDataProvider
 
 
-
 load_dotenv("secrets.env")
-
-datasource_name = "ALPACA"
 
 class AlpacaProvider(BaseDataProvider):
     def __init__(self):
@@ -23,7 +20,7 @@ class AlpacaProvider(BaseDataProvider):
             os.getenv("ALPACA_SECRET_KEY"),
         )
 
-    def get_ohlcv(
+    def fetch_from_api(
         self,
         symbol: str,
         start: dt.datetime,
@@ -55,13 +52,11 @@ class AlpacaProvider(BaseDataProvider):
         df = bars.df
         if df.empty:
             return pd.DataFrame()
+        
+        df.reset_index(inplace=True) #Bring indexes to columns
 
-        # Clean format
-        df.reset_index(inplace=True)
-        df["ts"] = df["timestamp"]
-        df["symbol"] = symbol
-
-        return df[["symbol", "ts", "open", "high", "low", "close", "volume"]]
+        logger.debug("DataFrame columns after cleanup - ALPACA: %s", df.columns)
+        return df[["timestamp", "open", "high", "low", "close", "volume"]]
     
     def get_datasource(self):
         return DataSource.ALPACA.value

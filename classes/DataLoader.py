@@ -5,8 +5,11 @@ from typing import Literal
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
+from dotenv import load_dotenv
 
 from classes.Logger import logger
+load_dotenv("secrets.env")
+
 
 TS_TZ = "UTC"  # store everything in UTC
 DEFAULT_DSN = os.environ.get(
@@ -18,8 +21,8 @@ DEFAULT_DSN = os.environ.get(
 class DataLoader:
     """Static helper – all methods are classmethods."""
 
-    _dsn = DEFAULT_DSN
-    _table = "ohlc_raw"
+    _dsn = os.getenv("PG_DSN")
+    _table = os.getenv("OHLC_TABLE")
     _engine = create_engine(_dsn)
 
     @classmethod
@@ -30,18 +33,19 @@ class DataLoader:
         CREATE TABLE IF NOT EXISTS {cls._table} (
             datasource TEXT NOT NULL,
             symbol TEXT NOT NULL,
-            ts TIMESTAMPTZ NOT NULL,
+            timestamp TIMESTAMPTZ NOT NULL,
             open  DOUBLE PRECISION,
             high  DOUBLE PRECISION,
             low   DOUBLE PRECISION,
             close DOUBLE PRECISION,
             volume DOUBLE PRECISION,
             data_ingested_ts TIMESTAMPTZ DEFAULT now(),
-            PRIMARY KEY (symbol, ts, datasource)
+            interval TEXT NOT NULL,
+            PRIMARY KEY (symbol, timestamp, datasource, interval)
         );
         """
         ddl_hypertable= f"""
-        SELECT create_hypertable('{cls._table}', 'ts', if_not_exists => TRUE);
+        SELECT create_hypertable('{cls._table}', 'timestamp', if_not_exists => TRUE);
         """
         try:
             with cls._engine.begin() as conn:
@@ -67,9 +71,12 @@ class DataLoader:
         start = end - dt.timedelta(days=days)
 
         try:
-            df = provider.get_ohlcv(symbol, start, end, interval)
+            df = provider.fetch_from_api(symbol, start, end, interval)
+
             df["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
             df["datasource"] = provider.get_datasource()
+            df["interval"] = interval
+            df["symbol"] = symbol
 
         except Exception as e:
             logger.exception("Data fetch failed for %s: %s", symbol, e)

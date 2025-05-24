@@ -6,7 +6,7 @@ from .base import DataSource
 from .base import BaseDataProvider
 
 class YahooFinanceProvider(BaseDataProvider):
-    def get_ohlcv(
+    def fetch_from_api(
         self,
         symbol: str,
         start: dt.datetime,
@@ -35,16 +35,12 @@ class YahooFinanceProvider(BaseDataProvider):
             df.columns.name = None  # Drop the 'Ticker' name 
 
         df = df.tz_convert(None).reset_index()
-
-        # Force lowercase column names
         df.columns = [col.lower() for col in df.columns]
-        # Rename datetime index to 'ts'
-        df.rename(columns={"datetime": "ts"}, inplace=True)
+        logger.debug("DataFrame columns after cleanup - YFINANCE: %s", df.columns)
 
-        df["symbol"] = symbol
-        logger.debug("DataFrame columns after cleanup: %s", df.columns)
-
-        return df[["symbol", "ts", "open", "high", "low", "close", "volume"]]
+        df["timestamp"] = df["datetime"]
+        
+        return df[["timestamp", "open", "high", "low", "close", "volume"]]
     
     def get_datasource(self):
         return DataSource.YFINANCE.value
