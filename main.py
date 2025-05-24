@@ -5,6 +5,7 @@ from classes.DataLoader import DataLoader
 from classes.engines.Backtester   import Backtester
 from classes.engines.StrategyEngine import StrategyEngine
 from pathlib import Path
+from classes.Logger import logger
 import yaml
 
 # ---------- indicator imports ----------
@@ -14,18 +15,38 @@ from classes.indicators.VWAPIndicator          import VWAPIndicator
 # add your TrendlineIndicator etc. here
 # ---------------------------------------
 
+from classes.ChartPlotter import ChartPlotter
 
 from data_providers.yahoo import YahooFinanceProvider
-from data_providers.alpaca import AlpacaProvider
+from data_providers.alpaca import AlpacaProvider 
 from classes.DataLoader import DataLoader
 
 DataLoader.ensure_schema()
 
-provider = YahooFinanceProvider()
-DataLoader.ingest_history("AAPL", provider, days=30, interval="1h")
+# Setup
+symbol = "ES"
+start_date = "2025-04-01"
+end_date = "2025-05-23"
+interval = "1d"
 
-provider = AlpacaProvider()
-DataLoader.ingest_history("AAPL", provider, days=15, interval="1h")
+yahoo_provider = YahooFinanceProvider()
+# DataLoader.ingest_history("symbol", yahoo_provider, days=30, interval="1d")
+
+alpaca_provider = AlpacaProvider()
+DataLoader.ingest_history(symbol, alpaca_provider, days=30, interval=interval)
+
+df = alpaca_provider.get_ohlcv(symbol=symbol, start=start_date, end=end_date, interval=interval)
+
+logger.debug(df)
+ChartPlotter.plot_ohlc(
+    df,
+    title=f"{symbol} from {alpaca_provider.get_datasource().upper()}",
+    symbol=symbol,
+    datasource=alpaca_provider.get_datasource(),
+    start=start_date,
+    end=end_date
+)
+
 
 
 # ─── hyper‑parameter grids ────────────────────────────────────────────────
