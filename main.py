@@ -12,6 +12,8 @@ import yaml
 from classes.indicators.LevelsIndicator        import LevelsIndicator      # daily & H4
 from classes.indicators.MarketProfileIndicator import DailyMarketProfileIndicator
 from classes.indicators.VWAPIndicator          import VWAPIndicator
+from classes.indicators.PivotLevelOverlay import PivotLevelOverlay
+
 # add your TrendlineIndicator etc. here
 # ---------------------------------------
 
@@ -27,7 +29,7 @@ DataLoader.ensure_schema()
 symbol = "ES"
 start_date = "2025-04-01"
 end_date = "2025-05-23"
-interval = "1d"
+interval = "1h"
 
 yahoo_provider = YahooFinanceProvider()
 # DataLoader.ingest_history("symbol", yahoo_provider, days=30, interval="1d")
@@ -36,6 +38,7 @@ alpaca_provider = AlpacaProvider()
 DataLoader.ingest_history(symbol, alpaca_provider, days=30, interval=interval)
 
 df = alpaca_provider.get_ohlcv(symbol=symbol, start=start_date, end=end_date, interval=interval)
+overlays = PivotLevelOverlay(df, lookbacks=[2, 5, 10, 15]).to_overlays(color="magenta")
 
 logger.debug(df)
 ChartPlotter.plot_ohlc(
@@ -44,7 +47,9 @@ ChartPlotter.plot_ohlc(
     symbol=symbol,
     datasource=alpaca_provider.get_datasource(),
     start=start_date,
-    end=end_date
+    end=end_date,
+    show_volume=True,
+    overlays=overlays
 )
 
 

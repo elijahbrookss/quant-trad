@@ -3,6 +3,7 @@ import mplfinance as mpf
 from typing import Optional
 from classes.Logger import logger
 import os
+from typing import List, Any
 
 class ChartPlotter:
     @staticmethod
@@ -16,7 +17,8 @@ class ChartPlotter:
         show_volume: bool = True,
         chart_type: str = "candle",
         output_base: str = "output",
-        output_subdir: str = "charts"  # Default folder for full chart output
+        output_subdir: str = "charts",
+        overlays: Optional[List[Any]] = None  # Default folder for full chart output
     ):
         """
         Plots OHLC data using mplfinance.
@@ -68,13 +70,15 @@ class ChartPlotter:
             mpf.plot(
                 df,
                 type=chart_type,
-                volume=show_volume and 'volume' in df.columns,
+                volume=show_volume and "volume" in df.columns,
                 title=title,
-                style='yahoo',
+                style="yahoo",
+                addplot=overlays if overlays else [],
                 savefig=file_path
             )
 
-            
+            logger.info("Chart saved to %s", file_path)
+
         except IndexError:
             logger.warning("IndexError: No data points in filtered date range (%s to %s)", start, end)
             raise ValueError(f"No data available in the date range {start} to {end}.")

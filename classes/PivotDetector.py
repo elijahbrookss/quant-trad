@@ -21,11 +21,11 @@ class PivotDetector:
 
         for i in range(lookback, len(self.df) - lookback):
             current = self.df.index[i]
-            high = self.df.at[current, 'High']
-            low = self.df.at[current, 'Low']
+            high = self.df.at[current, 'high']
+            low = self.df.at[current, 'low']
 
-            high_range = self.df['High'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
-            low_range = self.df['Low'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
+            high_range = self.df['high'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
+            low_range = self.df['low'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
 
             if high > high_range.max() and not is_near_existing(high):
                 highs.append((current, high))
