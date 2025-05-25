@@ -4,6 +4,9 @@ from typing import Optional
 from classes.Logger import logger
 import os
 from typing import List, Any
+import matplotlib.pyplot as plt
+from typing import Set, Tuple
+from matplotlib import patches
 
 class ChartPlotter:
     @staticmethod
@@ -18,6 +21,7 @@ class ChartPlotter:
         chart_type: str = "candle",
         output_base: str = "output",
         output_subdir: str = "charts",
+        legend_entries: Set[Tuple[str, str]] = None,
         overlays: Optional[List[Any]] = None  # Default folder for full chart output
     ):
         """
@@ -64,19 +68,32 @@ class ChartPlotter:
             output_dir = os.path.join(output_base, output_subdir)
             os.makedirs(output_dir, exist_ok=True)
 
-            file_name = f"chart_{datasource}_{symbol}_{start}_to_{end}.png"
+            file_name = f"chart_{datasource}_{symbol}_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}.png"
             file_path = os.path.join(output_dir, file_name)
+            
+            fig_width = min(10 + len(df.index) * 0.01, 30)
+            figsize = (fig_width, 6)
 
-            mpf.plot(
+
+            fig, axes = mpf.plot(
                 df,
                 type=chart_type,
                 volume=show_volume and "volume" in df.columns,
                 title=title,
                 style="yahoo",
                 addplot=overlays if overlays else [],
-                savefig=file_path
+                returnfig=True,
+                figsize=figsize
             )
 
+            if legend_entries:
+                handles = [
+                    patches.Patch(color=color, label=label)
+                    for label, color in sorted(legend_entries)
+                ]
+                axes[0].legend(handles=handles, loc="upper left", fontsize=8)
+
+            fig.savefig(file_path, dpi=300, bbox_inches="tight")
             logger.info("Chart saved to %s", file_path)
 
         except IndexError:

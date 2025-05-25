@@ -11,3 +11,4 @@ yfinance==0.2.61
 psycopg2-binary
 alpaca-trade-api
 mplfinance
+dataclasses

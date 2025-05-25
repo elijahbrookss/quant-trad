@@ -4,7 +4,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from classes.Logger import logger
 from .base import DataSource
@@ -29,15 +29,18 @@ class AlpacaProvider(BaseDataProvider):
     ) -> pd.DataFrame:
         tf = {
             "1m": TimeFrame.Minute,
-            "5m": TimeFrame(5, "Minute"),
-            "15m": TimeFrame(15, "Minute"),
+            "5m": TimeFrame(5, TimeFrameUnit.Minute),
+            "15m": TimeFrame(15, TimeFrameUnit.Minute),
             "1h": TimeFrame.Hour,
             "1d": TimeFrame.Day
         }.get(interval)
 
+        
         if tf is None:
             raise ValueError(f"Unsupported interval for Alpaca: {interval}")
 
+
+        logger.debug("Timeframe for Alpaca: %s", tf)
         bars = self.client.get_stock_bars(
             StockBarsRequest(
                 symbol_or_symbols=[symbol],
