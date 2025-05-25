@@ -6,6 +6,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, List
+from mplfinance.plotting import make_addplot
 
 
 ARTIFACT_ROOT = Path("artifacts")
@@ -71,8 +72,15 @@ class _BaseLevelsIndicator(BaseIndicator):
         file = folder / f"levels_{self.label}.png"
         fig.savefig(file, dpi=300, bbox_inches="tight", facecolor="black")
         plt.close(fig)
-        return file
 
+    def to_overlay(self, color: str = "gray") -> List:
+        if self.result is None:
+            self.compute()
+        overlays = []
+        for lvl in self.levels:
+            line = pd.Series(lvl, index=self.df.index)
+            overlays.append(make_addplot(line, color=color, linestyle='--', linewidth=1, alpha=0.7))
+        return overlays
 
 class LevelsIndicator(BaseIndicator):
     NAME = "levels"
