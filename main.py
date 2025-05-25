@@ -12,7 +12,7 @@ import yaml
 from classes.indicators.LevelsIndicator        import LevelsIndicator      # daily & H4
 from classes.indicators.MarketProfileIndicator import DailyMarketProfileIndicator
 from classes.indicators.VWAPIndicator          import VWAPIndicator
-from classes.indicators.PivotLevelOverlay import PivotLevelOverlay
+from classes.indicators.PivotLevelIndicator import PivotLevelIndicator
 
 # add your TrendlineIndicator etc. here
 # ---------------------------------------
@@ -23,35 +23,73 @@ from data_providers.yahoo import YahooFinanceProvider
 from data_providers.alpaca import AlpacaProvider 
 from classes.DataLoader import DataLoader
 
-DataLoader.ensure_schema()
-
-# Setup
-symbol = "ES"
-start_date = "2025-04-01"
+symbol = "CL"
+start_date = "2024-05-23"
 end_date = "2025-05-23"
-interval = "1h"
 
-yahoo_provider = YahooFinanceProvider()
-# DataLoader.ingest_history("symbol", yahoo_provider, days=30, interval="1d")
+trading_start_date = "2025-03-20"
+trading_end_date = "2025-05-23"
 
-alpaca_provider = AlpacaProvider()
-DataLoader.ingest_history(symbol, alpaca_provider, days=30, interval=interval)
+color_mode = "role"  # timeframe or role
 
-df = alpaca_provider.get_ohlcv(symbol=symbol, start=start_date, end=end_date, interval=interval)
-overlays = PivotLevelOverlay(df, lookbacks=[2, 5, 10, 15]).to_overlays(color="magenta")
+provider = AlpacaProvider()
 
-logger.debug(df)
-ChartPlotter.plot_ohlc(
-    df,
-    title=f"{symbol} from {alpaca_provider.get_datasource().upper()}",
-    symbol=symbol,
-    datasource=alpaca_provider.get_datasource(),
-    start=start_date,
-    end=end_date,
-    show_volume=True,
-    overlays=overlays
+intervals = ["15m"]
+
+# for interval in intervals:
+    # provider.ingest_history(symbol=symbol, interval=interval, days=15)
+
+# Get daily and hourly OHLCV data
+df_daily = provider.get_ohlcv(symbol, start=start_date, end=end_date, interval="1d")
+df_hourly = provider.get_ohlcv(symbol, start=start_date, end=end_date, interval="1h")
+
+trading_chart = provider.get_ohlcv(symbol, start=trading_start_date, end=trading_end_date, interval="1h")
+
+# Compute daily and hourly levels
+daily_indicator = PivotLevelIndicator(df_daily, timeframe="1d")
+hourly_indicator = PivotLevelIndicator(df_hourly, timeframe="1h")
+
+indicators = PivotLevelIndicator(trading_chart, timeframe="1h")
+
+# Generate overlays (aligned to trading_chart index)
+overlays = []
+legend_entries = set()
+
+# daily_overlays, daily_legend = daily_indicator.to_overlays(
+#     plot_index=trading_chart.index,
+#     color_mode=color_mode
+# )
+
+# hourly_overlays, hourly_legend = hourly_indicator.to_overlays(
+#     plot_index=trading_chart.index,
+#     color_mode=color_mode
+# )
+
+# overlays += daily_overlays + hourly_overlays
+# legend_entries |= daily_legend | hourly_legend
+
+indcator_overlays, indicator_legend = indicators.to_overlays(
+    plot_index=trading_chart.index,
+    color_mode=color_mode
 )
 
+overlays += indcator_overlays
+legend_entries |= indicator_legend
+
+logger.info("legend_entries: %s", legend_entries)
+
+# Plot the combined chart
+ChartPlotter.plot_ohlc(
+    trading_chart,
+    title="CL | Support & Resistance Levels",
+    symbol=symbol,
+    datasource=provider.get_datasource(),
+    start=start_date,
+    end=end_date,
+    overlays=overlays,
+    legend_entries=legend_entries,
+    show_volume=True
+)
 
 
 # ─── hyper‑parameter grids ────────────────────────────────────────────────
