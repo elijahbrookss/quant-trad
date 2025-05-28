@@ -7,6 +7,7 @@ from classes.Logger import logger
 
 from matplotlib import patches
 from typing import Tuple, Set
+from dataclasses import field
 
 
 @dataclass
@@ -16,7 +17,23 @@ class Level:
     lookback: int
     first_touched: pd.Timestamp
     timeframe: str  # e.g., "1d", "1h", "4h"
+    touches: List[pd.Timestamp] = field(default_factory=list)
 
+    
+    def get_touches(self, df: pd.DataFrame) -> List[pd.Timestamp]:
+        """
+        Returns timestamps where this level was touched in the given trading DataFrame.
+
+        A 'touch' is defined as a candle where the level is between the Low and High.
+        """
+        # Wick-based mask: price falls between the candle range
+        mask = (df["low"] <= self.price) & (df["high"] >= self.price)
+        touches = df[mask].index.tolist()
+        self.touches = touches
+
+        logger.debug(f"Level {self.kind} at {self.price} touched {len(touches)} times.")
+
+        return touches
 
 class PivotLevelIndicator:
     def __init__(self, df, timeframe, lookbacks=(10, 20, 50), threshold=0.005):
@@ -48,7 +65,6 @@ class PivotLevelIndicator:
                 kind = "support" if last_price > p else "resistance"
                 levels.append(Level(price=p, kind=kind, lookback=lb, first_touched=t, timeframe=self.timeframe))
 
-
         levels.sort(key=lambda l: l.price)
         self.levels = levels
 
@@ -76,48 +92,13 @@ class PivotLevelIndicator:
 
         return highs, lows
 
-    
-    # def to_overlays(self, plot_index: pd.Index, color_mode: str = "role") -> List:
-    #     overlays = []
-
-    #     # assign a color if time-based mode
-    #     tf_color = {
-    #         "daily": "goldenrod",
-    #         "h4": "magenta",
-    #         "1h": "blue",
-    #         "1d": "goldenrod"
-    #     }
-
-    #     for level in self.levels:
-    #         if color_mode == "role":
-    #             color = "green" if level.kind == "support" else "red"
-    #         elif color_mode == "timeframe":
-    #             # infer from lookback, label, or assume based on caller's naming
-    #             color = tf_color.get(level.timeframe, "gray")
-    #         else:  # default/fixed
-    #             color = "gray"
-
-    #         if level.first_touched in plot_index:
-    #             start_idx = plot_index.get_loc(level.first_touched)
-    #         else:
-    #             start_idx = 0
-
-    #         ray_index = plot_index[start_idx:]
-    #         line = pd.Series(level.price, index=ray_index)
-    #         padded_line = line.reindex(plot_index, fill_value=np.nan)
-
-    #         logger.debug("padded_line: %s", padded_line)
-
-    #         label = f"Level ({level.timeframe})"
-    #         overlays.append(make_addplot(padded_line, color=color, linestyle='--', width=1, alpha=0.7, label=label))
-
-    #     return overlays
-
     def to_overlays(
         self,
-        plot_index: pd.Index,
+        plot_df: pd.Index,
         color_mode: str = "role"
     ) -> Tuple[List, Set[Tuple[str, str]]]:
+        
+        plot_index = plot_df.index
         overlays = []
         legend_entries = set()
 
@@ -160,6 +141,23 @@ class PivotLevelIndicator:
                 continue
 
             overlays.append(make_addplot(padded_line, color=color, linestyle="--", width=1, alpha=0.7))
+
+            level.touches = level.get_touches(plot_df)
+            # Only keep touches that occur on or after the level was discovered
+            level.touches = [ts for ts in level.touches if ts >= level.first_touched]
+
+            if level.touches:
+                dot_series = pd.Series(level.price, index=level.touches)
+                dot_line = dot_series.reindex(plot_index)
+
+                overlays.append(make_addplot(
+                    dot_line,
+                    color=color,
+                    marker='o',
+                    markersize=4,
+                    scatter=True,
+                    label=""
+            ))
             legend_entries.add(legend_key)
 
         return overlays, legend_entries

@@ -71,7 +71,7 @@ class ChartPlotter:
             file_name = f"chart_{datasource}_{symbol}_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}.png"
             file_path = os.path.join(output_dir, file_name)
             
-            fig_width = min(10 + len(df.index) * 0.01, 30)
+            fig_width = min(10 + len(df.index) * 0.03, 30)
             figsize = (fig_width, 6)
 
 

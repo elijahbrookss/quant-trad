@@ -69,7 +69,7 @@ legend_entries = set()
 # legend_entries |= daily_legend | hourly_legend
 
 indcator_overlays, indicator_legend = indicators.to_overlays(
-    plot_index=trading_chart.index,
+    plot_df=trading_chart,
     color_mode=color_mode
 )
 
