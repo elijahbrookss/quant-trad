@@ -31,6 +31,7 @@ class AlpacaProvider(BaseDataProvider):
             "1m": TimeFrame.Minute,
             "5m": TimeFrame(5, TimeFrameUnit.Minute),
             "15m": TimeFrame(15, TimeFrameUnit.Minute),
+            "30m": TimeFrame(30, TimeFrameUnit.Minute),
             "1h": TimeFrame.Hour,
             "1d": TimeFrame.Day
         }.get(interval)
