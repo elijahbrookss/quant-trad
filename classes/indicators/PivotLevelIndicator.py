@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional
 import pandas as pd
-import numpy as np
 from mplfinance.plotting import make_addplot
 from classes.Logger import logger
 
