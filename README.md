@@ -1,122 +1,119 @@
-## quant-trad
+# Quant-Trad
 
-Modular Python framework for building and analyzing quantitative trading strategies.
-
----
-
-### Features
-
-- Multi-lookback pivot detection
-- Ranked trendline analysis using linear regression
-- Trendline scoring based on R², angle, proximity, and violation ratio
-- Density visualization for pivot clustering
-- Clean, modular architecture (`ChartPlotter`, `TrendlineAnalyzer`, etc.)
-- Easy to extend with future plots (levels, channels, breakouts)
+A modular, extensible quantitative trading research and execution system designed for flexibility, clarity, and strategy experimentation.
 
 ---
 
-### Project Structure
+## 🔧 Features
+
+### ✅ Core Architecture
+- **Modular Indicator Classes** – each strategy component (Levels, VWAP, Market Profile) is encapsulated in its own class.
+- **ChartPlotter** – plots OHLCV with optional overlays and volume.
+- **Backtester & Strategy Engine** – plug-in architecture for strategy evaluation (under development).
+- **PostgreSQL with TimescaleDB** – efficient storage & retrieval of time-series data.
+
+---
+
+## 📈 Indicators
+
+### Pivot Level Indicator
+- Detects support and resistance using high/low pivots.
+- Supports role-based and timeframe-based color modes.
+- **Touchpoints plotted as dots** at each level where the price tested the level.
+- **Customizable loopback periods** for detection resolution.
+
+### LevelsIndicator (Daily, H4)
+- Wraps PivotLevelIndicator with preset lookbacks for daily and H4 intervals.
+- Merges close levels intelligently using volatility bandwidth.
+
+### Market Profile Indicator
+- Computes **POC**, **VAH**, and **VAL** for each day using 30-minute candles.
+- Uses **volume-based profiling** (TPO-based planned).
+- Overlays each session's profile using correct trading chart index.
+- Configurable `bin_size`.
+
+### VWAP Indicator *(in progress)*
+- Will support daily Value Areas and multi-session merge logic.
+- Will enable parameter sweep for optimal configuration testing.
+
+---
+
+## 🛠️ Charting Enhancements
+
+- **Legend Auto-Building** – based on overlay role (`support`, `resistance`) or source (`daily`, `h4`, `market_profile`).
+- **Flexible Overlay System** – indicators provide `to_overlays()` methods that return standardized mplfinance-compatible overlays.
+- **Session-Aware Plotting** – overlays align to the active chart index, not just the indicator’s internal data.
+- **Dynamic Figure Sizing** – adjusts width based on number of data points.
+
+---
+
+## 📦 Project Structure
 
 ```
 quant-trad/
-├── artifacts/               # Saved charts and outputs
-├── classes/                # Core reusable components
+├── classes/
+│   ├── indicators/
+│   │   ├── PivotLevelIndicator.py
+│   │   ├── MarketProfileIndicator.py
+│   │   └── VWAPIndicator.py
 │   ├── ChartPlotter.py
-│   ├── PivotDetector.py
-│   ├── StockData.py
-│   ├── Trendline.py
-│   ├── TrendlineAnalyzer.py
-│   └── Logger.py
-├── quant-env/              # Virtual environment (excluded from git)
-├── strategy.py             # Legacy version (to be refactored)
-├── main.py                 # Main execution pipeline
-├── start.sh                # Custom startup script
-├── README.md
-└── .gitignore
+│   ├── Logger.py
+│   ├── DataLoader.py
+│   └── engines/
+├── data_providers/
+│   ├── alpaca.py
+│   ├── yahoo.py
+│   └── base.py
+├── main.py
+├── grid_search.py
+└── requirements.txt
 ```
 
 ---
 
-### Quickstart
+## 🧪 Testing and Visualization
 
-#### 1. Clone the repo
+You can use `main.py` to run various indicator tests.
 
-```bash
-git clone https://github.com/elijahbrookss/quant-trad.git
-cd quant-trad
+### Run Market Profile Chart
+
+```python
+from classes.indicators.MarketProfileIndicator import run_market_profile_test
+run_market_profile_test(DataLoader, AlpacaProvider(), symbol="CL")
 ```
 
-#### 2. Set up environment manually
+### Enable/Disable Individual Tests
 
-```bash
-python3 -m venv quant-env
-source quant-env/bin/activate
-pip install -r python_imports
-```
+Inside `main.py` or `grid_search.py`, toggle specific indicators:
 
-#### 3. Run analysis
-
-```bash
-python main.py
-```
-
-Outputs will be saved under `artifacts/trendlines/`.
-
----
-
-### Quickstart (with `start.sh`)
-
-Use the included shell script to simplify setup:
-
-```bash
-chmod +x start.sh
-./start.sh
-```
-
-This script:
-- Sets up command aliases
-- Prompts you to create and activate a virtual environment
-- Prompts to install requirements
-- Adds these aliases to `~/.bash_aliases`:
-  - `quant-env`: Activate the virtual environment
-  - `quant-install`: Install dependencies
-  - `quant-run`: Run the strategy script
-  - `quant-deactivate`: Exit the environment
-  - `quant-help`: View command summary
-
----
-
-### Example Output
-
-*(Insert chart image here showing trendlines + pivot density)*
-
----
-
-### Requirements
-
-- pandas
-- numpy
-- matplotlib
-- scipy
-- yfinance
-
-Install all dependencies with:
-
-```bash
-pip install -r python_imports
+```python
+# Toggle support/resistance overlays
+# daily_overlays = DailyLevelsIndicator(df).to_overlays(plot_index=df.index)
 ```
 
 ---
 
-### Roadmap
+## 🔄 Data Ingestion
 
-- Support/resistance level detection
-- Trendline/channel breakout detection
-- Horizontal pivot value clustering
-- Backtesting and performance tracking
+Supports historical backfill via:
+
+```python
+provider.ingest_history(symbol="CL", interval="1h", start="2023-01-01", end="2024-01-01")
+```
 
 ---
 
-### Author
+## 🚀 Upcoming
 
-[Elijah Brooks](https://github.com/elijahbrookss)
+- VWAP Value Area merging logic
+- Walk-forward backtesting engine
+- Strategy optimization loop using YAML config + grid search
+- Dashboard UI with real-time overlay sync
+
+---
+
+## 🤝 Contributing
+
+This repo is in active development. PRs and feedback are welcome once version 1 is released.
+
+---
