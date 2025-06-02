@@ -7,8 +7,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from classes.Logger import logger
-from .base import DataSource
-from .base import BaseDataProvider
+from .base_provider import DataSource
+from .base_provider import BaseDataProvider
 
 
 load_dotenv("secrets.env")
@@ -33,6 +33,7 @@ class AlpacaProvider(BaseDataProvider):
             "15m": TimeFrame(15, TimeFrameUnit.Minute),
             "30m": TimeFrame(30, TimeFrameUnit.Minute),
             "1h": TimeFrame.Hour,
+            "4h": TimeFrame(4, TimeFrameUnit.Hour),
             "1d": TimeFrame.Day
         }.get(interval)
 

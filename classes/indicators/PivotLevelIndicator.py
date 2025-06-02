@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from classes.indicators.config import DataContext
 from typing import List, Optional
 import pandas as pd
 from mplfinance.plotting import make_addplot
@@ -44,8 +45,6 @@ class PivotLevelIndicator:
         self._compute()
 
     def _compute(self):
-        from types import SimpleNamespace
-
         def detect_all():
             all_pivots = {}
             for lb in self.lookbacks:
@@ -103,7 +102,7 @@ class PivotLevelIndicator:
 
         tf_color = {
             "daily": "goldenrod",
-            "h4": "magenta",
+            "4h": "magenta",
             "1h": "blue",
             "1d": "goldenrod"
         }
@@ -178,3 +177,36 @@ class PivotLevelIndicator:
 
     def distance_to_level(self, level: Level, price: float) -> float:
         return abs(level.price - price) / price
+    
+    @classmethod
+    def from_context(cls, provider, ctx: DataContext, level_timeframe: str, **kwargs):
+        """Create PivotLevelIndicator from provider-fetched timeframe with fallback ingestion."""
+
+        level_ctx = DataContext(
+            symbol=ctx.symbol,
+            start=ctx.start,
+            end=ctx.end,
+            interval=level_timeframe,
+        )
+
+        df = provider.get_ohlcv(level_ctx)
+
+        if df is None or df.empty:
+            logger.warning(
+                "No data found for %s [%s] from %s to %s. Attempting to ingest...",
+                level_ctx.symbol, level_timeframe, level_ctx.start, level_ctx.end
+            )
+
+            rows_ingested = provider.ingest_history(level_ctx)
+            if rows_ingested == 0:
+                raise ValueError(
+                    f"Failed to ingest data for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
+                )
+
+            df = provider.get_ohlcv(level_ctx)
+            if df is None or df.empty:
+                raise ValueError(
+                    f"Data still missing after ingest for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
+                )
+
+        return cls(df=df, timeframe=level_timeframe, **kwargs)

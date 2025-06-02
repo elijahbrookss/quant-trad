@@ -9,6 +9,5 @@ SQLAlchemy==2.0.41
 typer==0.15.4
 yfinance==0.2.61
 psycopg2-binary
-alpaca-trade-api
 mplfinance
 dataclasses

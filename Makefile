@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: db_up db_down db_logs db_cli 
+.PHONY: db_up db_down db_logs db_cli test test-integration test-unit
 
 db_up:
 	docker compose up -d timescaledb
@@ -29,3 +29,12 @@ db_cli:
 env:
 	@echo "To activate the virtual environment, run:"
 	@echo "source .venv/bin/activate"
+
+test:  ## Run all tests
+	pytest -v tests/
+
+test-unit:  ## Run only unit tests (if you tag with @pytest.mark.unit)
+	pytest -v -m "not integration" tests/
+
+test-integration:  ## Run only integration tests
+	pytest -v -m integration tests/

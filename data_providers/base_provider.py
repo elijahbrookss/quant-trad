@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from classes.Logger import logger
+from classes.indicators.config import DataContext
+from classes.ChartPlotter import ChartPlotter
 
 load_dotenv("secrets.env")
 
@@ -61,30 +63,34 @@ class BaseDataProvider(ABC):
 
     def ingest_history(
         self,
-        symbol: str,
-        interval: str = "1d",
-        days: int = 30,
-        start: dt.datetime = None,
-        end: dt.datetime = None
+        ctx: DataContext,
+        days: int = 30
     ) -> int:
+        # Fill in start/end if not defined in DataContext
+        start = ctx.start
+        end = ctx.end
+
         if not start or not end:
-            end = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-            start = end - dt.timedelta(days=days)
+            end_dt = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+            start_dt = end_dt - dt.timedelta(days=days)
+            ctx.start = start_dt.isoformat()
+            ctx.end = end_dt.isoformat()
 
         try:
-            logger.debug("Fetching data for %s [%s] from %s to %s", symbol, interval, start, end)
-            df = self.fetch_from_api(symbol, start, end, interval)
+            logger.debug("Fetching data for %s [%s] from %s to %s", ctx.symbol, ctx.interval, ctx.start, ctx.end)
+
+            df = self.fetch_from_api(ctx.symbol, ctx.start, ctx.end, ctx.interval)
             if df is None or df.empty:
-                logger.warning("No data returned for %s (%s).", symbol, interval)
+                logger.warning("No data returned for %s (%s).", ctx.symbol, ctx.interval)
                 return 0
 
             df["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
             df["datasource"] = self.get_datasource()
-            df["interval"] = interval
-            df["symbol"] = symbol
+            df["interval"] = ctx.interval
+            df["symbol"] = ctx.symbol
 
         except Exception as e:
-            logger.exception("Data fetch failed for %s: %s", symbol, e)
+            logger.exception("Data fetch failed for %s: %s", ctx.symbol, e)
             return 0
 
         try:
@@ -98,35 +104,43 @@ class BaseDataProvider(ABC):
                         text(f"INSERT INTO {self._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
                     )
 
-            logger.info("Ingested %d rows for %s [%s].", len(df), symbol, interval)
+            logger.info("Ingested %d rows for %s [%s].", len(df), ctx.symbol, ctx.interval)
             return len(df)
 
         except SQLAlchemyError as e:
-            logger.exception("DB error during ingest_history for %s: %s", symbol, e)
+            logger.exception("DB error during ingest_history for %s: %s", ctx.symbol, e)
             raise
 
-    def get_ohlcv(self, symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
+
+    def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
+        ctx.validate()
+
         query = text(f"""
             SELECT timestamp, open, high, low, close, volume
             FROM {self._table}
             WHERE symbol = :symbol
-              AND datasource = :ds
-              AND interval = :interval
-              AND timestamp BETWEEN :start AND :end
+            AND datasource = :ds
+            AND interval = :interval
+            AND timestamp BETWEEN :start AND :end
             ORDER BY timestamp
         """)
 
         df = pd.read_sql(query, self._engine, params={
-            "symbol": symbol,
+            "symbol": ctx.symbol,
             "ds": self.get_datasource(),
-            "interval": interval,
-            "start": start,
-            "end": end,
+            "interval": ctx.interval,
+            "start": ctx.start,
+            "end": ctx.end,
         })
 
         if df.empty:
-            logger.warning("No rows found for %s [%s] from %s to %s", symbol, interval, start, end)
+            logger.warning("No rows found for %s [%s] from %s to %s", ctx.symbol, ctx.interval, ctx.start, ctx.end)
             return df
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         return df
+    
+    def plot_ohlcv(self, ctx: DataContext, title: str = None, **kwargs):
+        df = self.get_ohlcv(ctx)
+        title = title or f"{ctx.symbol} | {ctx.interval}"
+        ChartPlotter.plot_ohlc(df, title=title, ctx=ctx, datasource=self.get_datasource(), **kwargs)
