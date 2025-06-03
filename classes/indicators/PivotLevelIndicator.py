@@ -192,21 +192,8 @@ class PivotLevelIndicator:
         df = provider.get_ohlcv(level_ctx)
 
         if df is None or df.empty:
-            logger.warning(
-                "No data found for %s [%s] from %s to %s. Attempting to ingest...",
-                level_ctx.symbol, level_timeframe, level_ctx.start, level_ctx.end
+            raise ValueError(
+                f"Data missing after ingest for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
             )
-
-            rows_ingested = provider.ingest_history(level_ctx)
-            if rows_ingested == 0:
-                raise ValueError(
-                    f"Failed to ingest data for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
-                )
-
-            df = provider.get_ohlcv(level_ctx)
-            if df is None or df.empty:
-                raise ValueError(
-                    f"Data still missing after ingest for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
-                )
 
         return cls(df=df, timeframe=level_timeframe, **kwargs)

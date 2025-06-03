@@ -115,33 +115,42 @@ class BaseDataProvider(ABC):
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
         ctx.validate()
 
-        query = text(f"""
-            SELECT timestamp, open, high, low, close, volume
-            FROM {self._table}
-            WHERE symbol = :symbol
-            AND datasource = :ds
-            AND interval = :interval
-            AND timestamp BETWEEN :start AND :end
-            ORDER BY timestamp
-        """)
+        def query_ohlcv():
+            query = text(f"""
+                SELECT timestamp, open, high, low, close, volume
+                FROM {self._table}
+                WHERE symbol = :symbol
+                AND datasource = :ds
+                AND interval = :interval
+                AND timestamp BETWEEN :start AND :end
+                ORDER BY timestamp
+            """)
+            return pd.read_sql(query, self._engine, params={
+                "symbol": ctx.symbol,
+                "ds": self.get_datasource(),
+                "interval": ctx.interval,
+                "start": ctx.start,
+                "end": ctx.end,
+            })
 
-        df = pd.read_sql(query, self._engine, params={
-            "symbol": ctx.symbol,
-            "ds": self.get_datasource(),
-            "interval": ctx.interval,
-            "start": ctx.start,
-            "end": ctx.end,
-        })
+        df = query_ohlcv()
 
         if df.empty:
-            logger.warning("No rows found for %s [%s] from %s to %s", ctx.symbol, ctx.interval, ctx.start, ctx.end)
-            return df
+            logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
+                        ctx.symbol, ctx.interval, ctx.start, ctx.end)
+            try:
+                self.ingest_history(ctx.symbol, ctx.start, ctx.end, ctx.interval)
+                df = query_ohlcv()
+                if df.empty:
+                    logger.error("Auto-ingestion attempted but still no data found.")
+                    return df
+            except Exception as e:
+                logger.exception("Auto-ingestion failed: %s", e)
+                return df
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df.set_index("timestamp", inplace=True) # Set timestamp as index
+        df.set_index("timestamp", inplace=True)
         df["timestamp"] = df.index
-
-
         return df
     
     def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):
