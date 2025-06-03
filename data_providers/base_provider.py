@@ -138,9 +138,14 @@ class BaseDataProvider(ABC):
             return df
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df.set_index("timestamp", inplace=True) # Set timestamp as index
+        df["timestamp"] = df.index
+
+
         return df
     
-    def plot_ohlcv(self, ctx: DataContext, title: str = None, **kwargs):
-        df = self.get_ohlcv(ctx)
-        title = title or f"{ctx.symbol} | {ctx.interval}"
-        ChartPlotter.plot_ohlc(df, title=title, ctx=ctx, datasource=self.get_datasource(), **kwargs)
+    def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):
+        df = self.get_ohlcv(plot_ctx)
+        title = title or f"{plot_ctx.symbol} | {plot_ctx.interval}"
+        logger.debug("df index sample: %s", df.index)
+        ChartPlotter.plot_ohlc(df, title=title, ctx=plot_ctx, datasource=self.get_datasource(), **kwargs)
