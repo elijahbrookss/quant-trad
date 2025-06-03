@@ -39,7 +39,7 @@ class ChartPlotter:
 
             required_columns = {'timestamp', 'open', 'high', 'low', 'close'}
             if not required_columns.issubset(df.columns):
-                raise ValueError(f"DataFrame must contain columns: {required_columns}")
+                raise ValueError(f"DataFrame must contain columns: {required_columns}, but found: {df.columns}")
 
             df = df.copy()
             df['timestamp'] = pd.to_datetime(df['timestamp'])
