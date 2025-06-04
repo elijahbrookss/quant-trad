@@ -48,7 +48,7 @@ def test_pivot_level_indicator_plot():
 
     # Plot and save chart using provider’s built-in method
     provider.plot_ohlcv(
-        ctx=ctx,
+        plot_ctx=ctx,
         title="Integration Test – Pivot Levels",
         overlays=overlays,
         legend_entries=legend_entries,
