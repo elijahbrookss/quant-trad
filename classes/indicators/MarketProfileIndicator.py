@@ -1,27 +1,40 @@
-from collections import defaultdict
 import numpy as np
 import pandas as pd
-from typing import Dict, List
-from classes.indicators.BaseIndicator import BaseIndicator
+from typing import Dict, List, Tuple, Set
+
 from mplfinance.plotting import make_addplot
-from classes.indicators.config import DataContext
+
 from classes.Logger import logger
-from typing import Tuple, Set
+from classes.indicators.BaseIndicator import BaseIndicator
+from classes.indicators.config import DataContext
 
 
 class MarketProfileIndicator(BaseIndicator):
     NAME = "market_profile"
 
-    def __init__(self, df: pd.DataFrame, bin_size: float = 0.1, mode: str = "tpo"):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        bin_size: float = 0.1,
+        mode: str = "tpo"
+    ):
         super().__init__(df)
         self.bin_size = bin_size
-        self.mode = mode  # "tpo" for now
-        self.daily_profiles: List[Dict[str, float]] = self.compute() 
+        self.mode = mode
+        self.daily_profiles: List[Dict[str, float]] = self._compute_daily_profiles()
+        self.merged_profiles: List[Dict[str, float]] = []
 
     @classmethod
-    def from_context(cls, provider, ctx: DataContext, bin_size: float = 0.1, mode: str = "tpo", interval: str = "30m") -> "MarketProfileIndicator":
+    def from_context(
+        cls,
+        provider,
+        ctx: DataContext,
+        bin_size: float = 0.1,
+        mode: str = "tpo",
+        interval: str = "30m"
+    ) -> "MarketProfileIndicator":
         """
-        Instantiate MarketProfileIndicator from a provider and a DataContext.
+        Create an instance using a data provider and context. Ingests history if needed.
         """
         ctx = DataContext(
             symbol=ctx.symbol,
@@ -30,210 +43,221 @@ class MarketProfileIndicator(BaseIndicator):
             interval=interval
         )
         ctx.validate()
-        
-        df = provider.get_ohlcv(ctx)
 
+        df = provider.get_ohlcv(ctx)
         if df is None or df.empty:
-            logger.warning("No data found for MarketProfile [%s] from %s to %s", ctx.symbol, ctx.start, ctx.end)
-            rows_ingested = provider.ingest_history(ctx)
-            if rows_ingested == 0:
-                raise ValueError(f"Failed to ingest data for {ctx.symbol} ({ctx.interval}) from {ctx.start} to {ctx.end}")
+            logger.warning(
+                "No data for %s from %s to %s; attempting ingest.",
+                ctx.symbol,
+                ctx.start,
+                ctx.end
+            )
+            ingested = provider.ingest_history(ctx)
+            if ingested == 0:
+                raise ValueError(
+                    f"Failed to ingest data for {ctx.symbol} ({ctx.interval}) from {ctx.start} to {ctx.end}"
+                )
             df = provider.get_ohlcv(ctx)
 
-        if df.empty:
-            raise ValueError(f"MarketProfileIndicator: No data to compute after ingest for {ctx.symbol} [{ctx.interval}]")
+        if df is None or df.empty:
+            raise ValueError(
+                f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest"
+            )
 
         return cls(df=df, bin_size=bin_size, mode=mode)
 
-    def compute(self) -> List[Dict[str, float]]:
+    def _compute_daily_profiles(self) -> List[Dict[str, float]]:
         """
-        Computes TPO‐based market profile for each daily session.
-        Now also records each session’s real start/end intraday timestamps.
+        Build daily TPO profiles with POC, VAH, VAL, and session timestamps.
         """
         df = self.df.copy()
         df.index = pd.to_datetime(df.index, utc=True)
-
-        # Group by calendar date (UTC) so that 'date' is the midnight of each day
-        grouped = df.groupby(df.index.date)
-
         profiles: List[Dict[str, float]] = []
 
-        for date, group in grouped:
-            # Build your TPO histogram and extract VAL/VAH/POC as before
+        # Group rows by calendar date
+        grouped = df.groupby(df.index.date)
+        for session_date, group in grouped:
             tpo_hist = self._build_tpo_histogram(group)
-            profile = self._extract_value_area(tpo_hist)
+            value_area = self._extract_value_area(tpo_hist)
 
-            # 2) Record the actual first‐bar and last‐bar timestamps for this session:
-            first_ts = group.index.min()  # e.g. 2025-05-15 13:30:00+00:00
-            last_ts  = group.index.max()  # e.g. 2025-05-15 20:00:00+00:00
-            profile["start_date"] = first_ts
-            profile["end_date"]   = last_ts
+            first_ts = group.index.min()
+            last_ts = group.index.max()
+            value_area.update({
+                "date": pd.to_datetime(session_date),
+                "start_date": first_ts,
+                "end_date": last_ts
+            })
 
-            # Now you have:
-            #   profile["POC"], profile["VAH"], profile["VAL"]
-            #   profile["date"]   (calendar midnight if you still want it)
-            #   profile["start_ts"], profile["end_ts"]  (real intraday bounds)
+            profiles.append(value_area)
+            logger.debug(
+                "Profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f",
+                session_date,
+                value_area["POC"],
+                value_area["VAH"],
+                value_area["VAL"]
+            )
 
-            profiles.append(profile)
-            logger.debug("Computed profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f",
-                         date, profile["POC"], profile["VAH"], profile["VAL"])
-
-        self.daily_profiles = profiles
         return profiles
 
-    def _build_tpo_histogram(self, df: pd.DataFrame) -> Dict[float, int]:
+    def _build_tpo_histogram(self, data: pd.DataFrame) -> Dict[float, int]:
         """
-        Builds a TPO histogram: counts how many 30m bars visited each price bucket.
+        Count how many bars visit each price bucket (by bin_size).
         """
-        tpo_count = defaultdict(int)
-
-        for _, row in df.iterrows():
-            low = row["low"]
-            high = row["high"]
-
-            # Round each price into buckets
-            price_range = np.arange(low, high + self.bin_size, self.bin_size)
-
-            for price in price_range:
+        tpo_counts: Dict[float, int] = {}
+        for _, row in data.iterrows():
+            low, high = row["low"], row["high"]
+            # Create price buckets from low to high (inclusive)
+            prices = np.arange(low, high + self.bin_size, self.bin_size)
+            for price in prices:
                 bucket = round(price / self.bin_size) * self.bin_size
-                tpo_count[bucket] += 1
-
-        return dict(tpo_count)
+                tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
+        return tpo_counts
 
     def _extract_value_area(self, tpo_hist: Dict[float, int]) -> Dict[str, float]:
         """
-        Given a TPO histogram, computes:
-        - POC (most visited price)
-        - VAH, VAL (top and bottom of 70% of TPOs)
+        From TPO histogram, compute POC, VAH, VAL (70% value area).
         """
-        total_tpos = sum(tpo_hist.values())
-        sorted_buckets = sorted(tpo_hist.items(), key=lambda x: x[1], reverse=True)
+        total = sum(tpo_hist.values())
+        if total == 0:
+            return {"POC": None, "VAH": None, "VAL": None}
 
-        poc = sorted_buckets[0][0]
+        # Sort buckets by count descending
+        sorted_buckets = sorted(tpo_hist.items(), key=lambda item: item[1], reverse=True)
+        poc_price = sorted_buckets[0][0]
+
         cumulative = 0
-        value_area_prices = []
-
+        va_prices: List[float] = []
+        threshold = 0.7 * total
         for price, count in sorted_buckets:
             cumulative += count
-            value_area_prices.append(price)
-            if cumulative >= 0.7 * total_tpos:
+            va_prices.append(price)
+            if cumulative >= threshold:
                 break
 
         return {
-            "POC": poc,
-            "VAH": max(value_area_prices),
-            "VAL": min(value_area_prices),
+            "POC": poc_price,
+            "VAH": max(va_prices),
+            "VAL": min(va_prices)
         }
-    
-    def _value_area_overlap(self, val1, vah1, val2, vah2) -> float:
-        overlap_low = max(val1, val2)
-        overlap_high = min(vah1, vah2)
 
-        overlap_range = max(0.0, overlap_high - overlap_low)
-        target_range = vah2 - val2  # use the *next* VA's range for % basis
+    @staticmethod
+    def _calculate_overlap(
+        val1: float,
+        vah1: float,
+        val2: float,
+        vah2: float
+    ) -> float:
+        """
+        Compute overlap ratio between two value areas, relative to second VA's range.
+        """
+        low = max(val1, val2)
+        high = min(vah1, vah2)
+        overlap = max(0.0, high - low)
+        range2 = vah2 - val2
+        return overlap / range2 if range2 > 0 else 0.0
 
-        if target_range == 0:
-            return 0.0
-
-        return overlap_range / target_range
-
-    
-    def merge_value_areas(self, threshold: float = 0.6, min_merge: float = 2) -> List[Dict]:
-        merged_profiles = []
-        i = 0
-        n = len(self.daily_profiles)
+    def merge_value_areas(
+        self,
+        threshold: float = 0.6,
+        min_merge: int = 2
+    ) -> List[Dict[str, float]]:
+        """
+        Merge consecutive daily profiles if their value areas overlap by threshold.
+        """
+        merged: List[Dict[str, float]] = []
+        profiles = self.daily_profiles
+        i, n = 0, len(profiles)
 
         while i < n:
-            base = self.daily_profiles[i]
-            merged_val = base['VAL']
-            merged_vah = base['VAH']
-            start_date = base['start_date']
-            end_date = base['end_date']
-            poc_values = [base['POC']] if base['POC'] is not None else []
-            merge_count = 1
+            base = profiles[i]
+            merged_val = base["VAL"]
+            merged_vah = base["VAH"]
+            start_ts = base["start_date"]
+            end_ts = base["end_date"]
+            poc_list = [base["POC"]] if base.get("POC") is not None else []
+            count = 1
             j = i + 1
 
             while j < n:
-                next_va = self.daily_profiles[j]
-                overlap = self._value_area_overlap(merged_val, merged_vah, next_va['VAL'], next_va['VAH'])
-
-                if overlap >= threshold:
-                    merged_val = min(merged_val, next_va['VAL'])
-                    merged_vah = max(merged_vah, next_va['VAH'])
-                    end_date = next_va['end_date']
-                    if next_va['POC'] is not None:
-                        poc_values.append(next_va['POC'])
-
-                    merge_count += 1
-                    j += 1
-                else:
+                next_prof = profiles[j]
+                overlap = self._calculate_overlap(
+                    merged_val,
+                    merged_vah,
+                    next_prof["VAL"],
+                    next_prof["VAH"]
+                )
+                if overlap < threshold:
                     break
-                
-            if merge_count >= min_merge:
-                merged_poc = sum(poc_values) / len(poc_values) if poc_values else None
-                merged_profiles.append({
-                    "start_date": start_date,
-                    "end_date": end_date,
+
+                merged_val = min(merged_val, next_prof["VAL"])
+                merged_vah = max(merged_vah, next_prof["VAH"])
+                end_ts = next_prof["end_date"]
+                if next_prof.get("POC") is not None:
+                    poc_list.append(next_prof["POC"])
+                count += 1
+                j += 1
+
+            if count >= min_merge:
+                avg_poc = sum(poc_list) / len(poc_list) if poc_list else None
+                merged.append({
+                    "start_date": start_ts,
+                    "end_date": end_ts,
                     "VAL": merged_val,
                     "VAH": merged_vah,
-                    "POC": merged_poc,
+                    "POC": avg_poc
                 })
+
             i = j
 
-        self.merged_profiles = merged_profiles
-        return merged_profiles
+        self.merged_profiles = merged
+        return merged
 
-
-    def to_overlays(self, plot_df: pd.DataFrame, merged_vas: bool=True) -> Tuple[List, Set[Tuple[str, str]]]:
+    def to_overlays(
+        self,
+        plot_df: pd.DataFrame,
+        use_merged: bool = True
+    ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
-        Returns chart overlays (POC, VAH, VAL lines) aligned to the plot_df index.
-        Each value area line is aligned with the daily session window within plot_df.
-        Logs session matching details for debugging.
+        Generate chart overlays (POC/VAH/VAL) aligned to plot_df's index.
+        Returns a list of addplot objects and legend entries.
         """
-        if not self.daily_profiles:
-            logger.warning("No daily profiles available to generate overlays.")
-            return []
-
-        if merged_vas and not hasattr(self, 'merged_profiles'):
-            raise ValueError("Merged VAs not computed. Call merge_value_areas() first.")
-
-        profiles = self.merged_profiles if merged_vas else self.daily_profiles
+        profiles = self.merged_profiles if use_merged else self.daily_profiles
+        if not profiles:
+            logger.warning("No profiles to generate overlays.")
+            return [], set()
 
         overlays = []
-        legend_entries = set()
+        legend_entries: Set[Tuple[str, str]] = set()
+        full_idx = plot_df.index
 
-        full_index = plot_df.index
-        logger.info("Generating overlays for %d sessions", len(profiles))
-
-        style_map = {
+        styles = {
             "POC": {"color": "orange", "width": 1.2},
-            "VAH": {"color": "gray", "width": 1},
-            "VAL": {"color": "gray", "width": 1},
+            "VAH": {"color": "gray", "width": 1.0},
+            "VAL": {"color": "gray", "width": 1.0}
         }
 
-        for profile in profiles:
-            start = profile["start_date"]
-            end   = profile["end_date"]
-            session_index = plot_df[(plot_df.index >= start) & (plot_df.index <= end)].index
-            logger.debug("Merged block: start_date=%s, end_date=%s", start, end)
-
-            if session_index.empty:
-                logger.warning("No candles matched for session: %s", profile)
+        for prof in profiles:
+            start_ts, end_ts = prof["start_date"], prof["end_date"]
+            session_idx = full_idx[(full_idx >= start_ts) & (full_idx <= end_ts)]
+            if session_idx.empty:
+                logger.warning("No data in plot for session: %s", prof)
                 continue
 
-            for key, style in style_map.items():
-                session_series = pd.Series([profile[key]] * len(session_index), index=session_index)
-                aligned_line = session_series.reindex(full_index, fill_value=np.nan)
-
-                overlays.append(make_addplot(
-                    aligned_line,
-                    color=style["color"],
-                    width=style["width"],
-                    linestyle="--",
-                    label=""
-                ))
-
+            for key, style in styles.items():
+                values = pd.Series(
+                    [prof[key]] * len(session_idx),
+                    index=session_idx
+                )
+                aligned = values.reindex(full_idx, fill_value=np.nan)
+                overlays.append(
+                    make_addplot(
+                        aligned,
+                        color=style["color"],
+                        width=style["width"],
+                        linestyle="--",
+                        label=""
+                    )
+                )
                 legend_entries.add((key, style["color"]))
 
-        logger.debug("Generated %d overlays for %d sessions", len(overlays), len(profiles))
         return overlays, legend_entries
