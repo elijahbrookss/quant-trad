@@ -1,54 +1,79 @@
-# Quant-Trad
 
-A modular, extensible quantitative trading research and execution system designed for flexibility, clarity, and strategy experimentation.
 
----
+# Quant-Trad 🚀  
+*A work-in-progress quantitative **trading bot** (autonomous execution coming soon)*
 
-## 🔧 Features
-
-### ✅ Core Architecture
-- **Modular Indicator Classes** – each strategy component (Levels, VWAP, Market Profile) is encapsulated in its own class.
-- **ChartPlotter** – plots OHLCV with optional overlays and volume.
-- **Backtester & Strategy Engine** – plug-in architecture for strategy evaluation (under development).
-- **PostgreSQL with TimescaleDB** – efficient storage & retrieval of time-series data.
 
 ---
 
-## 📈 Indicators
+## ✨ Vision
 
-### Pivot Level Indicator
-- Detects support and resistance using high/low pivots.
-- Supports role-based and timeframe-based color modes.
-- **Touchpoints plotted as dots** at each level where the price tested the level.
-- **Customizable loopback periods** for detection resolution.
-
-### Market Profile Indicator
-- Computes **POC**, **VAH**, and **VAL** for each day using 30-minute candles.
-- Uses **volume-based profiling** (TPO-based planned).
-- Overlays each session's profile using correct trading chart index.
-- Configurable `bin_size`.
-
-### VWAP Indicator *(in progress)*
-- Will support daily Value Areas and multi-session merge logic.
-- Will enable parameter sweep for optimal configuration testing.
+Quant-Trad is being built to **trade autonomously**.  
+Right now it focuses on clean data ingestion, robust indicator generation, and high-signal chart overlays.  
+Next milestones add strategy orchestration, parameter sweeps, and a live execution pipeline.
 
 ---
 
-## 🛠️ Charting Enhancements
+## 🏗️ Core Architecture (current)
 
-- **Legend Auto-Building** – based on overlay role (`support`, `resistance`) or source (`daily`, `h4`, `market_profile`).
-- **Flexible Overlay System** – indicators provide `to_overlays()` methods that return standardized mplfinance-compatible overlays.
-- **Session-Aware Plotting** – overlays align to the active chart index, not just the indicator’s internal data.
-- **Dynamic Figure Sizing** – adjusts width based on number of data points.
+| Layer | Key Components | Notes |
+|-------|----------------|-------|
+| **Data** | `BaseDataProvider`, `AlpacaProvider`, `YahooProvider` | Uniform OHLCV schema; optional TimescaleDB cache |
+| **Indicators** | `PivotLevelIndicator`, `MarketProfileIndicator` (TPO) | Implemented & tested |
+| *(Coming)* | `TrendlineIndicator`, `VWAPIndicator` | In development |
+| **Visualization** | `ChartPlotter` | Candles + volume + overlay lines |
+| *(Road-map)* | Strategy, Back-testing, Live Execution | Foundations laid, wiring next |
+
+---
+
+## 📈 Indicators At-a-Glance
+
+| Indicator | Status | Purpose | Overlay Goodies |
+|-----------|--------|---------|-----------------|
+| **Pivot Level** | ✅ | Convert swing highs/lows into S/R levels | Role & timeframe colors, touch-points |
+| **Market Profile (TPO)** | ✅ | POC / VAH / VAL per session, VA merges | Dashed VA bands per session |
+| **Trendline** | 🔨 | Auto-detect dynamic trendlines | Continuous lines, breakout flags |
+| **VWAP** | 🔨 | 30-min volume profile & VA merges | Session bands, rolling POC anchor |
 
 ---
 
-## 🔄 Data Ingestion
+## ⚡ Makefile Commands
 
-Supports historical backfill via:
+| Target               | Description                                                             |
+|----------------------|-------------------------------------------------------------------------|
+| `make db_up`         | Spin up **TimescaleDB** and **pgAdmin** containers and wait until ready |
+| `make db_down`       | Stop the TimescaleDB / pgAdmin containers                               |
+| `make db_logs`       | Tail TimescaleDB logs (`Ctrl-C` to quit)                                |
+| `make db_cli`        | Open a `psql` shell at `postgres://postgres:postgres@localhost:5432/postgres` |
+| `make test`          | Run the full pytest suite                                               |
+| `make test-unit`     | Run only unit tests (`-m "not integration"`)                           |
+| `make test-integration` | Run only tests tagged `@pytest.mark.integration`                     |
 
-```python
-provider.ingest_history(symbol="CL", interval="1h", start="2023-01-01", end="2024-01-01")
-```
 
----
+## ⚡ Quick Start-up
+
+> **Prerequisites**  
+> • Python 3.10+ with `venv`  
+> • [Docker Desktop](https://www.docker.com/products/docker-desktop/) running (needed for the TimescaleDB + pgAdmin containers)  
+> • GNU Make (pre-installed on macOS/Linux; Windows users can use the Git-Bash version or **WSL**)
+
+```bash
+# 0) clone the repo
+git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
+cd quant-trad
+
+# 1) spin-up TimescaleDB (+ pgAdmin) in Docker
+make db_up 
+
+# 2) create / activate virtual-env and install deps
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3) run the full test-suite
+make test            # or: make test-unit / make test-integration
+
+# 4) (optional) open a psql shell
+make db_cli          # \q to exit
+
+# 5) shut containers down when finished
+make db_down
