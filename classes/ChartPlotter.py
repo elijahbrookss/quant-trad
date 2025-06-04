@@ -1,181 +1,92 @@
-import matplotlib.pyplot as plt
 import pandas as pd
-import os
-from typing import Dict, List, Tuple, Any
-
+import mplfinance as mpf
+from typing import Optional
 from classes.Logger import logger
+import os
+from typing import List, Any
+import matplotlib.pyplot as plt
+from typing import Set, Tuple
+from matplotlib import patches
+from classes.indicators.config import DataContext
 
 class ChartPlotter:
-    """
-    A class for plotting stock charts with trendlines and pivot levels.
-
-    Attributes:
-        df (pd.DataFrame): DataFrame containing the stock data.
-        pivots (Any): Pivot points data used for plotting (format may vary).
-    """
-    def __init__(self, df: pd.DataFrame, pivots: Any) -> None:
-        self.df = df
-        self.pivots = pivots
-
-    def _save_plot(self, fig: plt.Figure, subdirectory: str, filename: str) -> None:
+    @staticmethod
+    def plot_ohlc(
+        df: pd.DataFrame,
+        title: str,
+        ctx: DataContext,
+        datasource: str,
+        show_volume: bool = True,
+        chart_type: str = "candle",
+        output_base: str = "output",
+        output_subdir: str = "misc",
+        legend_entries: Set[Tuple[str, str]] = None,
+        overlays: Optional[List[Any]] = None,
+        file_name: Optional[str] = None
+    ):
         """
-        Save the given figure to the specified subdirectory and filename.
-
-        Args:
-            fig (plt.Figure): The matplotlib figure to save.
-            subdirectory (str): Directory where the plot will be saved.
-            filename (str): The name of the output file.
+        Plots OHLC data using mplfinance, scoped to a given DataContext.
         """
-        os.makedirs(subdirectory, exist_ok=True)
-        path = os.path.join(subdirectory, filename)
-        fig.savefig(path, dpi=300, bbox_inches='tight', facecolor='black', edgecolor='none')
-        logger.info(f"Plot saved to {path}")
-        plt.close(fig)
+        try:
+            ctx.validate()
+            start = pd.to_datetime(ctx.start).tz_localize("UTC")
+            end = pd.to_datetime(ctx.end).tz_localize("UTC")
 
-    def plot_trendlines(
-        self,
-        trendlines_by_threshold: Dict[int, List[Any]],
-        filename: str = 'trendlines_regression.png',
-        subdirectory: str = 'artifacts/trendlines/'
-    ) -> None:
-        """
-        Plot trendlines on a stock chart with the closing price as background.
+            logger.debug("Index sample: %s → %s", df.index.min(), df.index.max())
 
-        Args:
-            trendlines_by_threshold (Dict[int, List[Any]]): A dictionary mapping threshold values to lists of trendline objects.
-            filename (str): The output filename for the plot.
-            subdirectory (str): The directory to save the plot.
-        """
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=(12, 6))
+            if df is None or df.empty:
+                logger.warning("No data to plot for given symbol and date range.")
+                raise ValueError("Cannot plot: DataFrame is empty or None.")
 
-        # Plot the closing price
-        ax.plot(self.df.index, self.df['Close'], label="Closing Price", color="cyan", alpha=0.6)
+            required_columns = {'timestamp', 'open', 'high', 'low', 'close'}
+            if not required_columns.issubset(df.columns):
+                raise ValueError(f"DataFrame must contain columns: {required_columns}, but found: {df.columns}")
 
-        colors = ['red', 'green', 'blue', 'orange', 'purple']
-        unique_labels = set()
+            df = df.copy()
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+            df.index = pd.to_datetime(df.index)
 
-        # Create a stable color mapping for each threshold
-        thresholds_sorted = sorted(trendlines_by_threshold.keys())
-        threshold_color_map = {
-            t: colors[i % len(colors)] for i, t in enumerate(thresholds_sorted)
-        }
+            logger.debug("Filtering for %s → %s", start, end)
+            df = df[(df.index >= start) & (df.index <= end)]
 
-        for threshold, trendlines in trendlines_by_threshold.items():
-            logger.debug(f"Plotting trendlines with {threshold} points, found {len(trendlines)} trendlines")
-            color = threshold_color_map[threshold]
+            if df.empty:
+                raise ValueError(f"No data to plot after filtering from {start} to {end}.")
 
-            for tl in trendlines:
-                logger.debug(
-                    f"Trendline: {tl.start_date} to {tl.end_date}, R²={tl.r_squared:.2f}, "
-                    f"Score={tl.score:.2f}, Length={tl.length} days, Points={len(tl.points)}, "
-                    f"Violations={tl.violations}, Violation Ratio={tl.violation_ratio:.2f}"
-                )
-                # Convert start and end dates to timestamps for calculation
-                x_start = pd.Timestamp(tl.start_date).timestamp()
-                x_end = pd.Timestamp(tl.end_date).timestamp()
-                y_start = tl.slope * x_start + tl.intercept
-                y_end = tl.slope * x_end + tl.intercept
+            output_dir = os.path.join(output_base, output_subdir)
+            os.makedirs(output_dir, exist_ok=True)
 
-                label = f'Trendline (Points={threshold}, R²={tl.r_squared:.2f})'
-                if label not in unique_labels:
-                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end],
-                            color=color, linestyle='--', alpha=0.8, label=label)
-                    unique_labels.add(label)
-                else:
-                    ax.plot([tl.start_date, tl.end_date], [y_start, y_end],
-                            color=color, linestyle='--', alpha=0.8)
+            start_end_time= f"{start.strftime('%Y-%m-%d')}_{end.strftime('%Y-%m-%d')}"
+            file_name = f"{file_name}_{start_end_time}.png" if file_name else f"{ctx.symbol}_{ctx.interval}_{start_end_time}.png"
+            file_path = os.path.join(output_dir, file_name)
 
-                # Plot the pivot points used for this trendline
-                x_pts = [pd.Timestamp(d).to_pydatetime() for d, _ in tl.points]
-                y_pts = [v for _, v in tl.points]
-                ax.scatter(x_pts, y_pts, color=color, marker='o', s=50, alpha=0.8)
+            fig_width = min(10 + len(df.index) * 0.03, 30)
+            figsize = (fig_width, 6)
 
-        # Customize chart appearance
-        ax.set_title("Price Action with Ranked Trendlines", color='white', size=14)
-        ax.set_xlabel("Date", color='white')
-        ax.set_ylabel("Price", color='white')
-        ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
-        ax.grid(alpha=0.2, color='gray')
+            fig, axes = mpf.plot(
+                df,
+                type=chart_type,
+                volume=show_volume and "volume" in df.columns,
+                title=title,
+                style="yahoo",
+                addplot=overlays if overlays else [],
+                returnfig=True,
+                figsize=figsize
+            )
 
-        self._save_plot(fig, subdirectory, filename)
+            if legend_entries:
+                handles = [
+                    patches.Patch(color=color, label=label)
+                    for label, color in sorted(legend_entries)
+                ]
+                axes[0].legend(handles=handles, loc="upper left", fontsize=8)
 
-    def plot_levels(
-        self,
-        lookbacks: Dict[Any, Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]],
-        filename: str = 'levels_plot.png',
-        subdirectory: str = 'artifacts/levels/',
-        min_price_distance: float = 1.0
-    ) -> None:
-        """
-        Plot pivot level rays from significant pivot points across different lookback periods.
-        Each ray starts at the pivot point and extends horizontally to the right.
-        Different lookback periods are assigned different colors.
+            fig.savefig(file_path, dpi=300, bbox_inches="tight")
+            logger.info("Chart saved to %s", file_path)
 
-        Args:
-            lookbacks (Dict[Any, Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]]):
-                A dictionary where each key is a lookback period and its value is a tuple containing two lists:
-                one for high pivots and one for low pivots.
-            filename (str): Name of the output file.
-            subdirectory (str): Directory where the plot will be saved.
-            min_price_distance (float): Minimum price difference to consider two levels distinct.
-        """
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=(12, 6))
+        except IndexError:
+            logger.warning("IndexError: No data points in filtered date range (%s to %s)", ctx.start, ctx.end)
+            raise ValueError(f"No data available in the date range {ctx.start} to {ctx.end}.")
 
-        # Plot the closing price
-        ax.plot(self.df.index, self.df['Close'], label="Closing Price", color="cyan", alpha=0.6)
-
-        colors = ['red', 'green', 'blue', 'orange', 'purple']
-
-        # Create a stable color mapping for each lookback
-        lookbacks_sorted = sorted(lookbacks.keys())
-        lookback_color_map = {
-            lb: colors[i % len(colors)] for i, lb in enumerate(lookbacks_sorted)
-        }
-
-        # Collect all pivot points with associated lookback and type (high/low)
-        all_pivots: List[Tuple[str, float, Any, bool]] = []
-        for lookback, (pivots_high, pivots_low) in lookbacks.items():
-            for date, value in pivots_high:
-                all_pivots.append((date, value, lookback, True))  # True for high pivot
-            for date, value in pivots_low:
-                all_pivots.append((date, value, lookback, False))  # False for low pivot
-
-        # Sort pivots by price to filter out levels that are too close
-        all_pivots.sort(key=lambda x: x[1])
-        filtered_pivots: List[Tuple[str, float, Any, bool]] = []
-        if all_pivots:
-            filtered_pivots.append(all_pivots[0])
-            for date, price, lookback, is_high in all_pivots[1:]:
-                if abs(price - filtered_pivots[-1][1]) >= min_price_distance:
-                    filtered_pivots.append((date, price, lookback, is_high))
-
-        logger.info(f"Found {len(filtered_pivots)} distinct levels after filtering")
-
-        unique_labels = set()
-        last_date = self.df.index[-1]  # The rightmost date for the rays
-        for date, price, lookback, is_high in filtered_pivots:
-            pivot_dt = pd.Timestamp(date)
-            color = lookback_color_map[lookback]
-            marker = '^' if is_high else 'v'
-            label = f'{"High" if is_high else "Low"} (Lookback={lookback})'
-
-            # Plot the pivot point
-            if label not in unique_labels:
-                ax.scatter(pivot_dt, price, color=color, marker=marker, s=100, label=label)
-                unique_labels.add(label)
-            else:
-                ax.scatter(pivot_dt, price, color=color, marker=marker, s=100)
-
-            # Draw a ray from the pivot point to the last date
-            ax.plot([pivot_dt, last_date], [price, price], color=color, linestyle='--', alpha=0.4)
-
-        # Customize chart appearance
-        ax.set_title("Price Action with Filtered Pivot Levels", color='white', size=14)
-        ax.set_xlabel("Date", color='white')
-        ax.set_ylabel("Price", color='white')
-        ax.legend(facecolor='black', edgecolor='white', fontsize=8, loc='upper left')
-        ax.grid(alpha=0.2, color='gray')
-
-        self._save_plot(fig, subdirectory, filename)
+        except Exception as e:
+            logger.exception("Charting failed: %s", str(e))
