@@ -21,7 +21,8 @@ class ChartPlotter:
         output_base: str = "output",
         output_subdir: str = "misc",
         legend_entries: Set[Tuple[str, str]] = None,
-        overlays: Optional[List[Any]] = None
+        overlays: Optional[List[Any]] = None,
+        file_name: Optional[str] = None
     ):
         """
         Plots OHLC data using mplfinance, scoped to a given DataContext.
@@ -55,7 +56,8 @@ class ChartPlotter:
             output_dir = os.path.join(output_base, output_subdir)
             os.makedirs(output_dir, exist_ok=True)
 
-            file_name = f"chart_{datasource}_{ctx.symbol}_{ctx.interval}_{start.strftime('%Y%m%d')}_to_{end.strftime('%Y%m%d')}.png"
+            start_end_time= f"{start.strftime('%Y-%m-%d')}_{end.strftime('%Y-%m-%d')}"
+            file_name = f"{file_name}_{start_end_time}.png" if file_name else f"{ctx.symbol}_{ctx.interval}_{start_end_time}.png"
             file_path = os.path.join(output_dir, file_name)
 
             fig_width = min(10 + len(df.index) * 0.03, 30)

@@ -112,25 +112,86 @@ class MarketProfileIndicator(BaseIndicator):
             "VAH": max(value_area_prices),
             "VAL": min(value_area_prices),
         }
+    
+    def _value_area_overlap(self, val1, vah1, val2, vah2) -> float:
+        overlap_low = max(val1, val2)
+        overlap_high = min(vah1, vah2)
 
-    def to_overlays(self, plot_df: pd.DataFrame) -> Tuple[List, Set[Tuple[str, str]]]:
+        overlap_range = max(0.0, overlap_high - overlap_low)
+        target_range = vah2 - val2  # use the *next* VA's range for % basis
+
+        if target_range == 0:
+            return 0.0
+
+        return overlap_range / target_range
+
+    
+    def merge_value_areas(self, threshold: float = 0.6, min_merge: float = 2) -> List[Dict]:
+        merged_profiles = []
+        i = 0
+        n = len(self.daily_profiles)
+
+        while i < n:
+            base = self.daily_profiles[i]
+            merged_val = base['VAL']
+            merged_vah = base['VAH']
+            start_date = base['date']
+            end_date = base['date']
+            poc_values = [base['POC']] if base['POC'] is not None else []
+            merge_count = 1
+            j = i + 1
+
+            while j < n:
+                next_va = self.daily_profiles[j]
+                overlap = self._value_area_overlap(merged_val, merged_vah, next_va['VAL'], next_va['VAH'])
+
+                if overlap >= threshold:
+                    merged_val = min(merged_val, next_va['VAL'])
+                    merged_vah = max(merged_vah, next_va['VAH'])
+                    end_date = next_va['date']
+                    if next_va['POC'] is not None:
+                        poc_values.append(next_va['POC'])
+
+                    merge_count += 1
+                    j += 1
+                else:
+                    break
+                
+            if merge_count >= min_merge:
+                merged_poc = sum(poc_values) / len(poc_values) if poc_values else None
+                merged_profiles.append({
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "VAL": merged_val,
+                    "VAH": merged_vah,
+                    "POC": merged_poc,
+                })
+            i = j
+
+        self.merged_profiles = merged_profiles
+        return merged_profiles
+
+
+    def to_overlays(self, plot_df: pd.DataFrame, merged_vas: bool=True) -> Tuple[List, Set[Tuple[str, str]]]:
         """
         Returns chart overlays (POC, VAH, VAL lines) aligned to the plot_df index.
         Each value area line is aligned with the daily session window within plot_df.
         Logs session matching details for debugging.
-
-        
         """
-
         if not self.daily_profiles:
             logger.warning("No daily profiles available to generate overlays.")
             return []
+
+        if merged_vas and not hasattr(self, 'merged_profiles'):
+            raise ValueError("Merged VAs not computed. Call merge_value_areas() first.")
+
+        profiles = self.merged_profiles if merged_vas else self.daily_profiles
 
         overlays = []
         legend_entries = set()
 
         full_index = plot_df.index
-        logger.info("Generating overlays for %d sessions", len(self.daily_profiles))
+        logger.info("Generating overlays for %d sessions", len(profiles))
 
         style_map = {
             "POC": {"color": "orange", "width": 1.2},
@@ -138,19 +199,24 @@ class MarketProfileIndicator(BaseIndicator):
             "VAL": {"color": "gray", "width": 1},
         }
 
-        for profile in self.daily_profiles:
-            date = profile["date"]
-            session_index = plot_df[plot_df.index.date == date.date()].index
+        for profile in profiles:
+            if "start_date" in profile:
+                start = pd.to_datetime(profile["start_date"], utc=True)
+                end = pd.to_datetime(profile["end_date"], utc=True)
+                session_index = plot_df[(plot_df.index >= start) & (plot_df.index <= end)].index
+                logger.debug("Merged Session: start=%s, end=%s", start, end)
+            else:
+                session_day = profile["date"].date()
+                session_index = plot_df[plot_df.index.date == session_day].index
+                logger.debug("Unmerged Session: date=%s", session_day)
 
             if session_index.empty:
-                logger.warning("No candles matched for session date: %s", date.date())
+                logger.warning("No candles matched for session: %s", profile)
                 continue
-
-            logger.debug("Matched %d candles for session date: %s", len(session_index), date.date())
 
             for key, style in style_map.items():
                 session_series = pd.Series([profile[key]] * len(session_index), index=session_index)
-                aligned_line = session_series.reindex(full_index, fill_value=pd.NA)
+                aligned_line = session_series.reindex(full_index, fill_value=np.nan)
 
                 overlays.append(make_addplot(
                     aligned_line,
@@ -162,5 +228,5 @@ class MarketProfileIndicator(BaseIndicator):
 
                 legend_entries.add((key, style["color"]))
 
-        logger.info("Generated %d overlays total", len(overlays))
+        logger.debug("Generated %d overlays for %d sessions", len(overlays), len(profiles))
         return overlays, legend_entries
