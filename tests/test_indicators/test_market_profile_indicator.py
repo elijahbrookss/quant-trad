@@ -29,7 +29,7 @@ def test_market_profile_indicator_integration_plot():
     # Define a 30-minute context over two weeks
     ctx = DataContext(
         symbol="CL",
-        start="2025-05-15",
+        start="2025-04-15",
         end="2025-05-30",
         interval="30m"
     )
@@ -67,7 +67,7 @@ def test_market_profile_indicator_integration_plot():
     # Finally, call provider.plot_ohlcv (integration) to save a chart
     provider.plot_ohlcv(
         plot_ctx=ctx,
-        title="Integration Test – Market Profile (AAPL 30m)",
+        title="Integration Test – Market Profile (CL 30m)",
         overlays=overlays,
         legend_entries=legend_entries,
         show_volume=True,
