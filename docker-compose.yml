@@ -1,0 +1,27 @@
+# docker-compose.yml
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15           # Postgres 15 + Timescale
+    container_name: tsdb
+    restart: unless-stopped                            # auto‑start with Docker Desktop
+    ports:
+      - "5432:5432"                                    # host → container
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data                # persistent data
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      - timescaledb
+volumes:
+  pgdata:
