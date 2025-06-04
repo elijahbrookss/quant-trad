@@ -28,7 +28,7 @@ def show_market_profile():
         threshold=0.7,
         min_merge=3
     )
-    overlays, legend_keys = merged_profile.to_overlays(trading_chart, merged_vas=True)
+    overlays, legend_keys = merged_profile.to_overlays(trading_chart, use_merged=True)
 
     provider.plot_ohlcv(
         plot_ctx=trading_data_context,
@@ -39,7 +39,7 @@ def show_market_profile():
     )
 
     unmerged_profile = MarketProfileIndicator.from_context(provider, ctx=trading_data_context, interval="30m")
-    overlays_unmerged, legend_keys_unmerged = unmerged_profile.to_overlays(trading_chart, merged_vas=False)
+    overlays_unmerged, legend_keys_unmerged = unmerged_profile.to_overlays(trading_chart, use_merged=False)
 
     provider.plot_ohlcv(
         plot_ctx=trading_data_context,
