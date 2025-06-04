@@ -46,20 +46,6 @@ class MarketProfileIndicator(BaseIndicator):
 
         df = provider.get_ohlcv(ctx)
         if df is None or df.empty:
-            logger.warning(
-                "No data for %s from %s to %s; attempting ingest.",
-                ctx.symbol,
-                ctx.start,
-                ctx.end
-            )
-            ingested = provider.ingest_history(ctx)
-            if ingested == 0:
-                raise ValueError(
-                    f"Failed to ingest data for {ctx.symbol} ({ctx.interval}) from {ctx.start} to {ctx.end}"
-                )
-            df = provider.get_ohlcv(ctx)
-
-        if df is None or df.empty:
             raise ValueError(
                 f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest"
             )
