@@ -15,16 +15,19 @@ provider = AlpacaProvider()
 
 trading_data_context = DataContext(
     symbol=symbol,
-    start="2025-04-30",
+    start="2025-01-30",
     end="2025-05-23",
-    interval="30m"  # timeframe for trading data
+    interval="1h"  # timeframe for trading data
 )
 
 def show_market_profile():
     trading_chart = provider.get_ohlcv(trading_data_context)
 
     merged_profile = MarketProfileIndicator.from_context(provider, ctx=trading_data_context, interval="30m")
-    merged_profile.merge_value_areas()
+    merged_profile.merge_value_areas(
+        threshold=0.7,
+        min_merge=3
+    )
     overlays, legend_keys = merged_profile.to_overlays(trading_chart, merged_vas=True)
 
     provider.plot_ohlcv(

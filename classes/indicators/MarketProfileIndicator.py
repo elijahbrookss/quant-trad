@@ -47,24 +47,36 @@ class MarketProfileIndicator(BaseIndicator):
 
     def compute(self) -> List[Dict[str, float]]:
         """
-        Computes TPO-based market profile for each daily session.
+        Computes TPO‐based market profile for each daily session.
+        Now also records each session’s real start/end intraday timestamps.
         """
-    
         df = self.df.copy()
-        df.index = pd.to_datetime(df.index, utc=True)        
+        df.index = pd.to_datetime(df.index, utc=True)
+
+        # Group by calendar date (UTC) so that 'date' is the midnight of each day
         grouped = df.groupby(df.index.date)
 
-        profiles = []
+        profiles: List[Dict[str, float]] = []
 
         for date, group in grouped:
+            # Build your TPO histogram and extract VAL/VAH/POC as before
             tpo_hist = self._build_tpo_histogram(group)
             profile = self._extract_value_area(tpo_hist)
-            profile["date"] = pd.to_datetime(str(date)).tz_localize("UTC")
+
+            # 2) Record the actual first‐bar and last‐bar timestamps for this session:
+            first_ts = group.index.min()  # e.g. 2025-05-15 13:30:00+00:00
+            last_ts  = group.index.max()  # e.g. 2025-05-15 20:00:00+00:00
+            profile["start_date"] = first_ts
+            profile["end_date"]   = last_ts
+
+            # Now you have:
+            #   profile["POC"], profile["VAH"], profile["VAL"]
+            #   profile["date"]   (calendar midnight if you still want it)
+            #   profile["start_ts"], profile["end_ts"]  (real intraday bounds)
+
             profiles.append(profile)
-            logger.debug("Profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f", profile["date"], profile["POC"], profile["VAH"], profile["VAL"])
-
-
-        
+            logger.debug("Computed profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f",
+                         date, profile["POC"], profile["VAH"], profile["VAL"])
 
         self.daily_profiles = profiles
         return profiles
@@ -135,8 +147,8 @@ class MarketProfileIndicator(BaseIndicator):
             base = self.daily_profiles[i]
             merged_val = base['VAL']
             merged_vah = base['VAH']
-            start_date = base['date']
-            end_date = base['date']
+            start_date = base['start_date']
+            end_date = base['end_date']
             poc_values = [base['POC']] if base['POC'] is not None else []
             merge_count = 1
             j = i + 1
@@ -148,7 +160,7 @@ class MarketProfileIndicator(BaseIndicator):
                 if overlap >= threshold:
                     merged_val = min(merged_val, next_va['VAL'])
                     merged_vah = max(merged_vah, next_va['VAH'])
-                    end_date = next_va['date']
+                    end_date = next_va['end_date']
                     if next_va['POC'] is not None:
                         poc_values.append(next_va['POC'])
 
@@ -200,15 +212,10 @@ class MarketProfileIndicator(BaseIndicator):
         }
 
         for profile in profiles:
-            if "start_date" in profile:
-                start = pd.to_datetime(profile["start_date"], utc=True)
-                end = pd.to_datetime(profile["end_date"], utc=True)
-                session_index = plot_df[(plot_df.index >= start) & (plot_df.index <= end)].index
-                logger.debug("Merged Session: start=%s, end=%s", start, end)
-            else:
-                session_day = profile["date"].date()
-                session_index = plot_df[plot_df.index.date == session_day].index
-                logger.debug("Unmerged Session: date=%s", session_day)
+            start = profile["start_date"]
+            end   = profile["end_date"]
+            session_index = plot_df[(plot_df.index >= start) & (plot_df.index <= end)].index
+            logger.debug("Merged block: start_date=%s, end_date=%s", start, end)
 
             if session_index.empty:
                 logger.warning("No candles matched for session: %s", profile)
