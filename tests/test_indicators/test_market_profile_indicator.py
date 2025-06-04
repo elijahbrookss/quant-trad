@@ -2,14 +2,6 @@
 
 import pytest
 import pandas as pd
-import numpy as np
-from datetime import timedelta
-
-# Adjust these imports to match your project layout:
-# from classes.indicators.market_profile_indicator import MarketProfileIndicator
-# from classes.indicators.config import DataContext
-# from data_providers.alpaca_provider import AlpacaProvider
-
 from classes.indicators.MarketProfileIndicator import MarketProfileIndicator
 from classes.indicators.config import DataContext
 from data_providers.alpaca_provider import AlpacaProvider
