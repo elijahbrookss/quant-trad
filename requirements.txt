@@ -11,3 +11,5 @@ yfinance==0.2.61
 psycopg2-binary
 mplfinance
 dataclasses
+pandas_ta
+setuptools
