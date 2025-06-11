@@ -6,6 +6,7 @@ from classes.ChartPlotter import ChartPlotter
 from classes.indicators.MarketProfileIndicator import MarketProfileIndicator
 from classes.indicators.PivotLevelIndicator import PivotLevelIndicator
 from classes.indicators.VWAPIndicator import VWAPIndicator
+from classes.indicators.TrendlineIndicator import TrendlineIndicator
 
 from data_providers.alpaca_provider import AlpacaProvider
 from classes.indicators.config import DataContext
@@ -16,15 +17,23 @@ provider = AlpacaProvider()
 
 trading_data_context = DataContext(
     symbol=symbol,
-    start="2025-05-01",
+    start="2025-04-01",
     end="2025-05-30",
     interval="1h"  # timeframe for trading data
 )
 
 def get_overlays(plot_df: pd.DataFrame):
+    trendline = TrendlineIndicator.from_context(
+        provider=provider,
+        ctx=trading_data_context,
+        lookbacks=[20, 50, 100],
+        tolerance=10,
+        min_touches=3,
+        slope_tol=1,
+        intercept_tol=1
+    )
 
-    logger.info(f"VWAP overlays: {vwap_overlays}")
-    return vwap_overlays, vwap_legend_keys
+    return trendline.to_overlays(plot_df)
 
 
 def show_vwap():
@@ -33,10 +42,10 @@ def show_vwap():
 
     provider.plot_ohlcv(
         plot_ctx=trading_data_context,
-        title=f"{symbol} | {trading_data_context.interval} - VWAP Bands",
+        title=f"{symbol} | {trading_data_context.interval} - Trendline",
         overlays=overlays,
         legend_entries=legend_keys,
-        file_name=f"{symbol}_vwap_bands_{trading_data_context.interval}"
+        file_name=f"{symbol}_trendline_{trading_data_context.interval}"
     )
 
 show_vwap()

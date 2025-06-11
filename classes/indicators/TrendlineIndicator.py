@@ -1,157 +1,186 @@
-from classes.indicators.BaseIndicator import BaseIndicator
-from classes.PivotDetector import PivotDetector
-from classes.TrendlineAnalyzer import TrendlineAnalyzer
-
-import hashlib
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Tuple
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-ARTIFACT_ROOT = Path("artifacts/trendlines")
-
-# ------------------------------------------------------------------
-# In‑memory cache so repeated calls on the same DF / params are cheap
-# ------------------------------------------------------------------
-_CACHE: Dict[str, Tuple[datetime, dict]] = {}
-
-
-def _cache_key(symbol: str, tf: str, last_idx: int, params_hash: str) -> str:
-    return f"{symbol}-{tf}-{last_idx}-{params_hash}"
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Set, Literal, Optional
+from scipy.stats import linregress
+from mplfinance.plotting import make_addplot
+from matplotlib import patches
+from classes.indicators.BaseIndicator import BaseIndicator
+from classes.indicators.config import DataContext
 
 
-# ------------------------------------------------------------------
+
 @dataclass
-class TL:
-    """Single trendline data structure."""
-
-    p1: Tuple[int, float]  # (idx, price)
-    p2: Tuple[int, float]
+class Trendline:
     slope: float
     intercept: float
-    touches: int
+    r2: float
+    touches: List[pd.Timestamp]
     violations: int
-    last_touch_idx: int
-
-    @property
-    def direction(self) -> str:  # up / down
-        return "up" if self.slope > 0 else "down"
-
-    @property
-    def score(self) -> float:
-        """Simple quality score (0‑1)."""
-        return min(1.0, self.touches / (self.violations + 1))
+    lookback: int
+    score: float = 0.0
 
 
-# ------------------------------------------------------------------
 class TrendlineIndicator(BaseIndicator):
-    """Extracts & scores trendlines for a given timeframe."""
+    """
+    Detects trendlines from pivot points, clusters overlapping lines into averaged ones,
+    and provides overlays.
 
-    NAME = "trendlines"
+    Supports two color modes:
+      - 'role': green for support, red for resistance (determined at overlay time)
+      - 'timeframe': custom colors per indicator timeframe
+    """
+    NAME = 'trendline'
 
     def __init__(
         self,
         df: pd.DataFrame,
-        tf_label: str = "4h",
-        lookbacks: Tuple[int, ...] = (5, 10, 20, 40),
-        max_pivots: int = 300,
+        lookbacks: List[int],
+        tolerance: float = 0.0025,
+        min_touches: int = 2,
+        slope_tol: float = 0.0001,
+        intercept_tol: float = 0.01,
+        timeframe: str = ''
     ):
-        super().__init__(df)
-        self.tf_label = tf_label
+        self.df = df.copy()
         self.lookbacks = lookbacks
-        self.max_pivots = max_pivots
-        self.lines: List[TL] = []
+        self.tolerance = tolerance
+        self.min_touches = min_touches
+        self.slope_tol = slope_tol
+        self.intercept_tol = intercept_tol
+        self.timeframe = timeframe
+        self.trendlines: List[Trendline] = []
+        self._compute()
 
-        # adaptive min_points based on volatility
-        atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
-        self.min_points_range = range(max(3, int(atr / df["Close"].iloc[-1] * 1000)), 8)
+    @classmethod
+    def from_context(
+        cls,
+        provider,
+        ctx: DataContext,
+        lookbacks: List[int],
+        tolerance: float = 0.0025,
+        min_touches: int = 2,
+        slope_tol: float = 0.0001,
+        intercept_tol: float = 0.01
+    ):
+        df = provider.get_ohlcv(ctx)
+        if df is None or df.empty:
+            raise ValueError(f"Missing OHLCV for {ctx.symbol} from {ctx.start} to {ctx.end}")
+        return cls(
+            df=df,
+            lookbacks=lookbacks,
+            tolerance=tolerance,
+            min_touches=min_touches,
+            slope_tol=slope_tol,
+            intercept_tol=intercept_tol,
+            timeframe=ctx.interval
+        )
 
-    # ------------------------------------------------------------------
-    def _get_pivots(self) -> List[Tuple[int, float]]:
-        pivots: List[Tuple[int, float]] = []
-        detector = PivotDetector(self.df, lookbacks=self.lookbacks)
-        pivots_map = detector.detect_all()
-        for highs, lows in pivots_map.values():
-            pivots.extend(highs)
-            pivots.extend(lows)
-        pivots.sort(key=lambda t: t[0])
-        return pivots[-self.max_pivots :]  # limit for performance
+    def _find_pivots(self, lookback: int) -> Tuple[List[Tuple[pd.Timestamp, float]], List[Tuple[pd.Timestamp, float]]]:
+        highs, lows = [], []
+        prices = self.df['close']
+        for i in range(lookback, len(prices) - lookback):
+            window = prices.iloc[i - lookback: i + lookback + 1]
+            center = prices.iat[i]
+            ts = prices.index[i]
+            if center == window.max(): highs.append((ts, center))
+            if center == window.min(): lows.append((ts, center))
+        return highs, lows
 
-    # ------------------------------------------------------------------
-    def compute(self):
-        symbol = getattr(self.df, "symbol", "NA")
-        last_idx = int(self.df.index[-1].timestamp())
-        params_hash = hashlib.sha1(str((self.lookbacks, tuple(self.min_points_range))).encode()).hexdigest()[:8]
-        key = _cache_key(symbol, self.tf_label, last_idx, params_hash)
-        cached = _CACHE.get(key)
-        if cached:
-            self.result, self.lines = cached  # type: ignore
-            self.score = max(l.score for l in self.lines) if self.lines else 0
-            return self.result
+    def _compute(self) -> None:
+        raw_lines: List[Trendline] = []
+        # generate raw trendlines
+        for lb in self.lookbacks:
+            highs, lows = self._find_pivots(lb)
+            for pts in (lows, highs):
+                if len(pts) < 2: continue
+                for i in range(len(pts)):
+                    for j in range(i + 1, len(pts)):
+                        t1, p1 = pts[i]; t2, p2 = pts[j]
+                        x = np.array([self.df.index.get_loc(t1), self.df.index.get_loc(t2)])
+                        y = np.array([p1, p2])
+                        slope, intercept, r_val, _, _ = linregress(x, y)
+                        r2 = r_val**2
+                        touches, violations = [], 0
+                        for idx, ts in enumerate(self.df.index):
+                            price = self.df.at[ts, 'close']
+                            line_p = slope*idx + intercept
+                            dist = abs(price - line_p)/price
+                            if dist <= self.tolerance:
+                                touches.append(ts)
+                            else:
+                                violations += 1
+                        if len(touches) < self.min_touches: continue
+                        raw_lines.append(Trendline(slope, intercept, r2, touches, violations, lb))
 
-        pivots = self._get_pivots()
-        trendlines_by_thresh: Dict[int, List[TL]] = {}
-        for n in self.min_points_range:
-            analyzer = TrendlineAnalyzer(self.df, pivots, min_points=n)
-            raw_lines = analyzer.analyze()
-            trendlines_by_thresh[n] = []
-            for (idx1, price1), (idx2, price2), touches, violations in raw_lines:
-                slope = (price2 - price1) / (idx2 - idx1)
-                intercept = price1 - slope * idx1
-                tl = TL(
-                    p1=(idx1, price1),
-                    p2=(idx2, price2),
-                    slope=slope,
-                    intercept=intercept,
+        # cluster lines that overlap (similar slope & intercept)
+        clusters: List[List[Trendline]] = []
+        for tl in raw_lines:
+            placed = False
+            for cluster in clusters:
+                rep = cluster[0]
+                if abs(tl.slope - rep.slope) <= self.slope_tol and abs(tl.intercept - rep.intercept) <= self.intercept_tol:
+                    cluster.append(tl)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([tl])
+
+        # average each cluster
+        self.trendlines.clear()
+        for cluster in clusters:
+            slopes = [c.slope for c in cluster]
+            inters = [c.intercept for c in cluster]
+            r2s = [c.r2 for c in cluster]
+            touches = sorted({ts for c in cluster for ts in c.touches})
+            violations = sum(c.violations for c in cluster)
+            lookback = min(c.lookback for c in cluster)
+            avg_slope = float(np.mean(slopes))
+            avg_intercept = float(np.mean(inters))
+            avg_r2 = float(np.mean(r2s))
+            self.trendlines.append(
+                Trendline(
+                    slope=avg_slope,
+                    intercept=avg_intercept,
+                    r2=avg_r2,
                     touches=touches,
                     violations=violations,
-                    last_touch_idx=idx2,
+                    lookback=lookback
                 )
-                trendlines_by_thresh[n].append(tl)
-                self.lines.append(tl)
-
-        self.result = trendlines_by_thresh
-        self.score = max(l.score for l in self.lines) if self.lines else 0
-        _CACHE[key] = (datetime.utcnow(), self.result)
-        return self.result
-
-    # ------------------------------------------------------------------
-    def plot(self) -> Path:
-        if self.result is None:
-            self.compute()
-
-        plt.style.use("dark_background")
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(self.df.index, self.df["Close"], color="cyan", alpha=0.6)
-
-        cmap = plt.cm.get_cmap("plasma")
-        for tl in self.lines:
-            xs = np.array([tl.p1[0], tl.p2[0]])
-            ys = tl.intercept + tl.slope * xs
-            norm_score = tl.score  # 0‑1
-            ax.plot(
-                self.df.index[xs],
-                ys,
-                color=cmap(norm_score),
-                linewidth=1 + 2 * norm_score,
-                alpha=0.8,
             )
-        ax.set_title(f"Trendlines ({self.tf_label})")
-        folder = ARTIFACT_ROOT / self.tf_label
-        folder.mkdir(parents=True, exist_ok=True)
-        file = folder / f"trendlines_{self.tf_label}.png"
-        fig.savefig(file, dpi=300, bbox_inches="tight")
-        plt.close(fig)
-        return file
-    
-    def get_lines(self) -> List[TL]:
-        """
-        Return all detected TL objects for this timeframe.
-        """
-        if self.result is None:
-            self.compute()
-        return self.lines
+
+    def to_overlays(
+        self,
+        plot_df: pd.DataFrame,
+        color_mode: Literal['role', 'timeframe'] = 'role',
+        role_color_map: Dict[str, str] = None,
+        timeframe_color_map: Dict[str, str] = None,
+        width: float = 1.0,
+        style: str = 'dashed',
+        top_n: Optional[int] = None
+    ) -> Tuple[List, Set[Tuple[str, str]]]:
+        overlays, legend_entries = [], set()
+        lines = sorted(self.trendlines, key=lambda tl: tl.r2, reverse=True)
+        if top_n:
+            lines = lines[:top_n]
+
+        role_c = role_color_map or {'support':'green','resistance':'red'}
+        tf_c = timeframe_color_map or {self.timeframe:'blue'}
+        last_idx = len(plot_df.index)-1
+        last_price = plot_df['close'].iat[last_idx]
+
+        for tl in lines:
+            end_p = tl.slope*last_idx + tl.intercept
+            kind = 'support' if last_price > end_p else 'resistance'
+            if color_mode=='role':
+                color=role_c[kind]; label=f"{kind.capitalize()} TL"
+            else:
+                color=tf_c.get(self.timeframe,'gray'); label=f"{self.timeframe} TL"
+            series = pd.Series([tl.slope*i+tl.intercept for i in range(len(plot_df.index))], index=plot_df.index)
+            overlays.append(make_addplot(series, color=color, linestyle=style, width=width))
+            legend_entries.add((label,color))
+        return overlays, legend_entries
+
+    @staticmethod
+    def build_legend_handles(legend_entries: Set[Tuple[str, str]]):
+        return [patches.Patch(color=c,label=l) for l,c in sorted(legend_entries)]
