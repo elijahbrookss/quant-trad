@@ -5,6 +5,8 @@ from classes.Logger import logger
 from classes.ChartPlotter import ChartPlotter
 from classes.indicators.MarketProfileIndicator import MarketProfileIndicator
 from classes.indicators.PivotLevelIndicator import PivotLevelIndicator
+from classes.indicators.VWAPIndicator import VWAPIndicator
+from classes.indicators.TrendlineIndicator import TrendlineIndicator
 
 from data_providers.alpaca_provider import AlpacaProvider
 from classes.indicators.config import DataContext
@@ -15,39 +17,35 @@ provider = AlpacaProvider()
 
 trading_data_context = DataContext(
     symbol=symbol,
-    start="2025-01-30",
-    end="2025-05-23",
+    start="2025-04-01",
+    end="2025-05-30",
     interval="1h"  # timeframe for trading data
 )
 
-def show_market_profile():
-    trading_chart = provider.get_ohlcv(trading_data_context)
-
-    merged_profile = MarketProfileIndicator.from_context(provider, ctx=trading_data_context, interval="30m")
-    merged_profile.merge_value_areas(
-        threshold=0.7,
-        min_merge=3
+def get_overlays(plot_df: pd.DataFrame):
+    trendline = TrendlineIndicator.from_context(
+        provider=provider,
+        ctx=trading_data_context,
+        lookbacks=[20, 50, 100],
+        tolerance=10,
+        min_touches=3,
+        slope_tol=1,
+        intercept_tol=1
     )
-    overlays, legend_keys = merged_profile.to_overlays(trading_chart, use_merged=True)
+
+    return trendline.to_overlays(plot_df)
+
+
+def show_vwap():
+    trading_chart = provider.get_ohlcv(trading_data_context)
+    overlays, legend_keys = get_overlays(trading_chart)
 
     provider.plot_ohlcv(
         plot_ctx=trading_data_context,
-        title=f"{symbol} | {trading_data_context.interval} - {merged_profile.NAME} - Merged VAs",
+        title=f"{symbol} | {trading_data_context.interval} - Trendline",
         overlays=overlays,
         legend_entries=legend_keys,
-        file_name=f"{symbol}_merged_market_profile_{trading_data_context.interval}"
+        file_name=f"{symbol}_trendline_{trading_data_context.interval}"
     )
 
-    unmerged_profile = MarketProfileIndicator.from_context(provider, ctx=trading_data_context, interval="30m")
-    overlays_unmerged, legend_keys_unmerged = unmerged_profile.to_overlays(trading_chart, use_merged=False)
-
-    provider.plot_ohlcv(
-        plot_ctx=trading_data_context,
-        title=f"{symbol} | {trading_data_context.interval} - {unmerged_profile.NAME} - Unmerged VAs",
-        overlays=overlays_unmerged,
-        legend_entries=legend_keys_unmerged,
-        file_name=f"{symbol}_unmerged_market_profile_{trading_data_context.interval}"
-    )
-
-    
-show_market_profile()
+show_vwap()

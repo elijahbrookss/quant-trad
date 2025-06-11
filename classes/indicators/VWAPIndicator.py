@@ -1,112 +1,121 @@
-############################################################
-# vwap.py – session‑reset VWAP with volatility bands
-############################################################
-
-from __future__ import annotations
-
-import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Literal, Tuple
-
+from mplfinance.plotting import make_addplot
+from matplotlib import patches
 from classes.indicators.BaseIndicator import BaseIndicator
-
-ARTIFACT_ROOT = Path("artifacts/vwap")
+from classes.indicators.config import DataContext
 
 
 class VWAPIndicator(BaseIndicator):
     """
-    Session‑reset VWAP with ±kσ bands, for any session timeframe.
-
-    Parameters
-    ----------
-    df : DataFrame
-        OHLCV data indexed by timestamp (UTC).
-    session_tf : Literal['D','M','W','H']
-        Period code for VWAP reset: 'D'=daily, 'M'=monthly, etc.
-    band_k : float
-        Number of standard deviations for upper/lower bands.
+    Computes anchored VWAP and its standard-deviation bands (VWAP bands) for overlays.
+    Implements VWAP manually without external dependencies, plus rolling std bands.
     """
 
-    NAME = "vwap"
+    NAME = "vwap_bands"
 
     def __init__(
         self,
         df: pd.DataFrame,
-        session_tf: Literal['D', 'W', 'M'] = 'D',
-        band_k: float = 2.0,
+        stddev_window: int = 20,
+        stddev_multipliers: list[float] = [1.0, 2.0],
+        reset_by: str = "D"  # 'D' resets VWAP each trading day
     ):
-        super().__init__(df)
-        self.session_tf = session_tf
-        self.band_k = band_k
+        # Raw OHLCV DataFrame (must have datetime index)
+        self.df = df.copy()
+        self.stddev_window = stddev_window
+        self.stddev_multipliers = stddev_multipliers
+        self.reset_by = reset_by
+        self._compute()
 
-    def compute(self) -> pd.DataFrame:
-        df = self.df.copy()
-        # Typical price and safe volume
-        df['tp'] = (df['High'] + df['Low'] + df['Close']) / 3
-        df['vol'] = df['Volume'].clip(lower=1e-9)
-
-        # Identify session groups by period
-        grp = df.index.to_period(self.session_tf)
-
-        # Cumulative numerator and denominator per session
-        df['cum_tp_vol'] = (
-            df.groupby(grp)
-              .apply(lambda g: (g.tp * g.vol).cumsum())
-              .reset_index(level=0, drop=True)
-        )
-        df['cum_vol'] = df.groupby(grp)['vol'].cumsum()
-        # For volatility band: E[X^2] term
-        df['cum_tp2_vol'] = (
-            df.groupby(grp)
-              .apply(lambda g: (g.tp ** 2 * g.vol).cumsum())
-              .reset_index(level=0, drop=True)
-        )
-
-        # VWAP and vwap_std per session
-        vwap = df['cum_tp_vol'] / df['cum_vol']
-        var = df['cum_tp2_vol'] / df['cum_vol'] - vwap**2
-        vwap_std = np.sqrt(var.clip(lower=0))
-
-        df['VWAP'] = vwap
-        df['VWAP_STD'] = vwap_std
-        self.result = df[['VWAP', 'VWAP_STD']]
-
-        # Score = last deviation in ATR units
-        atr14 = (df['High'] - df['Low']).rolling(14).mean()
-        last_dev = df['Close'].iloc[-1] - vwap.iloc[-1]
-        self.score = float(last_dev / atr14.iloc[-1]) if atr14.iloc[-1] > 0 else 0.0
-        return self.result
-
-    def plot(self) -> Path:
-        if self.result is None:
-            self.compute()
-        fig, ax = self._init_price_ax(
-            self.df,
-            f"VWAP {self.session_tf} ±{self.band_k}σ"
-        )
-        idx = self.result.index
-        ax.plot(idx, self.result['VWAP'], label='VWAP', color='yellow')
-        ax.plot(
-            idx,
-            self.result['VWAP'] + self.band_k * self.result['VWAP_STD'],
-            linestyle='--', label=f'+{self.band_k}σ', alpha=0.8
-        )
-        ax.plot(
-            idx,
-            self.result['VWAP'] - self.band_k * self.result['VWAP_STD'],
-            linestyle='--', label=f'-{self.band_k}σ', alpha=0.8
-        )
-        ax.legend(facecolor='black', edgecolor='white', fontsize=8)
-        path = ARTIFACT_ROOT / f"vwap_{self.session_tf}.png"
-        return self._save_fig(fig, path.name)
-    
-    def get_vwap(self, timestamp: pd.Timestamp) -> Tuple[float, float]:
+    @classmethod
+    def from_context(
+        cls,
+        provider,
+        ctx: DataContext,
+        stddev_window: int = 20,
+        stddev_multipliers: list[float] = [1.0, 2.0],
+        reset_by: str = "D"
+    ):
         """
-        Return (VWAP, VWAP_STD) at the given timestamp.
+        Instantiate from a DataContext and data provider.
         """
-        if self.result is None:
-            self.compute()
-        # self.result is a DataFrame with columns ['VWAP','VWAP_STD']
-        row = self.result.loc[timestamp]
-        return float(row['VWAP']), float(row['VWAP_STD'])
+        df = provider.get_ohlcv(ctx)
+        if df is None or df.empty:
+            raise ValueError(
+                f"Missing OHLCV for {ctx.symbol} from {ctx.start} to {ctx.end}"
+            )
+        return cls(
+            df=df,
+            stddev_window=stddev_window,
+            stddev_multipliers=stddev_multipliers,
+            reset_by=reset_by
+        )
+
+    def _compute(self):
+        # Typical price for each bar
+        tp = (self.df['high'] + self.df['low'] + self.df['close']) / 3
+        # Price * Volume
+        pv = tp * self.df['volume']
+
+        # Compute VWAP: anchored daily or cumulative
+        if self.reset_by == 'D':
+            # group by calendar date
+            cum_pv = pv.groupby(self.df.index.date).cumsum()
+            cum_vol = self.df['volume'].groupby(self.df.index.date).cumsum()
+        else:
+            cum_pv = pv.cumsum()
+            cum_vol = self.df['volume'].cumsum()
+
+        self.df['vwap'] = cum_pv.values / cum_vol.values
+
+        # Rolling std of typical price
+        tp_std = tp.rolling(window=self.stddev_window, min_periods=1).std()
+
+        # Bands around VWAP
+        for m in self.stddev_multipliers:
+            self.df[f'upper_{int(m)}std'] = self.df['vwap'] + m * tp_std
+            self.df[f'lower_{int(m)}std'] = self.df['vwap'] - m * tp_std
+
+    def to_overlays(
+        self,
+        plot_df: pd.DataFrame,
+        vwap_color: str = 'blue',
+        band_color: str = 'gray'
+    ) -> tuple[list, set]:
+        """
+        Returns (overlays, legend_entries) for mplfinance plotting.
+
+        - overlays: list of make_addplot objects
+        - legend_entries: set of (label, color) for custom legend
+        """
+        overlays = []
+        legend_entries: set[tuple[str, str]] = set()
+
+        # VWAP line across plot index
+        vwap_series = pd.Series(self.df['vwap'].values, index=plot_df.index)
+        overlays.append(
+            make_addplot(vwap_series, color=vwap_color, linestyle='solid', width=1)
+        )
+        legend_entries.add(("VWAP", vwap_color))
+
+        # Bands (dashed)
+        for m in self.stddev_multipliers:
+            up = pd.Series(self.df[f'upper_{int(m)}std'].values, index=plot_df.index)
+            lo = pd.Series(self.df[f'lower_{int(m)}std'].values, index=plot_df.index)
+            overlays.append(
+                make_addplot(up, color=band_color, linestyle='dashed', width=0.75)
+            )
+            overlays.append(
+                make_addplot(lo, color=band_color, linestyle='dashed', width=0.75)
+            )
+            legend_entries.add((f"VWAP + {m}\u03c3", band_color))
+            legend_entries.add((f"VWAP - {m}\u03c3", band_color))
+
+        return overlays, legend_entries
+
+    @staticmethod
+    def build_legend_handles(legend_entries: set) -> list:
+        """
+        Convert legend_entries (label, color) into matplotlib Patch handles.
+        """
+        return [patches.Patch(color=color, label=label) for label, color in sorted(legend_entries)]
