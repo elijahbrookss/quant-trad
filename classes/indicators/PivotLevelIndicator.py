@@ -5,6 +5,7 @@ import pandas as pd
 from mplfinance.plotting import make_addplot
 from classes.Logger import logger
 from matplotlib import patches
+from classes.indicators.BaseIndicator import BaseIndicator
 
 @dataclass
 class Level:
