@@ -7,10 +7,8 @@ from classes.indicators.config import DataContext
 
 class VWAPIndicator(BaseIndicator):
     """
-    Computes anchored VWAP and its standard-deviation bands (VWAP bands) for overlays.
-    Implements VWAP manually without external dependencies, plus rolling std bands.
+    Computes anchored VWAP and its rolling standard-deviation bands (VWAP ± nσ).
     """
-
     NAME = "vwap_bands"
 
     def __init__(
@@ -18,9 +16,14 @@ class VWAPIndicator(BaseIndicator):
         df: pd.DataFrame,
         stddev_window: int = 20,
         stddev_multipliers: list[float] = [1.0, 2.0],
-        reset_by: str = "D"  # 'D' resets VWAP each trading day
+        reset_by: str = "D"
     ):
-        # Raw OHLCV DataFrame (must have datetime index)
+        """
+        :param df: OHLCV DataFrame with datetime index.
+        :param stddev_window: window size for rolling std of typical price.
+        :param stddev_multipliers: list of multipliers for band offsets.
+        :param reset_by: 'D' to reset VWAP daily; any other value for cumulative.
+        """
         self.df = df.copy()
         self.stddev_window = stddev_window
         self.stddev_multipliers = stddev_multipliers
@@ -38,6 +41,7 @@ class VWAPIndicator(BaseIndicator):
     ):
         """
         Instantiate from a DataContext and data provider.
+        Raises ValueError if no OHLCV data is returned.
         """
         df = provider.get_ohlcv(ctx)
         if df is None or df.empty:
@@ -52,14 +56,18 @@ class VWAPIndicator(BaseIndicator):
         )
 
     def _compute(self):
-        # Typical price for each bar
+        """
+        Calculate VWAP and rolling standard-deviation bands.
+        Adds columns:
+          - 'vwap'
+          - 'upper_{m}std' and 'lower_{m}std' for each multiplier m.
+        """
+        # typical price = (high + low + close)/3
         tp = (self.df['high'] + self.df['low'] + self.df['close']) / 3
-        # Price * Volume
         pv = tp * self.df['volume']
 
-        # Compute VWAP: anchored daily or cumulative
+        # cumulative PV and volume, reset daily if requested
         if self.reset_by == 'D':
-            # group by calendar date
             cum_pv = pv.groupby(self.df.index.date).cumsum()
             cum_vol = self.df['volume'].groupby(self.df.index.date).cumsum()
         else:
@@ -68,10 +76,10 @@ class VWAPIndicator(BaseIndicator):
 
         self.df['vwap'] = cum_pv.values / cum_vol.values
 
-        # Rolling std of typical price
+        # rolling std of typical price
         tp_std = tp.rolling(window=self.stddev_window, min_periods=1).std()
 
-        # Bands around VWAP
+        # compute bands
         for m in self.stddev_multipliers:
             self.df[f'upper_{int(m)}std'] = self.df['vwap'] + m * tp_std
             self.df[f'lower_{int(m)}std'] = self.df['vwap'] - m * tp_std
@@ -83,30 +91,38 @@ class VWAPIndicator(BaseIndicator):
         band_color: str = 'gray'
     ) -> tuple[list, set]:
         """
-        Returns (overlays, legend_entries) for mplfinance plotting.
+        Generate mplfinance overlays for VWAP and its bands.
 
-        - overlays: list of make_addplot objects
-        - legend_entries: set of (label, color) for custom legend
+        :param plot_df: DataFrame to align overlay indices with plot.
+        :param vwap_color: color for the VWAP line.
+        :param band_color: color for the standard-deviation bands.
+        :returns: (overlays, legend_entries)
         """
         overlays = []
         legend_entries: set[tuple[str, str]] = set()
 
-        # VWAP line across plot index
+        # VWAP line
         vwap_series = pd.Series(self.df['vwap'].values, index=plot_df.index)
         overlays.append(
             make_addplot(vwap_series, color=vwap_color, linestyle='solid', width=1)
         )
         legend_entries.add(("VWAP", vwap_color))
 
-        # Bands (dashed)
+        # bands
         for m in self.stddev_multipliers:
-            up = pd.Series(self.df[f'upper_{int(m)}std'].values, index=plot_df.index)
-            lo = pd.Series(self.df[f'lower_{int(m)}std'].values, index=plot_df.index)
-            overlays.append(
-                make_addplot(up, color=band_color, linestyle='dashed', width=0.75)
+            upper = pd.Series(
+                self.df[f'upper_{int(m)}std'].values,
+                index=plot_df.index
+            )
+            lower = pd.Series(
+                self.df[f'lower_{int(m)}std'].values,
+                index=plot_df.index
             )
             overlays.append(
-                make_addplot(lo, color=band_color, linestyle='dashed', width=0.75)
+                make_addplot(upper, color=band_color, linestyle='dashed', width=0.75)
+            )
+            overlays.append(
+                make_addplot(lower, color=band_color, linestyle='dashed', width=0.75)
             )
             legend_entries.add((f"VWAP + {m}\u03c3", band_color))
             legend_entries.add((f"VWAP - {m}\u03c3", band_color))
@@ -116,6 +132,6 @@ class VWAPIndicator(BaseIndicator):
     @staticmethod
     def build_legend_handles(legend_entries: set) -> list:
         """
-        Convert legend_entries (label, color) into matplotlib Patch handles.
+        Convert legend_entries (label, color) tuples into matplotlib Patch handles.
         """
         return [patches.Patch(color=color, label=label) for label, color in sorted(legend_entries)]
