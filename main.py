@@ -36,7 +36,7 @@ def get_overlays(plot_df: pd.DataFrame):
     return trendline.to_overlays(plot_df)
 
 
-def show_vwap():
+def show():
     trading_chart = provider.get_ohlcv(trading_data_context)
     overlays, legend_keys = get_overlays(trading_chart)
 
@@ -48,4 +48,4 @@ def show_vwap():
         file_name=f"{symbol}_trendline_{trading_data_context.interval}"
     )
 
-show_vwap()
+show()
