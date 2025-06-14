@@ -13,3 +13,5 @@ mplfinance
 dataclasses
 pandas_ta
 setuptools
+alpaca-py
+pytest
