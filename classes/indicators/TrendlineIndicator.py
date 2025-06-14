@@ -165,21 +165,49 @@ class TrendlineIndicator(BaseIndicator):
             lines = lines[:top_n]
 
         role_c = role_color_map or {'support':'green','resistance':'red'}
-        tf_c = timeframe_color_map or {self.timeframe:'blue'}
-        last_idx = len(plot_df.index)-1
+        tf_c   = timeframe_color_map or {self.timeframe:'blue'}
+        last_idx   = len(plot_df.index) - 1
         last_price = plot_df['close'].iat[last_idx]
 
         for tl in lines:
-            end_p = tl.slope*last_idx + tl.intercept
-            kind = 'support' if last_price > end_p else 'resistance'
+            # choose color/label
+            end_p = tl.slope * last_idx + tl.intercept
+            kind  = 'support' if last_price > end_p else 'resistance'
             if color_mode=='role':
-                color=role_c[kind]; label=f"{kind.capitalize()} TL"
+                color, label = role_c[kind], f"{kind.capitalize()} TL"
             else:
-                color=tf_c.get(self.timeframe,'gray'); label=f"{self.timeframe} TL"
-            series = pd.Series([tl.slope*i+tl.intercept for i in range(len(plot_df.index))], index=plot_df.index)
+                color, label = tf_c.get(self.timeframe,'gray'), f"{self.timeframe} TL"
+            legend_entries.add((label, color))
+
+            # build the trendline series
+            series = pd.Series(
+                [tl.slope*i + tl.intercept for i in range(len(plot_df.index))],
+                index=plot_df.index
+            )
             overlays.append(make_addplot(series, color=color, linestyle=style, width=width))
-            legend_entries.add((label,color))
+
+            # 1) build an all‐NaN series
+            dot_series = pd.Series(np.nan, index=plot_df.index)
+
+            # 2) only fill in the actual touch points, based on wick crossing
+            for ts in plot_df.index:
+                idx = plot_df.index.get_loc(ts)
+                line_p = tl.slope * idx + tl.intercept
+                low, high = plot_df.at[ts, 'low'], plot_df.at[ts, 'high']
+                if low <= line_p <= high:
+                    dot_series.iat[idx] = line_p
+
+            # 3) plot only those non‐NaN points as a scatter
+            overlays.append(make_addplot(
+                dot_series,
+                type='scatter',        # <— this forces matplotlib.scatter
+                marker='o',
+                markersize=6,
+                color=color,
+                label=""               # no extra legend entry
+            ))
         return overlays, legend_entries
+
 
     @staticmethod
     def build_legend_handles(legend_entries: Set[Tuple[str, str]]):
