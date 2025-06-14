@@ -10,6 +10,10 @@ from classes.indicators.config import DataContext
 
 
 class MarketProfileIndicator(BaseIndicator):
+    """
+    Computes daily market profile (TPO) to identify Point of Control (POC),
+    Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
+    """
     NAME = "market_profile"
 
     def __init__(
@@ -18,9 +22,15 @@ class MarketProfileIndicator(BaseIndicator):
         bin_size: float = 0.1,
         mode: str = "tpo"
     ):
+        """
+        :param df: OHLCV DataFrame indexed by timestamp.
+        :param bin_size: price bucket size for TPO histogram.
+        :param mode: profile mode (only 'tpo' supported today).
+        """
         super().__init__(df)
         self.bin_size = bin_size
         self.mode = mode
+        # Compute raw daily profiles on initialization
         self.daily_profiles: List[Dict[str, float]] = self._compute_daily_profiles()
         self.merged_profiles: List[Dict[str, float]] = []
 
@@ -34,7 +44,8 @@ class MarketProfileIndicator(BaseIndicator):
         interval: str = "30m"
     ) -> "MarketProfileIndicator":
         """
-        Create an instance using a data provider and context. Ingests history if needed.
+        Fetches OHLCV from provider and constructs the indicator.
+        Raises ValueError if no data is available.
         """
         ctx = DataContext(
             symbol=ctx.symbol,
@@ -54,7 +65,7 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
         """
-        Build daily TPO profiles with POC, VAH, VAL, and session timestamps.
+        Build daily TPO profiles: POC, VAH, VAL, plus session timestamps.
         """
         df = self.df.copy()
         df.index = pd.to_datetime(df.index, utc=True)
@@ -87,12 +98,13 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _build_tpo_histogram(self, data: pd.DataFrame) -> Dict[float, int]:
         """
-        Count how many bars visit each price bucket (by bin_size).
+        Count how many bars visit each price bucket defined by bin_size.
+        :param data: intraday DataFrame for one session.
+        :return: mapping of price bucket -> count of TPO occurrences.
         """
         tpo_counts: Dict[float, int] = {}
         for _, row in data.iterrows():
             low, high = row["low"], row["high"]
-            # Create price buckets from low to high (inclusive)
             prices = np.arange(low, high + self.bin_size, self.bin_size)
             for price in prices:
                 bucket = round(price / self.bin_size) * self.bin_size
@@ -101,13 +113,16 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _extract_value_area(self, tpo_hist: Dict[float, int]) -> Dict[str, float]:
         """
-        From TPO histogram, compute POC, VAH, VAL (70% value area).
+        From the TPO histogram, compute:
+          - POC: price with highest count
+          - VAH: upper bound of 70% cumulative TPO
+          - VAL: lower bound of 70% cumulative TPO
         """
         total = sum(tpo_hist.values())
         if total == 0:
             return {"POC": None, "VAH": None, "VAL": None}
 
-        # Sort buckets by count descending
+        # sort buckets by descending count
         sorted_buckets = sorted(tpo_hist.items(), key=lambda item: item[1], reverse=True)
         poc_price = sorted_buckets[0][0]
 
@@ -134,7 +149,8 @@ class MarketProfileIndicator(BaseIndicator):
         vah2: float
     ) -> float:
         """
-        Compute overlap ratio between two value areas, relative to second VA's range.
+        Compute the overlap ratio between two value areas,
+        normalized by the range of the second area.
         """
         low = max(val1, val2)
         high = min(vah1, vah2)
@@ -148,7 +164,8 @@ class MarketProfileIndicator(BaseIndicator):
         min_merge: int = 2
     ) -> List[Dict[str, float]]:
         """
-        Merge consecutive daily profiles if their value areas overlap by threshold.
+        Combine consecutive daily profiles whose value areas overlap
+        at least `threshold` fraction, requiring at least `min_merge` days.
         """
         merged: List[Dict[str, float]] = []
         profiles = self.daily_profiles
@@ -204,8 +221,11 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged: bool = True
     ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
-        Generate chart overlays (POC/VAH/VAL) aligned to plot_df's index.
-        Returns a list of addplot objects and legend entries.
+        Create mplfinance addplot overlays for POC/VAH/VAL lines.
+
+        :param plot_df: DataFrame for plotting (needs same index frequency).
+        :param use_merged: whether to use merged_profiles else daily_profiles.
+        :returns: (overlays, legend_entries)
         """
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
@@ -218,11 +238,12 @@ class MarketProfileIndicator(BaseIndicator):
 
         styles = {
             "POC": {"color": "orange", "width": 1.2},
-            "VAH": {"color": "gray", "width": 1.0},
-            "VAL": {"color": "gray", "width": 1.0}
+            "VAH": {"color": "gray",   "width": 1.0},
+            "VAL": {"color": "gray",   "width": 1.0}
         }
 
         for prof in profiles:
+            # select the session window
             start_ts, end_ts = prof["start_date"], prof["end_date"]
             session_idx = full_idx[(full_idx >= start_ts) & (full_idx <= end_ts)]
             if session_idx.empty:
