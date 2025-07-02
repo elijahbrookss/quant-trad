@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Set
+import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 
 from mplfinance.plotting import make_addplot
 
@@ -221,11 +223,12 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged: bool = True
     ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
-        Create mplfinance addplot overlays for POC/VAH/VAL lines.
+        Create persistent value area overlays using horizontal lines extending from
+        each merged profile's start to the end of the chart.
 
-        :param plot_df: DataFrame for plotting (needs same index frequency).
-        :param use_merged: whether to use merged_profiles else daily_profiles.
-        :returns: (overlays, legend_entries)
+        Returns:
+            - overlays: list of mplfinance addplots
+            - legend_entries: set of (label, color) tuples
         """
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
@@ -234,37 +237,33 @@ class MarketProfileIndicator(BaseIndicator):
 
         overlays = []
         legend_entries: Set[Tuple[str, str]] = set()
-        full_idx = plot_df.index
 
-        styles = {
-            "POC": {"color": "orange", "width": 1.2},
-            "VAH": {"color": "gray",   "width": 1.0},
-            "VAL": {"color": "gray",   "width": 1.0}
-        }
+        full_idx = plot_df.index
+        end_ts = full_idx[-1]
 
         for prof in profiles:
-            # select the session window
-            start_ts, end_ts = prof["start_date"], prof["end_date"]
-            session_idx = full_idx[(full_idx >= start_ts) & (full_idx <= end_ts)]
-            if session_idx.empty:
-                logger.warning("No data in plot for session: %s", prof)
-                continue
+            start_ts = prof["start_date"]
+            vah = prof["VAH"]
+            val = prof["VAL"]
+            poc = prof.get("POC")
 
-            for key, style in styles.items():
-                values = pd.Series(
-                    [prof[key]] * len(session_idx),
-                    index=session_idx
-                )
-                aligned = values.reindex(full_idx, fill_value=np.nan)
-                overlays.append(
-                    make_addplot(
-                        aligned,
-                        color=style["color"],
-                        width=style["width"],
-                        linestyle="--",
-                        label=""
-                    )
-                )
-                legend_entries.add((key, style["color"]))
+            # Masked series for VAH
+            vah_series = pd.Series(index=full_idx, dtype=float)
+            vah_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = vah
+            overlays.append(make_addplot(vah_series, color="gray", width=0.9, linestyle="--"))
+            legend_entries.add(("VAH", "gray"))
+
+            # Masked series for VAL
+            val_series = pd.Series(index=full_idx, dtype=float)
+            val_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = val
+            overlays.append(make_addplot(val_series, color="gray", width=0.9, linestyle="--"))
+            legend_entries.add(("VAL", "gray"))
+
+            # Optional: POC line
+            if poc is not None:
+                poc_series = pd.Series(index=full_idx, dtype=float)
+                poc_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = poc
+                overlays.append(make_addplot(poc_series, color="orange", width=1.0, linestyle="--"))
+                legend_entries.add(("POC", "orange"))
 
         return overlays, legend_entries

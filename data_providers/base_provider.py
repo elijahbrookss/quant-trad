@@ -139,7 +139,7 @@ class BaseDataProvider(ABC):
             logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
                         ctx.symbol, ctx.interval, ctx.start, ctx.end)
             try:
-                self.ingest_history(ctx.symbol, ctx.start, ctx.end, ctx.interval)
+                self.ingest_history(ctx)
                 df = query_ohlcv()
                 if df.empty:
                     logger.error("Auto-ingestion attempted but still no data found.")
