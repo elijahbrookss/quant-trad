@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Set
+import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 
 from mplfinance.plotting import make_addplot
 
@@ -10,6 +12,10 @@ from classes.indicators.config import DataContext
 
 
 class MarketProfileIndicator(BaseIndicator):
+    """
+    Computes daily market profile (TPO) to identify Point of Control (POC),
+    Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
+    """
     NAME = "market_profile"
 
     def __init__(
@@ -18,9 +24,15 @@ class MarketProfileIndicator(BaseIndicator):
         bin_size: float = 0.1,
         mode: str = "tpo"
     ):
+        """
+        :param df: OHLCV DataFrame indexed by timestamp.
+        :param bin_size: price bucket size for TPO histogram.
+        :param mode: profile mode (only 'tpo' supported today).
+        """
         super().__init__(df)
         self.bin_size = bin_size
         self.mode = mode
+        # Compute raw daily profiles on initialization
         self.daily_profiles: List[Dict[str, float]] = self._compute_daily_profiles()
         self.merged_profiles: List[Dict[str, float]] = []
 
@@ -34,7 +46,8 @@ class MarketProfileIndicator(BaseIndicator):
         interval: str = "30m"
     ) -> "MarketProfileIndicator":
         """
-        Create an instance using a data provider and context. Ingests history if needed.
+        Fetches OHLCV from provider and constructs the indicator.
+        Raises ValueError if no data is available.
         """
         ctx = DataContext(
             symbol=ctx.symbol,
@@ -54,7 +67,7 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
         """
-        Build daily TPO profiles with POC, VAH, VAL, and session timestamps.
+        Build daily TPO profiles: POC, VAH, VAL, plus session timestamps.
         """
         df = self.df.copy()
         df.index = pd.to_datetime(df.index, utc=True)
@@ -87,12 +100,13 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _build_tpo_histogram(self, data: pd.DataFrame) -> Dict[float, int]:
         """
-        Count how many bars visit each price bucket (by bin_size).
+        Count how many bars visit each price bucket defined by bin_size.
+        :param data: intraday DataFrame for one session.
+        :return: mapping of price bucket -> count of TPO occurrences.
         """
         tpo_counts: Dict[float, int] = {}
         for _, row in data.iterrows():
             low, high = row["low"], row["high"]
-            # Create price buckets from low to high (inclusive)
             prices = np.arange(low, high + self.bin_size, self.bin_size)
             for price in prices:
                 bucket = round(price / self.bin_size) * self.bin_size
@@ -101,13 +115,16 @@ class MarketProfileIndicator(BaseIndicator):
 
     def _extract_value_area(self, tpo_hist: Dict[float, int]) -> Dict[str, float]:
         """
-        From TPO histogram, compute POC, VAH, VAL (70% value area).
+        From the TPO histogram, compute:
+          - POC: price with highest count
+          - VAH: upper bound of 70% cumulative TPO
+          - VAL: lower bound of 70% cumulative TPO
         """
         total = sum(tpo_hist.values())
         if total == 0:
             return {"POC": None, "VAH": None, "VAL": None}
 
-        # Sort buckets by count descending
+        # sort buckets by descending count
         sorted_buckets = sorted(tpo_hist.items(), key=lambda item: item[1], reverse=True)
         poc_price = sorted_buckets[0][0]
 
@@ -134,7 +151,8 @@ class MarketProfileIndicator(BaseIndicator):
         vah2: float
     ) -> float:
         """
-        Compute overlap ratio between two value areas, relative to second VA's range.
+        Compute the overlap ratio between two value areas,
+        normalized by the range of the second area.
         """
         low = max(val1, val2)
         high = min(vah1, vah2)
@@ -148,7 +166,8 @@ class MarketProfileIndicator(BaseIndicator):
         min_merge: int = 2
     ) -> List[Dict[str, float]]:
         """
-        Merge consecutive daily profiles if their value areas overlap by threshold.
+        Combine consecutive daily profiles whose value areas overlap
+        at least `threshold` fraction, requiring at least `min_merge` days.
         """
         merged: List[Dict[str, float]] = []
         profiles = self.daily_profiles
@@ -204,46 +223,52 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged: bool = True
     ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
-        Generate chart overlays (POC/VAH/VAL) aligned to plot_df's index.
-        Returns a list of addplot objects and legend entries.
+        Emit two kinds of overlay specs:
+        • kind="rect" → persistent VAH/VAL zones  
+        • kind="addplot" → POC horizontal line
         """
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
             logger.warning("No profiles to generate overlays.")
             return [], set()
 
-        overlays = []
+        overlays: List[dict] = []
         legend_entries: Set[Tuple[str, str]] = set()
         full_idx = plot_df.index
 
-        styles = {
-            "POC": {"color": "orange", "width": 1.2},
-            "VAH": {"color": "gray", "width": 1.0},
-            "VAL": {"color": "gray", "width": 1.0}
-        }
-
         for prof in profiles:
-            start_ts, end_ts = prof["start_date"], prof["end_date"]
-            session_idx = full_idx[(full_idx >= start_ts) & (full_idx <= end_ts)]
-            if session_idx.empty:
-                logger.warning("No data in plot for session: %s", prof)
-                continue
+            start_ts = prof["start_date"]
+            val      = prof["VAL"]
+            vah      = prof["VAH"]
+            poc      = prof.get("POC")
 
-            for key, style in styles.items():
-                values = pd.Series(
-                    [prof[key]] * len(session_idx),
-                    index=session_idx
+            # 1) persistent rectangle for VA zone
+            overlays.append({
+                "kind":  "rect",
+                "start": start_ts,
+                "val":   val,
+                "vah":   vah,
+                "color": "gray",
+                "alpha": 0.2
+            })
+            legend_entries.add(("Value Area", "gray"))
+
+            # 2) optional POC line as an addplot
+            if poc is not None:
+                # mask out everything before start_ts
+                poc_series = pd.Series(index=full_idx, dtype=float)
+                poc_series.loc[full_idx >= start_ts] = poc
+
+                ap = make_addplot(
+                    poc_series,
+                    color="orange",
+                    width=1.0,
+                    linestyle="--"
                 )
-                aligned = values.reindex(full_idx, fill_value=np.nan)
-                overlays.append(
-                    make_addplot(
-                        aligned,
-                        color=style["color"],
-                        width=style["width"],
-                        linestyle="--",
-                        label=""
-                    )
-                )
-                legend_entries.add((key, style["color"]))
+                overlays.append({
+                    "kind": "addplot",
+                    "plot": ap
+                })
+                legend_entries.add(("POC", "orange"))
 
         return overlays, legend_entries

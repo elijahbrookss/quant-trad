@@ -15,37 +15,38 @@ from classes.indicators.config import DataContext
 symbol = "CL"
 provider = AlpacaProvider()
 
-trading_data_context = DataContext(
-    symbol=symbol,
-    start="2025-04-01",
-    end="2025-05-30",
-    interval="1h"  # timeframe for trading data
+ctx = DataContext(
+    symbol="CL",
+    start="2025-06-01",
+    end="2025-06-30",
+    interval="15m"
 )
 
 def get_overlays(plot_df: pd.DataFrame):
-    trendline = TrendlineIndicator.from_context(
+    mpi = MarketProfileIndicator.from_context(
         provider=provider,
-        ctx=trading_data_context,
-        lookbacks=[20, 50, 100],
-        tolerance=10,
-        min_touches=3,
-        slope_tol=1,
-        intercept_tol=1
+        ctx=ctx,
+        bin_size=0.5,      # can adjust bin size as desired
+        mode="tpo",
+        interval="30m"
     )
+    merged = mpi.merge_value_areas()
 
-    return trendline.to_overlays(plot_df)
+    return mpi.to_overlays(plot_df, use_merged=True)
 
 
-def show_vwap():
-    trading_chart = provider.get_ohlcv(trading_data_context)
-    overlays, legend_keys = get_overlays(trading_chart)
+def show():
+    plot_df = provider.get_ohlcv(ctx)
+    overlays, legend_keys = get_overlays(plot_df)
+
+    logger.debug([overlay["kind"] for overlay in overlays])
 
     provider.plot_ohlcv(
-        plot_ctx=trading_data_context,
-        title=f"{symbol} | {trading_data_context.interval} - Trendline",
+        plot_ctx=ctx,
+        title="Integration Test – Market Profile (CL 30m)",
         overlays=overlays,
         legend_entries=legend_keys,
-        file_name=f"{symbol}_trendline_{trading_data_context.interval}"
+        show_volume=True
     )
 
-show_vwap()
+show()

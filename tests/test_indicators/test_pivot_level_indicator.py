@@ -18,7 +18,14 @@ def test_pivot_level_indicator_plot():
     ctx = DataContext(
         symbol="CL",
         start="2025-05-15",
-        end="2025-05-30",
+        end="2025-06-13",
+        interval="15m"
+    )
+
+    indicator_ctx = DataContext(
+        symbol="CL",
+        start="2025-04-01",
+        end="2025-06-13",
         interval="15m"
     )
 
@@ -31,7 +38,7 @@ def test_pivot_level_indicator_plot():
         # Generate pivot levels based on higher timeframe context
         indicator = PivotLevelIndicator.from_context(
             provider=provider,
-            ctx=ctx,
+            ctx=indicator_ctx,
             level_timeframe=tf,
             lookbacks=(2, 3, 5, 10, 20),
         )
