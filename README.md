@@ -1,122 +1,79 @@
-## quant-trad
 
-Modular Python framework for building and analyzing quantitative trading strategies.
 
----
+# Quant-Trad 🚀  
+*A work-in-progress quantitative **trading bot** (autonomous execution coming soon)*
 
-### Features
-
-- Multi-lookback pivot detection
-- Ranked trendline analysis using linear regression
-- Trendline scoring based on R², angle, proximity, and violation ratio
-- Density visualization for pivot clustering
-- Clean, modular architecture (`ChartPlotter`, `TrendlineAnalyzer`, etc.)
-- Easy to extend with future plots (levels, channels, breakouts)
 
 ---
 
-### Project Structure
+## ✨ Vision
 
-```
-quant-trad/
-├── artifacts/               # Saved charts and outputs
-├── classes/                # Core reusable components
-│   ├── ChartPlotter.py
-│   ├── PivotDetector.py
-│   ├── StockData.py
-│   ├── Trendline.py
-│   ├── TrendlineAnalyzer.py
-│   └── Logger.py
-├── quant-env/              # Virtual environment (excluded from git)
-├── strategy.py             # Legacy version (to be refactored)
-├── main.py                 # Main execution pipeline
-├── start.sh                # Custom startup script
-├── README.md
-└── .gitignore
-```
+Quant-Trad is being built to **trade autonomously**.  
+Right now it focuses on clean data ingestion, robust indicator generation, and high-signal chart overlays.  
+Next milestones add strategy orchestration, parameter sweeps, and a live execution pipeline.
 
 ---
 
-### Quickstart
+## 🏗️ Core Architecture (current)
 
-#### 1. Clone the repo
+| Layer | Key Components | Notes |
+|-------|----------------|-------|
+| **Data** | `BaseDataProvider`, `AlpacaProvider`, `YahooProvider` | Uniform OHLCV schema; optional TimescaleDB cache |
+| **Indicators** | `PivotLevelIndicator`, `MarketProfileIndicator` (TPO) | Implemented & tested |
+| *(Coming)* | `TrendlineIndicator`, `VWAPIndicator` | In development |
+| **Visualization** | `ChartPlotter` | Candles + volume + overlay lines |
+| *(Road-map)* | Strategy, Back-testing, Live Execution | Foundations laid, wiring next |
+
+---
+
+## 📈 Indicators At-a-Glance
+
+| Indicator | Status | Purpose | Overlay Goodies |
+|-----------|--------|---------|-----------------|
+| **Pivot Level** | ✅ | Convert swing highs/lows into S/R levels | Role & timeframe colors, touch-points |
+| **Market Profile (TPO)** | ✅ | POC / VAH / VAL per session, VA merges | Dashed VA bands per session |
+| **Trendline** | 🔨 | Auto-detect dynamic trendlines | Continuous lines, breakout flags |
+| **VWAP** | 🔨 | 30-min volume profile & VA merges | Session bands, rolling POC anchor |
+
+---
+
+## ⚡ Makefile Commands
+
+| Target               | Description                                                             |
+|----------------------|-------------------------------------------------------------------------|
+| `make db_up`         | Spin up **TimescaleDB** and **pgAdmin** containers and wait until ready |
+| `make db_down`       | Stop the TimescaleDB / pgAdmin containers                               |
+| `make db_logs`       | Tail TimescaleDB logs (`Ctrl-C` to quit)                                |
+| `make db_cli`        | Open a `psql` shell at `postgres://postgres:postgres@localhost:5432/postgres` |
+| `make test`          | Run the full pytest suite                                               |
+| `make test-unit`     | Run only unit tests (`-m "not integration"`)                           |
+| `make test-integration` | Run only tests tagged `@pytest.mark.integration`                     |
+
+
+## ⚡ Quick Start-up
+
+> **Prerequisites**  
+> • Python 3.10+ with `venv`  
+> • [Docker Desktop](https://www.docker.com/products/docker-desktop/) running (needed for the TimescaleDB + pgAdmin containers)  
+> • GNU Make (pre-installed on macOS/Linux; Windows users can use the Git-Bash version or **WSL**)
 
 ```bash
-git clone https://github.com/elijahbrookss/quant-trad.git
+# 0) clone the repo
+git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
 cd quant-trad
-```
 
-#### 2. Set up environment manually
+# 1) spin-up TimescaleDB (+ pgAdmin) in Docker
+make db_up 
 
-```bash
-python3 -m venv quant-env
-source quant-env/bin/activate
-pip install -r python_imports
-```
+# 2) create / activate virtual-env and install deps
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-#### 3. Run analysis
+# 3) run the full test-suite
+make test            # or: make test-unit / make test-integration
 
-```bash
-python main.py
-```
+# 4) (optional) open a psql shell
+make db_cli          # \q to exit
 
-Outputs will be saved under `artifacts/trendlines/`.
-
----
-
-### Quickstart (with `start.sh`)
-
-Use the included shell script to simplify setup:
-
-```bash
-chmod +x start.sh
-./start.sh
-```
-
-This script:
-- Sets up command aliases
-- Prompts you to create and activate a virtual environment
-- Prompts to install requirements
-- Adds these aliases to `~/.bash_aliases`:
-  - `quant-env`: Activate the virtual environment
-  - `quant-install`: Install dependencies
-  - `quant-run`: Run the strategy script
-  - `quant-deactivate`: Exit the environment
-  - `quant-help`: View command summary
-
----
-
-### Example Output
-
-*(Insert chart image here showing trendlines + pivot density)*
-
----
-
-### Requirements
-
-- pandas
-- numpy
-- matplotlib
-- scipy
-- yfinance
-
-Install all dependencies with:
-
-```bash
-pip install -r python_imports
-```
-
----
-
-### Roadmap
-
-- Support/resistance level detection
-- Trendline/channel breakout detection
-- Horizontal pivot value clustering
-- Backtesting and performance tracking
-
----
-
-### Author
-
-[Elijah Brooks](https://github.com/elijahbrookss)
+# 5) shut containers down when finished
+make db_down

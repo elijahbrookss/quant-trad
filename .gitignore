@@ -1,3 +1,9 @@
 quant-env/
 classes/__pycache__/
+__pycache__/
+*.pyc
 artifacts/
+.venv/
+secrets.env
+.vscode/
+.pytest_cache/
