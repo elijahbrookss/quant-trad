@@ -21,6 +21,10 @@ db_down:
 db_logs:
 	docker compose logs -f timescaledb
 
+grafana_up:
+	docker compose up -d loki grafana
+	@echo "Grafana is running at http://localhost:3000"
+	
 # quick psql shell (requires psql client installed inside WSL/Windows)
 db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"

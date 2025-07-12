@@ -133,7 +133,9 @@ class PivotLevelIndicator(BaseIndicator):
         :param color_mode: 'role' to color by support/resistance, 'timeframe' to color by timeframe
         :return: (overlays, legend_entries)
         """
-        overlays, legend_entries = [], set()
+        overlays: List[dict] = []
+        legend_entries: Set[Tuple[str, str]] = set()
+
         idx = plot_df.index
         role_colors = {'support':'green','resistance':'red'}
         tf_colors   = {self.timeframe:'blue'}  # extend as needed
@@ -152,16 +154,18 @@ class PivotLevelIndicator(BaseIndicator):
             start = lvl.first_touched if lvl.first_touched in idx else idx[0]
             ray = idx[idx.get_indexer([start])[0]:]
             series = pd.Series(lvl.price, index=ray).reindex(idx)
-            overlays.append(
-                make_addplot(series, color=color, linestyle='--', width=1, alpha=0.7)
-            )
+
+            ap = make_addplot(series, color=color, linestyle='--', width=1, alpha=0.7)
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
 
             # compute & plot touches
             touches = [ts for ts in lvl.get_touches(plot_df) if ts >= lvl.first_touched]
             if touches:
                 dots = pd.Series(lvl.price, index=touches).reindex(idx)
-                overlays.append(
-                    make_addplot(
+                ap =  make_addplot(
                         dots,
                         scatter=True,
                         marker='o',
@@ -169,7 +173,11 @@ class PivotLevelIndicator(BaseIndicator):
                         color=color,
                         label=""
                     )
-                )
+                
+                overlays.append({
+                    "kind": "addplot",
+                    "plot": ap
+                })
         return overlays, legend_entries
 
     @staticmethod

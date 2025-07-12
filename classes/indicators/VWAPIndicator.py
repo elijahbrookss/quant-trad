@@ -98,8 +98,8 @@ class VWAPIndicator(BaseIndicator):
         :param band_color: color for the standard-deviation bands.
         :returns: (overlays, legend_entries)
         """
-        overlays = []
-        legend_entries: set[tuple[str, str]] = set()
+        overlays: List[dict] = []
+        legend_entries: Set[Tuple[str, str]] = set()
 
         # VWAP line
         vwap_series = pd.Series(self.df['vwap'].values, index=plot_df.index)
@@ -118,12 +118,18 @@ class VWAPIndicator(BaseIndicator):
                 self.df[f'lower_{int(m)}std'].values,
                 index=plot_df.index
             )
-            overlays.append(
-                make_addplot(upper, color=band_color, linestyle='dashed', width=0.75)
-            )
-            overlays.append(
-                make_addplot(lower, color=band_color, linestyle='dashed', width=0.75)
-            )
+
+            ap = make_addplot(upper, color=band_color, linestyle='dashed', width=0.75)
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
+            
+            ap = make_addplot(lower, color=band_color, linestyle='dashed', width=0.75)
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
             legend_entries.add((f"VWAP + {m}\u03c3", band_color))
             legend_entries.add((f"VWAP - {m}\u03c3", band_color))
 
