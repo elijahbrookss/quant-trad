@@ -1,28 +1,52 @@
-from datetime import datetime
-from classes.StockData import StockData
+import pandas as pd
+from pathlib import Path
+from classes.Logger import logger
+
 from classes.ChartPlotter import ChartPlotter
-from classes.PivotDetector import PivotDetector
-from classes.TrendlineAnalyzer import TrendlineAnalyzer
+from classes.indicators.MarketProfileIndicator import MarketProfileIndicator
+from classes.indicators.PivotLevelIndicator import PivotLevelIndicator
+from classes.indicators.VWAPIndicator import VWAPIndicator
+from classes.indicators.TrendlineIndicator import TrendlineIndicator
 
-if __name__ == "__main__":
-    symbol = "AAPL"
-    start_date = "2024-01-01"
-    end_date = "2025-01-01"
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+from data_providers.alpaca_provider import AlpacaProvider
+from classes.indicators.config import DataContext
 
-    stock_data = StockData(symbol, start_date, end_date)
-    detector = PivotDetector(stock_data.df, lookbacks=[5, 10, 15, 20, 25])
-    all_pivots = detector.detect_all()
 
-    combined_pivots = []
-    for high_pivots, low_pivots in all_pivots.values():
-        combined_pivots.extend(high_pivots + low_pivots)
+symbol = "CL"
+provider = AlpacaProvider()
 
-    plotter = ChartPlotter(stock_data.df, combined_pivots)
-    trendlines_by_threshold = {}
-    for min_pts in range(3, 8):
-        analyzer = TrendlineAnalyzer(stock_data.df, combined_pivots, min_points=min_pts)
-        trendlines_by_threshold[min_pts] = analyzer.analyze()
+ctx = DataContext(
+    symbol="CL",
+    start="2025-06-01",
+    end="2025-06-30",
+    interval="15m"
+)
 
-    plot_filename = f"trendlines_regression_{timestamp}.png"
-    plotter.plot_trendlines(trendlines_by_threshold, filename=plot_filename)
+def get_overlays(plot_df: pd.DataFrame):
+    mpi = MarketProfileIndicator.from_context(
+        provider=provider,
+        ctx=ctx,
+        bin_size=0.5,      # can adjust bin size as desired
+        mode="tpo",
+        interval="30m"
+    )
+    merged = mpi.merge_value_areas()
+
+    return mpi.to_overlays(plot_df, use_merged=True)
+
+
+def show():
+    plot_df = provider.get_ohlcv(ctx)
+    overlays, legend_keys = get_overlays(plot_df)
+
+    logger.debug([overlay["kind"] for overlay in overlays])
+
+    provider.plot_ohlcv(
+        plot_ctx=ctx,
+        title="Integration Test – Market Profile (CL 30m)",
+        overlays=overlays,
+        legend_entries=legend_keys,
+        show_volume=True
+    )
+
+show()
