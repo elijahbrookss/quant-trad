@@ -33,6 +33,8 @@ db_cli:
 env:
 	@echo "To activate the virtual environment, run:"
 	@echo "source .venv/bin/activate"
+	@echo "If you need to create the virtual environment, run:"
+	@echo "python3 -m venv .venv"
 
 test:  ## Run all tests
 	pytest -v tests/
