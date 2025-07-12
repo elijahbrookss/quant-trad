@@ -39,6 +39,8 @@ def show():
     plot_df = provider.get_ohlcv(ctx)
     overlays, legend_keys = get_overlays(plot_df)
 
+    logger.debug([overlay["kind"] for overlay in overlays])
+
     provider.plot_ohlcv(
         plot_ctx=ctx,
         title="Integration Test – Market Profile (CL 30m)",

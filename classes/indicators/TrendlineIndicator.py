@@ -195,8 +195,10 @@ class TrendlineIndicator(BaseIndicator):
         :param style: matplotlib line style.
         :param top_n: if set, only plot the top N lines by R².
         :returns: (list of addplot objects, set of (label,color) for legend)
-        """
-        overlays, legend_entries = [], set()
+        """        
+        overlays: List[dict] = []
+        legend_entries: Set[Tuple[str, str]] = set()
+
         lines = sorted(self.trendlines, key=lambda tl: tl.r2, reverse=True)
         if top_n:
             lines = lines[:top_n]
@@ -221,9 +223,14 @@ class TrendlineIndicator(BaseIndicator):
                 [tl.slope*i + tl.intercept for i in range(len(plot_df.index))],
                 index=plot_df.index
             )
-            overlays.append(make_addplot(
+
+            ap = make_addplot(
                 series, color=color, linestyle=style, width=width
-            ))
+            )
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
 
             # touchpoints as small dots
             dot_series = pd.Series(np.nan, index=plot_df.index)
@@ -234,14 +241,18 @@ class TrendlineIndicator(BaseIndicator):
                 if low <= line_p <= high:
                     dot_series.iat[idx] = line_p
 
-            overlays.append(make_addplot(
+            ap = make_addplot(
                 dot_series,
                 type='scatter',
                 marker='o',
                 markersize=6,
                 color=color,
                 label=""
-            ))
+            )
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
 
         return overlays, legend_entries
 

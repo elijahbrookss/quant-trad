@@ -223,47 +223,52 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged: bool = True
     ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
-        Create persistent value area overlays using horizontal lines extending from
-        each merged profile's start to the end of the chart.
-
-        Returns:
-            - overlays: list of mplfinance addplots
-            - legend_entries: set of (label, color) tuples
+        Emit two kinds of overlay specs:
+        • kind="rect" → persistent VAH/VAL zones  
+        • kind="addplot" → POC horizontal line
         """
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
             logger.warning("No profiles to generate overlays.")
             return [], set()
 
-        overlays = []
+        overlays: List[dict] = []
         legend_entries: Set[Tuple[str, str]] = set()
-
         full_idx = plot_df.index
-        end_ts = full_idx[-1]
 
         for prof in profiles:
             start_ts = prof["start_date"]
-            vah = prof["VAH"]
-            val = prof["VAL"]
-            poc = prof.get("POC")
+            val      = prof["VAL"]
+            vah      = prof["VAH"]
+            poc      = prof.get("POC")
 
-            # Masked series for VAH
-            vah_series = pd.Series(index=full_idx, dtype=float)
-            vah_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = vah
-            overlays.append(make_addplot(vah_series, color="gray", width=0.9, linestyle="--"))
-            legend_entries.add(("VAH", "gray"))
+            # 1) persistent rectangle for VA zone
+            overlays.append({
+                "kind":  "rect",
+                "start": start_ts,
+                "val":   val,
+                "vah":   vah,
+                "color": "gray",
+                "alpha": 0.2
+            })
+            legend_entries.add(("Value Area", "gray"))
 
-            # Masked series for VAL
-            val_series = pd.Series(index=full_idx, dtype=float)
-            val_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = val
-            overlays.append(make_addplot(val_series, color="gray", width=0.9, linestyle="--"))
-            legend_entries.add(("VAL", "gray"))
-
-            # Optional: POC line
+            # 2) optional POC line as an addplot
             if poc is not None:
+                # mask out everything before start_ts
                 poc_series = pd.Series(index=full_idx, dtype=float)
-                poc_series[(full_idx >= start_ts) & (full_idx <= end_ts)] = poc
-                overlays.append(make_addplot(poc_series, color="orange", width=1.0, linestyle="--"))
+                poc_series.loc[full_idx >= start_ts] = poc
+
+                ap = make_addplot(
+                    poc_series,
+                    color="orange",
+                    width=1.0,
+                    linestyle="--"
+                )
+                overlays.append({
+                    "kind": "addplot",
+                    "plot": ap
+                })
                 legend_entries.add(("POC", "orange"))
 
         return overlays, legend_entries
