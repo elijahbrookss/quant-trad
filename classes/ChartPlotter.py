@@ -8,8 +8,13 @@ import matplotlib.pyplot as plt
 from typing import Set, Tuple
 from matplotlib import patches
 from classes.indicators.config import DataContext
+from itertools import groupby
+from classes.OverlayRegistry import get_overlay_handler
+import classes.OverlayHandlers
+
 
 class ChartPlotter:
+
     @staticmethod
     def plot_ohlc(
         df: pd.DataFrame,
@@ -63,16 +68,21 @@ class ChartPlotter:
             fig_width = min(10 + len(df.index) * 0.03, 30)
             figsize = (fig_width, 6)
 
+            addplot_specs, other_specs = ChartPlotter._split_overlays(overlays)
+
             fig, axes = mpf.plot(
                 df,
                 type=chart_type,
                 volume=show_volume and "volume" in df.columns,
                 title=title,
                 style="yahoo",
-                addplot=overlays if overlays else [],
+                addplot=addplot_specs,
                 returnfig=True,
                 figsize=figsize
             )
+
+            price_ax = axes[0]
+            ChartPlotter._dispatch_overlays(df, price_ax, other_specs)
 
             if legend_entries:
                 handles = [
@@ -90,3 +100,49 @@ class ChartPlotter:
 
         except Exception as e:
             logger.exception("Charting failed: %s", str(e))
+
+    @staticmethod
+    def _split_overlays(overlays):
+        """
+        Splits the overlays into:
+          - addplot_specs: list of mplfinance addplot objects
+          - other_specs:   list of (kind, specs_list) for the rest
+        """
+        addplot_specs = []
+        other_by_kind = {}
+
+        for item in overlays or []:
+            # Determine its kind
+            if isinstance(item, dict) and "kind" in item:
+                kind = item["kind"]
+            else:
+                kind = "addplot"
+
+            if kind == "addplot":
+                # Unwrap the real addplot object
+                if isinstance(item, dict) and "plot" in item:
+                    addplot_specs.append(item["plot"])
+                else:
+                    # raw mplfinance addplot passed straight through
+                    addplot_specs.append(item)
+            else:
+                # Group the rest by kind
+                other_by_kind.setdefault(kind, []).append(item)
+
+        # Turn the dict into a list of tuples
+        other_specs = list(other_by_kind.items())
+        print("rect specs:", [group for group in other_specs if group[0]=="rect"])
+
+        return addplot_specs, other_specs
+
+    @staticmethod
+    def _dispatch_overlays(df, price_ax, other_specs):
+        """
+        Dispatches overlays to the appropriate handler based on kind.
+        """
+        for kind, spec_list in other_specs:
+            handler = get_overlay_handler(kind)
+            if handler:
+                handler(df, price_ax, spec_list)
+            else:
+                logger.warning("No handler found for overlay kind: %s", kind)

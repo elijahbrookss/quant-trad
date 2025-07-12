@@ -1,199 +1,230 @@
 from dataclasses import dataclass, field
 from classes.indicators.config import DataContext
-from typing import List, Optional
+from typing import List, Optional, Tuple, Set
 import pandas as pd
 from mplfinance.plotting import make_addplot
 from classes.Logger import logger
-
 from matplotlib import patches
-from typing import Tuple, Set
-from dataclasses import field
-
+from classes.indicators.BaseIndicator import BaseIndicator
 
 @dataclass
 class Level:
+    """
+    Represents a horizontal support or resistance level detected from pivots.
+
+    :param price: price of the level
+    :param kind: 'support' or 'resistance'
+    :param lookback: pivot lookback window used
+    :param first_touched: timestamp of the pivot that created this level
+    :param timeframe: timeframe label (e.g., '1d', '4h')
+    :param touches: list of timestamps where price touched this level
+    """
     price: float
-    kind: str  # "support" or "resistance"
+    kind: str
     lookback: int
     first_touched: pd.Timestamp
-    timeframe: str  # e.g., "1d", "1h", "4h"
+    timeframe: str
     touches: List[pd.Timestamp] = field(default_factory=list)
 
-    
     def get_touches(self, df: pd.DataFrame) -> List[pd.Timestamp]:
         """
-        Returns timestamps where this level was touched in the given trading DataFrame.
+        Find all bar timestamps where the level price falls between low and high.
 
-        A 'touch' is defined as a candle where the level is between the Low and High.
+        :param df: OHLC DataFrame
+        :return: list of touch timestamps
         """
-        # Wick-based mask: price falls between the candle range
-        mask = (df["low"] <= self.price) & (df["high"] >= self.price)
+        mask = (df['low'] <= self.price) & (df['high'] >= self.price)
         touches = df[mask].index.tolist()
         self.touches = touches
-
-        logger.debug(f"Level {self.kind} at {self.price} touched {len(touches)} times.")
-
+        logger.debug(
+            "Level %s at %.4f touched %d times.",
+            self.kind, self.price, len(touches)
+        )
         return touches
 
-class PivotLevelIndicator:
-    def __init__(self, df, timeframe, lookbacks=(10, 20, 50), threshold=0.005):
+class PivotLevelIndicator(BaseIndicator):
+    """
+    Detects horizontal support and resistance levels by clustering pivot highs/lows,
+    and provides mplfinance overlays with optional touch markers.
+    """
+    NAME = 'pivot_level'
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        timeframe: str,
+        lookbacks: Tuple[int, ...] = (10, 20, 50),
+        threshold: float = 0.005
+    ):
+        """
+        :param df: OHLC DataFrame indexed by timestamp
+        :param timeframe: label for coloring (e.g., '1h', 'daily')
+        :param lookbacks: tuple of pivot lookback sizes
+        :param threshold: price dedup threshold (fractional)
+        """
         self.df = df
+        self.timeframe = timeframe
         self.lookbacks = lookbacks
         self.threshold = threshold
-        self.timeframe = timeframe
         self.levels: List[Level] = []
         self._compute()
 
     def _compute(self):
-        def detect_all():
-            all_pivots = {}
-            for lb in self.lookbacks:
-                all_pivots[lb] = self._find_pivots(lb)
-            return all_pivots
-
-        pivot_map = detect_all()
-        last_price = self.df["close"].iloc[-1]
+        """
+        Find pivot highs/lows for each lookback, dedupe within threshold,
+        and label each as support or resistance based on last price.
+        Populates self.levels sorted by price.
+        """
+        # collect all pivots
+        pivot_map = {lb: self._find_pivots(lb) for lb in self.lookbacks}
+        last_price = self.df['close'].iloc[-1]
         levels: List[Level] = []
 
         for lb, (highs, lows) in pivot_map.items():
-            for t, p in highs + lows:
-                # Deduplication within threshold
-                if any(abs(p - existing.price) / p < self.threshold for existing in levels):
+            for ts, price in highs + lows:
+                # skip if within threshold of existing
+                if any(abs(price - lvl.price) / price < self.threshold for lvl in levels):
                     continue
-                kind = "support" if last_price > p else "resistance"
-                levels.append(Level(price=p, kind=kind, lookback=lb, first_touched=t, timeframe=self.timeframe))
+                kind = 'support' if last_price > price else 'resistance'
+                levels.append(
+                    Level(
+                        price=price,
+                        kind=kind,
+                        lookback=lb,
+                        first_touched=ts,
+                        timeframe=self.timeframe
+                    )
+                )
+        # sort levels and assign
+        self.levels = sorted(levels, key=lambda lvl: lvl.price)
 
-        levels.sort(key=lambda l: l.price)
-        self.levels = levels
+    def _find_pivots(self, lookback: int) -> Tuple[List[Tuple[pd.Timestamp, float]], List[Tuple[pd.Timestamp, float]]]:
+        """
+        Identify pivot highs and lows using a rolling window of size lookback.
 
-    def _find_pivots(self, lookback):
+        :param lookback: number of bars on each side for pivot detection
+        :return: (highs, lows) lists of (timestamp, price)
+        """
         highs, lows = [], []
-
-        def is_near_existing(price):
-            for _, p in highs + lows:
-                if abs(price - p) / p < self.threshold:
-                    return True
-            return False
+        def near_existing(price):
+            return any(abs(price - p) / p < self.threshold for _, p in highs + lows)
 
         for i in range(lookback, len(self.df) - lookback):
-            current = self.df.index[i]
-            high = self.df.at[current, 'high']
-            low = self.df.at[current, 'low']
+            ts = self.df.index[i]
+            high, low = self.df.at[ts, 'high'], self.df.at[ts, 'low']
+            window_high = self.df['high'].iloc[i-lookback:i+lookback+1].drop(labels=[ts])
+            window_low  = self.df['low'].iloc[i-lookback:i+lookback+1].drop(labels=[ts])
 
-            high_range = self.df['high'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
-            low_range = self.df['low'].iloc[i - lookback:i + lookback + 1].drop(labels=[current])
-
-            if high > high_range.max() and not is_near_existing(high):
-                highs.append((current, high))
-            elif low < low_range.min() and not is_near_existing(low):
-                lows.append((current, low))
-
+            if high > window_high.max() and not near_existing(high):
+                highs.append((ts, high))
+            elif low < window_low.min() and not near_existing(low):
+                lows.append((ts, low))
         return highs, lows
 
     def to_overlays(
         self,
-        plot_df: pd.Index,
-        color_mode: str = "role"
+        plot_df: pd.DataFrame,
+        color_mode: str = 'role'
     ) -> Tuple[List, Set[Tuple[str, str]]]:
-        
-        plot_index = plot_df.index
-        overlays = []
-        legend_entries = set()
+        """
+        Generate addplot overlays for each level with touch dots.
 
-        tf_color = {
-            "daily": "goldenrod",
-            "4h": "magenta",
-            "1h": "blue",
-            "1d": "goldenrod"
-        }
+        :param plot_df: DataFrame for plotting (must contain low/high index)
+        :param color_mode: 'role' to color by support/resistance, 'timeframe' to color by timeframe
+        :return: (overlays, legend_entries)
+        """
+        overlays: List[dict] = []
+        legend_entries: Set[Tuple[str, str]] = set()
 
-        role_color = {
-            "support": "green",
-            "resistance": "red"
-        }
+        idx = plot_df.index
+        role_colors = {'support':'green','resistance':'red'}
+        tf_colors   = {self.timeframe:'blue'}  # extend as needed
 
-        for level in self.levels:
-            if color_mode == "role":
-                color = role_color.get(level.kind, "gray")
-                label = f"{level.kind.capitalize()} Level"
-                legend_key = (label, color)
-            elif color_mode == "timeframe":
-                color = tf_color.get(level.timeframe, "gray")
-                label = f"{level.timeframe} Levels"
-                legend_key = (label, color)
+        for lvl in self.levels:
+            # choose color and label
+            if color_mode == 'role':
+                color = role_colors[lvl.kind]
+                label = f"{lvl.kind.capitalize()} Level"
             else:
-                color = "gray"
-                label = "Level"
-                legend_key = (label, color)
+                color = tf_colors.get(lvl.timeframe, 'gray')
+                label = f"{lvl.timeframe} Levels"
+            legend_entries.add((label, color))
 
-            if level.first_touched in plot_index:
-                start_idx = plot_index.get_loc(level.first_touched)
-            else:
-                start_idx = 0
+            # draw the infinite ray from first touch onward
+            start = lvl.first_touched if lvl.first_touched in idx else idx[0]
+            ray = idx[idx.get_indexer([start])[0]:]
+            series = pd.Series(lvl.price, index=ray).reindex(idx)
 
-            ray_index = plot_index[start_idx:]
-            line = pd.Series(level.price, index=ray_index)
-            padded_line = line.reindex(plot_index, fill_value=pd.NA)
+            ap = make_addplot(series, color=color, linestyle='--', width=1, alpha=0.7)
+            overlays.append({
+                "kind": "addplot",
+                "plot": ap
+            })
 
-            if padded_line.dropna().empty:
-                continue
-
-            overlays.append(make_addplot(padded_line, color=color, linestyle="--", width=1, alpha=0.7))
-
-            level.touches = level.get_touches(plot_df)
-            # Only keep touches that occur on or after the level was discovered
-            level.touches = [ts for ts in level.touches if ts >= level.first_touched]
-
-            if level.touches:
-                dot_series = pd.Series(level.price, index=level.touches)
-                dot_line = dot_series.reindex(plot_index)
-
-                overlays.append(make_addplot(
-                    dot_line,
-                    color=color,
-                    marker='o',
-                    markersize=4,
-                    scatter=True,
-                    label=""
-            ))
-            legend_entries.add(legend_key)
-
+            # compute & plot touches
+            touches = [ts for ts in lvl.get_touches(plot_df) if ts >= lvl.first_touched]
+            if touches:
+                dots = pd.Series(lvl.price, index=touches).reindex(idx)
+                ap =  make_addplot(
+                        dots,
+                        scatter=True,
+                        marker='o',
+                        markersize=4,
+                        color=color,
+                        label=""
+                    )
+                
+                overlays.append({
+                    "kind": "addplot",
+                    "plot": ap
+                })
         return overlays, legend_entries
 
-    # helper to convert legend entries to mpl handles
+    @staticmethod
     def build_legend_handles(legend_entries: Set[Tuple[str, str]]):
-        return [
-            patches.Patch(color=color, label=label)
-            for label, color in sorted(legend_entries)
-        ]
+        """
+        Convert (label, color) pairs into matplotlib Patch handles.
+        """
+        return [patches.Patch(color=c, label=l) for l, c in sorted(legend_entries)]
 
     def nearest_support(self, price: float) -> Optional[Level]:
-        supports = [lvl for lvl in self.levels if lvl.kind == "support"]
-        return min(supports, key=lambda l: abs(l.price - price), default=None)
+        """Return the support level closest to the given price."""
+        supports = [lvl for lvl in self.levels if lvl.kind=='support']
+        return min(supports, key=lambda l: abs(l.price-price), default=None)
 
     def nearest_resistance(self, price: float) -> Optional[Level]:
-        resistances = [lvl for lvl in self.levels if lvl.kind == "resistance"]
-        return min(resistances, key=lambda l: abs(l.price - price), default=None)
+        """Return the resistance level closest to the given price."""
+        resistances = [lvl for lvl in self.levels if lvl.kind=='resistance']
+        return min(resistances, key=lambda l: abs(l.price-price), default=None)
 
     def distance_to_level(self, level: Level, price: float) -> float:
+        """Compute fractional distance between price and a level."""
         return abs(level.price - price) / price
-    
-    @classmethod
-    def from_context(cls, provider, ctx: DataContext, level_timeframe: str, **kwargs):
-        """Create PivotLevelIndicator from provider-fetched timeframe with fallback ingestion."""
 
+    @classmethod
+    def from_context(
+        cls,
+        provider,
+        ctx: DataContext,
+        level_timeframe: str,
+        **kwargs
+    ):
+        """
+        Instantiate from a DataContext 
+        :param provider: data provider with get_ohlcv method
+        :param ctx: DataContext with symbol, start, end, interval
+        :param level_timeframe: timeframe for the pivot levels (e.g., '1d', '4h')
+
+        """
         level_ctx = DataContext(
             symbol=ctx.symbol,
             start=ctx.start,
             end=ctx.end,
-            interval=level_timeframe,
+            interval=level_timeframe
         )
-
         df = provider.get_ohlcv(level_ctx)
-
         if df is None or df.empty:
             raise ValueError(
-                f"Data missing after ingest for {level_ctx.symbol} [{level_timeframe}] from {level_ctx.start} to {level_ctx.end}"
+                f"Data missing for {ctx.symbol} [{level_timeframe}]"
             )
-
         return cls(df=df, timeframe=level_timeframe, **kwargs)

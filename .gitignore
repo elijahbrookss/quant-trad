@@ -5,3 +5,5 @@ __pycache__/
 artifacts/
 .venv/
 secrets.env
+.vscode/
+.pytest_cache/

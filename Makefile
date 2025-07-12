@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: db_up db_down db_logs db_cli test test-integration test-unit
+.PHONY: db_up db_down db_logs db_cli test test-integration test-unit grafana_up env
 
 db_up:
 	docker compose up -d timescaledb
@@ -21,6 +21,10 @@ db_down:
 db_logs:
 	docker compose logs -f timescaledb
 
+grafana_up:
+	docker compose up -d loki grafana
+	@echo "Grafana is running at http://localhost:3000"
+	
 # quick psql shell (requires psql client installed inside WSL/Windows)
 db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"

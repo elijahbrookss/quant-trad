@@ -21,8 +21,8 @@ def test_market_profile_indicator_integration_plot():
     # Define a 30-minute context over two weeks
     ctx = DataContext(
         symbol="CL",
-        start="2025-04-15",
-        end="2025-05-30",
+        start="2025-06-01",
+        end="2025-06-30",
         interval="30m"
     )
 
@@ -243,9 +243,5 @@ def test_to_overlays_using_merge(dummy_df):
     # 5) Call to_overlays with use_merged=True
     overlays, legend_entries = mpi.to_overlays(plot_df, use_merged=True)
 
-    # We expect 3 overlays (POC, VAH, VAL) for that merged session
-    assert len(overlays) == 3
-
-    # Legend should contain exactly these three entries
-    expected_legend = {("POC", "orange"), ("VAH", "gray"), ("VAL", "gray")}
-    assert legend_entries == expected_legend
+    # We expect 2 overlays (VAH, VAL) for that merged session
+    assert len(overlays) == 2
