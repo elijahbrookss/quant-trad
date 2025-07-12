@@ -73,9 +73,13 @@ class MarketProfileIndicator(BaseIndicator):
         df.index = pd.to_datetime(df.index, utc=True)
         profiles: List[Dict[str, float]] = []
 
+        unique_dates = len(np.unique(df.index.date))
+        logger.info("Starting daily profile computation for %d sessions", unique_dates)
+
         # Group rows by calendar date
         grouped = df.groupby(df.index.date)
         for session_date, group in grouped:
+            logger.debug("Processing session: %s, bars: %d", session_date, len(group))
             tpo_hist = self._build_tpo_histogram(group)
             value_area = self._extract_value_area(tpo_hist)
 
@@ -88,7 +92,7 @@ class MarketProfileIndicator(BaseIndicator):
             })
 
             profiles.append(value_area)
-            logger.debug(
+            logger.info(
                 "Profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f",
                 session_date,
                 value_area["POC"],
@@ -96,6 +100,7 @@ class MarketProfileIndicator(BaseIndicator):
                 value_area["VAL"]
             )
 
+        logger.info("Completed daily profile computation. Total profiles: %d", len(profiles))
         return profiles
 
     def _build_tpo_histogram(self, data: pd.DataFrame) -> Dict[float, int]:
@@ -105,12 +110,14 @@ class MarketProfileIndicator(BaseIndicator):
         :return: mapping of price bucket -> count of TPO occurrences.
         """
         tpo_counts: Dict[float, int] = {}
+        logger.debug("Building TPO histogram for session with %d bars", len(data))
         for _, row in data.iterrows():
             low, high = row["low"], row["high"]
             prices = np.arange(low, high + self.bin_size, self.bin_size)
             for price in prices:
                 bucket = round(price / self.bin_size) * self.bin_size
                 tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
+        logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
         return tpo_counts
 
     def _extract_value_area(self, tpo_hist: Dict[float, int]) -> Dict[str, float]:
@@ -122,6 +129,7 @@ class MarketProfileIndicator(BaseIndicator):
         """
         total = sum(tpo_hist.values())
         if total == 0:
+            logger.warning("TPO histogram is empty, cannot extract value area.")
             return {"POC": None, "VAH": None, "VAL": None}
 
         # sort buckets by descending count
@@ -137,6 +145,10 @@ class MarketProfileIndicator(BaseIndicator):
             if cumulative >= threshold:
                 break
 
+        logger.debug(
+            "Extracted value area: POC=%.2f, VAH=%.2f, VAL=%.2f, total TPO=%d",
+            poc_price, max(va_prices), min(va_prices), total
+        )
         return {
             "POC": poc_price,
             "VAH": max(va_prices),
@@ -158,7 +170,14 @@ class MarketProfileIndicator(BaseIndicator):
         high = min(vah1, vah2)
         overlap = max(0.0, high - low)
         range2 = vah2 - val2
-        return overlap / range2 if range2 > 0 else 0.0
+        ratio = overlap / range2 if range2 > 0 else 0.0
+        logger = globals().get("logger", None)
+        if logger:
+            logger.debug(
+                "Calculated overlap: [%.2f, %.2f] vs [%.2f, %.2f] => overlap=%.2f, ratio=%.2f",
+                val1, vah1, val2, vah2, overlap, ratio
+            )
+        return ratio
 
     def merge_value_areas(
         self,
@@ -173,6 +192,8 @@ class MarketProfileIndicator(BaseIndicator):
         profiles = self.daily_profiles
         i, n = 0, len(profiles)
 
+        logger.info("Starting merge of value areas: threshold=%.2f, min_merge=%d", threshold, min_merge)
+
         while i < n:
             base = profiles[i]
             merged_val = base["VAL"]
@@ -183,6 +204,8 @@ class MarketProfileIndicator(BaseIndicator):
             count = 1
             j = i + 1
 
+            logger.debug("Merging from profile %d (start: %s)", i, start_ts)
+
             while j < n:
                 next_prof = profiles[j]
                 overlap = self._calculate_overlap(
@@ -191,7 +214,12 @@ class MarketProfileIndicator(BaseIndicator):
                     next_prof["VAL"],
                     next_prof["VAH"]
                 )
+                logger.debug(
+                    "Checking overlap with profile %d: overlap=%.2f (threshold=%.2f)",
+                    j, overlap, threshold
+                )
                 if overlap < threshold:
+                    logger.debug("Overlap below threshold, stopping merge at profile %d", j)
                     break
 
                 merged_val = min(merged_val, next_prof["VAL"])
@@ -211,10 +239,17 @@ class MarketProfileIndicator(BaseIndicator):
                     "VAH": merged_vah,
                     "POC": avg_poc
                 })
+                logger.info(
+                    "Merged %d profiles: [%s → %s], VAL=%.2f, VAH=%.2f, avg POC=%.2f",
+                    count, start_ts, end_ts, merged_val, merged_vah, avg_poc if avg_poc else float('nan')
+                )
+            else:
+                logger.debug("Merge group too small (%d < %d), skipping", count, min_merge)
 
             i = j
 
         self.merged_profiles = merged
+        logger.info("Completed merging. Total merged profiles: %d", len(merged))
         return merged
 
     def to_overlays(
@@ -236,11 +271,18 @@ class MarketProfileIndicator(BaseIndicator):
         legend_entries: Set[Tuple[str, str]] = set()
         full_idx = plot_df.index
 
+        logger.info("Generating overlays for %d profiles (use_merged=%s)", len(profiles), use_merged)
+
         for prof in profiles:
             start_ts = prof["start_date"]
             val      = prof["VAL"]
             vah      = prof["VAH"]
             poc      = prof.get("POC")
+
+            plot_min = plot_df.index.min()
+            if start_ts < plot_min:
+                logger.debug("Adjusting rect start from %s to %s (plot start)", start_ts, plot_min)
+                start_ts = plot_min
 
             # 1) persistent rectangle for VA zone
             overlays.append({
@@ -252,6 +294,9 @@ class MarketProfileIndicator(BaseIndicator):
                 "alpha": 0.2
             })
             legend_entries.add(("Value Area", "gray"))
+            logger.debug(
+                "Overlay rect: start=%s, VAL=%.2f, VAH=%.2f", start_ts, val, vah
+            )
 
             # 2) optional POC line as an addplot
             if poc is not None:
@@ -270,5 +315,9 @@ class MarketProfileIndicator(BaseIndicator):
                     "plot": ap
                 })
                 legend_entries.add(("POC", "orange"))
+                logger.debug(
+                    "Overlay POC: start=%s, POC=%.2f", start_ts, poc
+                )
 
+        logger.info("Generated %d overlays", len(overlays))
         return overlays, legend_entries
