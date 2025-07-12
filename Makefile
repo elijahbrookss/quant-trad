@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: db_up db_down db_logs db_cli test test-integration test-unit
+.PHONY: db_up db_down db_logs db_cli test test-integration test-unit grafana_up env
 
 db_up:
 	docker compose up -d timescaledb
