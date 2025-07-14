@@ -11,6 +11,7 @@ from classes.indicators.config import DataContext
 from itertools import groupby
 from classes.OverlayRegistry import get_overlay_handler
 import classes.OverlayHandlers
+import numpy as np
 
 
 class ChartPlotter:
@@ -80,6 +81,56 @@ class ChartPlotter:
 
             addplot_specs, other_specs = ChartPlotter._split_overlays(overlays)
             logger.debug("Addplot overlays: %d, Other overlays: %d", len(addplot_specs), len(other_specs))
+
+            # Final filter to remove overlays with zero-length y/data
+            cleaned_addplots = []
+            for i, spec in enumerate(addplot_specs):
+                label = spec.get("label", f"Overlay #{i}")
+                if spec.get("scatter", False):
+                    x = spec.get("x")
+                    y = spec.get("y")
+
+                    if y is None or x is None:
+                        logger.warning("Skipping scatter (%s) with missing x/y: %s", label, str(spec)[:150])
+                        continue
+                    if len(x) == 0 or len(y) == 0:
+                        logger.warning("Skipping scatter (%s) with empty x/y: x=%d, y=%d, spec=%s", label, len(x), len(y), str(spec)[:150])
+                        continue
+                else:
+                    data = spec.get("data")
+
+                    if data is None:
+                        logger.warning("Skipping line (%s) with missing data.", label)
+                        continue
+
+                    if isinstance(data, pd.Series):
+                        if data.empty:
+                            logger.warning("Skipping line (%s): Series is empty.", label)
+                            continue
+                        if data.isna().all():
+                            logger.warning("Skipping line (%s): Series is all NaN.", label)
+                            continue
+
+                    elif isinstance(data, (list, np.ndarray)):
+                        if len(data) == 0:
+                            logger.warning("Skipping line (%s): empty array.", label)
+                            continue
+                        if all(pd.isna(v) for v in data):
+                            logger.warning("Skipping line (%s): array is all NaN.", label)
+                            continue
+
+                cleaned_addplots.append(spec)
+
+            logger.info("Final cleaned addplot overlays: %d", len(cleaned_addplots))
+            addplot_specs = cleaned_addplots
+            for i, spec in enumerate(addplot_specs):
+                label = spec.get("label", f"Overlay #{i}")
+                if not spec.get("scatter", False):
+                    data = spec.get("data")
+                    if isinstance(data, pd.Series):
+                        logger.debug("Line overlay %s head:\n%s", label, data.head(3))
+                        logger.debug("Line overlay %s stats: len=%d, nulls=%d, isna.all=%s", 
+                                    label, len(data), data.isna().sum(), data.isna().all())
 
             fig, axes = mpf.plot(
                 df,
