@@ -12,6 +12,20 @@ def handle_addplot(df, price_ax, specs):
     logger.debug("Handling addplot overlays: count=%d", len(specs))
     return specs
 
+@register_overlay_handler("line")
+def handle_line(df, price_ax, specs):
+    logger.info("Handling line overlays: count=%d", len(specs))
+    logger.debug("Axis limits before overlays: xlim=%s, ylim=%s", price_ax.get_xlim(), price_ax.get_ylim())
+    
+    return specs
+
+@register_overlay_handler("scatter")
+def handle_scatter(df, price_ax, specs):
+    logger.info("Handling scatter overlays: count=%d", len(specs))
+    logger.debug("Axis limits before overlays: xlim=%s, ylim=%s", price_ax.get_xlim(), price_ax.get_ylim())
+    
+    return specs
+
 @register_overlay_handler("rect")
 def handle_rectangle(df, price_ax, specs):
     logger.info("Handling rectangle overlays: count=%d", len(specs))
