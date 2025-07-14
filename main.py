@@ -13,7 +13,7 @@ from classes.indicators.config import DataContext
 
 from classes.signals.market_profile_signal import MarketProfileSignalGenerator
 
-symbol = "GC=F"
+symbol = "CL"
 provider = AlpacaProvider()
 
 lower_timespan_ctx = DataContext(
