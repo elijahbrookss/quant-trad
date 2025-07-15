@@ -32,6 +32,8 @@ class ChartPlotter:
                 "Starting plot_ohlc for symbol=%s, interval=%s, chart_type=%s",
                 ctx.symbol, ctx.interval, chart_type
             )
+            logger.debug("Overlays provided: %s", overlays)
+
             ctx.validate()
             start, end = ChartPlotter._get_plot_range(ctx)
             df = ChartPlotter._prepare_dataframe(df)
@@ -48,8 +50,6 @@ class ChartPlotter:
             logger.debug("Figure size set to: %s", figsize)
 
             addplot_specs, other_specs = ChartPlotter._split_overlays(overlays)
-            logger.debug("Addplot overlays: %d, Other overlays: %d", len(addplot_specs), len(other_specs))
-
             addplot_specs = ChartPlotter._clean_addplots(addplot_specs)
 
             ChartPlotter._log_addplot_details(addplot_specs)
@@ -59,7 +59,7 @@ class ChartPlotter:
                 type=chart_type,
                 volume=show_volume and "volume" in df.columns,
                 title=title,
-                style="yahoo",
+                style="charles",
                 addplot=addplot_specs,
                 returnfig=True,
                 figsize=figsize
@@ -73,6 +73,9 @@ class ChartPlotter:
 
             if legend_entries:
                 ChartPlotter._add_legend(axes[0], legend_entries)
+
+            # autoscale 
+            # price_ax.autoscale_view()
 
             fig.savefig(file_path, dpi=300, bbox_inches="tight")
             logger.info("Chart saved to %s", file_path)
@@ -109,8 +112,8 @@ class ChartPlotter:
 
     @staticmethod
     def _log_index_info(df):
-        logger.debug("DataFrame index type: %s", type(df.index))
-        logger.debug("DataFrame index sample: %s", df.index[:5])
+        logger.debug("Plotting DataFrame index type: %s", type(df.index))
+        logger.debug("Plotting DataFrame index sample: %s", df.index[:5])
 
     @staticmethod
     def _filter_dataframe(df, start, end):
@@ -188,6 +191,7 @@ class ChartPlotter:
                     addplot_specs.append(item)
             else:
                 other_by_kind.setdefault(kind, []).append(item)
+
         other_specs = list(other_by_kind.items())
         rect_count = len(other_by_kind.get("rect", []))
         logger.debug(
