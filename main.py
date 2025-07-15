@@ -78,17 +78,17 @@ def simulate_signal_generation(delay_seconds: int = 5):
         for i in range(30, len(full_df)):
             current_df = full_df.iloc[:i+1]
             signals = signal_generator.generate_signals(current_df, merged_value_areas)
-            new_signals = signals[len(all_signals):]
-            all_signals.extend(new_signals)
-
-            if new_signals:
-                logger.info("[%d] %d new signal(s) at %s", i, len(new_signals), current_df.index[-1])
-                for sig in new_signals:
+            all_signals.extend(signals)
+            
+            if all_signals:
+                logger.info("[%d] %d new signal(s) at %s", i, len(all_signals), current_df.index[-1])
+                for sig in all_signals:
                     print(sig.to_dict())
 
             time.sleep(delay_seconds)
 
         logger.info("Simulation complete. Total signals generated: %d", len(all_signals))
+        logger.info("all_signals: %s", all_signals)
 
         signal_overlays = MarketProfileSignalGenerator.to_overlays(plot_df=full_df, signals=all_signals) if all_signals else []
         combined_overlays = indicator_overlays + signal_overlays

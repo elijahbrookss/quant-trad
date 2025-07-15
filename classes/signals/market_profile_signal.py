@@ -33,7 +33,15 @@ class MarketProfileSignalGenerator:
         raw_signals = []
         for va in value_areas:
             for rule in rules:
-                raw_signals.extend(rule(context, va))
+                new_signals = rule(context, va)
+                raw_signals.extend(new_signals)
+
+                logger.debug(
+                    "INSIGHTS Generated %d signals from rule %s for VA: %s",
+                    len(new_signals), rule.__name__, va
+                )
+
+        logger.info("INSIGHTS Total raw signals generated: %d", len(raw_signals)) 
 
         signals = [
             BaseSignal(
@@ -46,6 +54,8 @@ class MarketProfileSignalGenerator:
             for meta in raw_signals
         ]
 
+        logger.info("INSIGHTS Total BaseSignal objects created: %d", len(signals))
+
         return signals
 
     @staticmethod
@@ -53,7 +63,7 @@ class MarketProfileSignalGenerator:
         signals: List["BaseSignal"],
         plot_df: pd.DataFrame,
         n: int = 3,
-        offset: float = .6,
+        offset: float = .2,
     ) -> List[Dict]:
         overlays = []
         logger.info("Converting %d signals to line overlays", len(signals))
