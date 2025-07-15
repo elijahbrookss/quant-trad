@@ -1,3 +1,10 @@
+
+# BaseDataProvider defines the common interface and database logic for all data providers in quant-trad.
+# It handles schema management, ingestion, and querying of OHLCV data from a unified database table.
+# Concrete providers (e.g., YahooFinanceProvider, AlpacaProvider) inherit from this class and implement
+# the fetch_from_api method to retrieve data from their respective sources. This ensures all market data
+# is standardized and accessible for backtesting, analysis, and plotting within the project.
+
 from abc import ABC, abstractmethod
 from enum import Enum
 import datetime as dt
@@ -13,26 +20,44 @@ from classes.ChartPlotter import ChartPlotter
 load_dotenv("secrets.env")
 
 
+
+# Enum for supported data sources. Used to tag and distinguish data in the database.
 class DataSource(str, Enum):
     YFINANCE = "YFINANCE"
     ALPACA = "ALPACA"
     UNKNOWN = "UNKNOWN"
 
 
+
+# Abstract base class for all data providers. Handles DB connection and schema logic.
 class BaseDataProvider(ABC):
     _dsn = os.getenv("PG_DSN")
     _table = os.getenv("OHLC_TABLE")
     _engine = create_engine(_dsn)
 
+
     @abstractmethod
     def get_datasource(self) -> str:
+        """
+        Return the identifier for the data source (e.g., 'YFINANCE', 'ALPACA').
+        Used to tag data in the database and distinguish providers.
+        """
         pass
 
     @abstractmethod
     def fetch_from_api(self, symbol: str, start: dt.datetime, end: dt.datetime, interval: str) -> pd.DataFrame:
+        """
+        Fetch historical OHLCV data from the provider's API.
+        Must be implemented by subclasses for each data source.
+        """
         pass
 
+
     def ensure_schema(self):
+        """
+        Ensure the OHLCV table exists in the database and is a TimescaleDB hypertable.
+        This enables efficient time-series storage and querying for all providers.
+        """
         ddl_create = f"""
         CREATE TABLE IF NOT EXISTS {self._table} (
             datasource TEXT NOT NULL,
@@ -61,11 +86,17 @@ class BaseDataProvider(ABC):
             logger.exception("Failed to ensure schema for '%s': %s", self._table, e)
             raise
 
+
     def ingest_history(
         self,
         ctx: DataContext,
         days: int = 30
     ) -> int:
+        """
+        Ingest historical OHLCV data for a symbol and interval into the database.
+        If start/end are missing, defaults to the last N days. Fetches data from the provider's API,
+        tags it, and inserts it into the OHLCV table. Handles DB errors and logs ingestion status.
+        """
         # Fill in start/end if not defined in DataContext
         start = ctx.start
         end = ctx.end
@@ -84,6 +115,7 @@ class BaseDataProvider(ABC):
                 logger.warning("No data returned for %s (%s).", ctx.symbol, ctx.interval)
                 return 0
 
+            # Tag data with ingestion timestamp, datasource, interval, and symbol
             df["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
             df["datasource"] = self.get_datasource()
             df["interval"] = ctx.interval
@@ -96,6 +128,7 @@ class BaseDataProvider(ABC):
         try:
             with self._engine.connect() as conn:
                 with conn.begin():
+                    # Use a temp table for bulk insert, then merge into main table
                     conn.execute(
                         text(f"CREATE TEMP TABLE tmp (LIKE {self._table}) ON COMMIT DROP;")
                     )
@@ -112,7 +145,13 @@ class BaseDataProvider(ABC):
             raise
 
 
+
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
+        """
+        Query OHLCV data for a symbol/interval from the database.
+        If no data is found, automatically triggers ingestion from the provider's API.
+        Returns a DataFrame indexed by timestamp for downstream analysis and plotting.
+        """
         ctx.validate()
 
         def query_ohlcv():
@@ -136,6 +175,7 @@ class BaseDataProvider(ABC):
         df = query_ohlcv()
 
         if df.empty:
+            # If no data is found, try to ingest from API and re-query
             logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
                         ctx.symbol, ctx.interval, ctx.start, ctx.end)
             try:
@@ -148,12 +188,18 @@ class BaseDataProvider(ABC):
                 logger.exception("Auto-ingestion failed: %s", e)
                 return df
 
+        # Ensure timestamp is timezone-aware and set as index
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df.set_index("timestamp", inplace=True)
         df["timestamp"] = df.index
         return df
     
+
     def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):
+        """
+        Plot OHLCV data for a symbol/interval using the ChartPlotter utility.
+        Fetches data from the database and passes it to the plotting engine for visualization.
+        """
         df = self.get_ohlcv(plot_ctx)
         title = title or f"{plot_ctx.symbol} | {plot_ctx.interval}"
         logger.debug("df index sample: %s", df.index)
