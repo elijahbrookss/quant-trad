@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Set
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 from mplfinance.plotting import make_addplot
+import logging
 
 from classes.Logger import logger
 from classes.indicators.BaseIndicator import BaseIndicator
@@ -113,20 +114,6 @@ class MarketProfileIndicator(BaseIndicator):
         logger.debug("Extracted value area: POC=%.2f, VAH=%.2f, VAL=%.2f, total TPO=%d", poc_price, max(va_prices), min(va_prices), total)
         return {"POC": poc_price, "VAH": max(va_prices), "VAL": min(va_prices)}
 
-    @staticmethod
-    def _calculate_overlap(val1: float, vah1: float, val2: float, vah2: float) -> float:
-        """
-        Compute the overlap ratio between two value areas,
-        normalized by the range of the second area.
-        """
-        low = max(val1, val2)
-        high = min(vah1, vah2)
-        overlap = max(0.0, high - low)
-        range2 = vah2 - val2
-        ratio = overlap / range2 if range2 > 0 else 0.0
-        logger.debug("Calculated overlap: [%.2f, %.2f] vs [%.2f, %.2f] => overlap=%.2f, ratio=%.2f", val1, vah1, val2, vah2, overlap, ratio)
-        return ratio
-
     def merge_value_areas(self, threshold: float = 0.6, min_merge: int = 2) -> List[Dict[str, float]]:
         """
         Combine consecutive daily profiles whose value areas overlap
@@ -165,8 +152,8 @@ class MarketProfileIndicator(BaseIndicator):
             if count >= min_merge:
                 avg_poc = sum(poc_list) / len(poc_list) if poc_list else None
                 merged.append({
-                    "start_date": start_ts,
-                    "end_date": end_ts,
+                    "start": start_ts,
+                    "end": end_ts,
                     "VAL": merged_val,
                     "VAH": merged_vah,
                     "POC": avg_poc
@@ -196,10 +183,24 @@ class MarketProfileIndicator(BaseIndicator):
         full_idx = plot_df.index
 
         logger.info("Generating overlays for %d profiles (use_merged=%s)", len(profiles), use_merged)
-        for prof in profiles:
-            start_ts = prof["start_date"]
-            val, vah = prof["VAL"], prof["VAH"]
+        for idx, prof in enumerate(profiles):
+            # Robustly get the start timestamp
+            try:
+                start_ts = prof.get("start")
+                if start_ts is None:
+                    start_ts = prof.get("start_date")
+                if start_ts is None:
+                    raise KeyError("Profile missing both 'start' and 'start_date'")
+            except Exception as e:
+                logger.error("Profile %d missing 'start'/'start_date': %s. Skipping overlay.", idx, str(e))
+                continue
+
+            val, vah = prof.get("VAL"), prof.get("VAH")
             poc = prof.get("POC")
+
+            if val is None or vah is None:
+                logger.warning("Profile %d missing VAL or VAH. Skipping overlay.", idx)
+                continue
 
             plot_min = plot_df.index.min()
             if start_ts < plot_min:
@@ -220,7 +221,6 @@ class MarketProfileIndicator(BaseIndicator):
 
             # 2) optional POC line as an addplot
             if poc is not None:
-                # mask out everything before start_ts
                 poc_series = pd.Series(index=full_idx, dtype=float)
                 poc_series.loc[full_idx >= start_ts] = poc
 
@@ -231,3 +231,121 @@ class MarketProfileIndicator(BaseIndicator):
 
         logger.info("Generated %d overlays", len(overlays))
         return overlays, legend_entries
+
+    @staticmethod
+    def _calculate_overlap(val1: float, vah1: float, val2: float, vah2: float) -> float:
+        """
+        Compute the overlap ratio between two value areas,
+        normalized by the range of the second area.
+        """
+        low = max(val1, val2)
+        high = min(vah1, vah2)
+        overlap = max(0.0, high - low)
+        range2 = vah2 - val2
+        ratio = overlap / range2 if range2 > 0 else 0.0
+        logger.debug("Calculated overlap: [%.2f, %.2f] vs [%.2f, %.2f] => overlap=%.2f, ratio=%.2f", val1, vah1, val2, vah2, overlap, ratio)
+        return ratio
+
+#Rules below
+
+def breakout_rule(context: Dict, va: Dict) -> List[Dict]:
+    df = context["df"]
+    symbol = context["symbol"]
+    results = []
+
+    logger = logging.getLogger("MarketProfileBreakoutRule")
+    logger.debug("Evaluating breakout_rule for symbol=%s, VA start=%s, VAH=%.2f, VAL=%.2f",
+                 symbol, va.get("start"), va.get("VAH"), va.get("VAL"))
+
+    va_start = va.get("start")
+    curr_time = df.index[-1]
+
+    if va_start is None or (curr_time - va_start) < pd.Timedelta(days=1):
+        logger.debug(
+            "Skipping VA starting at %s: less than 1 day old (age=%s)",
+            va_start, curr_time - va_start
+        )
+        return results
+
+
+    if len(df) < 2:
+        logger.info("Not enough bars in DataFrame (len=%d), skipping breakout evaluation.", len(df))
+        return results
+
+    prev_bar = df.iloc[-2]
+    curr_bar = df.iloc[-1]
+    curr_time = df.index[-1]
+
+    logger.debug(
+        "Prev close=%.2f, Curr close=%.2f, VAH=%.2f, VAL=%.2f",
+        prev_bar["close"], curr_bar["close"], va["VAH"], va["VAL"]
+    )
+
+    if va["VAL"] <= prev_bar["close"] <= va["VAH"]:
+        # Breakout ABOVE
+        if curr_bar["close"] > va["VAH"]:
+            logger.info(
+                "Breakout UP detected: prev_close=%.2f in VA, curr_close=%.2f > VAH=%.2f at %s",
+                prev_bar["close"], curr_bar["close"], va["VAH"], curr_time
+            )
+            results.append({
+                "source": "MarketProfile",
+                "type": "breakout",
+                "symbol": symbol,
+                "time": curr_time,
+                "level_type": "VAH",
+                "distance_pct": round((curr_bar["close"] - va["VAH"]) / va["VAH"], 4),
+                "direction": "up",
+                "trigger_price": curr_bar["close"],
+                "trigger_volume": curr_bar["volume"],
+                "trigger_open": curr_bar["open"],
+                "trigger_high": curr_bar["high"],
+                "trigger_low": curr_bar["low"],
+                "trigger_close": curr_bar["close"],
+                "bar_range": round(curr_bar["high"] - curr_bar["low"], 4),
+                "prev_close": prev_bar["close"],
+                "VAH": va["VAH"],
+                "VAL": va["VAL"],
+                "POC": va.get("POC"),
+                "session_start": va["start"]
+            })
+
+        # Breakout BELOW
+        elif curr_bar["close"] < va["VAL"]:
+            logger.info(
+                "Breakout DOWN detected: prev_close=%.2f in VA, curr_close=%.2f < VAL=%.2f at %s",
+                prev_bar["close"], curr_bar["close"], va["VAL"], curr_time
+            )
+            results.append({
+                "type": "breakout",
+                "symbol": symbol,
+                "time": curr_time,
+                "level_type": "VAL",
+                "distance_pct": round((va["VAL"] - curr_bar["close"]) / va["VAL"], 4),
+                "direction": "down",
+                "trigger_price": curr_bar["close"],
+                "trigger_volume": curr_bar["volume"],
+                "trigger_open": curr_bar["open"],
+                "trigger_high": curr_bar["high"],
+                "trigger_low": curr_bar["low"],
+                "trigger_close": curr_bar["close"],
+                "bar_range": round(curr_bar["high"] - curr_bar["low"], 4),
+                "prev_close": prev_bar["close"],
+                "VAH": va["VAH"],
+                "VAL": va["VAL"],
+                "POC": va.get("POC"),
+                "session_start": va["start"]
+            })
+        else:
+            logger.debug(
+                "No breakout: prev_close=%.2f in VA, curr_close=%.2f within VA bounds.",
+                prev_bar["close"], curr_bar["close"]
+            )
+    else:
+        logger.debug(
+            "No breakout: prev_close=%.2f not in VA (VAL=%.2f, VAH=%.2f).",
+            prev_bar["close"], va["VAL"], va["VAH"]
+        )
+
+    logger.debug("Breakout rule produced %d signal(s).", len(results))
+    return results
