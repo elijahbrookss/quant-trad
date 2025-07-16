@@ -1,8 +1,8 @@
 import pandas as pd
 from mplfinance.plotting import make_addplot
 from matplotlib import patches
-from classes.indicators.BaseIndicator import BaseIndicator
-from classes.indicators.config import DataContext
+from src.indicators.base import BaseIndicator
+from src.indicators.config import DataContext
 
 
 class VWAPIndicator(BaseIndicator):

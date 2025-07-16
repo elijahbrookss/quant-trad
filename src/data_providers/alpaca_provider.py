@@ -6,7 +6,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
-from classes.Logger import logger
+from src.core.logger import logger
 from .base_provider import DataSource
 from .base_provider import BaseDataProvider
 

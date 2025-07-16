@@ -1,8 +1,8 @@
 from typing import List, Dict
 import pandas as pd
-from classes.indicators.MarketProfileIndicator import breakout_rule
+from src.indicators.market_profile import breakout_rule
 from mplfinance.plotting import make_addplot
-from .base import BaseSignal
+from signals.base import BaseSignal
 import logging
 
 logger = logging.getLogger("MarketProfileSignalGenerator")

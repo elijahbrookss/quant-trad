@@ -5,8 +5,8 @@ from typing import List, Tuple, Dict, Set, Literal, Optional
 from scipy.stats import linregress
 from mplfinance.plotting import make_addplot
 from matplotlib import patches
-from classes.indicators.BaseIndicator import BaseIndicator
-from classes.indicators.config import DataContext
+from src.indicators.base import BaseIndicator
+from src.indicators.config import DataContext
 
 
 @dataclass
