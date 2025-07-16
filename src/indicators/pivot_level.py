@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from classes.indicators.config import DataContext
+from src.indicators.config import DataContext
 from typing import List, Optional, Tuple, Set
 import pandas as pd
 from mplfinance.plotting import make_addplot
-from classes.Logger import logger
+from src.core.logger import logger
 from matplotlib import patches
-from classes.indicators.BaseIndicator import BaseIndicator
+from src.indicators.base import BaseIndicator
 
 @dataclass
 class Level:

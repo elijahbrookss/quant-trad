@@ -6,9 +6,9 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from classes.Logger import logger
-from classes.indicators.config import DataContext
-from classes.ChartPlotter import ChartPlotter
+from src.core.logger import logger
+from src.indicators.config import DataContext
+from src.core.chart_plotter import ChartPlotter
 
 load_dotenv("secrets.env")
 

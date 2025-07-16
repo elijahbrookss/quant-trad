@@ -1,11 +1,11 @@
 import pandas as pd
 import time
-from classes.Logger import logger
+from src.core.logger import logger
 
-from classes.indicators.MarketProfileIndicator import MarketProfileIndicator
+from src.indicators.MarketProfileIndicator import MarketProfileIndicator
 from data_providers.alpaca_provider import AlpacaProvider
-from classes.indicators.config import DataContext
-from classes.signals.market_profile_signal import MarketProfileSignalGenerator
+from src.indicators.config import DataContext
+from src.signals.market_profile_signal import MarketProfileSignalGenerator
 
 symbol = "CL"
 end = "2025-07-15"

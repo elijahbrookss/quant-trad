@@ -1,9 +1,9 @@
 import datetime as dt
 import pandas as pd
 import yfinance as yf
-from classes.Logger import logger
-from .base import DataSource
-from .base import BaseDataProvider
+from src.core.logger import logger
+from .base_provider import DataSource
+from .base_provider import BaseDataProvider
 
 class YahooFinanceProvider(BaseDataProvider):
     def fetch_from_api(

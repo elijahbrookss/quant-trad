@@ -6,9 +6,9 @@ from matplotlib.patches import Rectangle
 from mplfinance.plotting import make_addplot
 import logging
 
-from classes.Logger import logger
-from classes.indicators.BaseIndicator import BaseIndicator
-from classes.indicators.config import DataContext
+from src.core.logger import logger
+from src.indicators.base import BaseIndicator
+from src.indicators.config import DataContext
 
 
 class MarketProfileIndicator(BaseIndicator):

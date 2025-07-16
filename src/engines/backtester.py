@@ -1,8 +1,8 @@
 import pandas as pd
 from typing import List, Dict, Optional
 
-from classes.engines.StrategyEngine import StrategyEngine
-from classes.indicators.BaseIndicator import BaseIndicator
+from src.engines.strategy_engine import StrategyEngine
+from src.indicators.base import BaseIndicator
 from dataclasses import dataclass
 
 class Trade:
