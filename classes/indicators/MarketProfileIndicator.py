@@ -317,6 +317,7 @@ def breakout_rule(context: Dict, va: Dict) -> List[Dict]:
                 prev_bar["close"], curr_bar["close"], va["VAL"], curr_time
             )
             results.append({
+                "source": "MarketProfile",
                 "type": "breakout",
                 "symbol": symbol,
                 "time": curr_time,
