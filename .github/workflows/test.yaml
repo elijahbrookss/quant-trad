@@ -18,8 +18,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up GitHub CLI
-        uses: cli/cli-action@v2
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install -y curl unzip
+          curl -s https://api.github.com/repos/cli/cli/releases/latest \
+            | grep "browser_download_url.*linux_amd64.deb" \
+            | cut -d '"' -f 4 \
+            | wget -qi -
+          sudo dpkg -i gh_*_linux_amd64.deb
+
 
       - name: Run tests in Docker with coverage
         run: |
