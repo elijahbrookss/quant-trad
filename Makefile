@@ -10,14 +10,14 @@ setup:
 		echo "Waiting for TimescaleDB..."; \
 		sleep 2; \
 	done
-	@echo "✅ TimescaleDB is ready"
+	@echo "TimescaleDB is ready"
 	@echo "pgAdmin → http://localhost:8080"
 	@echo "Grafana → http://localhost:3000"
 
 ## Stop all containers
 shutdown:
 	docker compose stop timescaledb pgadmin grafana loki
-	@echo "⛔ All containers stopped"
+	@echo "All containers stopped"
 
 ## Open a psql shell to TimescaleDB
 db_cli:
