@@ -1,79 +1,95 @@
-
-
-# Quant-Trad 🚀  
-*A work-in-progress quantitative **trading bot** (autonomous execution coming soon)*
-
+# Quant-Trad  
+*A modular, test-driven quantitative trading bot with strategy orchestration and live chart overlays*
 
 ---
 
-## ✨ Vision
+## Vision
 
-Quant-Trad is being built to **trade autonomously**.  
-Right now it focuses on clean data ingestion, robust indicator generation, and high-signal chart overlays.  
-Next milestones add strategy orchestration, parameter sweeps, and a live execution pipeline.
-
----
-
-## 🏗️ Core Architecture (current)
-
-| Layer | Key Components | Notes |
-|-------|----------------|-------|
-| **Data** | `BaseDataProvider`, `AlpacaProvider`, `YahooProvider` | Uniform OHLCV schema; optional TimescaleDB cache |
-| **Indicators** | `PivotLevelIndicator`, `MarketProfileIndicator` (TPO) | Implemented & tested |
-| *(Coming)* | `TrendlineIndicator`, `VWAPIndicator` | In development |
-| **Visualization** | `ChartPlotter` | Candles + volume + overlay lines |
-| *(Road-map)* | Strategy, Back-testing, Live Execution | Foundations laid, wiring next |
+Quant-Trad is being built to **trade autonomously**, combining clean data ingestion, flexible indicators, stateless signal rules, and configurable strategies.  
+Current focus is on structured feature extraction and signal generation, with backtesting and execution infrastructure in progress.
 
 ---
 
-## 📈 Indicators At-a-Glance
+## Core Architecture
 
-| Indicator | Status | Purpose | Overlay Goodies |
-|-----------|--------|---------|-----------------|
-| **Pivot Level** | ✅ | Convert swing highs/lows into S/R levels | Role & timeframe colors, touch-points |
-| **Market Profile (TPO)** | ✅ | POC / VAH / VAL per session, VA merges | Dashed VA bands per session |
-| **Trendline** | 🔨 | Auto-detect dynamic trendlines | Continuous lines, breakout flags |
-| **VWAP** | 🔨 | 30-min volume profile & VA merges | Session bands, rolling POC anchor |
+| Layer           | Key Components | Notes |
+|----------------|----------------|-------|
+| **Data**        | `BaseProvider`, `AlpacaProvider`, `YahooProvider` | Unified OHLCV schema, optional TimescaleDB caching |
+| **Indicators**  | `PivotLevelIndicator`, `MarketProfileIndicator`, `TrendlineIndicator`, `VWAPIndicator` | Modular, composable, overlay-capable |
+| **Signals**     | Stateless signal rules (e.g. `breakout_rule`, `bounce_rule`) | Operate on indicator output + context |
+| **Strategies**  | `BaseStrategy`, `ReversalStrategy` | Orchestrates indicators and rules, produces structured signals |
+| **Visualization** | `ChartPlotter`, `OverlayRegistry`, `OverlayHandlers` | Candlesticks with high-signal overlays |
+| **Backtesting** | `Backtester`, `StrategyEngine` | Simulate strategy decisions over historical data |
+| **Monitoring**  | Loki (logs), Grafana (dashboards) | Docker services for system observability |
+| *(Planned)*     | Live Execution, Parameter Sweeps | Hooks for automated live trading and optimization |
 
 ---
 
-## ⚡ Makefile Commands
+## Strategy Framework Overview
 
-| Target               | Description                                                             |
-|----------------------|-------------------------------------------------------------------------|
-| `make db_up`         | Spin up **TimescaleDB** and **pgAdmin** containers and wait until ready |
-| `make db_down`       | Stop the TimescaleDB / pgAdmin containers                               |
-| `make db_logs`       | Tail TimescaleDB logs (`Ctrl-C` to quit)                                |
-| `make db_cli`        | Open a `psql` shell at `postgres://postgres:postgres@localhost:5432/postgres` |
-| `make test`          | Run the full pytest suite                                               |
-| `make test-unit`     | Run only unit tests (`-m "not integration"`)                           |
-| `make test-integration` | Run only tests tagged `@pytest.mark.integration`                     |
+| Component | Purpose |
+|----------|---------|
+| `Indicator` | Extracts features from OHLCV (levels, trendlines, VAH/VAL/POC) |
+| `SignalRule` | Stateless logic to evaluate market conditions |
+| `Strategy` | Registers indicators and rules, manages context, emits trade signals |
+| `DataContext` | Defines timeframe and range for each indicator instance |
+| `Signal` | Output object enriched with strategy and indicator metadata |
 
+Strategies can register the same indicator multiple times with different configurations and rules to support confluence across timeframes or techniques.
 
-## ⚡ Quick Start-up
+---
 
-> **Prerequisites**  
-> • Python 3.10+ with `venv`  
-> • [Docker Desktop](https://www.docker.com/products/docker-desktop/) running (needed for the TimescaleDB + pgAdmin containers)  
-> • GNU Make (pre-installed on macOS/Linux; Windows users can use the Git-Bash version or **WSL**)
+## Indicators Summary
+
+| Indicator | Status | Purpose | Overlay Features |
+|-----------|--------|---------|------------------|
+| **Pivot Level** | Complete | Convert swing highs/lows into support/resistance zones | Timeframe coloring, touchpoint dots |
+| **Market Profile (TPO)** | Complete | Compute value areas and merged sessions | VA bands, dashed session overlays |
+| **Trendline** | Complete | Auto-detect dynamic trendlines from pivots | Line overlays, breakout regions |
+| **VWAP** | Complete | Compute value areas from intraday volume | Rolling session anchors, POC tracking |
+
+---
+
+## Makefile Commands
+
+| Target            | Description |
+|-------------------|-------------|
+| `make setup`      | Start TimescaleDB, pgAdmin, Grafana, and Loki containers |
+| `make shutdown`   | Stop all containers |
+| `make db_cli`     | Open a `psql` shell to TimescaleDB |
+| `make run`        | Run the app with `PYTHONPATH` set to the project root |
+| `make test`       | Run all tests |
+| `make test-unit`  | Run only unit tests |
+| `make test-integration` | Run only integration tests |
+| `make status`     | Show status of running containers |
+| `make dev`        | Run the local dev startup script (`scripts/dev_startup.sh`) |
+
+---
+
+## Quick Start
+
+**Prerequisites**
+- Python 3.10+
+- Docker Desktop
+- GNU Make (comes with macOS/Linux; Windows users can use Git Bash or WSL)
 
 ```bash
-# 0) clone the repo
+# Clone the repo
 git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
 cd quant-trad
 
-# 1) spin-up TimescaleDB (+ pgAdmin) in Docker
-make db_up 
+# Start core services (TimescaleDB, pgAdmin, Grafana, Loki)
+make setup 
 
-# 2) create / activate virtual-env and install deps
-python -m venv .venv && source .venv/bin/activate
+# Create and activate virtual environment
+python -m venv env && source env/bin/activate
 pip install -r requirements.txt
 
-# 3) run the full test-suite
+# Run tests
 make test            # or: make test-unit / make test-integration
 
-# 4) (optional) open a psql shell
-make db_cli          # \q to exit
+# Launch TimescaleDB CLI (optional)
+make db_cli
 
-# 5) shut containers down when finished
-make db_down
+# Shut down services when done
+make shutdown
