@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from src.indicators.TrendlineIndicator import TrendlineIndicator, Trendline
+from src.indicators.trendline import TrendlineIndicator, Trendline
 from data_providers.alpaca_provider import AlpacaProvider
 from src.indicators.config import DataContext
 
