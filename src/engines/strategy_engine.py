@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 import pandas as pd
 
-from src.indicators.base import BaseIndicator
+from indicators.base import BaseIndicator
 
 
 class StrategyEngine:

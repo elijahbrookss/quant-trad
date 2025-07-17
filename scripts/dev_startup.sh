@@ -5,13 +5,7 @@ set -e
 # -------------------------------
 # 🔧 Dev Setup Script
 # -------------------------------
-echo "🚀 Initializing development environment..."
-
-# 1. Check for Python
-if ! command -v python3 &> /dev/null; then
-  echo "Python3 is not installed. Please install it manually."
-  exit 1
-fi
+echo "Initializing development environment..."
 
 # 2. Create virtual environment if missing
 if [ ! -d "env" ]; then
@@ -23,6 +17,13 @@ fi
 
 # 3. Activate virtual environment
 source env/bin/activate || { echo "Failed to activate virtual environment. This must be resolved manually."; exit 1; }
+
+# Ensure we're in the virtual environment
+if [[ "$VIRTUAL_ENV" == "" ]]; then
+  echo "Virtual environment not active. Aborting dependency install."
+  exit 1
+fi
+
 
 # 4. Install dependencies
 if [ ! -f "requirements.txt" ]; then
@@ -51,10 +52,11 @@ fi
 
 # 7. Validate PYTHONPATH
 if [[ ":$PYTHONPATH:" != *":$(pwd)/src:"* ]]; then
-  export PYTHONPATH=$(pwd)/src:$PYTHONPATH
+  export PYTHONPATH=$(pwd)
   echo "PYTHONPATH set to: $PYTHONPATH"
 fi
 
 # 8. Finish
 echo "Dev environment ready. Suggested next step:"
+echo "source env/bin/activate"
 echo "python src/main.py"

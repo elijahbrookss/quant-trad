@@ -2,13 +2,13 @@ import pandas as pd
 import time
 from core.logger import logger
 
-from src.indicators.MarketProfileIndicator import MarketProfileIndicator
+from indicators.market_profile import MarketProfileIndicator
 from data_providers.alpaca_provider import AlpacaProvider
-from src.indicators.config import DataContext
-from src.signals.market_profile_signal import MarketProfileSignalGenerator
+from indicators.config import DataContext
+from signals.engine.market_profile_generator import MarketProfileSignalGenerator
 from dotenv import load_dotenv
 
-# Load environment variables from .env files
+# Load environment variables from .env filess
 load_dotenv("secrets.env")
 load_dotenv(".env")
 
