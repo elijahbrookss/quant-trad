@@ -1,6 +1,6 @@
 import pandas as pd
 import time
-from src.core.logger import logger
+from core.logger import logger
 
 from src.indicators.MarketProfileIndicator import MarketProfileIndicator
 from data_providers.alpaca_provider import AlpacaProvider
