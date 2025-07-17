@@ -7,8 +7,8 @@ from mplfinance.plotting import make_addplot
 import logging
 
 from core.logger import logger
-from indicators.base import BaseIndicator
-from indicators.config import DataContext
+from .base import BaseIndicator
+from .config import DataContext
 
 
 class MarketProfileIndicator(BaseIndicator):
