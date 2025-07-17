@@ -5,7 +5,7 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, ProgrammingError
 from core.logger import logger
 from indicators.config import DataContext
 from core.chart_plotter import ChartPlotter
@@ -22,6 +22,10 @@ class DataSource(str, Enum):
 class BaseDataProvider(ABC):
     _dsn = os.getenv("PG_DSN")
     _table = os.getenv("OHLC_TABLE")
+
+    if not _dsn:
+        raise ValueError("PG_DSN is not defined. Check your .env or environment variables.")
+
     _engine = create_engine(_dsn)
 
     @abstractmethod
@@ -61,12 +65,7 @@ class BaseDataProvider(ABC):
             logger.exception("Failed to ensure schema for '%s': %s", self._table, e)
             raise
 
-    def ingest_history(
-        self,
-        ctx: DataContext,
-        days: int = 30
-    ) -> int:
-        # Fill in start/end if not defined in DataContext
+    def ingest_history(self, ctx: DataContext, days: int = 30) -> int:
         start = ctx.start
         end = ctx.end
 
@@ -78,8 +77,8 @@ class BaseDataProvider(ABC):
 
         try:
             logger.debug("Fetching data for %s [%s] from %s to %s", ctx.symbol, ctx.interval, ctx.start, ctx.end)
-
             df = self.fetch_from_api(ctx.symbol, ctx.start, ctx.end, ctx.interval)
+
             if df is None or df.empty:
                 logger.warning("No data returned for %s (%s).", ctx.symbol, ctx.interval)
                 return 0
@@ -96,13 +95,14 @@ class BaseDataProvider(ABC):
         try:
             with self._engine.connect() as conn:
                 with conn.begin():
-                    conn.execute(
-                        text(f"CREATE TEMP TABLE tmp (LIKE {self._table}) ON COMMIT DROP;")
-                    )
-                    df.to_sql("tmp", conn, if_exists="append", index=False, method="multi")
-                    conn.execute(
-                        text(f"INSERT INTO {self._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;")
-                    )
+                    conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {self._table}) ON COMMIT DROP;"))
+                    try:
+                        df.to_sql("tmp", conn, if_exists="append", index=False, method="multi")
+                    except Exception as e:
+                        logger.exception("Failed to write to temp table 'tmp': %s", e)
+                        raise
+
+                    conn.execute(text(f"INSERT INTO {self._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;"))
 
             logger.info("Ingested %d rows for %s [%s].", len(df), ctx.symbol, ctx.interval)
             return len(df)
@@ -111,33 +111,44 @@ class BaseDataProvider(ABC):
             logger.exception("DB error during ingest_history for %s: %s", ctx.symbol, e)
             raise
 
-
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
         ctx.validate()
 
         def query_ohlcv():
-            query = text(f"""
-                SELECT timestamp, open, high, low, close, volume
-                FROM {self._table}
-                WHERE symbol = :symbol
-                AND datasource = :ds
-                AND interval = :interval
-                AND timestamp BETWEEN :start AND :end
-                ORDER BY timestamp
-            """)
-            return pd.read_sql(query, self._engine, params={
-                "symbol": ctx.symbol,
-                "ds": self.get_datasource(),
-                "interval": ctx.interval,
-                "start": ctx.start,
-                "end": ctx.end,
-            })
+            try:
+                query = text(f"""
+                    SELECT timestamp, open, high, low, close, volume
+                    FROM {self._table}
+                    WHERE symbol = :symbol
+                    AND datasource = :ds
+                    AND interval = :interval
+                    AND timestamp BETWEEN :start AND :end
+                    ORDER BY timestamp
+                """)
+                return pd.read_sql(query, self._engine, params={
+                    "symbol": ctx.symbol,
+                    "ds": self.get_datasource(),
+                    "interval": ctx.interval,
+                    "start": ctx.start,
+                    "end": ctx.end,
+                })
+            except ProgrammingError as e:
+                if "does not exist" in str(e).lower():
+                    logger.warning("Table '%s' does not exist. Auto-creating schema.", self._table)
+                    self.ensure_schema()
+                    return pd.DataFrame()
+                else:
+                    logger.exception("Query failed for table '%s': %s", self._table, e)
+                return pd.DataFrame()
+            except SQLAlchemyError as e:
+                logger.exception("Database error during OHLCV query: %s", e)
+                return pd.DataFrame()
 
         df = query_ohlcv()
 
         if df.empty:
             logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
-                        ctx.symbol, ctx.interval, ctx.start, ctx.end)
+                           ctx.symbol, ctx.interval, ctx.start, ctx.end)
             try:
                 self.ingest_history(ctx)
                 df = query_ohlcv()
@@ -152,7 +163,7 @@ class BaseDataProvider(ABC):
         df.set_index("timestamp", inplace=True)
         df["timestamp"] = df.index
         return df
-    
+
     def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):
         df = self.get_ohlcv(plot_ctx)
         title = title or f"{plot_ctx.symbol} | {plot_ctx.interval}"
