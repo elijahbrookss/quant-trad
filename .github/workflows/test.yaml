@@ -18,23 +18,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install GitHub CLI
-        run: |
-          sudo apt update
-          sudo apt install -y curl unzip
-          curl -s https://api.github.com/repos/cli/cli/releases/latest \
-            | grep "browser_download_url.*linux_amd64.deb" \
-            | cut -d '"' -f 4 \
-            | wget -qi -
-          sudo dpkg -i gh_*_linux_amd64.deb
-
-
-      - name: Run tests in Docker with coverage
+      - name: Run tests with coverage inside Docker
         run: |
           docker compose -f docker/docker-compose.test.yml run --rm \
-            --env ALPACA_API_KEY="${ALPACA_API_KEY}" \
-            --env ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
-            test pytest --cov=src --cov-report=term --cov-report=xml
+            -e ALPACA_API_KEY="${ALPACA_API_KEY}" \
+            -e ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
+            test bash -c "
+              pytest --cov=src --cov-report=term --cov-report=xml &&
+              echo '' &&
+              echo '========== Coverage Summary ==========' &&
+              coverage report &&
+              echo '======================================='
+            "
 
       - name: Tear down containers
         if: always()
@@ -48,32 +43,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload indicator chart artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: indicator-charts
           path: output/integration_tests/**/*.png
           if-no-files-found: ignore
-
-      - name: Post coverage report as PR comment
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-        run: |
-          echo '### 📊 Code Coverage Summary' > coverage-comment.md
-          echo '```' >> coverage-comment.md
-          docker compose -f docker/docker-compose.test.yml run --rm \
-            --env ALPACA_API_KEY="${ALPACA_API_KEY}" \
-            --env ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
-            test coverage report >> coverage-comment.md
-          echo '```' >> coverage-comment.md
-
-          PR_NUMBER=${{ github.event.pull_request.number }}
-
-          if [ -n "$PR_NUMBER" ]; then
-            gh api repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-              -f body="$(cat coverage-comment.md)"
-          else
-            echo "No PR number found — skipping comment."
-          fi
