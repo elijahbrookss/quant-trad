@@ -2,8 +2,8 @@
 
 import pytest
 import pandas as pd
-from src.indicators.market_profile import MarketProfileIndicator
-from src.indicators.config import DataContext
+from indicators.market_profile import MarketProfileIndicator
+from indicators.config import DataContext
 from data_providers.alpaca_provider import AlpacaProvider
 
 
@@ -166,8 +166,8 @@ def test_merge_value_areas_unit(dummy_df):
     # Expect a single merged entry:
     assert len(merged) == 1
     m = merged[0]
-    assert m["start_date"] == day1_start
-    assert m["end_date"]   == day2_end
+    assert m["start"] == day1_start
+    assert m["end"]   == day2_end
     assert m["VAL"] == pytest.approx(99.0)
     assert m["VAH"] == pytest.approx(102.0)
     assert m["POC"] == pytest.approx((100.0 + 101.0) / 2)

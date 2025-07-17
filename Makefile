@@ -2,6 +2,9 @@
 
 .PHONY: setup shutdown db_cli test test-integration test-unit run status
 
+# Ensure virtual environment is set up
+VENV_CHECK=test -f env/bin/activate || { echo \"❌ Virtualenv not found. Run 'make dev' first.\"; exit 1; }
+
 ## Start all required containers (TimescaleDB, pgAdmin, Grafana, Loki)
 setup:
 	docker compose up -d timescaledb pgadmin grafana loki
@@ -24,22 +27,23 @@ db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"
 	@echo "Use \\q to exit the shell"
 
-## Run all tests
+## Run the main program with virtual environment and PYTHONPATH=project root
+run:
+	@echo "Running application with PYTHONPATH=$(pwd)"
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && export PYTHONPATH=$(pwd) && python3 src/main.py"
+
+## Run all tests with virtual environment
 test:
-	pytest -v tests/
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v tests/"
 
 ## Run only unit tests
 test-unit:
-	pytest -v -m "not integration" tests/
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m 'not integration' tests/"
 
 ## Run only integration tests
 test-integration:
-	pytest -v -m integration tests/
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m integration tests/"
 
-## Run the main program with virtual environment and PYTHONPATH=src
-run:
-	@echo "Running application with PYTHONPATH=src"
-	@bash -c "source env/bin/activate && PYTHONPATH=src python3 src/main.py"
 
 ## Show running container status
 status:

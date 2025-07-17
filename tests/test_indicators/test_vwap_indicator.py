@@ -1,8 +1,8 @@
 import pytest
 import pandas as pd
 from data_providers.alpaca_provider import AlpacaProvider
-from src.indicators.vwap import VWAPIndicator
-from src.indicators.config import DataContext
+from indicators.vwap import VWAPIndicator
+from indicators.config import DataContext
 from matplotlib.patches import Patch
 
 @pytest.mark.integration

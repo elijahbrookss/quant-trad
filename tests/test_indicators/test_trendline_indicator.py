@@ -1,9 +1,9 @@
 import pytest
 import pandas as pd
 import numpy as np
-from src.indicators.trendline import TrendlineIndicator, Trendline
+from indicators.trendline import TrendlineIndicator, Trendline
 from data_providers.alpaca_provider import AlpacaProvider
-from src.indicators.config import DataContext
+from indicators.config import DataContext
 
 @pytest.mark.integration
 def test_trendline_indicator_plot():
