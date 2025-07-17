@@ -31,14 +31,14 @@ jobs:
 
       - name: Run tests in Docker with coverage
         run: |
-          docker compose -f docker-compose.test.yml run --rm \
+          docker compose -f docker/docker-compose.test.yml run --rm \
             --env ALPACA_API_KEY="${ALPACA_API_KEY}" \
             --env ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
             test pytest --cov=src --cov-report=term --cov-report=xml
 
       - name: Tear down containers
         if: always()
-        run: docker compose -f docker-compose.test.yml down
+        run: docker compose -f docker/docker-compose.test.yml down
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -63,7 +63,7 @@ jobs:
         run: |
           echo '### 📊 Code Coverage Summary' > coverage-comment.md
           echo '```' >> coverage-comment.md
-          docker compose -f docker-compose.test.yml run --rm \
+          docker compose -f docker/docker-compose.test.yml run --rm \
             --env ALPACA_API_KEY="${ALPACA_API_KEY}" \
             --env ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
             test coverage report >> coverage-comment.md
