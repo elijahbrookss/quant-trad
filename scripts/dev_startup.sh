@@ -58,5 +58,8 @@ fi
 
 # 8. Finish
 echo "Dev environment ready. Suggested next step:"
-echo "source env/bin/activate"
-echo "python src/main.py"
+echo "make setup"
+echo "To run the application, use:"
+echo "make run"
+echo "To run tests, use:"
+echo "make test"
