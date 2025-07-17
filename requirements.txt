@@ -16,3 +16,4 @@ setuptools
 alpaca-py
 pytest
 requests
+pytest-cov

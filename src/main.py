@@ -9,9 +9,11 @@ from signals.engine.market_profile_generator import MarketProfileSignalGenerator
 from dotenv import load_dotenv
 
 # Load environment variables from .env filess
-load_dotenv("secrets.env")
-load_dotenv(".env")
 
+# Only load .env if not running inside GitHub Actions
+if not os.getenv("GITHUB_ACTIONS"):
+    load_dotenv("secrets.env")
+    load_dotenv(".env")
 
 symbol = "CL"
 end = "2025-07-15"
