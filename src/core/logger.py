@@ -3,8 +3,10 @@ from utils.logging_utils import LokiHandler, ExcludeLoggerFilter
 from dotenv import load_dotenv
 import os
 
-load_dotenv("secrets.env")
-load_dotenv(".env")
+# Only load .env if not running inside GitHub Actions
+if not os.getenv("GITHUB_ACTIONS"):
+    load_dotenv("secrets.env")
+    load_dotenv(".env")
 
 debug_mode = True if os.getenv("DEBUG", "false").lower() == "true" else False
 

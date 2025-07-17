@@ -7,7 +7,7 @@ VENV_CHECK=test -f env/bin/activate || { echo \"❌ Virtualenv not found. Run 'm
 
 ## Start all required containers (TimescaleDB, pgAdmin, Grafana, Loki)
 setup:
-	docker compose up -d timescaledb pgadmin grafana loki
+	docker compose -f docker/docker-compose.local.yml docker up -d timescaledb pgadmin grafana loki
 	@echo "⏳ Waiting for TimescaleDB to be ready..."
 	@while ! docker exec tsdb pg_isready -U postgres >/dev/null 2>&1; do \
 		echo "Waiting for TimescaleDB..."; \
