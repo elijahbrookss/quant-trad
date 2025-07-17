@@ -2,7 +2,7 @@
 
 import pytest
 import pandas as pd
-from src.indicators.MarketProfileIndicator import MarketProfileIndicator
+from src.indicators.market_profile import MarketProfileIndicator
 from src.indicators.config import DataContext
 from data_providers.alpaca_provider import AlpacaProvider
 

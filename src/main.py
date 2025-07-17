@@ -6,6 +6,12 @@ from src.indicators.MarketProfileIndicator import MarketProfileIndicator
 from data_providers.alpaca_provider import AlpacaProvider
 from src.indicators.config import DataContext
 from src.signals.market_profile_signal import MarketProfileSignalGenerator
+from dotenv import load_dotenv
+
+# Load environment variables from .env files
+load_dotenv("secrets.env")
+load_dotenv(".env")
+
 
 symbol = "CL"
 end = "2025-07-15"
