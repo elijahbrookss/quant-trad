@@ -1,5 +1,5 @@
 import logging
-from .logging_utils import LokiHandler, ExcludeLoggerFilter
+from src.utils.logging_utils import LokiHandler, ExcludeLoggerFilter
 
 LOG_FMT = "%(asctime)s %(levelname)-5s %(filename)s:%(lineno)d | %(message)s"
 logging.basicConfig(level=logging.DEBUG, format=LOG_FMT)
