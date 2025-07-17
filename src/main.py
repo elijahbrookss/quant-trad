@@ -7,6 +7,7 @@ from data_providers.alpaca_provider import AlpacaProvider
 from indicators.config import DataContext
 from signals.engine.market_profile_generator import MarketProfileSignalGenerator
 from dotenv import load_dotenv
+import os
 
 # Load environment variables from .env filess
 
