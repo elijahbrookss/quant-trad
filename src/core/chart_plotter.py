@@ -1,13 +1,13 @@
 import pandas as pd
 import mplfinance as mpf
 from typing import Optional, List, Any, Set, Tuple
-from src.core.logger import logger
+from core.logger import logger
 import os
 import matplotlib.pyplot as plt
 from matplotlib import patches
-from src.indicators.config import DataContext
-from src.core.overlay_registry import get_overlay_handler
-import src.core.overlay_handlers
+from indicators.config import DataContext
+from core.overlay_registry import get_overlay_handler
+import core.overlay_handlers
 import numpy as np
 
 

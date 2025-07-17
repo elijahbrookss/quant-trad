@@ -3,7 +3,7 @@ import pandas as pd
 
 from pathlib import Path
 from typing import Tuple
-from src.core.logger import logger
+from core.logger import logger
 
 ARTIFACT_ROOT = Path("artifacts")
 

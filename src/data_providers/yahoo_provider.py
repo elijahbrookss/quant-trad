@@ -1,7 +1,7 @@
 import datetime as dt
 import pandas as pd
 import yfinance as yf
-from src.core.logger import logger
+from core.logger import logger
 from .base_provider import DataSource
 from .base_provider import BaseDataProvider
 

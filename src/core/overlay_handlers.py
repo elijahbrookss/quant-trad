@@ -2,7 +2,7 @@ import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 import matplotlib.transforms as mtransforms
 from .overlay_registry import register_overlay_handler
-from src.core.logger import logger
+from core.logger import logger
 import pandas as pd
 import mplfinance as mpf
 import numpy as np
