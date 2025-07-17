@@ -78,12 +78,11 @@ Strategies can register the same indicator multiple times with different configu
 git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
 cd quant-trad
 
+# Create dev setup
+make dev
+
 # Start core services (TimescaleDB, pgAdmin, Grafana, Loki)
 make setup 
-
-# Create and activate virtual environment
-python -m venv env && source env/bin/activate
-pip install -r requirements.txt
 
 # Run tests
 make test            # or: make test-unit / make test-integration
