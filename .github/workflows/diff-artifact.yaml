@@ -1,0 +1,54 @@
+name: Generate Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Ensure full history
+
+      - name: Set branch info
+        id: branch-info
+        run: |
+          echo "head_ref=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+          echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+
+      - name: Fetch base and head branches
+        run: |
+          git fetch origin ${{ github.base_ref }} ${{ github.head_ref }}
+
+      - name: Generate git diff patch
+        run: |
+          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > full_diff.patch
+
+      - name: Upload patch file
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-diff
+          path: full_diff.patch
+
+      # - name: Set up Python
+      #   uses: actions/setup-python@v4
+      #   with:
+      #     python-version: "3.10"
+
+      # - name: Install dependencies
+      #   run: pip install openai
+
+      # - name: Generate changelog with OpenAI
+      #   env:
+      #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      #   run: |
+      #     python scripts/generate_changelog.py
+
+      # - name: Upload generated changelog
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: changelog
+      #     path: CHANGELOG.md
