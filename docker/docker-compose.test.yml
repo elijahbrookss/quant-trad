@@ -1,0 +1,33 @@
+
+services:
+  test:
+    build:
+      context: ..
+      dockerfile: docker/test/Dockerfile
+    volumes:
+      - ../:/app
+    working_dir: /app
+    env_file:
+      - ../.env.test
+    environment:
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: ["bash", "/app/wait-for-db.sh", "pytest", "--cov=src", "--cov-report=term", "--cov-report=xml"]
+
+
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
