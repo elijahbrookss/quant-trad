@@ -5,6 +5,18 @@ from engines.strategy_engine import StrategyEngine
 from indicators.base import BaseIndicator
 from dataclasses import dataclass
 
+# Prometheus metrics integration
+from prometheus_client import start_http_server, Counter, Histogram
+import time
+
+# Metrics definitions
+ORDER_LATENCY = Histogram('order_latency_seconds', 'Order execution latency in seconds')
+TRADES_EXECUTED = Counter('trades_executed_total', 'Total trades executed')
+TRADE_ERRORS = Counter('trade_errors_total', 'Total trade errors')
+
+# Start Prometheus metrics server (port matches prometheus.yml)
+start_http_server(8001)
+
 class Trade:
     def __init__(self, entry_time, entry_price, direction):
         self.entry_time = entry_time
@@ -77,7 +89,7 @@ class Backtester:
         self.trades: List[Trade] = []
 
     def run(self) -> pd.DataFrame:
-        """Simulate trades over the DataFrame."""
+        """Simulate trades over the DataFrame and record Prometheus metrics."""
         position: Optional[Trade] = None
 
         # ---- Wilder ATR (True Range w/ Wilder smoothing) ----
@@ -97,33 +109,46 @@ class Backtester:
             price = row['Close']
             atr_val = atr.loc[idx]
 
-            # Entry logic
+            # Entry logic with Prometheus metrics
             if position is None and score >= self.entry_threshold:
-                position = Trade(idx, price, direction)
-                self.trades.append(position)
-                # Compute static stops/targets
-                sl = self.stop_loss * atr_val
-                tp = self.take_profit * atr_val
-                if direction == 'long':
-                    position.stop_price = price - sl
-                    position.target_price = price + tp
-                else:
-                    position.stop_price = price + sl
-                    position.target_price = price - tp
+                start = time.time()
+                try:
+                    position = Trade(idx, price, direction)
+                    self.trades.append(position)
+                    # Compute static stops/targets
+                    sl = self.stop_loss * atr_val
+                    tp = self.take_profit * atr_val
+                    if direction == 'long':
+                        position.stop_price = price - sl
+                        position.target_price = price + tp
+                    else:
+                        position.stop_price = price + sl
+                        position.target_price = price - tp
+                    TRADES_EXECUTED.inc()
+                except Exception as e:
+                    TRADE_ERRORS.inc()
+                    raise
+                finally:
+                    latency = time.time() - start
+                    ORDER_LATENCY.observe(latency)
 
             # Exit logic
             if position is not None and position.exit_time is None:
                 low, high = row['Low'], row['High']
-                if position.direction == 'long':
-                    if low <= position.stop_price:
-                        position.close(idx, position.stop_price)
-                    elif high >= position.target_price:
-                        position.close(idx, position.target_price)
-                else:
-                    if high >= position.stop_price:
-                        position.close(idx, position.stop_price)
-                    elif low <= position.target_price:
-                        position.close(idx, position.target_price)
+                try:
+                    if position.direction == 'long':
+                        if low <= position.stop_price:
+                            position.close(idx, position.stop_price)
+                        elif high >= position.target_price:
+                            position.close(idx, position.target_price)
+                    else:
+                        if high >= position.stop_price:
+                            position.close(idx, position.stop_price)
+                        elif low <= position.target_price:
+                            position.close(idx, position.target_price)
+                except Exception as e:
+                    TRADE_ERRORS.inc()
+                    raise
 
         # Build results DataFrame
         if not self.trades:
