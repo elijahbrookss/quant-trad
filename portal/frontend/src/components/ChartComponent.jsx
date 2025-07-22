@@ -1,16 +1,31 @@
-import { CandlestickSeries, createChart } from 'lightweight-charts';
+import { CandlestickSeries, createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
 import React, { useEffect, useRef } from 'react';
 
-function generateMockOHLC(count = 50) {
-  // timestamp, open, high, low, close
-  const now = Date.now();
-  return Array.from({ length: count }).map((_, i) => ({
-    time: (now - (count - i) * 60000) / 1000,
-    open: Math.random() * 100,
-    high: Math.random() * 100 + 5,
-    low: Math.random() * 100 - 5,
-    close: Math.random() * 100,
-  }));
+function generateMockOHLC(
+  count = 1000,
+  basePrice = 100,
+  volatility = 2,
+  intervalSec = 60 * 60
+) {
+  const now = Math.floor(Date.now() / 1000);
+  const data = [];
+  let lastClose = basePrice;
+
+  for (let i = 0; i < count; i++) {
+    const time = now - (count - i) * intervalSec;
+    const open = lastClose;
+    const change = (Math.random() * 2 - 1) * volatility;
+    const close = open + change;
+    const high =
+      Math.max(open, close) + Math.random() * (volatility * 0.5);
+    const low =
+      Math.min(open, close) - Math.random() * (volatility * 0.5);
+
+    data.push({ time, open, high, low, close });
+    lastClose = close;
+  }
+
+  return data;
 }
 
 
@@ -21,25 +36,53 @@ export const ChartComponent = () => {
     
     const chartOptions = {
       layout: {
-        textColor: 'black',
-        backgroundColor: { type: 'solid', color: 'white' },
+        textColor: '#DDD',
+        background: { color: '#222' },
       },
+      grid: {
+        vertLines: {
+          color: "#444",
+        },
+        horzLines: {
+          color: "#444",
+        }
+      }
     };
 
     const handleResize = () => {
       chart.applyOptions({ width: chartContainerRef.current.clientWidth });
     };
 
-    const chart = createChart(chartContainerRef.current, chartOptions);
+  const chart = createChart(chartContainerRef.current, chartOptions);
+
    chart.timeScale().fitContent();
 
     const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#4FFF00',
-      downColor: '#FF4976',
+      wickUpColor: 'rgb(54, 116, 217)',
+      upColor: 'rgb(54, 116, 217)',
+      wickDownColor: 'rgb(225, 50, 85)',
+      downColor: 'rgb(225, 50, 85)',
       borderVisible: false,
-      wickVisible: true,
     });
-    candlestickSeries.setData(generateMockOHLC(50));
+    chart.applyOptions({
+        crosshair: {
+            mode: CrosshairMode.Normal,
+
+            vertLine: {
+                width: 8,
+                color: '#C3BCDB45',
+                style: LineStyle.Solid,
+                labelBackgroundColor: '#black',
+            },
+
+            horzLine: {
+                color: '#C3BCDB70',
+                labelBackgroundColor: '#black',
+            },
+        },
+    });
+
+    candlestickSeries.setData(generateMockOHLC());
 
     window.addEventListener('resize', handleResize);
 
