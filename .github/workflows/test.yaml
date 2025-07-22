@@ -1,0 +1,51 @@
+name: Dockerized Tests with Coverage
+
+on:
+  push:
+    branches: [develop, test, main]
+  pull_request:
+    branches: [develop, test, main]
+
+env:
+  ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+  ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run tests with coverage inside Docker
+        run: |
+          docker compose -f docker/docker-compose.test.yml run --rm \
+            -e ALPACA_API_KEY="${ALPACA_API_KEY}" \
+            -e ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
+            test bash -c "
+              pytest --cov=src --cov-report=term --cov-report=xml &&
+              echo '' &&
+              echo '========== Coverage Summary ==========' &&
+              coverage report &&
+              echo '======================================='
+            "
+
+      - name: Tear down containers
+        if: always()
+        run: docker compose -f docker/docker-compose.test.yml down
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Upload indicator chart artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: indicator-charts
+          path: output/integration_tests/**/*.png
+          if-no-files-found: ignore

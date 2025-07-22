@@ -1,44 +1,56 @@
-# Makefile
-.PHONY: db_up db_down db_logs db_cli test test-integration test-unit grafana_up env
+# Makefile for local dev: setup containers, run app, and run tests
 
-db_up:
-	docker compose up -d timescaledb
-	@echo "Waiting for TimescaleDB to start..."
-	@while ! docker exec -it tsdb pg_isready -U postgres; do \
-		echo "Waiting for TimescaleDB to be ready..."; \
+.PHONY: setup shutdown db_cli test test-integration test-unit run status
+
+# Ensure virtual environment is set up
+VENV_CHECK=test -f env/bin/activate || { echo \"❌ Virtualenv not found. Run 'make dev' first.\"; exit 1; }
+
+## Start all required containers (TimescaleDB, pgAdmin, Grafana, Loki)
+setup:
+	docker compose -f docker/docker-compose.local.yml up -d timescaledb pgadmin grafana loki
+	@echo "⏳ Waiting for TimescaleDB to be ready..."
+	@while ! docker exec tsdb pg_isready -U postgres >/dev/null 2>&1; do \
+		echo "Waiting for TimescaleDB..."; \
 		sleep 2; \
 	done
-	@echo "TimescaleDB is ready!"
-	docker compose up -d pgadmin
-	@echo Use the following command to view the IP address of the TimescaleDB container:
-	@echo "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tsdb"
-	@echo "You can also connect using pgAdmin at http://localhost:8080"
+	@echo "TimescaleDB is ready"
+	@echo "pgAdmin → http://localhost:8080"
+	@echo "Grafana → http://localhost:3000"
 
-db_down:
-	docker compose stop timescaledb
-	docker compose stop pgadmin
+## Stop all containers
+shutdown:
+	docker compose -f docker/docker-compose.local.yml stop timescaledb pgadmin grafana loki
+	@echo "All containers stopped"
 
-db_logs:
-	docker compose logs -f timescaledb
-
-grafana_up:
-	docker compose up -d loki grafana
-	@echo "Grafana is running at http://localhost:3000"
-	
-# quick psql shell (requires psql client installed inside WSL/Windows)
+## Open a psql shell to TimescaleDB
 db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"
-	@echo "Connected to TimescaleDB. Use \q to exit."
+	@echo "Use \\q to exit the shell"
 
-env:
-	@echo "To activate the virtual environment, run:"
-	@echo "source .venv/bin/activate"
+## Run the main program with virtual environment and PYTHONPATH=project root
+run:
+	@echo "Running application with PYTHONPATH=$(pwd)"
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && export PYTHONPATH=$(pwd) && python3 src/main.py"
 
-test:  ## Run all tests
-	pytest -v tests/
+## Run all tests with virtual environment
+test:
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v tests/"
 
-test-unit:  ## Run only unit tests (if you tag with @pytest.mark.unit)
-	pytest -v -m "not integration" tests/
+## Run only unit tests
+test-unit:
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m 'not integration' tests/"
 
-test-integration:  ## Run only integration tests
-	pytest -v -m integration tests/
+## Run only integration tests
+test-integration:
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m integration tests/"
+
+
+## Show running container status
+status:
+	@docker compose ps --status=running
+
+
+## Run development startup script
+dev:
+	@echo "Running dev startup script..."
+	@./scripts/dev_startup.sh

@@ -7,3 +7,5 @@ artifacts/
 secrets.env
 .vscode/
 .pytest_cache/
+env/
+output/
