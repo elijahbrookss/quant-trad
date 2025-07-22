@@ -1,33 +1,33 @@
 import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { ChartComponent } from './components/ChartComponent'
+import { TimeframeSelect, SymbolInput} from './components/TimeframeSelectComponent'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [symbol, setSymbol] = useState('AAPL')
+  const [timeframe, setTimeframe] = useState('1h')
 
   return (
     <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+      <div className="bg-neutral-900 text-white min-h-screen p-5">
+        <h1 className="text-3xl font-bold text-center mt-10">
+          QuantTrad
+        </h1>
+        <div className="max-w-4xl mx-auto mt-10 p-5 bg-neutral-800 rounded-lg shadow-lg">
+          <div className="flex justify-left space-x-4">
+            <TimeframeSelect
+              selected={timeframe}
+              onChange={setTimeframe}
+            />
+            <SymbolInput
+              value={symbol}
+              onChange={setSymbol}
+            />
+          </div>
+          <div className="flex justify-center mt-3 rounded-lg overflow-hidden h-120 bg-gray-800">
+            <ChartComponent />
+          </div>
+        </div>
       </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
     </>
   )
 }
