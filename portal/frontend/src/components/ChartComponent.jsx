@@ -37,7 +37,7 @@ export const ChartComponent = () => {
     const chartOptions = {
       layout: {
         textColor: '#DDD',
-        background: { color: '#222' },
+        background: { color: '#1E1E1E' },
       },
       grid: {
         vertLines: {
@@ -92,5 +92,5 @@ export const ChartComponent = () => {
     };
   }, []);
 
-  return <div ref={chartContainerRef} style={{ width: '1000px', height: '500px' }} />;
+  return <div ref={chartContainerRef} className='h-full w-full bg-transparent' />;
 }
