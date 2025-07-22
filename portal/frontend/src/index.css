@@ -1,5 +1,2 @@
 @import "tailwindcss";
-
-.bg-primary {
-  background-color: #303030a1;
-}
+@source '../node_modules/react-tailwindcss-datepicker/dist/index.esm.js'
