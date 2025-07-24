@@ -22,7 +22,7 @@ function App() {
 
     {/* Title */}
     <h1 className="text-3xl font-bold text-center mt-10">
-      QuantTrad
+      QuantTrad Lab
     </h1>
 
     {/* Chart + Indicators Section */}
@@ -53,7 +53,7 @@ function App() {
 
         {/* 2) Indicators sidebar — fixed width, same height */}
         <div className="w-80 bg-neutral-900  shadow-2xl rounded-lg p-5 h-[400px] overflow-auto">
-          <h2 className="text-xl font-semibold mb-4">Indicators</h2>
+          <h2 className="text-xl font-semibold mb-4 text-center">Indicators</h2>
           {/* …your indicators here… */}
         </div>
 
