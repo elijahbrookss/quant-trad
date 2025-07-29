@@ -7,7 +7,7 @@ export const TabManager = () => {
   const [activeTab, setActiveTab] = useState(tabs[0])
 
   return (
-    <div className="p-6">
+    <div className="p-.5">
       {/* Top Tab Bar */}
       <div className="flex mb-4">
         {tabs.map((tab) => (
@@ -26,7 +26,7 @@ export const TabManager = () => {
       </div>
 
       {/* Tab Content */}
-      <div className="mt-4">
+      <div className="mt-1">
         {activeTab === 'Indicators' && (
           <div className="">
             <IndicatorSection />
