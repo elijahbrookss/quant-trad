@@ -1,76 +1,36 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, CrosshairMode, LineStyle, CandlestickSeries } from 'lightweight-charts'
+import { createChart, CandlestickSeries } from 'lightweight-charts'
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
 import { DateRangePickerComponent } from './DateTimePickerComponent'
-
-function generateMockOHLC(count = 1000, basePrice = 100, volatility = 2, intervalSec = 3600) {
-  const now = Math.floor(Date.now() / 1000)
-  const data = []
-  let lastClose = basePrice
-
-  for (let i = 0; i < count; i++) {
-    const time = now - (count - i) * intervalSec
-    const open = lastClose
-    const change = (Math.random() * 2 - 1) * volatility
-    const close = open + change
-    const high = Math.max(open, close) + Math.random() * (volatility * 0.5)
-    const low = Math.min(open, close) - Math.random() * (volatility * 0.5)
-    data.push({ time, open, high, low, close })
-    lastClose = close
-  }
-
-  return data
-}
+import { options, seriesOptions } from './ChartOptions'
 
 export const ChartComponent = () => {
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+
   const [symbol, setSymbol] = useState('AAPL')
   const [timeframe, setTimeframe] = useState('1h')
-
   // Default date range: last 45 days
   // Adjusted to ensure it doesn't exceed current time by 5 minutes
   const defaultEnd = new Date();
   defaultEnd.setMinutes(defaultEnd.getMinutes() - 5);
+
   const defaultStart = new Date();
   defaultStart.setDate(defaultStart.getDate() - 45);
 
   const [dateRange, setDateRange] = useState([defaultStart, defaultEnd]);
-
   const chartContainerRef = useRef()
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
 
   useEffect(() => {
-    const chart = createChart(chartContainerRef.current, {
-      layout: {
-        textColor: '#DDD',
-        background: { color: '#1E1E1E' },
-      },
-      grid: {
-        vertLines: { color: "#444" },
-        horzLines: { color: "#444" },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: {
-          width: 8,
-          color: '#C3BCDB45',
-          style: LineStyle.Solid,
-          labelBackgroundColor: '#000',
-        },
-        horzLine: {
-          color: '#C3BCDB70',
-          labelBackgroundColor: '#000',
-        },
-      }
-    });
+    const chart = createChart(chartContainerRef.current, { ...options });
+    chartRef.current = chart;
 
-    const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      wickUpColor: 'rgb(54, 116, 217)',
-      upColor: 'rgb(54, 116, 217)',
-      wickDownColor: 'rgb(225, 50, 85)',
-      downColor: 'rgb(225, 50, 85)',
-      borderVisible: false,
-    });
+    const series = chart.addSeries(CandlestickSeries, { ...seriesOptions });
+    seriesRef.current = series;
 
-    candlestickSeries.setData(generateMockOHLC());
+    loadChartData();
+
     chart.timeScale().fitContent();
 
     const handleResize = () => {
@@ -85,20 +45,63 @@ export const ChartComponent = () => {
 
   }, []);
 
-  const handlePrintState = () => {
-    console.log(
-      'Selected Controls:',
-      JSON.stringify(
-        {
-          symbol,
-          timeframe,
-          start: dateRange[0]?.toISOString(),
-          end: dateRange[1]?.toISOString(),
+
+  const loadChartData = async () => {
+    const response = await fetchCandleData({
+      symbol,
+      timeframe,
+      start: dateRange[0]?.toISOString(),
+      end: dateRange[1]?.toISOString(),
+    });
+
+    const formatted = response
+      .filter(c => c && typeof c.time === "number")
+      .map(c => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+
+    console.log("Fetched candles:", formatted);
+
+    if (seriesRef.current && formatted.length > 0) {
+      seriesRef.current.setData(formatted);
+      chartRef.current.timeScale().fitContent();
+    }
+  };
+
+  const fetchCandleData = async ({ symbol, timeframe, start, end }) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/candles`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        null,
-        2
-      )
-    );
+        body: JSON.stringify({ symbol, timeframe, start, end }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      return data.candles || [];
+    } catch (error) {
+      console.error("Error fetching candle data:", error);
+      return [];
+    }
+  };
+
+  const handlePrintState = () => {
+    console.log('Chart State:', {
+      symbol,
+      timeframe,
+      dateRange,
+      chart: chartRef.current,
+      series: seriesRef.current,
+    });
+
+    loadChartData();
   };
 
   return (
