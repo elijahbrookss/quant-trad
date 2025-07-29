@@ -1,28 +1,47 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 
-/**
- * Adapter to fetch indicator data from backend API
- * @returns {Promise<Array>} - array of candles
- */
-export async function fetchIndicators() {
-    console.log("[IndicatorAdapter] Fetching indicators from API...");
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/indicators`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-    });
-
-    console.log("[IndicatorAdapter] Response status:", res.status);
-    if (!res.ok) {
-      throw new Error(`API error: ${res.status} ${res.statusText}`);
-    }
-
-    const indicators = await res.json();
-    console.log("[IndicatorAdapter] Fetched indicators:", indicators);
-    return Array.isArray(indicators) ? indicators : [];
-
-  } catch (err) {
-    console.error("[CandleAdapter] fetch failed:", err);
-    return [];
+async function handleResponse(res) {
+  if (!res.ok) {
+    const txt = await res.text()
+    throw new Error(txt || res.statusText)
   }
+  return res.status === 204 ? null : res.json()
+}
+
+export async function fetchIndicators() {
+  const res = await fetch(`${BASE}/api/indicators/`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+export async function fetchIndicatorTypes() {
+  const res = await fetch(`${BASE}/api/indicators-types/`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+export async function createIndicator({ type, name, params }) {
+  const res = await fetch(`${BASE}/api/indicators/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, name, params }),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function updateIndicator(id, { type, name, params }) {
+  const res = await fetch(`${BASE}/api/indicators/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, name, params }),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function deleteIndicator(id) {
+  const res = await fetch(`${BASE}/api/indicators/${id}`, {
+    method: 'DELETE',
+    mode: 'cors',
+  })
+  return handleResponse(res)
 }

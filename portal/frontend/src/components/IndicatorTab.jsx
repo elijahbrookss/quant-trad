@@ -1,30 +1,59 @@
-import { useState, useEffect } from 'react'
-import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
+import React, { useState, useEffect } from 'react'
 import { Switch } from '@headlessui/react'
-import { fetchIndicators } from '../adapters/indicator.adapter'
+import {
+  fetchIndicators,
+  createIndicator,
+  updateIndicator,
+  deleteIndicator,
+} from '../adapters/indicator.adapter'
+import IndicatorModal from './IndicatorModal'
 
 export const IndicatorSection = () => {
   const [indicators, setIndicators] = useState([])
-  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState()
 
 
-    useEffect(() => {
-        const load = async () => {
-        try {
-            const data = await fetchIndicators()
-            setIndicators(data)
-        } catch (err) {
-            console.error(err)
-            setError(err.message || 'Failed to load indicators')
-        } finally {
-            setIsLoading(false)
-        }
-        }
-        load()
-    }, [])
+  // 1) load existing instances
+  useEffect(() => {
+    fetchIndicators()
+      .then(setIndicators)
+      .catch(e => setError(e.message))
+      .finally(() => setIsLoading(false))
+  }, [])
+
+    // 2) open modal in Create or Edit mode
+  const openCreate = () =>  { setEditing(null);    setError(null); setModalOpen(true) }
+  const openEdit   = (item) => { setEditing(item);  setError(null); setModalOpen(true) }
+
+    // 3) Save handler delegates to create/update adapter
+  const handleSave = async (meta) => {
+    try {
+      let result
+      if (meta.id) {
+        result = await updateIndicator(meta.id, { type: meta.type, params: meta.params })
+        setIndicators(indicators.map(i => i.id === result.id ? result : i))
+      } else {
+        result = await createIndicator({    type: meta.type, params: meta.params })
+        setIndicators([...indicators, result])
+      }
+      setModalOpen(false)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+    // 4) Delete instance
+  const handleDelete = async (id) => {
+    try {
+      await deleteIndicator(id)
+      setIndicators(indicators.filter(i => i.id !== id))
+    } catch (e) {
+      setError(e.message)
+    }
+  }
 
   const toggleEnable = (id) => {
     setIndicators((prev) =>
@@ -36,15 +65,10 @@ export const IndicatorSection = () => {
 
   const openEditModal = (indicator) => {
     setEditing(indicator)
-    setIsModalOpen(true)
+    setModalOpen(true)
+    setError(undefined)
   }
 
-  const handleSave = () => {
-    setIndicators((prev) =>
-      prev.map((i) => (i.id === editing?.id ? editing : i))
-    )
-    setIsModalOpen(false)
-  }
 
   if (isLoading) return <div>Loading indicators…</div>
   if (error)     return <div className="text-red-500">Error: {error}</div>
@@ -52,6 +76,12 @@ export const IndicatorSection = () => {
   return (
     <div className="space-y-6">
 
+        <button
+          onClick={() => openEditModal()}
+          className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 cursor-pointer transition-colors"
+        >
+          Create Indicator
+        </button>
       {/* Indicator List */}
       <div className="space-y-3">
         {indicators.map((indicator) => (
@@ -71,10 +101,11 @@ export const IndicatorSection = () => {
             </div>
 
             <div className="flex items-center gap-4">
+                {/* Enable/Disable Toggle */}
                 <Switch
                     checked={indicator.enabled}
                     onChange={() => toggleEnable(indicator.id)}
-                    className={`${
+                    className={`cursor-pointer ${
                     indicator.enabled ? 'bg-indigo-500' : 'bg-gray-600'
                     } relative inline-flex h-6 w-11 items-center rounded-full`}
                 >
@@ -85,15 +116,8 @@ export const IndicatorSection = () => {
                     />
                 </Switch>
 
-                <button
-                    onClick={() => openEditModal(indicator)}
-                    className="text-gray-400 hover:text-white cursor-pointer transition-colors"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
-                    </svg>
-                </button>
 
+                {/* Generate Signals */}
                 <button
                     onClick={() => generateSignals(indicator.id)}
                     className="text-gray-400 hover:text-white cursor-pointer transition-colors"
@@ -104,86 +128,38 @@ export const IndicatorSection = () => {
                     </svg>
 
                 </button>
+
+                {/* Edit Indicator */}
+                <button
+                    onClick={() => openEditModal(indicator)}
+                    className="text-gray-400 hover:text-white cursor-pointer transition-colors"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+                    </svg>
+                </button>
+
+                {/* Delete */}
+                <button
+                    onClick={() => handleDelete(indicator.id)}
+                    className="text-gray-400 hover:text-white cursor-pointer transition-colors"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                    </svg>                    
+                </button>
             </div>
         </div>
         ))}
       </div>
 
-      {/* Edit/Create Modal */}
-      <Dialog open={isModalOpen} onClose={() => setIsModalOpen(false)} className="relative z-50">
-        <div className="fixed inset-0 bg-black/30" aria-hidden="true" />
-        <div className="fixed inset-0 flex items-center justify-center p-4">
-          <DialogPanel className="w-full max-w-md rounded p-6 shadow-lg space-y-4 bg-neutral-800 text-neutral-300">
-            <DialogTitle className="text-lg font-semibold">
-              {editing ? 'Edit Indicator' : 'Create Indicator'}
-            </DialogTitle>
-
-            <div className="space-y-2">
-              <div>
-                <label className="block text-sm font-medium">Name</label>
-                <input
-                  type="text"
-                  className="w-full border rounded px-3 py-1.5"
-                  value={editing?.name || ''}
-                  onChange={(e) =>
-                    setEditing((prev) =>
-                      prev ? { ...prev, name: e.target.value } : null
-                    )
-                  }
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium">Type</label>
-                <input
-                  type="text"
-                  className="w-full border rounded px-3 py-1.5"
-                  value={editing?.type || ''}
-                  onChange={(e) =>
-                    setEditing((prev) =>
-                      prev ? { ...prev, type: e.target.value } : null
-                    )
-                  }
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium">Params (JSON)</label>
-                <textarea
-                  rows={3}
-                  className="w-full border rounded px-3 py-1.5 font-mono text-xs"
-                  value={
-                    editing?.params
-                      ? JSON.stringify(editing.params, null, 2)
-                      : '{}'
-                  }
-                  onChange={(e) =>
-                    setEditing((prev) => {
-                      try {
-                        return prev
-                          ? { ...prev, params: JSON.parse(e.target.value) }
-                          : null
-                      } catch {
-                        return prev
-                      }
-                    })
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-4 space-x-3">
-              <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 rounded border border-gray-300">
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700"
-              >
-                Save
-              </button>
-            </div>
-          </DialogPanel>
-        </div>
-      </Dialog>
+      <IndicatorModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        initial={editing}
+        onSave={handleSave}
+        error={error}
+        />
     </div>
   )
 }
