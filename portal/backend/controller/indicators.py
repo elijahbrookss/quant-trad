@@ -29,6 +29,13 @@ class IndicatorInstanceOut(BaseModel):
     params: Dict[str, Any]
     enabled: bool
 
+class IndicatorTypeDetail(BaseModel):
+    id: str
+    name: str
+    required_params: List[str]
+    default_params: Dict[str, Any]
+    field_types: Dict[str, str]
+
 #
 # ── In‐Memory Store ─────────────────────────────────────────────────────────────
 #
@@ -196,31 +203,48 @@ async def delete_instance(inst_id: str):
     return
 
 
-@router.get("/types", response_model=List[IndicatorInstanceOut])
+@router.get("-types", response_model=List[str])
 async def list_indicators():
-    out: List[Dict[str, Any]] = []
+    return list(_INDICATOR_MAP.keys())
 
-    for Cls in _INDICATOR_CLASSES:
-        # 2) Inspect its __init__ signature for default params
-        sig = inspect.signature(Cls.__init__)
-        defaults = {
-            name: param.default
-            for name, param in sig.parameters.items()
-            # skip `self` and the DataFrame arg
-            if name not in ("self", "df") and param.default is not inspect._empty
-        }
+@router.get("-types/{type_id}", response_model=IndicatorTypeDetail)
+async def get_indicator_type(type_id: str):
+    """
+    Return the required and default constructor params for a given type.
+    """
+    Cls = _INDICATOR_MAP.get(type_id)
+    if not Cls:
+        raise HTTPException(404, f"Unknown indicator type: {type_id}")
 
-        # 3) Build your payload fields
-        #    Use a class‐level NAME if present, otherwise fallback to the class name
-        type_str = getattr(Cls, "NAME", Cls.__name__)
-        id_str   = type_str.lower().replace(" ", "-")
+    sig = inspect.signature(Cls.__init__)
+    required = []
+    defaults = {}
+    field_types: Dict[str, str] = {}
 
-        out.append({
-            "id":      id_str,
-            "name":    type_str,
-            "type":    type_str,
-            "enabled": False,    # or pull from your own feature‐flag store
-            "params":  defaults,
-        })
+    for name, param in sig.parameters.items():
+        if name in ("self", "df"):
+            continue
 
-    return out
+        # figure out the declared type
+        anno = param.annotation
+        if anno is inspect._empty:
+            tname = "string"
+        elif hasattr(anno, "__name__"):
+            tname = anno.__name__
+        else:
+            tname = str(anno)
+        field_types[name] = tname
+
+        # separate required vs defaulted
+        if param.default is inspect._empty:
+            required.append(name)
+        else:
+            defaults[name] = param.default
+
+    return {
+        "id":              type_id,
+        "name":            getattr(Cls, "NAME", type_id),
+        "required_params": required,
+        "default_params":  defaults,
+        "field_types":     field_types,
+    }
