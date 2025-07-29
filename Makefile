@@ -37,10 +37,10 @@ db_cli:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"
 	@echo "Use \\q to exit the shell"
 
-## Run the main program with virtual environment and PYTHONPATH=project root
+## Run FastAPI app with virtual environment and PYTHONPATH=src/
 run:
-	@echo "Running application with PYTHONPATH=$(pwd)"
-	@bash -c "$(VENV_CHECK) && source env/bin/activate && export PYTHONPATH=$(pwd) && python3 src/main.py"
+	@echo "Running FastAPI app with PYTHONPATH=src"
+	@bash -c "$(VENV_CHECK) && source env/bin/activate && export PYTHONPATH=src && uvicorn portal.backend.main:app --reload"
 
 ## Run all tests with virtual environment
 test:

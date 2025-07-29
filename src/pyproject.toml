@@ -6,4 +6,4 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core", "data_providers", "indicators", "signals"]
+include = ["core", "data_providers", "indicators", "signals", "utils"]
