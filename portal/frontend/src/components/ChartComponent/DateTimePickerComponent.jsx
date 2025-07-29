@@ -1,30 +1,33 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import "flatpickr/dist/themes/dark.css";
 import Flatpickr from "react-flatpickr";
 
-export function DateRangePickerComponent() {
+export function DateRangePickerComponent({
+  dateRange,
+  setDateRange,
+  defaultStart,
+  defaultEnd,
+}) {
   const today = new Date();
   const fortyFiveDaysAgo = new Date();
   fortyFiveDaysAgo.setDate(today.getDate() - 45);
-
-  // Set end date to today but 5 minutes before the current time
   today.setMinutes(today.getMinutes() - 5);
-
-  const [startDate, setStartDate] = useState(fortyFiveDaysAgo);
-  const [endDate, setEndDate] = useState(today);
 
   const datePickerRef = useRef(null);
 
-  // Automatically fix invalid date ranges
+  // Default values fallback if not passed
+  const [startDate, endDate] = dateRange ?? [defaultStart ?? fortyFiveDaysAgo, defaultEnd ?? today];
+
+  // Auto-correct ranges
   useEffect(() => {
     if (startDate > endDate) {
-      setEndDate(startDate);
+      setDateRange([startDate, startDate]);
     }
   }, [startDate]);
 
   useEffect(() => {
     if (endDate < startDate) {
-      setStartDate(endDate);
+      setDateRange([endDate, endDate]);
     }
   }, [endDate]);
 
@@ -37,7 +40,7 @@ export function DateRangePickerComponent() {
           id="startDatePicker"
           ref={datePickerRef}
           value={startDate}
-          onChange={([date]) => setStartDate(date)}
+          onChange={([date]) => setDateRange([date, endDate])}
           options={{
             dateFormat: "Y-m-d H:i",
             maxDate: "today",
@@ -62,7 +65,7 @@ export function DateRangePickerComponent() {
           id="endDatePicker"
           ref={datePickerRef}
           value={endDate}
-          onChange={([date]) => setEndDate(date)}
+          onChange={([date]) => setDateRange([startDate, date])}
           options={{
             dateFormat: "Y-m-d H:i",
             minDate: "2020-01-01",
