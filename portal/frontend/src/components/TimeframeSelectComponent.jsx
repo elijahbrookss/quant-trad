@@ -49,6 +49,7 @@ export function TimeframeSelect({ selected, onChange, placeholder = 'Select time
 
   return (
     <div ref={containerRef} className="relative inline-block w-40">
+      <span className="text-neutral-500 text-sm"> Timeframe </span>
       <button
         type="button"
         onClick={toggleOpen}
@@ -79,12 +80,15 @@ export function TimeframeSelect({ selected, onChange, placeholder = 'Select time
 
 export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
   return (
-    <input
-      type="text"
-      className="w-40 bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-    />
+    <div className="flex flex-col">
+      <span className="text-neutral-500 text-sm"> Symbol </span>
+      <input
+        type="text"
+        className="w-40 bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+      />
+    </div>
   );
 }
