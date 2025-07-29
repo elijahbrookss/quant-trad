@@ -92,10 +92,8 @@ export const ChartComponent = () => {
         {
           symbol,
           timeframe,
-          dateRange: {
-            start: dateRange[0]?.toISOString(),
-            end: dateRange[1]?.toISOString(),
-          },
+          start: dateRange[0]?.toISOString(),
+          end: dateRange[1]?.toISOString(),
         },
         null,
         2

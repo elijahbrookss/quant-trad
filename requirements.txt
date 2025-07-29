@@ -17,3 +17,5 @@ alpaca-py
 pytest
 requests
 pytest-cov
+fastapi
+uvicorn
