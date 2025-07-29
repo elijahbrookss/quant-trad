@@ -59,7 +59,7 @@ export function DateRangePickerComponent() {
           options={{
             dateFormat: "Y-m-d H:i",
             minDate: "2020-01-01",
-            maxDate: new Date(Date.now() + 5 * 60), // set maxdate to tomorrow
+            maxDate: new Date(Date.now() + 5 * 60), // set maxdate to 5 mins from now
             altInput: true,
             altFormat: "Y-m-d H:i",
             allowInput: true,
