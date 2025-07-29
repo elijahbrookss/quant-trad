@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .controller import candles
+from .controller import candles, indicators
 
 app = FastAPI(
     title="Quant-Trad API",
@@ -15,4 +15,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(candles.router, prefix="/api")
+app.include_router(candles.router, prefix="/api/candles")
+app.include_router(indicators.router, prefix="/api/indicators")
