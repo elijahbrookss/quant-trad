@@ -3,6 +3,7 @@ import { createChart, CandlestickSeries } from 'lightweight-charts'
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
 import { DateRangePickerComponent } from './DateTimePickerComponent'
 import { options, seriesOptions } from './ChartOptions'
+import { fetchCandleData } from '../../adapters/candle.adapter'
 
 export const ChartComponent = () => {
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -69,26 +70,6 @@ export const ChartComponent = () => {
     if (seriesRef.current && formatted.length > 0) {
       seriesRef.current.setData(formatted);
       chartRef.current.timeScale().fitContent();
-    }
-  };
-
-  const fetchCandleData = async ({ symbol, timeframe, start, end }) => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/candles`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ symbol, timeframe, start, end }),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
-      return data.candles || [];
-    } catch (error) {
-      console.error("Error fetching candle data:", error);
-      return [];
     }
   };
 
