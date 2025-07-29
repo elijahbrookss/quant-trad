@@ -30,9 +30,11 @@ export function DateRangePickerComponent() {
 
   return (
     <div className="flex items-center space-x-3">
+      {/* Start Date Picker */}
       <div className="flex flex-col">
-        <span className="text-sm text-neutral-500">Start Date/Time</span>
+        <label htmlFor="startDatePicker" className="text-sm text-neutral-500">Start Date/Time</label>
         <Flatpickr
+          id="startDatePicker"
           ref={datePickerRef}
           value={startDate}
           onChange={([date]) => setStartDate(date)}
@@ -45,27 +47,32 @@ export function DateRangePickerComponent() {
             allowInput: true,
             enableTime: true,
           }}
-          className="w-fit bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="self-end w-fit bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
         />
       </div>
-      <span className="text-neutral-400">to</span>
+
+      <div className="flex items-center">
+        <span className="text-neutral-400 mt-4">to</span>
+      </div>
+
+      {/* End Date Picker */}
       <div className="flex flex-col">
-        <span className="text-sm text-neutral-500">End Date/Time</span>
+        <label htmlFor="endDatePicker" className="text-sm text-neutral-500">End Date/Time</label>
         <Flatpickr
-          // key={endDate.getTime()} // Ensure re-render on endDate change
+          id="endDatePicker"
           ref={datePickerRef}
           value={endDate}
           onChange={([date]) => setEndDate(date)}
           options={{
             dateFormat: "Y-m-d H:i",
             minDate: "2020-01-01",
-            maxDate: new Date(Date.now() + 5 * 60), // set maxdate to 5 mins from now
+            maxDate: new Date(Date.now() + 5 * 60),
             altInput: true,
             altFormat: "Y-m-d H:i",
             allowInput: true,
             enableTime: true,
           }}
-          className="w-fit bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="self-end w-fit bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
         />
       </div>
     </div>
