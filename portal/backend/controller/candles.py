@@ -11,7 +11,7 @@ class CandleRequest(BaseModel):
     end: str
     timeframe: str
 
-@router.get("/candles")
+@router.post("/candles")
 def get_candles(req: CandleRequest):
     df = fetch_ohlcv(req.symbol, req.start, req.end, req.timeframe)
 
