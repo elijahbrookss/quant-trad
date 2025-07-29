@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import { ChartComponent } from './components/ChartComponent'
 import { TimeframeSelect, SymbolInput } from './components/TimeframeSelectComponent'
-import { DateRangePicker } from './components/DateTimePickerComponent'
-import Datepicker from 'react-tailwindcss-datepicker'
+import { DateRangePickerComponent } from './components/DateTimePickerComponent'
 
 function App() {
   const [symbol, setSymbol] = useState('AAPL')
@@ -29,18 +28,10 @@ function App() {
     <div className="max-w-7xl mx-auto mt-10 p-5 bg-neutral-800 rounded-lg shadow-lg">
 
       {/* controls row */}
-      <div className="flex space-x-4">
+      <div className="flex items-center space-x-4">
         <TimeframeSelect selected={timeframe} onChange={setTimeframe} />
         <SymbolInput     value={symbol}     onChange={setSymbol}     />
-
-        <div className="w-1/4">
-            <Datepicker
-              primaryColor={"indigo"}
-              value={dates} 
-              onChange={setDates}
-              showShortcuts={false}
-          />
-        </div>
+        <DateRangePickerComponent />
       </div>
 
       {/* chart + sidebar row */}
