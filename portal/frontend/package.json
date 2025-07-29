@@ -16,9 +16,7 @@
     "lightweight-charts": "^5.0.8",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-flatpickr": "^4.0.11",
-    "react-tailwindcss-datepicker": "^2.0.0",
-    "tailwind-datepicker-react": "^1.4.3"
+    "react-flatpickr": "^4.0.11"
   },
   "devDependencies": {
     "@eslint/js": "^9.30.1",
