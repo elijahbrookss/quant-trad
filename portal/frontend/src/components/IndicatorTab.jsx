@@ -1,29 +1,30 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
 import { Switch } from '@headlessui/react'
-
-
-const mockIndicators = [
-  {
-    id: 'vwap-daily',
-    name: 'VWAP (Daily)',
-    type: 'VWAP',
-    enabled: true,
-    params: { session: '0930-1600' },
-  },
-  {
-    id: 'pivot-zones',
-    name: 'Pivot Zones',
-    type: 'Pivot',
-    enabled: false,
-    params: { lookback: 10 },
-  },
-]
+import { fetchIndicators } from '../adapters/indicator.adapter'
 
 export const IndicatorSection = () => {
-  const [indicators, setIndicators] = useState(mockIndicators)
+  const [indicators, setIndicators] = useState([])
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState()
+
+
+    useEffect(() => {
+        const load = async () => {
+        try {
+            const data = await fetchIndicators()
+            setIndicators(data)
+        } catch (err) {
+            console.error(err)
+            setError(err.message || 'Failed to load indicators')
+        } finally {
+            setIsLoading(false)
+        }
+        }
+        load()
+    }, [])
 
   const toggleEnable = (id) => {
     setIndicators((prev) =>
@@ -44,6 +45,9 @@ export const IndicatorSection = () => {
     )
     setIsModalOpen(false)
   }
+
+  if (isLoading) return <div>Loading indicators…</div>
+  if (error)     return <div className="text-red-500">Error: {error}</div>
 
   return (
     <div className="space-y-6">
