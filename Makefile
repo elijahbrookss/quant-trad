@@ -14,8 +14,18 @@ setup:
 		sleep 2; \
 	done
 	@echo "TimescaleDB is ready"
+	@echo "Containers started successfully"
+	@echo "Access the following services:"
+
+	@echo "TimescaleDB → postgresql://postgres:postgres@localhost:5432/postgres"
 	@echo "pgAdmin → http://localhost:8080"
 	@echo "Grafana → http://localhost:3000"
+	@echo "Loki → http://localhost:3100"
+
+	@echo "Starting frontend server..."
+	@cd portal/frontend && npm run dev &
+	@echo "Frontend server started"
+
 
 ## Stop all containers
 shutdown:
