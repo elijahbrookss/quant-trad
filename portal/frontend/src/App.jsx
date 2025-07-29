@@ -1,4 +1,5 @@
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
+import { TabManager } from './components/TabManager'
 
 export default function App() {
   return (
@@ -9,6 +10,9 @@ export default function App() {
 
       <div className="max-w-7xl mx-auto mt-10 p-5 bg-neutral-800 rounded-lg shadow-lg">
         <ChartComponent />
+      </div>
+      <div className="max-w-7xl mx-auto mt-10 p-5 bg-neutral-800 rounded-lg shadow-lg">
+        <TabManager />
       </div>
     </div>
   )
