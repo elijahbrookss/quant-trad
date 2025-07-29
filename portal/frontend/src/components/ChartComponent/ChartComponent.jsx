@@ -6,8 +6,6 @@ import { options, seriesOptions } from './ChartOptions'
 import { fetchCandleData } from '../../adapters/candle.adapter'
 
 export const ChartComponent = () => {
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-
   const [symbol, setSymbol] = useState('AAPL')
   const [timeframe, setTimeframe] = useState('1h')
   // Default date range: last 45 days
@@ -20,8 +18,8 @@ export const ChartComponent = () => {
 
   const [dateRange, setDateRange] = useState([defaultStart, defaultEnd]);
   const chartContainerRef = useRef()
-  const chartRef = useRef(null);
-  const seriesRef = useRef(null);
+  const chartRef = useRef();
+  const seriesRef = useRef();
 
   useEffect(() => {
     const chart = createChart(chartContainerRef.current, { ...options });
