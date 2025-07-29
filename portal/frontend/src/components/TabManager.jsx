@@ -17,7 +17,7 @@ export const TabManager = () => {
             className={`px-4 py-2 -mb-px border-b-2 transition-all cursor-pointer ${
               activeTab === tab
                 ? 'border-white text-white font-semibold rounded-xs'
-                : 'border-transparent text-gray-600 hover:text-neutral-500 '
+                : 'border-transparent text-white/25 hover:text-neutral-500 '
             }`}
           >
             {tab}
@@ -33,10 +33,10 @@ export const TabManager = () => {
           </div>
         )}
         {activeTab === 'Signals' && (
-          <div className="text-gray-500">Signal section goes here.</div>
+          <div className="">Signal section goes here.</div>
         )}
         {activeTab === 'Strategies' && (
-          <div className="text-gray-500">Strategy section goes here.</div>
+          <div className="">Strategy section goes here.</div>
         )}
       </div>
     </div>
