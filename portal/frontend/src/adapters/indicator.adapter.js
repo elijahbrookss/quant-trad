@@ -18,7 +18,14 @@ export async function fetchIndicatorTypes() {
   return handleResponse(res)
 }
 
+export async function fetchIndicatorType(id) {
+    const res = await fetch(`${BASE}/api/indicators-types/${id}`, { mode: 'cors' })
+    return handleResponse(res)
+}
+
 export async function createIndicator({ type, name, params }) {
+    var body = JSON.stringify({ type, name, params })
+    console.log("[IndicatorAdapter] createIndicator body:", body)
   const res = await fetch(`${BASE}/api/indicators/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -4,19 +4,22 @@ import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
 import { DateRangePickerComponent } from './DateTimePickerComponent'
 import { options, seriesOptions } from './ChartOptions'
 import { fetchCandleData } from '../../adapters/candle.adapter'
+import { useQueryParam } from '../../hooks/useQueryParam'
 
 export const ChartComponent = () => {
-  const [symbol, setSymbol] = useState('AAPL')
-  const [timeframe, setTimeframe] = useState('1h')
-  // Default date range: last 45 days
-  // Adjusted to ensure it doesn't exceed current time by 5 minutes
-  const defaultEnd = new Date();
-  defaultEnd.setMinutes(defaultEnd.getMinutes() - 5);
+  const [symbolQ,   setSymbolQ]   = useQueryParam('symbol',   'AAPL')
+  const [intervalQ, setIntervalQ] = useQueryParam('interval', '1h')
+  const [startQ, setStartQ]    = useQueryParam('start',
+    (() => { const d = new Date(); d.setDate(d.getDate()-45); return d.toISOString() })()
+  )
+  const [endQ, setEndQ]      = useQueryParam('end',
+    (() => { const d = new Date(); d.setMinutes(d.getMinutes()-5); return d.toISOString() })()
+  )
 
-  const defaultStart = new Date();
-  defaultStart.setDate(defaultStart.getDate() - 45);
-
-  const [dateRange, setDateRange] = useState([defaultStart, defaultEnd]);
+  const [symbol,   setSymbol]   = useState(symbolQ)
+  const [interval, setInterval] = useState(intervalQ)
+  const [dateRange, setDateRange] = useState([new Date(startQ), new Date(endQ)])
+ 
   const chartContainerRef = useRef()
   const chartRef = useRef();
   const seriesRef = useRef();
@@ -44,13 +47,14 @@ export const ChartComponent = () => {
 
   }, []);
 
-
   const loadChartData = async () => {
+
+    console.log("Loading chart data for:", { symbol, interval, dateRange });
     const response = await fetchCandleData({
       symbol,
-      timeframe,
-      start: dateRange[0]?.toISOString(),
-      end: dateRange[1]?.toISOString(),
+      timeframe: interval,
+      start: dateRange[0].toISOString(),
+      end: dateRange[1].toISOString(),
     });
 
     const formatted = response
@@ -74,22 +78,44 @@ export const ChartComponent = () => {
   const handlePrintState = () => {
     console.log('Chart State:', {
       symbol,
-      timeframe,
+      interval,
       dateRange,
       chart: chartRef.current,
       series: seriesRef.current,
     });
 
     loadChartData();
+
+    console.log('Query Params:', {
+      symbol: symbolQ,
+      interval: intervalQ,
+      start: startQ,
+      end: endQ,
+    });
+
+    console.log('Local State:', {
+      symbol,
+      interval,
+      dateRange,
+    });
+
+        // now sync URL → locals
+    setSymbolQ(symbol)
+    setIntervalQ(interval)
+    setStartQ(dateRange[0].toISOString())
+    setEndQ(dateRange[1].toISOString())
   };
 
   return (
     <>
       {/* Controls */}
       <div className="flex items-end space-x-4">
-        <TimeframeSelect selected={timeframe} onChange={setTimeframe} />
+        <TimeframeSelect selected={interval} onChange={setInterval} />
         <SymbolInput value={symbol} onChange={setSymbol} />
-        <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+        <DateRangePickerComponent
+          dateRange={dateRange}
+          setDateRange={setDateRange}
+        />
         <button 
           className="mt-5.5 self-center border border-neutral-600 rounded-md p-2 hover:bg-neutral-700 transition-colors cursor-pointer"
           onClick={handlePrintState}
