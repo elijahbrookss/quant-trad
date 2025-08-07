@@ -3,7 +3,7 @@ import { IndicatorSection } from './IndicatorTab.jsx'
 
 const tabs = ['Indicators', 'Signals', 'Strategies']
 
-export const TabManager = () => {
+export const TabManager = ({ chartId }) => {
   const [activeTab, setActiveTab] = useState(tabs[0])
 
   return (
@@ -29,7 +29,7 @@ export const TabManager = () => {
       <div className="mt-1">
         {activeTab === 'Indicators' && (
           <div className="">
-            <IndicatorSection />
+            <IndicatorSection chartId={""}/>
           </div>
         )}
         {activeTab === 'Signals' && (
