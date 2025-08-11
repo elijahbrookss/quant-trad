@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { ChartStateProvider } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
 import { TabManager } from './components/TabManager'
@@ -5,6 +6,10 @@ import { TabManager } from './components/TabManager'
 export default function App() {
   const chartId = 'main'
 
+  useEffect(() => {
+    console.log('[App] Mounted QuantTrad Lab')
+    console.log('[App] chartId:', chartId)
+  }, [])
 
   return (
     <ChartStateProvider>

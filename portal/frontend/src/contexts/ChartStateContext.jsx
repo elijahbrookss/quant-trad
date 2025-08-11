@@ -20,8 +20,20 @@ export const ChartStateProvider = ({ children }) => {
       [chartId]: {
         symbol: initialState.symbol || '',
         interval: initialState.interval || '',
-        dateRange: initialState.dateRange || [],
+        start: initialState.start || '',
+        end: initialState.end || '',
         overlays: initialState.overlays || [],
+        refreshKey: Date.now(), // Used to force re-render
+      },
+    }))
+  }
+
+  const bumpRefresh = (chartId) => {
+    setCharts(prev => ({
+      ...prev,
+      [chartId]: {
+        ...prev[chartId],
+        refreshKey: Date.now(), // Update refresh key to force re-render
       },
     }))
   }
@@ -44,7 +56,7 @@ export const ChartStateProvider = ({ children }) => {
   }
 
   return (
-    <ChartStateContext.Provider value={{ registerChart, updateChart, getChart }}>
+    <ChartStateContext.Provider value={{ registerChart, updateChart, getChart, bumpRefresh }}>
       {children}
     </ChartStateContext.Provider>
   )

@@ -11,6 +11,7 @@ import { useChartState } from '../contexts/ChartStateContext'
 
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
+
   const [indicators, setIndicators] = useState([])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -19,20 +20,23 @@ export const IndicatorSection = ({ chartId }) => {
 
   const { updateChart, getChart } = useChartState()
 
-  console.log(chartId, "chartId in IndicatorSection")
+  // Debug: chartId and chartState
+  console.log("[IndicatorSection] chartId:", chartId)
   const chartState = getChart(chartId, "indicatorTab")
+  console.log("[IndicatorSection] chartState:", chartState)
+
 
   // Fetch indicators whenever chart parameters change
   useEffect(() => {
-    if (!chartState) {
-      console.log("returning", chartState)
+    if (!chartState?.refreshKey) {
+      console.warn("[IndicatorSection] No chartState found, skipping fetch")
       return
     }
 
+
     let isMounted = true
     setIsLoading(true)
-
-    console.log ("Updating indicators!!")
+    console.log("[IndicatorSection] Fetching indicators for", chartState.symbol, chartState.interval)
 
     fetchIndicators({
       symbol: chartState.symbol,
@@ -48,32 +52,41 @@ export const IndicatorSection = ({ chartId }) => {
           .map(i => ({ id: i.id, type: i.type, params: i.params }))
 
         updateChart(chartId, { overlays: initialOverlays, indicators: data })
-        console.log("Updated chart overlays:", initialOverlays)
+        console.log("[IndicatorSection] Updated chart overlays:", initialOverlays)
       })
       .catch(e => {
         if (!isMounted) return
         setError(e.message)
+        console.error("[IndicatorSection] Error fetching indicators:", e)
       })
       .finally(() => {
         if (isMounted) setIsLoading(false)
+        console.log("[IndicatorSection] Indicator fetch complete")
       })
     return () => { isMounted = false }
-  }, [chartState, chartState?.symbol, chartState?.interval, chartState?.dateRange])
+  }, [chartState?.refreshKey])
 
   // Create or update indicator
   const handleSave = async (meta) => {
     try {
+      const params = { ...meta.params, start: chartState.start, end: chartState.end, symbol: chartState.symbol, interval: chartState.interval }
+
       let result
       if (meta.id) {
-        result = await updateIndicator(meta.id, { type: meta.type, params: meta.params })
+        // combine params and chartState fields (start, end, etc.)
+
+        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name })
         setIndicators(prev => prev.map(i => i.id === result.id ? result : i))
+        console.log("[IndicatorSection] Updated indicator:", result)
       } else {
-        result = await createIndicator({ type: meta.type, params: meta.params, name: meta.name })
+        result = await createIndicator({ type: meta.type, params, name: meta.name })
         setIndicators(prev => [...prev, result])
+        console.log("[IndicatorSection] Created new indicator:", result)
       }
       setModalOpen(false)
     } catch (e) {
       setError(e.message)
+      console.error("[IndicatorSection] Error saving indicator:", e)
     }
   }
 
@@ -82,8 +95,10 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
+      console.log("[IndicatorSection] Deleted indicator with id:", id)
     } catch (e) {
       setError(e.message)
+      console.error("[IndicatorSection] Error deleting indicator:", e)
     }
   }
 
@@ -92,6 +107,7 @@ export const IndicatorSection = ({ chartId }) => {
     setIndicators(prev =>
       prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i)
     )
+    console.log("[IndicatorSection] Toggled enabled for indicator id:", id)
   }
 
   // Open modal for create/edit
@@ -99,10 +115,23 @@ export const IndicatorSection = ({ chartId }) => {
     setEditing(indicator)
     setModalOpen(true)
     setError(null)
+    console.log("[IndicatorSection] Opened modal for indicator:", indicator)
   }
 
-  if (isLoading) return <div>Loading indicators…</div>
-  if (error) return <div className="text-red-500">Error: {error}</div>
+  if (isLoading) {
+    console.log("[IndicatorSection] Loading indicators…")
+    return <div>Loading indicators…</div>
+  }
+  if (error) {
+    console.error("[IndicatorSection] Error:", error)
+    return <div className="text-red-500">Error: {error}</div>
+  }
+  
+  // If no chart state or chartId is missing, log error
+  if (!chartState || !chartId ) {
+    console.warn("[IndicatorSection] No chart state found or chartId is missing")
+    return <div className="text-red-500">Error: No chart state found</div>
+  }
 
   return (
     <div className="space-y-6">
@@ -138,19 +167,37 @@ export const IndicatorSection = ({ chartId }) => {
                 <span className={`${indicator.enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
               </Switch>
 
-              {/* Edit icon */}
-              <button onClick={() => openEditModal(indicator)} className="text-gray-400 hover:text-white">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.651 1.651m-2.121-2.12a2.062 2.062 0 013.166 2.679L12.75 15.5H9.25v-3.5l6.119-6.119z" />
+              {/* Edit Button */}
+              <button
+                onClick={() => openEditModal(indicator)}
+                className="text-gray-400 hover:text-white cursor-pointer transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
                 </svg>
               </button>
 
-              {/* Delete icon */}
-              <button onClick={() => handleDelete(indicator.id)} className="text-gray-400 hover:text-white">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              {/* Generate Signals */}
+              <button
+                  onClick={() => generateSignals(indicator.id)}
+                  className="text-gray-400 hover:text-white cursor-pointer transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z" />
                 </svg>
               </button>
+
+              {/* Delete Button */}
+              <button
+                onClick={() => handleDelete(indicator.id)}
+                className="text-red-400 hover:text-red-600 cursor-pointer transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 6.75h-15M6 6.75v12.75A2.25 2.25 0 0 0 8.25 21h7.5A2.25 2.25 0 0 0 18 19.5V6.75m-3.75 0V4.5A2.25 2.25 0 0 0 12 2.25h-3A2.25 2.25 0 0 0 6.75 4.5v2.25m9.75 0h-7.5m7.5 0L16.5 4.5m0 2.25L16.5 19.5m-3.75-12.75h-3m3 0L12 4.5m0 2.25L12 19.5m3.75-12.75h-3m3 0L15.75 4.5m0 2.25L15.75 19.5" />
+                </svg>
+              </button>
+              
             </div>
           </div>
         ))}
