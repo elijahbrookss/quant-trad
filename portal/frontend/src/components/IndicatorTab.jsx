@@ -1,5 +1,11 @@
-import  { useState, useEffect } from 'react'
-import { Switch } from '@headlessui/react'
+import  { useState, useEffect, Fragment } from 'react'
+import { 
+  Switch, 
+  Popover, 
+  Transition,
+  PopoverButton,
+  PopoverPanel
+} from '@headlessui/react'
 import {
   fetchIndicators,
   createIndicator,
@@ -188,16 +194,75 @@ export const IndicatorSection = ({ chartId }) => {
                 </svg>
               </button>
 
-              {/* Delete Button */}
-              <button
-                onClick={() => handleDelete(indicator.id)}
-                className="text-red-400 hover:text-red-200 cursor-pointer transition-colors"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
-                </svg>
+              {/* Delete Button with confirmation */}
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  {/* Delete trigger */}
+                  <PopoverButton
+                    className="text-red-400 hover:text-red-200 cursor-pointer transition-colors"
+                    title="Delete"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                    </svg>
+                  </PopoverButton>
 
-              </button>
+                  {/* Tiny confirmation tooltip */}
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 scale-95"
+                    enterTo="opacity-100 scale-100"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 scale-100"
+                    leaveTo="opacity-0 scale-95"
+                  >
+                    <PopoverPanel
+                      className="absolute z-50 -top-2 right-0 -translate-y-full
+                                rounded-md border border-neutral-700 bg-neutral-900
+                                shadow-xl p-1"
+                    >
+                      <div className="flex items-center gap-1">
+                        {/* Confirm */}
+                        <button
+                          aria-label="Confirm delete"
+                          onClick={() => { handleDelete(indicator.id); close(); }}
+                          className="p-1 rounded hover:bg-green-600/20 text-green-400 hover:text-green-300"
+                        >
+                          {/* check icon */}
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                              fill="none" stroke="currentColor" strokeWidth="1.8"
+                              className="size-5">
+                            <path strokeLinecap="round" strokeLinejoin="round"
+                                  d="M4.5 12.75l6 6 9-13.5"/>
+                          </svg>
+                        </button>
+
+                        {/* Cancel (just closes) */}
+                        <PopoverButton
+                          aria-label="Cancel"
+                          className="p-1 rounded hover:bg-neutral-700 text-neutral-300 hover:text-white"
+                        >
+                          {/* x icon */}
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                              fill="none" stroke="currentColor" strokeWidth="1.8"
+                              className="size-5">
+                            <path strokeLinecap="round" strokeLinejoin="round"
+                                  d="M6 18L18 6M6 6l12 12"/>
+                          </svg>
+                        </PopoverButton>
+                      </div>
+
+                      {/* little caret */}
+                      <div className="absolute -bottom-1 right-3 w-2 h-2 bg-neutral-900
+                                      border-b border-r border-neutral-700 rotate-45"/>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
+
 
             </div>
           </div>
