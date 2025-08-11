@@ -6,6 +6,15 @@ const tabs = ['Indicators', 'Signals', 'Strategies']
 export const TabManager = ({ chartId }) => {
   const [activeTab, setActiveTab] = useState(tabs[0])
 
+  // Debug: log tab changes and chartId
+  console.log("[TabManager] chartId:", chartId)
+  console.log("[TabManager] Active tab:", activeTab)
+
+  const handleTabClick = (tab) => {
+    setActiveTab(tab)
+    console.log("[TabManager] Switched to tab:", tab)
+  }
+
   return (
     <div className="p-.5">
       {/* Top Tab Bar */}
@@ -13,7 +22,7 @@ export const TabManager = ({ chartId }) => {
         {tabs.map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => handleTabClick(tab)}
             className={`px-4 py-2 -mb-px border-b-2 transition-all cursor-pointer ${
               activeTab === tab
                 ? 'border-white text-white font-semibold rounded-xs'
@@ -29,7 +38,7 @@ export const TabManager = ({ chartId }) => {
       <div className="mt-1">
         {activeTab === 'Indicators' && (
           <div className="">
-            <IndicatorSection chartId={""}/>
+            <IndicatorSection chartId={chartId}/>
           </div>
         )}
         {activeTab === 'Signals' && (

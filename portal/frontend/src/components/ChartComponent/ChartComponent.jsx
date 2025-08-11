@@ -7,7 +7,7 @@ import { fetchCandleData } from '../../adapters/candle.adapter'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 
 export const ChartComponent = ({ chartId }) => {
-  const { registerChart, updateChart, getChart } = useChartState()
+  const { registerChart, updateChart, getChart, bumpRefresh } = useChartState()
 
   // Local state for inputs
   const [symbol, setSymbol] = useState('AAPL')
@@ -28,17 +28,16 @@ export const ChartComponent = ({ chartId }) => {
   // Initialize chart and register context
   useLayoutEffect(() => {
     if (!chartId) {
-      console.error('ChartComponent requires a chartId prop')
+      console.error('[ChartComponent] chartId prop is missing')
       return
     }
-    registerChart(chartId, { symbol, interval, dateRange, overlays: [] })
-
-    var chartState = getChart(chartId, "chartComponent-useLayoutEffect")
-    console.log("Chart state:", chartState)
-
+    registerChart(chartId, { symbol, interval, overlays: [], start: dateRange[0].toISOString(), end: dateRange[1].toISOString() })
+    const chartState = getChart(chartId, "chartComponent-useLayoutEffect")
+    console.log("[ChartComponent] Registered chart state:", chartState)
   }, [chartId])
 
   useEffect(() => {
+    console.log("[ChartComponent] Mounting chart for", symbol, interval, dateRange)
     const chart = createChart(chartContainerRef.current, { ...options })
     chartRef.current = chart
 
@@ -48,63 +47,79 @@ export const ChartComponent = ({ chartId }) => {
     loadChartData()
     chart.timeScale().fitContent()
 
-    const handleResize = () =>
+    const handleResize = () => {
       chart.applyOptions({ width: chartContainerRef.current.clientWidth })
+      console.log("[ChartComponent] Chart resized to", chartContainerRef.current.clientWidth)
+    }
     window.addEventListener('resize', handleResize)
 
     return () => {
       window.removeEventListener('resize', handleResize)
       chart.remove()
+      console.log("[ChartComponent] Chart unmounted")
     }
   }, [])
-
 
   // // Render overlays on chart
   // useEffect(() => {
   //   const chart = chartRef.current
   //   if (!chart) return
-
   //   // Remove series for overlays no longer present
   //   Object.keys(overlaySeriesRefs.current).forEach(id => {
   //     if (!overlays.find(o => o.id === id)) {
   //       overlaySeriesRefs.current[id].remove()
   //       delete overlaySeriesRefs.current[id]
+  //       console.log(`[ChartComponent] Removed overlay series: ${id}`)
   //     }
   //   })
-
   //   // Add or update overlay series
   //   overlays.forEach(o => {
   //     let lineSeries = overlaySeriesRefs.current[o.id]
   //     if (!lineSeries) {
   //       lineSeries = chart.addSeries(LineSeries, { title: o.type })
   //       overlaySeriesRefs.current[o.id] = lineSeries
+  //       console.log(`[ChartComponent] Added overlay series: ${o.id}`)
   //     }
-  //     // Assume o.data is array of { time, value }
   //     lineSeries.setData(o.data || [])
+  //     console.log(`[ChartComponent] Updated overlay series: ${o.id} with ${o.data?.length || 0} points`)
   //   })
   // }, [overlays])
 
   const loadChartData = async () => {
-    const response = await fetchCandleData({
-      symbol,
-      timeframe: interval,
-      start: dateRange[0].toISOString(),
-      end: dateRange[1].toISOString(),
-    })
+    console.log("[ChartComponent] Loading chart data for", symbol, interval, dateRange)
+    try {
+      const response = await fetchCandleData({
+        symbol,
+        timeframe: interval,
+        start: dateRange[0].toISOString(),
+        end: dateRange[1].toISOString(),
+      })
+      console.log("[ChartComponent] Fetched", response.length, "candles")
 
-    const formatted = response
-      .filter(c => c && typeof c.time === 'number')
-      .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
+      const formatted = response
+        .filter(c => c && typeof c.time === 'number')
+        .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
 
-    if (seriesRef.current && formatted.length > 0) {
-      seriesRef.current.setData(formatted)
-      chartRef.current.timeScale().fitContent()
+      if (seriesRef.current && formatted.length > 0) {
+        seriesRef.current.setData(formatted)
+        chartRef.current.timeScale().fitContent()
+        console.log("[ChartComponent] Chart data set with", formatted.length, "points")
+      } else {
+        console.warn("[ChartComponent] No valid data to set on chart")
+      }
+    } catch (err) {
+      console.error("[ChartComponent] Error loading chart data:", err)
     }
   }
 
   const handlePrintState = () => {
+    console.log("[ChartComponent] Print state button clicked")
     loadChartData()
     updateChart(chartId, { symbol, interval, dateRange, overlays })
+    bumpRefresh(chartId)
+    
+    const chartState = getChart(chartId, "chartComponent-handlePrintState")
+    console.log("[ChartComponent] Current chart state:", chartState)
   }
 
   return (
