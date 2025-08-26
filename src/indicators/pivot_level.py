@@ -206,7 +206,7 @@ class PivotLevelIndicator(BaseIndicator):
         cls,
         provider,
         ctx: DataContext,
-        level_timeframe: str,
+        timeframe: str,
         **kwargs
     ):
         """
@@ -220,11 +220,11 @@ class PivotLevelIndicator(BaseIndicator):
             symbol=ctx.symbol,
             start=ctx.start,
             end=ctx.end,
-            interval=level_timeframe
+            interval=timeframe
         )
         df = provider.get_ohlcv(level_ctx)
         if df is None or df.empty:
             raise ValueError(
-                f"Data missing for {ctx.symbol} [{level_timeframe}]"
+                f"Data missing for {ctx.symbol} [{timeframe}]"
             )
-        return cls(df=df, timeframe=level_timeframe, **kwargs)
+        return cls(df=df, timeframe=timeframe, **kwargs)

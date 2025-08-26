@@ -3,6 +3,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
 import inspect
+import logging
+
+logger = logging.getLogger(__name__)
 
 from data_providers.alpaca_provider import AlpacaProvider
 from indicators.config           import DataContext
@@ -94,6 +97,8 @@ async def create_instance(body: IndicatorInstanceIn):
 
     # 4) Instantiate the indicator (this may fetch data, compute profiles, etc.)
     try:
+        logger.info(f"Instantiating indicator {body.type} with params: {body.params}")
+
         inst = Cls.from_context(
             provider=provider,
             ctx=ctx,

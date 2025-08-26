@@ -58,6 +58,9 @@ export default function IndicatorModal({
           // seed params in create mode
           const seed = {}
           meta.required_params.forEach(key => { seed[key] = '' })
+
+          console.log("[IndicatorModal] Fetched type metadata:", meta)
+
           Object.entries(meta.default_params).forEach(([k, v]) => {
             seed[k] = v
           })

@@ -1,66 +1,106 @@
-# Makefile for local dev: setup containers, run app, and run tests
+# Makefile — fast local dev: bring up infra, run apps, and test
 
-.PHONY: setup shutdown db_cli test test-integration test-unit run status
+.DEFAULT_GOAL := help
 
-# Ensure virtual environment is set up
-VENV_CHECK=test -f env/bin/activate || { echo \"❌ Virtualenv not found. Run 'make dev' first.\"; exit 1; }
+COMPOSE_FILE := docker/docker-compose.local.yml
+SERVICES     := timescaledb pgadmin grafana loki
+FRONTEND_DIR := portal/frontend
+BACKEND_APP  := portal.backend.main:app
+PY_SRC       := src
+VENV_DIR     := env
 
-## Start all required containers (TimescaleDB, pgAdmin, Grafana, Loki)
-setup:
-	docker compose -f docker/docker-compose.local.yml up -d timescaledb pgadmin grafana loki
-	@echo "⏳ Waiting for TimescaleDB to be ready..."
+VENV_CHECK := [ -f "$(VENV_DIR)/bin/activate" ] || { echo '❌ No venv. Run make bootstrap.'; exit 1; }
+
+.PHONY: help bootstrap \
+        infra-up infra-down infra-restart infra-logs infra-status infra-clean db-shell \
+        api-up api-stop web-up web-stop \
+        dev-up dev-down \
+        test test-unit test-int
+
+## Show this help
+help:
+	@awk 'BEGIN{FS":.*##"; printf "\nCommands:\n"} /^[a-zA-Z0-9_.-]+:.*##/{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
+
+## One-time setup (venv, pip, npm)
+bootstrap:
+	@python3 -m venv $(VENV_DIR)
+	@. $(VENV_DIR)/bin/activate && pip install -U pip && pip install -r requirements.txt
+	@cd $(FRONTEND_DIR) && npm install
+	@echo "✅ Bootstrap complete"
+
+## Start infra containers (DB, pgAdmin, Grafana, Loki)
+infra-up:
+	docker compose -f $(COMPOSE_FILE) up -d $(SERVICES)
+	@echo "⏳ Waiting for TimescaleDB..."
 	@while ! docker exec tsdb pg_isready -U postgres >/dev/null 2>&1; do \
-		echo "Waiting for TimescaleDB..."; \
-		sleep 2; \
+		echo "… still waiting"; sleep 2; \
 	done
-	@echo "TimescaleDB is ready"
-	@echo "Containers started successfully"
-	@echo "Access the following services:"
+	@echo "✅ TimescaleDB ready"
+	@echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100 | pgAdmin http://localhost:8080"
 
-	@echo "TimescaleDB → postgresql://postgres:postgres@localhost:5432/postgres"
-	@echo "pgAdmin → http://localhost:8080"
-	@echo "Grafana → http://localhost:3000"
-	@echo "Loki → http://localhost:3100"
+## Stop infra containers (keep volumes)
+infra-down:
+	docker compose -f $(COMPOSE_FILE) stop $(SERVICES)
+	@echo "🛑 Infra stopped"
 
-	@echo "Starting frontend server..."
-	@cd portal/frontend && npm run dev &
-	@echo "Frontend server started"
+## Restart infra containers
+infra-restart:
+	$(MAKE) infra-down
+	$(MAKE) infra-up
 
+## Tail infra logs
+infra-logs:
+	docker compose -f $(COMPOSE_FILE) logs -f $(SERVICES)
 
-## Stop all containers
-shutdown:
-	docker compose -f docker/docker-compose.local.yml stop timescaledb pgadmin grafana loki
-	@echo "All containers stopped"
+## Show running infra
+infra-status:
+	docker compose -f $(COMPOSE_FILE) ps --status=running
 
-## Open a psql shell to TimescaleDB
-db_cli:
+## Teardown infra with volumes (DANGER)
+infra-clean:
+	docker compose -f $(COMPOSE_FILE) down -v
+	@echo "🧹 Removed containers and volumes"
+
+## Open psql shell to TimescaleDB
+db-shell:
 	psql "postgresql://postgres:postgres@localhost:5432/postgres"
-	@echo "Use \\q to exit the shell"
 
-## Run FastAPI app with virtual environment and PYTHONPATH=src/
-run:
-	@echo "Running FastAPI app with PYTHONPATH=src"
-	@bash -c "$(VENV_CHECK) && source env/bin/activate && export PYTHONPATH=src && uvicorn portal.backend.main:app --reload"
+## Run FastAPI (reload) with venv
+api-up:
+	@echo "🚀 API dev server"
+	@bash -c "$(VENV_CHECK) && . $(VENV_DIR)/bin/activate && export PYTHONPATH=$(PY_SRC) && uvicorn $(BACKEND_APP) --reload"
 
-## Run all tests with virtual environment
+## (Optional) stop API if you background it (placeholder)
+api-stop:
+	@pkill -f "uvicorn $(BACKEND_APP)" || true
+	@echo "🛑 API stopped"
+
+## Run frontend dev server (Vite)
+web-up:
+	@echo "🎨 Frontend dev server"
+	@cd $(FRONTEND_DIR) && npm run dev
+
+## (Optional) stop frontend if you background it (placeholder)
+web-stop:
+	@pkill -f "vite" || true
+	@echo "🛑 Frontend stopped"
+
+## Bring up infra + API + Web for full dev
+dev-up: infra-up
+	@$(MAKE) -j2 api-up web-up
+
+## Stop everything (apps need stop only if backgrounded)
+dev-down: infra-down
+	@echo "🧯 Dev stack down"
+
+## Run all tests
 test:
-	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v tests/"
+	@bash -c "$(VENV_CHECK) && . $(VENV_DIR)/bin/activate && pytest -v tests/"
 
-## Run only unit tests
+## Unit tests only
 test-unit:
-	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m 'not integration' tests/"
+	@bash -c "$(VENV_CHECK) && . $(VENV_DIR)/bin/activate && pytest -v -m 'not integration' tests/"
 
-## Run only integration tests
-test-integration:
-	@bash -c "$(VENV_CHECK) && source env/bin/activate && pytest -v -m integration tests/"
-
-
-## Show running container status
-status:
-	@docker compose ps --status=running
-
-
-## Run development startup script
-dev:
-	@echo "Running dev startup script..."
-	@./scripts/dev_startup.sh
+## Integration tests only
+test-int:
+	@bash -c "$(VENV_CHECK) && . $(VENV_DIR)/bin/activate && pytest -v -m integration tests/"
