@@ -24,8 +24,8 @@ export async function fetchIndicatorType(id) {
 }
 
 export async function createIndicator({ type, name, params }) {
-    var body = JSON.stringify({ type, name, params })
-    console.log("[IndicatorAdapter] createIndicator body:", body)
+  var body = JSON.stringify({ type, name, params })
+  console.log("[IndicatorAdapter] createIndicator body:", body)
   const res = await fetch(`${BASE}/api/indicators/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -51,4 +51,15 @@ export async function deleteIndicator(id) {
     mode: 'cors',
   })
   return handleResponse(res)
+}
+
+export async function fetchIndicatorOverlays(id, { start, end, interval, symbol }) {
+  console.log("[IndicatorAdapter] fetchIndicatorOverlays params:", { id, start, end, interval, symbol })
+  const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start, end, interval, symbol }),
+    mode: 'cors',
+  });
+  return handleResponse(res);
 }

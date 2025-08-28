@@ -56,7 +56,7 @@ export const ChartStateProvider = ({ children }) => {
   }
 
   return (
-    <ChartStateContext.Provider value={{ registerChart, updateChart, getChart, bumpRefresh }}>
+    <ChartStateContext.Provider value={{ charts, registerChart, updateChart, getChart, bumpRefresh }}>
       {children}
     </ChartStateContext.Provider>
   )
@@ -68,4 +68,13 @@ export const useChartState = () => {
     throw new Error('useChartState must be used within a ChartStateProvider')
   }
   return context
+}
+
+
+export const useChartValue = (chartId) => {
+  const context = useContext(ChartStateContext)
+  if (!context) {
+    throw new Error('useChartValue must be used within a ChartStateProvider')
+  }
+  return context.charts[chartId] || null
 }

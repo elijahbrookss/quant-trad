@@ -11,6 +11,7 @@ import {
   createIndicator,
   updateIndicator,
   deleteIndicator,
+  fetchIndicatorOverlays,
 } from '../adapters/indicator.adapter'
 import IndicatorModal from './IndicatorModal'
 import { useChartState } from '../contexts/ChartStateContext'
@@ -39,7 +40,6 @@ export const IndicatorSection = ({ chartId }) => {
       return
     }
 
-
     let isMounted = true
     setIsLoading(true)
     console.log("[IndicatorSection] Fetching indicators for", chartState.symbol, chartState.interval)
@@ -47,30 +47,73 @@ export const IndicatorSection = ({ chartId }) => {
     fetchIndicators({
       symbol: chartState.symbol,
       interval: chartState.interval,
-      // add other params if needed
     })
       .then(data => {
         if (!isMounted) return
         setIndicators(data)
-        // Initialize overlays for enabled indicators
-        const initialOverlays = data
-          .filter(i => i.enabled)
-          .map(i => ({ id: i.id, type: i.type, params: i.params }))
-
-        updateChart(chartId, { overlays: initialOverlays, indicators: data })
-        console.log("[IndicatorSection] Updated chart overlays:", initialOverlays)
+        console.log("[IndicatorSection] Fetched indicators:", data)
+        updateChart(chartId, { overlays: [], indicators: data })
       })
       .catch(e => {
         if (!isMounted) return
         setError(e.message)
         console.error("[IndicatorSection] Error fetching indicators:", e)
       })
-      .finally(() => {
+      .finally(async () => {
+        await refreshEnabledOverlays()
         if (isMounted) setIsLoading(false)
         console.log("[IndicatorSection] Indicator fetch complete")
       })
     return () => { isMounted = false }
   }, [chartState?.refreshKey])
+
+  const refreshEnabledOverlays = async () => {
+    console.log("[IndicatorSection - Overlays] Refreshing enabled overlays for chartId:", chartId)
+    if (!chartState) return;
+
+    const enabled = indicators.filter(i => i.enabled);
+    if (enabled.length === 0) {
+      // clear overlays if none enabled
+      updateChart(chartId, { overlays: [] });
+      return;
+    }
+
+    const body = {
+      // Ensure plain ISO strings—some states may already be ISO strings
+      start: typeof chartState.start === 'string' ? chartState.start : chartState.start?.toISOString(),
+      end:   typeof chartState.end   === 'string' ? chartState.end   : chartState.end?.toISOString(),
+      interval: chartState.interval,
+      symbol: chartState.symbol,  // optional override; service will default to stored if null
+    };
+
+    const results = await Promise.all(enabled.map(async (ind) => {
+      try {
+        const payload = await fetchIndicatorOverlays(ind.id, body);
+        return { ind_id: ind.id, type: ind.type, payload };
+      } catch (e) {
+        // Skip common 404s (no overlays / no candles) but log others
+        const msg = String(e.message || e);
+        if (
+          msg.includes('Indicator not found') ||
+          msg.includes('No candles available') ||
+          msg.includes('No overlays computed')
+        ) {
+          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`);
+          return null;
+        }
+        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
+        return null;
+      }
+    }));
+
+    // results befor filter
+    console.log('[IndicatorSection] Raw overlay results:', results);
+    const overlaysPayload = results.filter(Boolean); // drop nulls
+    console.log('[IndicatorSection] Filtered overlaysPayload:', overlaysPayload);
+
+    updateChart(chartId, { overlays: overlaysPayload });
+    console.log("[IndicatorSection] Updated chart", overlaysPayload);
+  };
 
   // Create or update indicator
   const handleSave = async (meta) => {

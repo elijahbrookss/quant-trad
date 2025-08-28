@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from .config import DataContext
-from typing import List, Optional, Tuple, Set
+from typing import List, Optional, Tuple, Set, Dict, Any
 import pandas as pd
 from mplfinance.plotting import make_addplot
 from core.logger import logger
@@ -228,3 +228,65 @@ class PivotLevelIndicator(BaseIndicator):
                 f"Data missing for {ctx.symbol} [{timeframe}]"
             )
         return cls(df=df, timeframe=timeframe, **kwargs)
+
+
+    def to_lightweight(
+        self,
+        plot_df: pd.DataFrame,
+        color_mode: str = 'role'
+    ) -> Dict[str, Any]:
+        """
+        Produce TradingView Lightweight Charts overlays:
+        - price_lines: [{ id, price, title, color, lineStyle, lineWidth, axisLabelVisible, originTime }]
+        - markers:     [{ time, position, shape, color, text }]
+        """
+        role_colors = {'support': '#22c55e', 'resistance': '#ef4444'}  # green/red
+        tf_colors   = {self.timeframe: '#60a5fa'}                      # blue fallback
+
+        price_lines = []
+        markers = []
+
+        idx = plot_df.index
+
+        for i, lvl in enumerate(self.levels):
+            # color / label
+            if color_mode == 'role':
+                color = role_colors.get(lvl.kind, '#9ca3af')  # gray fallback
+                title = f"{lvl.kind[:3].upper()} · lb={lvl.lookback}"
+            else:
+                color = tf_colors.get(lvl.timeframe, '#9ca3af')
+                title = f"{lvl.timeframe} · lb={lvl.lookback}"
+
+            # ensure originTime exists (first visible bar or first_touched)
+            origin = lvl.first_touched if lvl.first_touched in idx else (idx[0] if len(idx) else lvl.first_touched)
+            origin_ts = int(pd.Timestamp(origin).timestamp())
+
+            price_lines.append({
+                "id": f"pivotlvl-{i}-{lvl.lookback}",
+                "price": float(lvl.price),
+                "title": title,
+                "color": color,
+                "lineStyle": 2,             # Dashed
+                "lineWidth": 1,
+                "axisLabelVisible": True,
+                "originTime": origin_ts     # for optional client logic
+            })
+
+            # touch markers on/after first_touched
+            touches = [ts for ts in lvl.get_touches(plot_df) if ts >= lvl.first_touched]
+            pos = "belowBar" if lvl.kind == "resistance" else "aboveBar"
+            for ts in touches:
+                markers.append({
+                    "time": int(pd.Timestamp(ts).timestamp()),
+                    "position": pos,
+                    "shape": "circle",
+                    "color": color,
+                    "text": f"{lvl.kind}@{lvl.price:.2f}"
+                })
+
+        return {
+            "type": "pivot-levels",
+            "timeframe": self.timeframe,
+            "price_lines": price_lines,
+            "markers": markers
+        }
