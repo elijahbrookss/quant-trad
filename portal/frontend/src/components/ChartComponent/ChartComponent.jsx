@@ -4,26 +4,79 @@ import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
 import { DateRangePickerComponent } from './DateTimePickerComponent'
 import { options, seriesOptions } from './ChartOptions'
 import { fetchCandleData } from '../../adapters/candle.adapter'
-import { useChartState } from '../../contexts/ChartStateContext.jsx'
+import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
 
 export const ChartComponent = ({ chartId }) => {
   const { registerChart, updateChart, getChart, bumpRefresh } = useChartState()
+  const chartState = useChartValue(chartId)
+
+  console.log("[ChartComponent] chartState from context:", chartState)
 
   // Local state for inputs
-  const [symbol, setSymbol] = useState('AAPL')
-  const [interval, setInterval] = useState('1h')
+  const [symbol, setSymbol] = useState('CL')
+  const [interval, setInterval] = useState('15m')
   const [dateRange, setDateRange] = useState([
     (() => { const d = new Date(); d.setDate(d.getDate() - 45); return d })(),
     (() => { const d = new Date(); d.setMinutes(d.getMinutes() - 5); return d })(),
   ])
-  // Local overlays state, synced from context
-  const [overlays, setOverlays] = useState([])
 
   // Chart refs
   const chartContainerRef = useRef()
   const chartRef = useRef()
   const seriesRef = useRef()
-  const overlaySeriesRefs = useRef({})
+  const overlayHandlesRef = useRef({ price_lines: [], hasMarkers: false }) // To hold multiple overlay series
+
+  const syncOverlays = (overlays = []) => {
+    console.log("[ChartComponent] Syncing overlays:", overlays)
+    if (!seriesRef.current || !chartRef.current) return;
+    overlayHandlesRef.current.price_lines.forEach(h => {
+      try { seriesRef.current.removePriceLine(h) } catch {}
+    })
+    overlayHandlesRef.current.price_lines = []
+    if (overlayHandlesRef.current.hasMarkers) {
+      try { seriesRef.current.setMarkers([]) } catch {}
+      overlayHandlesRef.current.hasMarkers = false
+    }
+
+    // 3) draw new overlays
+    const markers = []
+    overlays.forEach(({ type, payload }) => {
+      console.log("[ChartComponent] Processing overlay:", type, payload)
+      if (!payload) return
+
+      if (Array.isArray(payload.price_lines)) {
+        console.log("[ChartComponent] Creating price lines for overlay:", type, payload.price_lines)
+        payload.price_lines.forEach(pl => {
+          const handle = seriesRef.current.createPriceLine({
+            price: pl.price,
+            color: pl.color || undefined,
+            lineWidth: pl.lineWidth ?? 1,
+            lineStyle: pl.lineStyle ?? 0,
+            axisLabelVisible: true,
+            title: pl.title || type,
+          })
+          overlayHandlesRef.current.price_lines.push(handle)
+        })
+      }
+
+      // Example: markers
+      if (Array.isArray(payload.markers)) {
+        payload.markers.forEach(m => {
+          markers.push({
+            time: m.time,                // unix seconds expected by lightweight-charts
+            position: m.position,        // 'aboveBar' | 'belowBar' | ...
+            shape: m.shape,              // 'circle' | 'arrowUp' | ...
+            color: m.color,
+            text: m.text || type,
+          })
+        })
+      }
+    })
+    if (markers.length) {
+      seriesRef.current.setMarkers(markers)
+      overlayHandlesRef.current.hasMarkers = true
+    }
+  }
 
   // Initialize chart and register context
   useLayoutEffect(() => {
@@ -49,7 +102,6 @@ export const ChartComponent = ({ chartId }) => {
 
     const handleResize = () => {
       chart.applyOptions({ width: chartContainerRef.current.clientWidth })
-      console.log("[ChartComponent] Chart resized to", chartContainerRef.current.clientWidth)
     }
     window.addEventListener('resize', handleResize)
 
@@ -60,30 +112,12 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [])
 
-  // // Render overlays on chart
-  // useEffect(() => {
-  //   const chart = chartRef.current
-  //   if (!chart) return
-  //   // Remove series for overlays no longer present
-  //   Object.keys(overlaySeriesRefs.current).forEach(id => {
-  //     if (!overlays.find(o => o.id === id)) {
-  //       overlaySeriesRefs.current[id].remove()
-  //       delete overlaySeriesRefs.current[id]
-  //       console.log(`[ChartComponent] Removed overlay series: ${id}`)
-  //     }
-  //   })
-  //   // Add or update overlay series
-  //   overlays.forEach(o => {
-  //     let lineSeries = overlaySeriesRefs.current[o.id]
-  //     if (!lineSeries) {
-  //       lineSeries = chart.addSeries(LineSeries, { title: o.type })
-  //       overlaySeriesRefs.current[o.id] = lineSeries
-  //       console.log(`[ChartComponent] Added overlay series: ${o.id}`)
-  //     }
-  //     lineSeries.setData(o.data || [])
-  //     console.log(`[ChartComponent] Updated overlay series: ${o.id} with ${o.data?.length || 0} points`)
-  //   })
-  // }, [overlays])
+  useEffect(() => {
+    if (chartState?.overlays) {
+      console.log("[ChartComponent] overlays changed:", chartState.overlays)
+      syncOverlays(chartState.overlays)
+    }
+  }, [chartState?.overlays])
 
   const loadChartData = async () => {
     console.log("[ChartComponent] Loading chart data for", symbol, interval, dateRange)
@@ -115,7 +149,7 @@ export const ChartComponent = ({ chartId }) => {
   const handlePrintState = () => {
     console.log("[ChartComponent] Print state button clicked")
     loadChartData()
-    updateChart(chartId, { symbol, interval, dateRange, overlays })
+    updateChart(chartId, { symbol, interval, dateRange })
     bumpRefresh(chartId)
     
     const chartState = getChart(chartId, "chartComponent-handlePrintState")
