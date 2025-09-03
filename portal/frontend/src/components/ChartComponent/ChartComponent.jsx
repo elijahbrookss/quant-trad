@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'react'
-import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts'
+import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts'
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
 import { DateRangePickerComponent } from './DateTimePickerComponent'
 import { options, seriesOptions } from './ChartOptions'
@@ -23,60 +23,10 @@ export const ChartComponent = ({ chartId }) => {
   // Chart refs
   const chartContainerRef = useRef()
   const chartRef = useRef()
+  const paneViewRef = useRef()
   const seriesRef = useRef()
-  const overlayHandlesRef = useRef({ price_lines: [], hasMarkers: false }) // To hold multiple overlay series
-
-  const syncOverlays = (overlays = []) => {
-    console.log("[ChartComponent] Syncing overlays:", overlays)
-    if (!seriesRef.current || !chartRef.current) return;
-    overlayHandlesRef.current.price_lines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h) } catch {}
-    })
-    overlayHandlesRef.current.price_lines = []
-    if (overlayHandlesRef.current.hasMarkers) {
-      try { seriesRef.current.setMarkers([]) } catch {}
-      overlayHandlesRef.current.hasMarkers = false
-    }
-
-    // 3) draw new overlays
-    const markers = []
-    overlays.forEach(({ type, payload }) => {
-      console.log("[ChartComponent] Processing overlay:", type, payload)
-      if (!payload) return
-
-      if (Array.isArray(payload.price_lines)) {
-        console.log("[ChartComponent] Creating price lines for overlay:", type, payload.price_lines)
-        payload.price_lines.forEach(pl => {
-          const handle = seriesRef.current.createPriceLine({
-            price: pl.price,
-            color: pl.color || undefined,
-            lineWidth: pl.lineWidth ?? 1,
-            lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: true,
-            title: pl.title || type,
-          })
-          overlayHandlesRef.current.price_lines.push(handle)
-        })
-      }
-
-      // Example: markers
-      if (Array.isArray(payload.markers)) {
-        payload.markers.forEach(m => {
-          markers.push({
-            time: m.time,                // unix seconds expected by lightweight-charts
-            position: m.position,        // 'aboveBar' | 'belowBar' | ...
-            shape: m.shape,              // 'circle' | 'arrowUp' | ...
-            color: m.color,
-            text: m.text || type,
-          })
-        })
-      }
-    })
-    if (markers.length) {
-      seriesRef.current.setMarkers(markers)
-      overlayHandlesRef.current.hasMarkers = true
-    }
-  }
+  const overlayHandlesRef = useRef({ price_lines: [], markersApi: null }) // To hold multiple overlay series
+  const touchSeriesRef = useRef()
 
   // Initialize chart and register context
   useLayoutEffect(() => {
@@ -96,6 +46,12 @@ export const ChartComponent = ({ chartId }) => {
 
     const series = chart.addSeries(CandlestickSeries, { ...seriesOptions })
     seriesRef.current = series
+
+    const paneView = createTouchPaneView(chart.timeScale());
+    paneViewRef.current = paneView;
+
+    const touchSeries = chart.addCustomSeries(paneView, {});
+    touchSeriesRef.current = touchSeries;
 
     loadChartData()
     chart.timeScale().fitContent()
@@ -145,6 +101,135 @@ export const ChartComponent = ({ chartId }) => {
       console.error("[ChartComponent] Error loading chart data:", err)
     }
   }
+  
+  const syncOverlays = (overlays = []) => {
+    console.log("[ChartComponent] Syncing overlays:", overlays)
+    if (!seriesRef.current || !chartRef.current) return;
+    overlayHandlesRef.current.price_lines.forEach(h => {
+      try { seriesRef.current.removePriceLine(h) } catch {}
+    })
+    overlayHandlesRef.current.price_lines = []
+
+    // 2) ensure markers plugin exists; clear old markers
+    if (!overlayHandlesRef.current.markersApi) {
+      overlayHandlesRef.current.markersApi = createSeriesMarkers(seriesRef.current, [])
+    } else {
+      overlayHandlesRef.current.markersApi.setMarkers([])
+    }
+
+    // 3) draw new overlays
+    const touchPoints = [] // for touch series
+    const allBarMarkers = [] // for standard markers
+    overlays.forEach(({ type, payload }) => {
+      console.log("[ChartComponent] Processing overlay:", type, payload)
+      if (!payload) return
+
+      if (Array.isArray(payload.price_lines)) {
+        console.log("[ChartComponent] Creating price lines for overlay:", type, payload.price_lines)
+        payload.price_lines.forEach(pl => {
+          const handle = seriesRef.current.createPriceLine({
+            price: pl.price,
+            color: pl.color || undefined,
+            lineWidth: pl.lineWidth ?? 1,
+            lineStyle: pl.lineStyle ?? 0,
+            axisLabelVisible: true,
+            title: pl.title || type,
+          })
+          overlayHandlesRef.current.price_lines.push(handle)
+        })
+      }
+
+      if (Array.isArray(payload.markers)) {
+        for (const m of payload.markers) {
+          if (m.subtype === 'touch' && typeof m.price === 'number') {
+            // plot exact dots on TouchSeries only
+            touchPoints.push({
+              time: m.time,
+              originalData: { price: m.price, color: m.color, size: 4 },
+            });
+          } else {
+            // everything else goes to standard markers
+            allBarMarkers.push({
+              time: m.time,
+              position: m.position ?? 'aboveBar',
+              shape: m.shape ?? 'circle',
+              color: m.color,
+              text: m.text ?? '',
+            });
+          }
+        }
+      }
+    });
+
+    // Sort touch points by time to ensure correct rendering
+    // ---- normalize, group, sort ----
+    const toSec = v => (typeof v === 'number' ? (v > 2e10 ? Math.floor(v / 1000) : v) : v);
+
+    // normalize times
+    allBarMarkers.forEach(m => { m.time = toSec(m.time); });
+    touchPoints.forEach(p => { p.time = toSec(p.time); });
+
+    // group touch points by time (STRICTLY 1 item per time)
+    const grouped = new Map();
+    for (const p of touchPoints) {
+      if (p.time == null || Number.isNaN(p.time)) continue;
+      if (!grouped.has(p.time)) grouped.set(p.time, []);
+      grouped.get(p.time).push({
+        price:  p.originalData?.price ?? p.price,
+        color:  p.originalData?.color ?? p.color,
+        size:   (p.originalData?.size ?? p.size ?? 3),
+      });
+    }
+
+    // materialize series data: one row per time
+    const touchData = [...grouped.entries()]
+      .map(([time, points]) => ({
+        time,
+        originalData: { points },        // <-- multiple dots per bar
+      }))
+      .sort((a, b) => a.time - b.time);
+
+    // sort markers too (not strictly required, but tidy)
+    allBarMarkers.sort((a, b) => a.time - b.time);
+
+
+    console.log('[Touch] count:', touchPoints.length,
+            'first:', touchPoints[0],
+            'last:', touchPoints[touchPoints.length - 1]);
+    console.log('[Touch] grouped entries:', grouped.size, 'touchData points:', touchData.length);
+    console.log('[Markers] count:', allBarMarkers.length,
+            'first:', allBarMarkers[0],
+            'last:', allBarMarkers[allBarMarkers.length - 1]);
+
+
+    const lastCandleTime = seriesRef.current?._data?._items?.at?.(-1)?.time ?? null;
+    const lastClose = seriesRef.current?._data?._items?.at?.(-1)?.close ?? null;
+
+    if (lastCandleTime != null && lastClose != null) {
+      touchData.push({
+        time: lastCandleTime,
+        originalData: { points: [{ price: lastClose, color: '#ff00ff', size: 8 }] },
+      });
+      console.log('[TouchSeries] injected test dot at', lastCandleTime, 'price', lastClose);
+    }
+
+    // update series
+    overlayHandlesRef.current.markersApi.setMarkers(allBarMarkers);
+    if (touchSeriesRef.current) {
+      console.log('[TouchSeries] calling setData len:', touchData.length, 'first:', touchData[0], 'last:', touchData.at(-1));
+
+      const last = seriesRef.current?._data?._items?.at?.(-1);
+      if (last) {
+        touchData.push({
+          time: last.time,
+          originalData: { points: [{ price: last.close, color: '#ff00ff', size: 10 }] },
+        });
+      }
+
+      paneViewRef.current?.setExternalData(touchData);
+      touchSeriesRef.current.setData(touchData);
+    }
+  }
 
   const handlePrintState = () => {
     console.log("[ChartComponent] Print state button clicked")
@@ -155,6 +240,55 @@ export const ChartComponent = ({ chartId }) => {
     const chartState = getChart(chartId, "chartComponent-handlePrintState")
     console.log("[ChartComponent] Current chart state:", chartState)
   }
+  
+  function createTouchPaneView(tsApi) {
+    let external = [];
+
+    const renderer = {
+      draw: (target, priceToCoordinate) => {
+        const ctx = target.useMediaCoordinateSpace(({ context }) => context);
+        ctx.save();
+
+        const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
+
+        for (const row of external) {
+          const x = tsApi.timeToCoordinate(toSec(row.time)); // ⬅ use chart’s timeScale
+          if (x == null) continue;
+
+          const pts = row.originalData?.points || [];
+          for (const pt of pts) {
+            const y = priceToCoordinate(pt.price);
+            if (y == null) continue;
+
+            ctx.beginPath();
+            ctx.arc(x, y, (pt.size ?? 5), 0, Math.PI * 2);
+            ctx.fillStyle = pt.color ?? '#60a5fa';
+            ctx.fill();
+          }
+        }
+
+        ctx.restore();
+      },
+      drawBackground: () => {},
+      hitTest: () => null,
+    };
+
+    return {
+      renderer: () => renderer,
+      update: () => {},                      // we don't rely on paneData anymore
+      setExternalData: rows => { external = rows || []; },  // <-- we’ll call this
+      priceValueBuilder: item => {
+        const p = item.originalData?.points?.[0]?.price ?? 0;
+        return [p, p, p];
+      },
+      isWhitespace: item => !(item.originalData?.points?.length),
+      defaultOptions() {
+        return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+      },
+      destroy: () => {},
+    };
+  }
+
 
   return (
     <>
