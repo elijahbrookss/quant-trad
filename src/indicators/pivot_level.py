@@ -54,7 +54,8 @@ class PivotLevelIndicator(BaseIndicator):
         df: pd.DataFrame,
         timeframe: str,
         lookbacks: Tuple[int, ...] = (10, 20, 50),
-        threshold: float = 0.005
+        threshold: float = 0.005,
+        days_back: int = 180
     ):
         """
         :param df: OHLC DataFrame indexed by timestamp
@@ -66,6 +67,7 @@ class PivotLevelIndicator(BaseIndicator):
         self.timeframe = timeframe
         self.lookbacks = lookbacks
         self.threshold = threshold
+        self.days_back = days_back
         self.levels: List[Level] = []
         self._compute()
 
@@ -207,6 +209,7 @@ class PivotLevelIndicator(BaseIndicator):
         provider,
         ctx: DataContext,
         timeframe: str,
+        days_back: int = 180,
         **kwargs
     ):
         """
@@ -216,12 +219,20 @@ class PivotLevelIndicator(BaseIndicator):
         :param level_timeframe: timeframe for the pivot levels (e.g., '1d', '4h')
 
         """
+        end_ts = pd.Timestamp(ctx.end)
+        start_dt = end_ts - pd.Timedelta(days=days_back)
+        if start_dt.tz is None:
+            start_dt = start_dt.tz_localize("UTC")
+        else:
+            start_dt = start_dt.tz_convert("UTC")
+
         level_ctx = DataContext(
             symbol=ctx.symbol,
-            start=ctx.start,
+            start=start_dt.isoformat(),
             end=ctx.end,
-            interval=timeframe
+            interval=timeframe,
         )
+
         df = provider.get_ohlcv(level_ctx)
         if df is None or df.empty:
             raise ValueError(
@@ -233,7 +244,7 @@ class PivotLevelIndicator(BaseIndicator):
     def to_lightweight(
         self,
         plot_df: pd.DataFrame,
-        color_mode: str = 'role'
+        color_mode: str = 'timeframe'
     ) -> Dict[str, Any]:
         """
         Produce TradingView Lightweight Charts overlays:
@@ -281,7 +292,8 @@ class PivotLevelIndicator(BaseIndicator):
                     "position": pos,
                     "shape": "circle",
                     "color": color,
-                    "text": f"{lvl.kind}@{lvl.price:.2f}"
+                    "price": float(lvl.price),
+                    "subtype": "touch",
                 })
 
         return {
