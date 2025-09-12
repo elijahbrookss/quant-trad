@@ -44,6 +44,15 @@ const normalizeParams = (params) => {
   return p;
 };
 
+const hexToRgba = (hex, a = 0.18) => {
+  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
+  const v = hex.slice(1);
+  const n = v.length === 3
+    ? v.split('').map(c => parseInt(c + c, 16))
+    : [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)];
+  return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
+};
+
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
@@ -101,6 +110,15 @@ export const IndicatorSection = ({ chartId }) => {
 
     return () => { isMounted = false; };
   }, [chartId, chartState?._version]);
+
+  // When indicator colors change, recolor overlays in chart context (post-render).
+  useEffect(() => {
+    const overlays = (getChart(chartId)?.overlays) || [];
+    if (!overlays.length) return;
+    const recolored = applyIndicatorColors(overlays, indColors);
+    updateChart(chartId, { overlays: recolored });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indColors, chartId]);
 
   // Refresh overlays for enabled indicators
   // ensure enabled indicators carry current chart symbol/interval before fetching overlays
@@ -283,18 +301,18 @@ export const IndicatorSection = ({ chartId }) => {
         ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
         : ov.payload.markers;
 
-      return { ...ov, payload: { ...ov.payload, price_lines, markers } };
+      const boxes = Array.isArray(ov.payload.boxes)
+        ? ov.payload.boxes.map(b => {
+            if (!b) return b;
+            return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
+          })
+        : ov.payload.boxes;
+
+      return { ...ov, payload: { ...ov.payload, price_lines, markers, boxes } };
     });
 
-  // set color, then recolor currently-displayed overlays in context
   const handleSelectColor = (indicatorId, color) => {
-    setIndColors(prev => {
-      const next = { ...prev, [indicatorId]: color };
-      const overlays = (getChart(chartId)?.overlays) || [];
-      const recolored = applyIndicatorColors(overlays, next);
-      updateChart(chartId, { overlays: recolored });
-      return next;
-    });
+    setIndColors(prev => ({ ...prev, [indicatorId]: color }));
   };
 
   if (isLoading) return <div>Loading indicators…</div>
