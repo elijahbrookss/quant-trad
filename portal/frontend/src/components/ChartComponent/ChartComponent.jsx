@@ -30,6 +30,8 @@ export const ChartComponent = ({ chartId }) => {
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
+  const seededRef = useRef(false); // ensure we seed only once
+
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
   const touchSeriesRef = useRef()
@@ -65,14 +67,26 @@ export const ChartComponent = ({ chartId }) => {
       get series() { return seriesRef.current; }
     });
 
-    // Seed chart slice and trigger first indicator fetch
-    updateChart?.(chartId, { symbol, interval, dateRange });
-    bumpRefresh?.(chartId);
+    loadChartData();
+    
+    if (!seededRef.current) {
+      updateChart?.(chartId, { symbol, interval, dateRange });
+      bumpRefresh?.(chartId); // trigger initial indicator load
+      seededRef.current = true;
+    }
 
     info('chart created', { chartId });
 
     return () => {
       try {
+        overlayHandlesRef.current?.priceLines?.forEach(h => {
+          try { seriesRef.current?.removePriceLine(h); } catch {}
+        });
+        overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
+        if (touchSeriesRef.current) {
+          chartRef.current?.removeSeries?.(touchSeriesRef.current);
+          touchSeriesRef.current = null;
+        }
         chartRef.current?.remove();
         chartRef.current = null;
         seriesRef.current = null;
@@ -81,7 +95,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, info, error, registerChart]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error]);
 
   // Resize via ResizeObserver.
   useEffect(() => {
@@ -277,13 +291,6 @@ export const ChartComponent = ({ chartId }) => {
     bumpRefresh?.(chartId);
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
 
-  // Initial load.
-  useEffect(() => {
-    if (chartRef.current && seriesRef.current) {
-      info('initial load', { chartId });
-      loadChartData();
-    }
-  }, [loadChartData, info, chartId]);
 
   function createTouchPaneView(tsApi) {
     let external = [];

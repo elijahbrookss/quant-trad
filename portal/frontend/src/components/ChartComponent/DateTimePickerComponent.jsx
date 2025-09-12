@@ -18,18 +18,10 @@ export function DateRangePickerComponent({
   // Default values fallback if not passed
   const [startDate, endDate] = dateRange ?? [defaultStart ?? fortyFiveDaysAgo, defaultEnd ?? today];
 
-  // Auto-correct ranges
   useEffect(() => {
-    if (startDate > endDate) {
-      setDateRange([startDate, startDate]);
-    }
-  }, [startDate]);
-
-  useEffect(() => {
-    if (endDate < startDate) {
-      setDateRange([endDate, endDate]);
-    }
-  }, [endDate]);
+    if (!startDate || !endDate) return;
+    if (startDate > endDate) setDateRange([startDate, startDate]);
+  }, [startDate, endDate]);
 
   return (
     <div className="flex items-center space-x-3">
