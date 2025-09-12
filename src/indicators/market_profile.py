@@ -45,13 +45,14 @@ class MarketProfileIndicator(BaseIndicator):
     """
     NAME = "market_profile"
 
-    def __init__(self, df: pd.DataFrame, bin_size: float = 0.1, mode: str = "tpo"):
+    def __init__(self, df: pd.DataFrame, bin_size: float = 0.1, mode: str = "tpo", interval: str = "30m"):
         super().__init__(df)
         self.bin_size = bin_size
         self.mode = mode
         # Compute raw daily profiles on initialization
         self.daily_profiles = self._compute_daily_profiles()
         self.merged_profiles = []
+        self.interval = interval
 
     @classmethod
     def from_context(cls, provider, ctx: DataContext, bin_size: float = 0.1, mode: str = "tpo", interval: str = "30m"):
@@ -359,40 +360,40 @@ class MarketProfileIndicator(BaseIndicator):
             })
 
             # ----- price lines (Lightweight "price line" settings) -----
-            # VAL (solid)
-            out_lines.append({
-                "price": float(val),
-                "title": "VAL",
-                "time": start_str,          # when the line begins
-                "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
-                "lineWidth": 1,
-                "extend": "right",
-                "axisLabelVisible": True,
-                "color": "#6b7280",
-            })
-            # POC (dashed) — if available
-            if poc is not None:
-                out_lines.append({
-                    "price": float(poc),
-                    "title": "POC",
-                    "time": start_str,
-                    "lineStyle": 2,         # dashed to distinguish from VA band edges
-                    "lineWidth": 1,
-                    "extend": "right",
-                    "axisLabelVisible": True,
-                    "color": "#f59e0b",
-                })
-            # VAH (solid)
-            out_lines.append({
-                "price": float(vah),
-                "title": "VAH",
-                "time": start_str,
-                "lineStyle": 0,
-                "lineWidth": 1,
-                "extend": "right",
-                "axisLabelVisible": True,
-                "color": "#6b7280",
-            })
+            # # VAL (solid)
+            # out_lines.append({
+            #     "price": float(val),
+            #     "title": "VAL",
+            #     "time": start_str,          # when the line begins
+            #     "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
+            #     "lineWidth": 0,
+            #     "extend": "right",
+            #     "axisLabelVisible": True,
+            #     "color": "#6b7280",
+            # })
+            # # POC (dashed) — if available
+            # if poc is not None:
+            #     out_lines.append({
+            #         "price": float(poc),
+            #         "title": "POC",
+            #         "time": start_str,
+            #         "lineStyle": 2,         # dashed to distinguish from VA band edges
+            #         "lineWidth": 0,
+            #         "extend": "right",
+            #         "axisLabelVisible": False,
+            #         "color": "#f59e0b",
+            #     })
+            # # VAH (solid)
+            # out_lines.append({
+            #     "price": float(vah),
+            #     "title": "VAH",
+            #     "time": start_str,
+            #     "lineStyle": 0,
+            #     "lineWidth": 0,
+            #     "extend": "right",
+            #     "axisLabelVisible": True,
+            #     "color": "#6b7280",
+            # })
 
             # ----- touchpoint markers (optional) -----
             if include_touches:
@@ -400,7 +401,7 @@ class MarketProfileIndicator(BaseIndicator):
                 out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
 
         return {
-            "price_lines": out_lines,
+            "price_lines": [],
             "markers": out_markers,
             "boxes": out_boxes
         }

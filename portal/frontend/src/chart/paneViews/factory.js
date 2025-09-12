@@ -25,7 +25,7 @@ export class PaneViewManager {
         view = createTouchPaneView(this.ts);
         break;
       case PaneViewType.VA_BOX:
-        view = createVABoxPaneView(this.ts);
+        view = createVABoxPaneView(this.ts, { hatchOverlap: true, extendRight: true });
         break;
       default:
         throw new Error(`Unknown pane view: ${type}`);
@@ -54,16 +54,40 @@ export class PaneViewManager {
     this.series.get(PaneViewType.TOUCH).setData(rows);
   }
 
-  setVABlocks(boxes) {
-    // boxes: [{ x1, x2, y1, y2, color, border? }]
-    if (!boxes?.length) return;
-    this.ensure(PaneViewType.VA_BOX);
+    setVABlocks(boxes) {
+      const type = PaneViewType.VA_BOX;
+      if (!boxes || boxes.length === 0) {
+        if (this.views.get(type)) {
+          this.views.get(type).setBoxes([]);
+          this.series.get(type)?.setData([]);
+        }
+        return;
+      }
 
-    this.views.get(PaneViewType.VA_BOX).setBoxes(boxes);
-    // seed minimal points so timescale accounts for the span
-    const seed = boxes.map(b => ({ time: Math.min(b.x1, b.x2), originalData: {} }));
-    this.series.get(PaneViewType.VA_BOX).setData(seed);
-  }
+      this.ensure(type);
+      this.views.get(type).setBoxes(boxes);
+
+      // ---- build strictly ascending, unique seed times ----
+      const toSec = (t) => {
+        if (typeof t === 'number') return t > 2e10 ? Math.floor(t / 1000) : t;
+        return Math.floor(new Date(t).getTime() / 1000);
+      };
+
+      const seen = new Set();
+      const uniqTimes = [];
+      for (const b of boxes) {
+        const t = Math.min(toSec(b.x1), toSec(b.x2 ?? b.x1));
+        if (!seen.has(t)) {
+          seen.add(t);
+          uniqTimes.push(t);
+        }
+      }
+      uniqTimes.sort((a, b) => a - b);
+
+      const seed = uniqTimes.map((t) => ({ time: t, originalData: {} }));
+      this.series.get(type).setData(seed);
+    }
+
 
   clearFrame() {
     if (this.views.get(PaneViewType.TOUCH)) {

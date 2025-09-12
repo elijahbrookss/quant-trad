@@ -1,5 +1,9 @@
-export function createVABoxPaneView(timeScaleApi) {
+export function createVABoxPaneView(timeScaleApi, opts = {}) {
+  const { hatchOverlap = true, extendRight = true } = opts;
   let boxes = []; // [{ x1, x2, y1, y2, color, border? }]
+
+  const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
+  const withAlpha = (rgba, a) => rgba.replace(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*[^)]+\)/, `rgba($1,$2,$3,${a})`);
 
   const renderer = {
     draw: (target, priceToCoordinate) => {
@@ -7,21 +11,29 @@ export function createVABoxPaneView(timeScaleApi) {
       if (!ctx) return;
       ctx.save();
 
-      const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
+      const vr = timeScaleApi.getVisibleRange?.();
+      const rightT = vr?.to; // epoch seconds
+      const pxRects = [];
 
+      // 1) draw base boxes
       for (const b of boxes) {
-        const x1 = timeScaleApi.timeToCoordinate(toSec(b.x1));
-        const x2 = timeScaleApi.timeToCoordinate(toSec(b.x2));
-        if (x1 == null || x2 == null) continue;
+        const xLeft  = timeScaleApi.timeToCoordinate(toSec(b.x1));
+        const xRight = extendRight && rightT != null
+          ? timeScaleApi.timeToCoordinate(rightT)
+          : timeScaleApi.timeToCoordinate(toSec(b.x2));
+
+        if (xLeft == null || xRight == null) continue;
 
         const y1 = priceToCoordinate(b.y1);
         const y2 = priceToCoordinate(b.y2);
         if (y1 == null || y2 == null) continue;
 
-        const left = Math.min(x1, x2);
-        const width = Math.max(1, Math.abs(x2 - x1));
+        const left = Math.min(xLeft, xRight);
+        const width = Math.max(1, Math.abs(xRight - xLeft));
         const top = Math.min(y1, y2);
         const height = Math.abs(y2 - y1);
+
+        pxRects.push({ left, top, width, height, color: b.color, border: b.border });
 
         ctx.fillStyle = b.color || 'rgba(156,163,175,0.18)';
         ctx.fillRect(left, top, width, height);
@@ -30,6 +42,37 @@ export function createVABoxPaneView(timeScaleApi) {
           ctx.strokeStyle = b.border.color || 'rgba(100,116,139,.45)';
           ctx.lineWidth = b.border.width || 1;
           ctx.strokeRect(left + .5, top + .5, Math.max(0, width - 1), Math.max(0, height - 1));
+        }
+      }
+
+      // 2) make overlaps obvious (light hatch)
+      if (hatchOverlap && pxRects.length > 1) {
+        for (let i = 0; i < pxRects.length; i++) {
+          for (let j = i + 1; j < pxRects.length; j++) {
+            const a = pxRects[i], b = pxRects[j];
+            const L = Math.max(a.left, b.left);
+            const R = Math.min(a.left + a.width, b.left + b.width);
+            const T = Math.max(a.top, b.top);
+            const B = Math.min(a.top + a.height, b.top + b.height);
+            const w = R - L, h = B - T;
+            if (w <= 1 || h <= 1) continue;
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(L, T, w, h);
+            ctx.clip();
+
+            ctx.strokeStyle = withAlpha(a.border?.color || a.color || 'rgba(156,163,175,0.18)', 0.50);
+            ctx.lineWidth = 1;
+            const step = 6;
+            for (let x = L - h; x < R; x += step) {
+              ctx.beginPath();
+              ctx.moveTo(x, T);
+              ctx.lineTo(x + h, B);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
         }
       }
 
@@ -44,11 +87,8 @@ export function createVABoxPaneView(timeScaleApi) {
     update: () => {},
     priceValueBuilder: () => [0,0,0],
     isWhitespace: () => false,
-    defaultOptions() {
-      return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
-    },
+    defaultOptions() { return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }; },
     destroy: () => {},
-
     setBoxes(arr) { boxes = Array.isArray(arr) ? arr : []; },
   };
 }
