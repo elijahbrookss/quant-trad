@@ -125,6 +125,8 @@ export const IndicatorSection = ({ chartId }) => {
   // re-fetch indicators and ensure enabled indicators' params match current chart before overlays
   // patch enabled indicators to current chart symbol/interval, then compute overlays
   const refreshEnabledOverlays = async (list = indicators) => {
+    updateChart(chartId, { overlayLoading: true }); // show loading state
+
     console.log('[IndicatorSection - Overlays] Refresh start for chartId:', chartId);
     if (!chartState) return;
 
@@ -202,7 +204,7 @@ export const IndicatorSection = ({ chartId }) => {
 
     const overlaysPayload = results.filter(Boolean);
     const colored = applyIndicatorColors(overlaysPayload, indColors);
-    updateChart(chartId, { overlays: colored });
+    updateChart(chartId, { overlays: colored, overlayLoading: false });
     console.log('[IndicatorSection] Updated overlays (colored):', colored);
   };
 
