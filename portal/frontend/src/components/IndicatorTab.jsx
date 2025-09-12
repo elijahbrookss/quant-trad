@@ -71,43 +71,80 @@ export const IndicatorSection = ({ chartId }) => {
       return;
     }
 
-    let isMounted = true;
-    let fetched = []; // capture fetched list
-    setIsLoading(true);
-    console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval);
+    // clear overlays immediately
+    updateChart(chartId, { overlays: [] });
 
-    fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
-      .then(async (data) => {
-        if (!isMounted) return;
-        fetched = Array.isArray(data) ? data : [];
-        setIndicators(fetched);
-        updateChart(chartId, { indicators: fetched });
-        await refreshEnabledOverlays(fetched); // use the fresh list
-      })
-      .catch(e => {
-        if (!isMounted) return;
-        setError(e.message);
-        console.error('[IndicatorSection] Error fetching indicators:', e);
-      })
-      .finally(() => {
+    let isMounted = true;
+    setIsLoading(true);
+
+    (async () => {
+      try {
+        await refreshEnabledOverlays(); // uses current indicators list; patches params before overlays
+      } catch (e) {
+        if (isMounted) {
+          setError(e.message);
+          console.error('[IndicatorSection] Refresh failed:', e);
+        }
+      } finally {
         if (isMounted) setIsLoading(false);
-        console.log('[IndicatorSection] Indicator fetch complete');
-      });
+      }
+    })();
 
     return () => { isMounted = false; };
   }, [chartId, chartState?._version]);
 
   // Refresh overlays for enabled indicators
+  // ensure enabled indicators carry current chart symbol/interval before fetching overlays
+  // re-fetch indicators and ensure enabled indicators' params match current chart before overlays
+  // patch enabled indicators to current chart symbol/interval, then compute overlays
   const refreshEnabledOverlays = async (list = indicators) => {
-    console.log('[IndicatorSection - Overlays] Refreshing for chartId:', chartId);
+    console.log('[IndicatorSection - Overlays] Refresh start for chartId:', chartId);
     if (!chartState) return;
 
-    const enabled = (list || []).filter(i => i.enabled);
-    if (enabled.length === 0) {
-      updateChart(chartId, { overlays: [] });
-      return;
+    // if list is empty/undefined, try one fetch to seed; otherwise use provided/current list
+    let working = Array.isArray(list) && list.length ? list : indicators;
+    if (!Array.isArray(working) || working.length === 0) {
+      try {
+        working = (await fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })) || [];
+        setIndicators(working);
+        updateChart(chartId, { indicators: working });
+      } catch (e) {
+        console.error('[IndicatorSection - Overlays] Failed to seed indicators:', e);
+        updateChart(chartId, { overlays: [] });
+        return;
+      }
     }
 
+    // patch params for enabled indicators if symbol/interval mismatch
+    const enabled = working.filter(i => i?.enabled);
+    const patched = await Promise.all(enabled.map(async (ind) => {
+      const p = ind?.params || {};
+      const desiredSymbol = chartState.symbol;
+      const desiredInterval = chartState.interval;
+      const needPatch = p.symbol !== desiredSymbol || p.interval !== desiredInterval;
+
+      if (!needPatch) return ind;
+
+      try {
+        const nextParams = { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO };
+        const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
+        return updated || { ...ind, params: nextParams };
+      } catch (e) {
+        console.warn('[IndicatorSection - Overlays] Param patch failed for', ind.id, e);
+        // fall back locally so overlays still align this session
+        return { ...ind, params: { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO } };
+      }
+    }));
+
+    // merge patched back into full list and persist
+    const byId = new Map(patched.map(p => [p.id, p]));
+    const merged = working.map(ind => byId.get(ind.id) || ind);
+    if (merged !== working) {
+      setIndicators(merged);
+      updateChart(chartId, { indicators: merged });
+    }
+
+    // compute overlays for enabled indicators using current chart window
     const body = {
       start: startISO,
       end: endISO,
@@ -115,28 +152,30 @@ export const IndicatorSection = ({ chartId }) => {
       symbol: chartState.symbol,
     };
 
-    const results = await Promise.all(enabled.map(async (ind) => {
-      try {
-        const payload = await fetchIndicatorOverlays(ind.id, body);
-        return { ind_id: ind.id, type: ind.type, payload };
-      } catch (e) {
-        const msg = String(e.message || e);
-        if (
-          msg.includes('Indicator not found') ||
-          msg.includes('No candles available') ||
-          msg.includes('No overlays computed')
-        ) {
-          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`);
+    const results = await Promise.all(
+      patched.map(async (ind) => {
+        try {
+          const payload = await fetchIndicatorOverlays(ind.id, body);
+          return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
+        } catch (e) {
+          const msg = String(e?.message ?? e);
+          if (
+            msg.includes('Indicator not found') ||
+            msg.includes('No candles available') ||
+            msg.includes('No overlays computed')
+          ) {
+            console.warn(`[IndicatorSection - Overlays] Skipping ${ind.id}: ${msg}`);
+            return null;
+          }
+          console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
           return null;
         }
-        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
-        return null;
-      }
-    }));
+      })
+    );
 
     const overlaysPayload = results.filter(Boolean);
     updateChart(chartId, { overlays: overlaysPayload });
-    console.log('[IndicatorSection] Updated overlays:', overlaysPayload);
+    console.log('[IndicatorSection - Overlays] Refresh done; overlays:', overlaysPayload.length);
   };
 
   // Handlers for modal save/delete
