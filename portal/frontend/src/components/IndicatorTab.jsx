@@ -10,6 +10,8 @@ import {
 import IndicatorModal from './IndicatorModal'
 import { useChartState } from '../contexts/ChartStateContext'
 
+const COLOR_SWATCHES = ['#60a5fa', '#f97316', '#22c55e', '#eab308', '#ef4444'];
+
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
   if (typeof v === 'string') {
@@ -44,6 +46,8 @@ export const IndicatorSection = ({ chartId }) => {
   const [editing, setEditing] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [indColors, setIndColors] = useState({});
+
 
   const { updateChart, getChart } = useChartState()
 
@@ -174,8 +178,9 @@ export const IndicatorSection = ({ chartId }) => {
     );
 
     const overlaysPayload = results.filter(Boolean);
-    updateChart(chartId, { overlays: overlaysPayload });
-    console.log('[IndicatorSection - Overlays] Refresh done; overlays:', overlaysPayload.length);
+    const colored = applyIndicatorColors(overlaysPayload, indColors);
+    updateChart(chartId, { overlays: colored });
+    console.log('[IndicatorSection] Updated overlays (colored):', colored);
   };
 
   // Handlers for modal save/delete
@@ -256,6 +261,37 @@ export const IndicatorSection = ({ chartId }) => {
     setError(null)
   }
 
+    // apply selected colors to overlays' price_lines and markers
+  const applyIndicatorColors = (overlays = [], colors = {}) =>
+    (overlays || []).map(ov => {
+      if (!ov || !ov.ind_id || !ov.payload) return ov;
+      const color = colors[ov.ind_id];
+      if (!color) return ov;
+
+      // price lines → uniform color
+      const price_lines = Array.isArray(ov.payload.price_lines)
+        ? ov.payload.price_lines.map(pl => ({ ...pl, color }))
+        : ov.payload.price_lines;
+
+      // markers (touch + regular) → override color
+      const markers = Array.isArray(ov.payload.markers)
+        ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
+        : ov.payload.markers;
+
+      return { ...ov, payload: { ...ov.payload, price_lines, markers } };
+    });
+
+  // set color, then recolor currently-displayed overlays in context
+  const handleSelectColor = (indicatorId, color) => {
+    setIndColors(prev => {
+      const next = { ...prev, [indicatorId]: color };
+      const overlays = (getChart(chartId)?.overlays) || [];
+      const recolored = applyIndicatorColors(overlays, next);
+      updateChart(chartId, { overlays: recolored });
+      return next;
+    });
+  };
+
   if (isLoading) return <div>Loading indicators…</div>
   if (error) return <div className="text-red-500">Error: {error}</div>
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
@@ -278,13 +314,51 @@ export const IndicatorSection = ({ chartId }) => {
       <div className="space-y-1">
         {indicators.map(indicator => (
           <div key={indicator.id} className="flex items-center justify-between px-4 py-3 rounded-lg bg-neutral-900 shadow-lg">
-            <div>
+          <div>
+            <div className="flex items-center gap-2">
               <div className="font-medium text-white">{indicator.name}</div>
-              <div className="text-sm text-gray-500">{indicator.type}</div>
-              <div className="text-xs text-gray-600 italic">
-                Params: {Object.entries(indicator.params).map(([k, v]) => `${k}=${v}`).join(', ')}
-              </div>
+
+              {/* color selector popover */}
+              <Popover className="relative cursor-pointer">
+                {({ close }) => (
+                  <>
+                    <PopoverButton
+                      className="h-4 w-4 rounded-sm border border-neutral-500 shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)] cursor-pointer"
+                      style={{ backgroundColor: indColors[indicator.id] || '#60a5fa' }}
+                      title="Set color"
+                    />
+                    <Transition
+                      enter="transition ease-out duration-100"
+                      enterFrom="opacity-0 translate-y-1"
+                      enterTo="opacity-100 translate-y-0"
+                      leave="transition ease-in duration-75"
+                      leaveFrom="opacity-100 translate-y-0"
+                      leaveTo="opacity-0 translate-y-1"
+                    >
+                      <PopoverPanel className="absolute z-20 mt-2 rounded-md bg-neutral-800 p-2 shadow-lg ring-1 ring-black/20 cursor-pointer">
+                        <div className="flex gap-2">
+                          {COLOR_SWATCHES.map(c => (
+                            <button
+                              key={c}
+                              className="h-5 w-5 rounded-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-white/40 cursor-pointer"
+                              style={{ backgroundColor: c }}
+                              onClick={() => { handleSelectColor(indicator.id, c); close(); }}
+                              aria-label={`Set color ${c}`}
+                            />
+                          ))}
+                        </div>
+                      </PopoverPanel>
+                    </Transition>
+                  </>
+                )}
+              </Popover>
             </div>
+
+            <div className="text-sm text-gray-500">{indicator.type}</div>
+            <div className="text-xs text-gray-600 italic">
+              Params: {Object.entries(indicator.params).map(([k, v]) => `${k}=${v}`).join(', ')}
+            </div>
+          </div>
             <div className="flex items-center gap-4">
               {/* Enable/Disable switch */}
               <Switch
