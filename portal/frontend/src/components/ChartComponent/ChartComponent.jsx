@@ -6,6 +6,8 @@ import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
 import { createLogger } from '../../utils/logger.js';
+import { PaneViewManager } from '../../chart/paneViews/factory.js';
+import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -20,9 +22,9 @@ export const ChartComponent = ({ chartId }) => {
 
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
-  const [interval, setInterval] = useState('30m');
+  const [interval, setInterval] = useState('15m');
   const [dateRange, setDateRange] = useState([
-    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
   ]);
 
@@ -31,6 +33,7 @@ export const ChartComponent = ({ chartId }) => {
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const seededRef = useRef(false); // ensure we seed only once
+  const pvMgrRef = useRef(null);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -58,9 +61,9 @@ export const ChartComponent = ({ chartId }) => {
     const series = chartRef.current.addSeries(CandlestickSeries, { ...seriesOptions })
     seriesRef.current = series
 
-    // Add touch points series and pane view.
-    touchPaneViewRef.current = createTouchPaneView(chartRef.current.timeScale());
-    touchSeriesRef.current = chartRef.current.addCustomSeries(touchPaneViewRef.current, {});
+    // Create pane view manager.
+    pvMgrRef.current = new PaneViewManager(chartRef.current);
+
 
     registerChart?.(chartId, {
       get chart() { return chartRef.current; },
@@ -83,10 +86,8 @@ export const ChartComponent = ({ chartId }) => {
           try { seriesRef.current?.removePriceLine(h); } catch {}
         });
         overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
-        if (touchSeriesRef.current) {
-          chartRef.current?.removeSeries?.(touchSeriesRef.current);
-          touchSeriesRef.current = null;
-        }
+        pvMgrRef.current?.destroy();
+        pvMgrRef.current = null;
         chartRef.current?.remove();
         chartRef.current = null;
         seriesRef.current = null;
@@ -197,14 +198,20 @@ export const ChartComponent = ({ chartId }) => {
       overlayHandlesRef.current.markersApi.setMarkers([]);
     }
 
+    pvMgrRef.current?.clearFrame();
+
     // 2) Build fresh markers and touch points.
     const markers = [];
     const touchPoints = [];
+    const boxes = [];
 
     // 3) Walk overlays and apply.
     for (const ov of overlays) {
-      const { type, payload } = ov || {};
+      const { type, payload, color } = ov || {};
       if (!payload) continue;
+
+      const paneViews = getPaneViewsFor(type);
+      const norm = adaptPayload(type, payload, color);
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
@@ -221,26 +228,25 @@ export const ChartComponent = ({ chartId }) => {
         }
       }
 
-      // 3b) Touch and markers.
-      if (Array.isArray(payload.markers)) {
-        for (const m of payload.markers) {
-          const t = toSec(m.time);
-          if (t == null) continue;
-          if (m.subtype === 'touch' && typeof m.price === 'number') {
-            touchPoints.push({
-              time: t,
-              originalData: {price: m.price, color: m.color, size: 4},
-            });
-          } else {
-            markers.push({
-              time: t,
-              position: m.position ?? 'inBar',   // 'aboveBar' | 'belowBar' | 'inBar'
-              shape: m.shape ?? 'circle',        // 'circle' | 'square' | 'arrowUp' | 'arrowDown'
-              color: m.color ?? '#60a5fa',
-              text: m.text ?? '',
-            });
-          }
-        }
+      // 3b) Markers.
+      markers.push(...norm.markers);
+
+      // 3c) Touch points.
+      if (paneViews.includes('touch') && norm.touchPoints?.length) {
+        touchPoints.push(...norm.touchPoints.map(p => ({
+          ...p,
+          time: toSec(p.time),
+        })));
+      }
+
+      // 3d) Boxes.
+      if (paneViews.includes('va_box') && norm.boxes?.length) {
+        boxes.push(...norm.boxes.map(b => ({
+          x1: toSec(b.x1), x2: toSec(b.x2),
+          y1: Number(b.y1), y2: Number(b.y2),
+          color: b.color,
+          border: b.border,
+        })));
       }
     }
 
@@ -255,14 +261,6 @@ export const ChartComponent = ({ chartId }) => {
         size:   (p.originalData?.size ?? p.size ?? 3),
       });
     }
-
-    // materialize series data: one row per time
-    const touchData = [...grouped.entries()]
-    .map(([time, points]) => ({
-      time,
-      originalData: { points },        // <-- multiple dots per bar
-    }))
-    .sort((a, b) => a.time - b.time);
     
     // 4) Sort markers for deterministic rendering.
     markers.sort((a, b) => a.time - b.time);
@@ -271,10 +269,9 @@ export const ChartComponent = ({ chartId }) => {
     try {
       // seriesRef.current.setMarkers(markers);
       overlayHandlesRef.current.markersApi.setMarkers(markers);
-     
-      // Apply touch points to the touch series via its pane view.
-      touchPaneViewRef.current?.setExternalData(touchData);
-      touchSeriesRef.current.setData(touchData);
+      // Touch points via custom pane-view.
+      pvMgrRef.current?.setTouchPoints(touchPoints);
+      pvMgrRef.current?.setVABlocks(boxes);
 
       // seriesRef.current.setData(touch)
     } catch (e) {
@@ -285,6 +282,8 @@ export const ChartComponent = ({ chartId }) => {
     info('overlays applied', {
       priceLines: overlayHandlesRef.current.priceLines.length,
       markers: markers.length,
+      touchPoints: touchPoints.length,
+      boxes: boxes.length,
     });
   }, [info, error]);
 
@@ -306,55 +305,6 @@ export const ChartComponent = ({ chartId }) => {
 
     bumpRefresh?.(chartId);
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
-
-
-  function createTouchPaneView(tsApi) {
-    let external = [];
-
-    const renderer = {
-      draw: (target, priceToCoordinate) => {
-        const ctx = target.useMediaCoordinateSpace(({ context }) => context);
-        ctx.save();
-
-        const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
-
-        for (const row of external) {
-          const x = tsApi.timeToCoordinate(toSec(row.time)); // ⬅ use chart’s timeScale
-          if (x == null) continue;
-
-          const pts = row.originalData?.points || [];
-          for (const pt of pts) {
-            const y = priceToCoordinate(pt.price);
-            if (y == null) continue;
-
-            ctx.beginPath();
-            ctx.arc(x, y, (pt.size ?? 5), 0, Math.PI * 2);
-            ctx.fillStyle = pt.color ?? '#60a5fa';
-            ctx.fill();
-          }
-        }
-
-        ctx.restore();
-      },
-      drawBackground: () => {},
-      hitTest: () => null,
-    };
-
-    return {
-      renderer: () => renderer,
-      update: () => {},                      // we don't rely on paneData anymore
-      setExternalData: rows => { external = rows || []; },  // <-- we’ll call this
-      priceValueBuilder: item => {
-        const p = item.originalData?.points?.[0]?.price ?? 0;
-        return [p, p, p];
-      },
-      isWhitespace: item => !(item.originalData?.points?.length),
-      defaultOptions() {
-        return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
-      },
-      destroy: () => {},
-    };
-  }
 
   return (
     <>
