@@ -9,6 +9,7 @@ const INDICATOR_PANEVIEWS = {
   pivot_levels: [PaneViewType.TOUCH],
   market_profile: [PaneViewType.TOUCH, PaneViewType.VA_BOX],
   vwap: [PaneViewType.TOUCH],
+  trendlines: [PaneViewType.TOUCH],
 };
 
 // expose which pane views a type uses

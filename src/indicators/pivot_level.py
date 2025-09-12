@@ -278,7 +278,7 @@ class PivotLevelIndicator(BaseIndicator):
                 "title": title,
                 "color": color,
                 "lineStyle": 2,             # Dashed
-                "lineWidth": 1,
+                "lineWidth": 2,
                 "axisLabelVisible": True,
                 "originTime": origin_ts     # for optional client logic
             })

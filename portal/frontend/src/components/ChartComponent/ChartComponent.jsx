@@ -8,18 +8,10 @@ import { useChartState, useChartValue } from '../../contexts/ChartStateContext.j
 import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
 import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
+import LoadingOverlay from '../LoadingOverlay.jsx';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
-
-const hexToRgba = (hex, a = 0.18) => {
-  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
-  const v = hex.slice(1);
-  const n = v.length === 3
-    ? v.split('').map(c => parseInt(c + c, 16))
-    : [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)];
-  return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
-};
 
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
@@ -36,6 +28,7 @@ export const ChartComponent = ({ chartId }) => {
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
   ]);
+  const [dataLoading, setDataLoading] = useState(false);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -122,6 +115,7 @@ export const ChartComponent = ({ chartId }) => {
   // Data loader.
   const loadChartData = useCallback(async () => {
     try {
+      setDataLoading(true);
       if (!symbol || !interval || !startISO || !endISO) {
         warn('missing inputs', { symbol, interval, startISO, endISO });
         return;
@@ -176,12 +170,15 @@ export const ChartComponent = ({ chartId }) => {
       });
     } catch (e) {
       error('load failed', e);
+    } finally {
+      setDataLoading(false);
     }
   }, [symbol, interval, startISO, endISO, info, warn, error]);
 
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
+    setDataLoading(true);
     // Guard on required refs.
     if (!seriesRef.current || !chartRef.current) return;
 
@@ -296,6 +293,8 @@ export const ChartComponent = ({ chartId }) => {
       touchPoints: touchPoints.length,
       boxes: boxes.length,
     });
+
+    setDataLoading(false);
   }, [info, error]);
 
   // React to overlay changes.
@@ -307,15 +306,20 @@ export const ChartComponent = ({ chartId }) => {
   // Apply handler.
   const handleApply = useCallback(() => {
     info('apply', { chartId, symbol, interval, dateRange });
-    
     syncOverlays([]); // clear overlays on apply
-
     updateChart?.(chartId, { symbol, interval, dateRange });
-    
     loadChartData();
-
     bumpRefresh?.(chartId);
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
+
+  function useBusyDelay(busy, ms=250){
+    const [show,setShow]=useState(false);
+    useEffect(()=>{
+      if(busy){ const t=setTimeout(()=>setShow(true), ms); return ()=>clearTimeout(t); }
+      setShow(false);
+    },[busy,ms]);
+    return show;
+  }
 
   return (
     <>
@@ -341,8 +345,17 @@ export const ChartComponent = ({ chartId }) => {
         </button>
       </div>
       <div className="flex space-x-4 mt-5">
-        <div className="flex-1 rounded-lg overflow-hidden bg-gray-800 h-[400px]">
+        <div className="relative flex-1 rounded-lg overflow-hidden bg-gray-800 h-[400px]">
           <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+          {/* overlay */}
+          <LoadingOverlay
+            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
+            message={
+              chartState?.signalsLoading ? 'Generating signals…'
+              : chartState?.overlayLoading ? 'Loading overlays…'
+              : 'Loading chart…'
+            }
+          />
         </div>
       </div>
     </>
