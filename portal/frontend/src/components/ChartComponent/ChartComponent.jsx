@@ -12,6 +12,15 @@ import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.j
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 
+const hexToRgba = (hex, a = 0.18) => {
+  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
+  const v = hex.slice(1);
+  const n = v.length === 3
+    ? v.split('').map(c => parseInt(c + c, 16))
+    : [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)];
+  return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
+};
+
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const { debug, info, warn, error } = useMemo(() => createLogger(LOG_NS), []);
@@ -173,6 +182,7 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [symbol, interval, startISO, endISO, info, warn, error]);
 
+
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
     // Guard on required refs.
@@ -212,6 +222,20 @@ export const ChartComponent = ({ chartId }) => {
 
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
+
+      if (paneViews.includes('va_box') && norm.boxes?.length) {
+        const fill  = hexToRgba(color || '#9ca3af', 0.18);
+        const stroke = hexToRgba(color || '#9ca3af', 0.45);
+
+        boxes.push(...norm.boxes.map(b => ({
+          x1: b.x1,                              // backend seconds OK
+          x2: b.x2,                              // pane view will override to right edge
+          y1: Number(b.y1),
+          y2: Number(b.y2),
+          color: fill,
+          border: { color: stroke, width: 1 },
+        })));
+      }
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
