@@ -10,7 +10,12 @@ import {
 import IndicatorModal from './IndicatorModal'
 import { useChartState } from '../contexts/ChartStateContext'
 
-const COLOR_SWATCHES = ['#60a5fa', '#f97316', '#22c55e', '#eab308', '#ef4444'];
+
+// Gold, Maroon, Orange, Purple, Lime, Gray
+const COLOR_SWATCHES = [
+  '#facc15', '#b91c1c', '#f97316', '#a855f7', '#84cc16', '#6b7280',
+  '#3b82f6', '#10b981', '#ec4899', '#14b8a6', '#eab308', '#f43f5e'
+];
 
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
