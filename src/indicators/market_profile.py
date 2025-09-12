@@ -376,7 +376,7 @@ class MarketProfileIndicator(BaseIndicator):
             #     out_lines.append({
             #         "price": float(poc),
             #         "title": "POC",
-            #         "time": start_str,
+            #         "time": _to_unix_s(start_ts),
             #         "lineStyle": 2,         # dashed to distinguish from VA band edges
             #         "lineWidth": 0,
             #         "extend": "right",
@@ -401,7 +401,7 @@ class MarketProfileIndicator(BaseIndicator):
                 out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
 
         return {
-            "price_lines": [],
+            "price_lines": out_lines,
             "markers": out_markers,
             "boxes": out_boxes
         }

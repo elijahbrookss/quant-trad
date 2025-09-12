@@ -46,9 +46,6 @@ export const ChartComponent = ({ chartId }) => {
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
-  const touchSeriesRef = useRef()
-  const touchPaneViewRef = useRef()
-
 
   // Derive ISO once per range change.
   const [startISO, endISO] = useMemo(() => {
@@ -223,20 +220,6 @@ export const ChartComponent = ({ chartId }) => {
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
 
-      if (paneViews.includes('va_box') && norm.boxes?.length) {
-        const fill  = hexToRgba(color || '#9ca3af', 0.18);
-        const stroke = hexToRgba(color || '#9ca3af', 0.45);
-
-        boxes.push(...norm.boxes.map(b => ({
-          x1: b.x1,                              // backend seconds OK
-          x2: b.x2,                              // pane view will override to right edge
-          y1: Number(b.y1),
-          y2: Number(b.y2),
-          color: fill,
-          border: { color: stroke, width: 1 },
-        })));
-      }
-
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
         for (const pl of payload.price_lines) {
@@ -263,14 +246,18 @@ export const ChartComponent = ({ chartId }) => {
         })));
       }
 
-      // 3d) Boxes.
+      // 3d) VA Boxes.
       if (paneViews.includes('va_box') && norm.boxes?.length) {
-        boxes.push(...norm.boxes.map(b => ({
-          x1: toSec(b.x1), x2: toSec(b.x2),
-          y1: Number(b.y1), y2: Number(b.y2),
-          color: b.color,
-          border: b.border,
-        })));
+        boxes.push(
+          ...norm.boxes.map(b => ({
+            x1: toSec(b.x1),
+            x2: toSec(b.x2),
+            y1: Number(b.y1),
+            y2: Number(b.y2),
+            color: b.color,
+            border: b.border,
+          }))
+        );
       }
     }
 
