@@ -1,175 +1,225 @@
-import { useState, useEffect, useRef, useLayoutEffect } from 'react'
-import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts'
-import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent'
-import { DateRangePickerComponent } from './DateTimePickerComponent'
-import { options, seriesOptions } from './ChartOptions'
-import { fetchCandleData } from '../../adapters/candle.adapter'
-import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
+import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
+import { DateRangePickerComponent } from './DateTimePickerComponent';
+import { options, seriesOptions } from './ChartOptions';
+import { fetchCandleData } from '../../adapters/candle.adapter';
+import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
+import { createLogger } from '../../utils/logger.js';
+
+// File-level namespace.
+const LOG_NS = 'ChartComponent';
 
 export const ChartComponent = ({ chartId }) => {
-  const { registerChart, updateChart, getChart, bumpRefresh } = useChartState()
-  const chartState = useChartValue(chartId)
+  // Logger for this file.
+  const { debug, info, warn, error } = useMemo(() => createLogger(LOG_NS), []);
 
-  console.log("[ChartComponent] chartState from context:", chartState)
+  // Context wiring.
+  const { registerChart, updateChart, bumpRefresh } = useChartState();
+  const chartState = useChartValue(chartId);
 
-  // Local state for inputs
-  const [symbol, setSymbol] = useState('CL')
-  const [interval, setInterval] = useState('15m')
+  // Local UI state.
+  const [symbol, setSymbol] = useState('CL');
+  const [interval, setInterval] = useState('30m');
   const [dateRange, setDateRange] = useState([
-    (() => { const d = new Date(); d.setDate(d.getDate() - 45); return d })(),
-    (() => { const d = new Date(); d.setMinutes(d.getMinutes() - 5); return d })(),
-  ])
+    new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    new Date()
+  ]);
 
-  // Chart refs
-  const chartContainerRef = useRef()
-  const chartRef = useRef()
-  const paneViewRef = useRef()
-  const seriesRef = useRef()
-  const overlayHandlesRef = useRef({ price_lines: [], markersApi: null }) // To hold multiple overlay series
+  // Refs for chart and DOM.
+  const chartContainerRef = useRef(null);
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
+    // Overlay resource handles.
+  const overlayHandlesRef = useRef({ priceLines: [] });
   const touchSeriesRef = useRef()
+  const touchPaneViewRef = useRef()
 
-  // Initialize chart and register context
-  useLayoutEffect(() => {
-    if (!chartId) {
-      console.error('[ChartComponent] chartId prop is missing')
-      return
-    }
-    registerChart(chartId, { symbol, interval, overlays: [], start: dateRange[0].toISOString(), end: dateRange[1].toISOString() })
-    const chartState = getChart(chartId, "chartComponent-useLayoutEffect")
-    console.log("[ChartComponent] Registered chart state:", chartState)
-  }, [chartId])
 
+  // Derive ISO once per range change.
+  const [startISO, endISO] = useMemo(() => {
+    const [s, e] = dateRange || [];
+    return [s?.toISOString(), e?.toISOString()];
+  }, [dateRange?.[0]?.getTime(), dateRange?.[1]?.getTime()]);
+
+  // Create chart once.
   useEffect(() => {
-    console.log("[ChartComponent] Mounting chart for", symbol, interval, dateRange)
-    const chart = createChart(chartContainerRef.current, { ...options })
-    chartRef.current = chart
+    const el = chartContainerRef.current;
+    if (!el || chartRef.current) return;
 
-    const series = chart.addSeries(CandlestickSeries, { ...seriesOptions })
+    chartRef.current = createChart(el, {
+      ...options,
+      width: el.clientWidth,
+      height: el.clientHeight || 400,
+    });
+
+    const series = chartRef.current.addSeries(CandlestickSeries, { ...seriesOptions })
     seriesRef.current = series
 
-    const paneView = createTouchPaneView(chart.timeScale());
-    paneViewRef.current = paneView;
+    // Add touch points series and pane view.
+    touchPaneViewRef.current = createTouchPaneView(chartRef.current.timeScale());
+    touchSeriesRef.current = chartRef.current.addCustomSeries(touchPaneViewRef.current, {});
 
-    const touchSeries = chart.addCustomSeries(paneView, {});
-    touchSeriesRef.current = touchSeries;
+    registerChart?.(chartId, {
+      get chart() { return chartRef.current; },
+      get series() { return seriesRef.current; }
+    });
 
-    loadChartData()
-    chart.timeScale().fitContent()
+    // Seed chart slice and trigger first indicator fetch
+    updateChart?.(chartId, { symbol, interval, dateRange });
+    bumpRefresh?.(chartId);
 
-    const handleResize = () => {
-      chart.applyOptions({ width: chartContainerRef.current.clientWidth })
-    }
-    window.addEventListener('resize', handleResize)
+    info('chart created', { chartId });
 
     return () => {
-      window.removeEventListener('resize', handleResize)
-      chart.remove()
-      console.log("[ChartComponent] Chart unmounted")
-    }
-  }, [])
+      try {
+        chartRef.current?.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+        info('chart removed', { chartId });
+      } catch (e) {
+        error('cleanup failed', e);
+      }
+    };
+  }, [chartId, info, error, registerChart]);
 
+  // Resize via ResizeObserver.
   useEffect(() => {
-    if (chartState?.overlays) {
-      console.log("[ChartComponent] overlays changed:", chartState.overlays)
-      syncOverlays(chartState.overlays)
-    }
-  }, [chartState?.overlays])
+    const el = chartContainerRef.current;
+    if (!el || !chartRef.current) return;
 
-  const loadChartData = async () => {
-    console.log("[ChartComponent] Loading chart data for", symbol, interval, dateRange)
+    const ro = new ResizeObserver(([entry]) => {
+      const r = entry?.contentRect; if (!r) return;
+      chartRef.current.applyOptions({ width: r.width, height: r.height });
+      debug('resize', { w: r.width, h: r.height });
+    });
+
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [debug]);
+
+  // Data loader.
+  const loadChartData = useCallback(async () => {
     try {
-      const response = await fetchCandleData({
+      if (!symbol || !interval || !startISO || !endISO) {
+        warn('missing inputs', { symbol, interval, startISO, endISO });
+        return;
+      }
+
+      info('fetch', { symbol, interval, startISO, endISO });
+      const resp = await fetchCandleData({
         symbol,
         timeframe: interval,
-        start: dateRange[0].toISOString(),
-        end: dateRange[1].toISOString(),
-      })
-      console.log("[ChartComponent] Fetched", response.length, "candles")
+        start: startISO,
+        end: endISO,
+      });
 
-      const formatted = response
-        .filter(c => c && typeof c.time === 'number')
-        .map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
-
-      if (seriesRef.current && formatted.length > 0) {
-        seriesRef.current.setData(formatted)
-        chartRef.current.timeScale().fitContent()
-        console.log("[ChartComponent] Chart data set with", formatted.length, "points")
-      } else {
-        console.warn("[ChartComponent] No valid data to set on chart")
+      if (!Array.isArray(resp) || resp.length === 0) {
+        warn('no data', { symbol, interval });
+        return;
       }
-    } catch (err) {
-      console.error("[ChartComponent] Error loading chart data:", err)
+
+      const data = resp
+        .filter(c => c && typeof c.time === 'number')
+        .map(c => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+
+      if (!seriesRef.current) {
+        warn('series missing');
+        return;
+      }
+
+      seriesRef.current.setData(data);
+      chartRef.current?.timeScale().fitContent();
+
+      info('data set', {
+        points: data.length,
+        first: data[0]?.time,
+        last: data.at(-1)?.time,
+      });
+    } catch (e) {
+      error('load failed', e);
     }
-  }
-  
-  const syncOverlays = (overlays = []) => {
-    console.log("[ChartComponent] Syncing overlays:", overlays)
+  }, [symbol, interval, startISO, endISO, info, warn, error]);
+
+  // Overlay refs and syncer.
+  const syncOverlays = useCallback((overlays = []) => {
+    // Guard on required refs.
     if (!seriesRef.current || !chartRef.current) return;
-    overlayHandlesRef.current.price_lines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h) } catch {}
-    })
-    overlayHandlesRef.current.price_lines = []
 
-    // 2) ensure markers plugin exists; clear old markers
+    // Helper: normalize time to seconds.
+    const toSec = (t) => {
+      if (t == null) return t;
+      if (typeof t !== 'number') return t;
+      return t > 2e10 ? Math.floor(t / 1000) : t; 
+    };
+
+    // 1) Clear existing price lines.
+    overlayHandlesRef.current.priceLines.forEach(h => {
+      try { seriesRef.current.removePriceLine(h); } catch {}
+    });
+    overlayHandlesRef.current.priceLines = [];
+
+    // Ensure markers plugin exists; clear existing markers.
     if (!overlayHandlesRef.current.markersApi) {
-      overlayHandlesRef.current.markersApi = createSeriesMarkers(seriesRef.current, [])
+      overlayHandlesRef.current.markersApi = createSeriesMarkers(seriesRef.current, []);
     } else {
-      overlayHandlesRef.current.markersApi.setMarkers([])
+      overlayHandlesRef.current.markersApi.setMarkers([]);
     }
 
-    // 3) draw new overlays
-    const touchPoints = [] // for touch series
-    const allBarMarkers = [] // for standard markers
-    overlays.forEach(({ type, payload }) => {
-      console.log("[ChartComponent] Processing overlay:", type, payload)
-      if (!payload) return
+    // 2) Build fresh markers and touch points.
+    const markers = [];
+    const touchPoints = [];
 
+    // 3) Walk overlays and apply.
+    for (const ov of overlays) {
+      const { type, payload } = ov || {};
+      if (!payload) continue;
+
+      // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
-        console.log("[ChartComponent] Creating price lines for overlay:", type, payload.price_lines)
-        payload.price_lines.forEach(pl => {
+        for (const pl of payload.price_lines) {
           const handle = seriesRef.current.createPriceLine({
             price: pl.price,
-            color: pl.color || undefined,
+            color: pl.color ?? undefined,
             lineWidth: pl.lineWidth ?? 1,
             lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: true,
-            title: pl.title || type,
-          })
-          overlayHandlesRef.current.price_lines.push(handle)
-        })
+            axisLabelVisible: pl.axisLabelVisible ?? true,
+            title: pl.title ?? type ?? '',
+          });
+          overlayHandlesRef.current.priceLines.push(handle);
+        }
       }
 
+      // 3b) Touch and markers.
       if (Array.isArray(payload.markers)) {
         for (const m of payload.markers) {
+          const t = toSec(m.time);
+          if (t == null) continue;
           if (m.subtype === 'touch' && typeof m.price === 'number') {
-            // plot exact dots on TouchSeries only
             touchPoints.push({
-              time: m.time,
-              originalData: { price: m.price, color: m.color, size: 4 },
+              time: t,
+              originalData: {price: m.price, color: m.color, size: 4},
             });
           } else {
-            // everything else goes to standard markers
-            allBarMarkers.push({
-              time: m.time,
-              position: m.position ?? 'aboveBar',
-              shape: m.shape ?? 'circle',
-              color: m.color,
+            markers.push({
+              time: t,
+              position: m.position ?? 'inBar',   // 'aboveBar' | 'belowBar' | 'inBar'
+              shape: m.shape ?? 'circle',        // 'circle' | 'square' | 'arrowUp' | 'arrowDown'
+              color: m.color ?? '#60a5fa',
               text: m.text ?? '',
             });
           }
         }
       }
-    });
+    }
 
-    // Sort touch points by time to ensure correct rendering
-    // ---- normalize, group, sort ----
-    const toSec = v => (typeof v === 'number' ? (v > 2e10 ? Math.floor(v / 1000) : v) : v);
-
-    // normalize times
-    allBarMarkers.forEach(m => { m.time = toSec(m.time); });
-    touchPoints.forEach(p => { p.time = toSec(p.time); });
-
-    // group touch points by time (STRICTLY 1 item per time)
+    // Group touch points by time, strictly 1 item per time.
     const grouped = new Map();
     for (const p of touchPoints) {
       if (p.time == null || Number.isNaN(p.time)) continue;
@@ -183,64 +233,58 @@ export const ChartComponent = ({ chartId }) => {
 
     // materialize series data: one row per time
     const touchData = [...grouped.entries()]
-      .map(([time, points]) => ({
-        time,
-        originalData: { points },        // <-- multiple dots per bar
-      }))
-      .sort((a, b) => a.time - b.time);
-
-    // sort markers too (not strictly required, but tidy)
-    allBarMarkers.sort((a, b) => a.time - b.time);
-
-
-    console.log('[Touch] count:', touchPoints.length,
-            'first:', touchPoints[0],
-            'last:', touchPoints[touchPoints.length - 1]);
-    console.log('[Touch] grouped entries:', grouped.size, 'touchData points:', touchData.length);
-    console.log('[Markers] count:', allBarMarkers.length,
-            'first:', allBarMarkers[0],
-            'last:', allBarMarkers[allBarMarkers.length - 1]);
-
-
-    const lastCandleTime = seriesRef.current?._data?._items?.at?.(-1)?.time ?? null;
-    const lastClose = seriesRef.current?._data?._items?.at?.(-1)?.close ?? null;
-
-    if (lastCandleTime != null && lastClose != null) {
-      touchData.push({
-        time: lastCandleTime,
-        originalData: { points: [{ price: lastClose, color: '#ff00ff', size: 8 }] },
-      });
-      console.log('[TouchSeries] injected test dot at', lastCandleTime, 'price', lastClose);
-    }
-
-    // update series
-    overlayHandlesRef.current.markersApi.setMarkers(allBarMarkers);
-    if (touchSeriesRef.current) {
-      console.log('[TouchSeries] calling setData len:', touchData.length, 'first:', touchData[0], 'last:', touchData.at(-1));
-
-      const last = seriesRef.current?._data?._items?.at?.(-1);
-      if (last) {
-        touchData.push({
-          time: last.time,
-          originalData: { points: [{ price: last.close, color: '#ff00ff', size: 10 }] },
-        });
-      }
-
-      paneViewRef.current?.setExternalData(touchData);
-      touchSeriesRef.current.setData(touchData);
-    }
-  }
-
-  const handlePrintState = () => {
-    console.log("[ChartComponent] Print state button clicked")
-    loadChartData()
-    updateChart(chartId, { symbol, interval, dateRange })
-    bumpRefresh(chartId)
+    .map(([time, points]) => ({
+      time,
+      originalData: { points },        // <-- multiple dots per bar
+    }))
+    .sort((a, b) => a.time - b.time);
     
-    const chartState = getChart(chartId, "chartComponent-handlePrintState")
-    console.log("[ChartComponent] Current chart state:", chartState)
-  }
-  
+    // 4) Sort markers for deterministic rendering.
+    markers.sort((a, b) => a.time - b.time);
+
+    // 5) Apply markers to the main series.
+    try {
+      // seriesRef.current.setMarkers(markers);
+      overlayHandlesRef.current.markersApi.setMarkers(markers);
+     
+      // Apply touch points to the touch series via its pane view.
+      touchPaneViewRef.current?.setExternalData(touchData);
+      touchSeriesRef.current.setData(touchData);
+
+      // seriesRef.current.setData(touch)
+    } catch (e) {
+      error('setMarkers failed', e);
+    }
+
+    // 6) Log summary for quick tracing.
+    info('overlays applied', {
+      priceLines: overlayHandlesRef.current.priceLines.length,
+      markers: markers.length,
+    });
+  }, [info, error]);
+
+  // React to overlay changes.
+  useEffect(() => {
+    if (!chartState) return;
+    syncOverlays(chartState.overlays || []);
+  }, [chartState?.overlays, syncOverlays]);
+
+  // Apply handler.
+  const handleApply = useCallback(() => {
+    info('apply', { chartId, symbol, interval, dateRange });
+    loadChartData();
+    updateChart?.(chartId, { symbol, interval, dateRange });
+    bumpRefresh?.(chartId);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
+
+  // Initial load.
+  useEffect(() => {
+    if (chartRef.current && seriesRef.current) {
+      info('initial load', { chartId });
+      loadChartData();
+    }
+  }, [loadChartData, info, chartId]);
+
   function createTouchPaneView(tsApi) {
     let external = [];
 
@@ -289,16 +333,23 @@ export const ChartComponent = ({ chartId }) => {
     };
   }
 
-
   return (
     <>
+
+      {/* 90-day note */}
+      <div className="mb-2">
+        <span className="inline-flex items-center rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
+          ⚠️Timeframe max is 90 days
+        </span>
+      </div>
+
       <div className="flex items-end space-x-4">
         <TimeframeSelect selected={interval} onChange={setInterval} />
         <SymbolInput value={symbol} onChange={setSymbol} />
         <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
         <button
           className="mt-5.5 self-center border border-neutral-600 rounded-md p-2 hover:bg-neutral-700 transition-colors cursor-pointer"
-          onClick={handlePrintState}
+          onClick={handleApply}
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
             <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
@@ -312,4 +363,4 @@ export const ChartComponent = ({ chartId }) => {
       </div>
     </>
   )
-}
+};

@@ -1,11 +1,5 @@
-import  { useState, useEffect, Fragment } from 'react'
-import { 
-  Switch, 
-  Popover, 
-  Transition,
-  PopoverButton,
-  PopoverPanel
-} from '@headlessui/react'
+import  { useState, useEffect, Fragment, useMemo } from 'react'
+import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
 import {
   fetchIndicators,
   createIndicator,
@@ -18,7 +12,6 @@ import { useChartState } from '../contexts/ChartStateContext'
 
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
-
   const [indicators, setIndicators] = useState([])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -27,160 +20,147 @@ export const IndicatorSection = ({ chartId }) => {
 
   const { updateChart, getChart } = useChartState()
 
-  // Debug: chartId and chartState
-  console.log("[IndicatorSection] chartId:", chartId)
-  const chartState = getChart(chartId, "indicatorTab")
-  console.log("[IndicatorSection] chartState:", chartState)
+  // Read current chart slice
+  const chartState = getChart(chartId)
+  console.log('[IndicatorSection] chartId:', chartId, 'chartState:', chartState)
 
+  // Derive ISO start/end from dateRange
+  const [startISO, endISO] = useMemo(() => {
+    const [s, e] = chartState?.dateRange || []
+    const sISO = typeof s === 'string' ? s : s?.toISOString()
+    const eISO = typeof e === 'string' ? e : e?.toISOString()
+    return [sISO, eISO]
+  }, [chartState?.dateRange?.[0], chartState?.dateRange?.[1]])
 
-  // Fetch indicators whenever chart parameters change
+  // Fetch indicators when chart version bumps (Apply)
   useEffect(() => {
-    if (!chartState?.refreshKey) {
-      console.warn("[IndicatorSection] No chartState found, skipping fetch")
+    if (!chartState || !chartState._version) {
+      console.warn('[IndicatorSection] No chart state version yet, skipping fetch')
+      setIsLoading(false)
+      return
+    }
+    if (!chartState.symbol || !chartState.interval) {
+      console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch')
+      setIsLoading(false)
       return
     }
 
     let isMounted = true
     setIsLoading(true)
-    console.log("[IndicatorSection] Fetching indicators for", chartState.symbol, chartState.interval)
+    console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval)
 
-    fetchIndicators({
-      symbol: chartState.symbol,
-      interval: chartState.interval,
-    })
+    fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
       .then(data => {
         if (!isMounted) return
-        setIndicators(data)
-        console.log("[IndicatorSection] Fetched indicators:", data)
-        updateChart(chartId, { overlays: [], indicators: data })
+        setIndicators(data || [])
+        updateChart(chartId, { indicators: data || [] }) // store list for reference
       })
       .catch(e => {
         if (!isMounted) return
         setError(e.message)
-        console.error("[IndicatorSection] Error fetching indicators:", e)
+        console.error('[IndicatorSection] Error fetching indicators:', e)
       })
       .finally(async () => {
         await refreshEnabledOverlays()
         if (isMounted) setIsLoading(false)
-        console.log("[IndicatorSection] Indicator fetch complete")
+        console.log('[IndicatorSection] Indicator fetch complete')
       })
+
     return () => { isMounted = false }
-  }, [chartState?.refreshKey])
+  }, [chartId, chartState?._version]) // version is bumped by ChartComponent.handleApply
 
+  // Refresh overlays for enabled indicators
   const refreshEnabledOverlays = async () => {
-    console.log("[IndicatorSection - Overlays] Refreshing enabled overlays for chartId:", chartId)
-    if (!chartState) return;
+    console.log('[IndicatorSection - Overlays] Refreshing for chartId:', chartId)
+    if (!chartState) return
 
-    const enabled = indicators.filter(i => i.enabled);
+    const enabled = indicators.filter(i => i.enabled)
     if (enabled.length === 0) {
-      // clear overlays if none enabled
-      updateChart(chartId, { overlays: [] });
-      return;
+      updateChart(chartId, { overlays: [] })
+      return
     }
 
     const body = {
-      // Ensure plain ISO strings—some states may already be ISO strings
-      start: typeof chartState.start === 'string' ? chartState.start : chartState.start?.toISOString(),
-      end:   typeof chartState.end   === 'string' ? chartState.end   : chartState.end?.toISOString(),
+      start: startISO,
+      end: endISO,
       interval: chartState.interval,
-      symbol: chartState.symbol,  // optional override; service will default to stored if null
-    };
+      symbol: chartState.symbol,
+    }
 
     const results = await Promise.all(enabled.map(async (ind) => {
       try {
-        const payload = await fetchIndicatorOverlays(ind.id, body);
-        return { ind_id: ind.id, type: ind.type, payload };
+        const payload = await fetchIndicatorOverlays(ind.id, body)
+        return { ind_id: ind.id, type: ind.type, payload }
       } catch (e) {
-        // Skip common 404s (no overlays / no candles) but log others
-        const msg = String(e.message || e);
+        const msg = String(e.message || e)
         if (
           msg.includes('Indicator not found') ||
           msg.includes('No candles available') ||
           msg.includes('No overlays computed')
         ) {
-          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`);
-          return null;
+          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`)
+          return null
         }
-        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
-        return null;
+        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e)
+        return null
       }
-    }));
+    }))
 
-    // results befor filter
-    console.log('[IndicatorSection] Raw overlay results:', results);
-    const overlaysPayload = results.filter(Boolean); // drop nulls
-    console.log('[IndicatorSection] Filtered overlaysPayload:', overlaysPayload);
-
-    updateChart(chartId, { overlays: overlaysPayload });
-    console.log("[IndicatorSection] Updated chart", overlaysPayload);
-  };
+    const overlaysPayload = results.filter(Boolean)
+    updateChart(chartId, { overlays: overlaysPayload })
+    console.log('[IndicatorSection] Updated overlays:', overlaysPayload)
+  }
 
   // Create or update indicator
   const handleSave = async (meta) => {
     try {
-      const params = { ...meta.params, start: chartState.start, end: chartState.end, symbol: chartState.symbol, interval: chartState.interval }
+      const params = {
+        ...meta.params,
+        start: startISO,
+        end: endISO,
+        symbol: chartState?.symbol,
+        interval: chartState?.interval,
+      }
 
       let result
       if (meta.id) {
-        // combine params and chartState fields (start, end, etc.)
-
         result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name })
         setIndicators(prev => prev.map(i => i.id === result.id ? result : i))
-        console.log("[IndicatorSection] Updated indicator:", result)
       } else {
         result = await createIndicator({ type: meta.type, params, name: meta.name })
         setIndicators(prev => [...prev, result])
-        console.log("[IndicatorSection] Created new indicator:", result)
       }
       setModalOpen(false)
     } catch (e) {
       setError(e.message)
-      console.error("[IndicatorSection] Error saving indicator:", e)
+      console.error('[IndicatorSection] Error saving indicator:', e)
     }
   }
 
-  // Delete indicator
   const handleDelete = async (id) => {
     try {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
-      console.log("[IndicatorSection] Deleted indicator with id:", id)
     } catch (e) {
       setError(e.message)
-      console.error("[IndicatorSection] Error deleting indicator:", e)
+      console.error('[IndicatorSection] Error deleting indicator:', e)
     }
   }
 
-  // Toggle enable/disable
   const toggleEnable = (id) => {
-    setIndicators(prev =>
-      prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i)
-    )
-    console.log("[IndicatorSection] Toggled enabled for indicator id:", id)
+    setIndicators(prev => prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i))
   }
 
-  // Open modal for create/edit
   const openEditModal = (indicator = null) => {
     setEditing(indicator)
     setModalOpen(true)
     setError(null)
-    console.log("[IndicatorSection] Opened modal for indicator:", indicator)
   }
 
-  if (isLoading) {
-    console.log("[IndicatorSection] Loading indicators…")
-    return <div>Loading indicators…</div>
-  }
-  if (error) {
-    console.error("[IndicatorSection] Error:", error)
-    return <div className="text-red-500">Error: {error}</div>
-  }
-  
-  // If no chart state or chartId is missing, log error
-  if (!chartState || !chartId ) {
-    console.warn("[IndicatorSection] No chart state found or chartId is missing")
-    return <div className="text-red-500">Error: No chart state found</div>
-  }
+  if (isLoading) return <div>Loading indicators…</div>
+  if (error) return <div className="text-red-500">Error: {error}</div>
+  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
+
 
   return (
     <div className="space-y-6">
