@@ -1,15 +1,42 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Any
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 from mplfinance.plotting import make_addplot
 import logging
+from datetime import timezone
 
 from core.logger import logger
 from .base import BaseIndicator
 from .config import DataContext
 
+def _ts_iso(ts) -> str:
+    # Lightweight markers/lines in your app are fine with ISO8601 strings
+    return pd.Timestamp(ts).tz_convert("UTC").isoformat().replace("+00:00", "Z")
+
+def _to_business_day_str(ts):
+    return pd.Timestamp(ts).tz_convert("UTC").date().isoformat()
+
+def _to_unix_s(ts):
+    return int(pd.Timestamp(ts).tz_convert("UTC").timestamp())
+
+def _find_touch_markers(df, level: float, start_ts: pd.Timestamp, label: str, fmt_time):
+    mks = []
+    if df.index.tz is None:
+        df = df.tz_localize("UTC")
+    window = df.loc[df.index >= start_ts]
+    for t, row in window.iterrows():
+        lo, hi = float(row["low"]), float(row["high"])
+        if lo <= level <= hi:
+            mks.append({
+                "time": int(pd.Timestamp(t).timestamp()),      # <-- 'YYYY-MM-DD'
+                "shape": "circle",
+                "color": "#6b7280", # default color, will be recolored on client,
+                "subtype": "touch",
+                "price": float(level)
+            })
+    return mks
 
 class MarketProfileIndicator(BaseIndicator):
     """
@@ -246,6 +273,137 @@ class MarketProfileIndicator(BaseIndicator):
         logger.debug("Calculated overlap: [%.2f, %.2f] vs [%.2f, %.2f] => overlap=%.2f, ratio=%.2f", val1, vah1, val2, vah2, overlap, ratio)
         return ratio
 
+    
+
+
+    def to_lightweight(
+        self,
+        plot_df: pd.DataFrame,
+        use_merged: bool = True,
+        merge_threshold: float = 0.60,
+        min_merge: int = 3,
+        include_touches: bool = True, 
+        time_fmt="business_day"
+    ) -> Dict[str, Any]:
+        """
+        Return overlays in your portal's expected shape:
+        {
+            "price_lines": [ { price, title, time, lineStyle, lineWidth, extend, color, axisLabelVisible }, ... ],
+            "markers":     [ { time, position, shape, text, color, size }, ... ]
+        }
+        Notes:
+        • 'time' is when the line starts; renderer should extend to the right.
+        • Color will be recolored uniformly per-indicator on the client.
+        """
+        if plot_df is None or plot_df.empty:
+            return {"price_lines": [], "markers": []}
+
+        # Ensure tz-aware UTC index for robust comparisons
+        plot_df = plot_df.copy()
+        plot_df.index = pd.to_datetime(plot_df.index, utc=True)
+
+        fmt_time = _to_business_day_str if time_fmt == "business_day" else _to_unix_s
+
+        if use_merged:
+            # compute merged profiles once if needed
+            if not getattr(self, "merged_profiles", None):
+                self.merge_value_areas(threshold=merge_threshold, min_merge=min_merge)
+            profiles = self.merged_profiles or []
+        else:
+            profiles = self.daily_profiles or []
+
+        out_lines: List[Dict[str, Any]] = []
+        out_markers: List[Dict[str, Any]] = []
+
+        if not profiles:
+            return {"price_lines": [], "markers": []}
+
+        chart_start = plot_df.index.min()
+        chart_end = plot_df.index.max()
+
+        out_lines, out_markers, out_boxes = [], [], []
+
+        for prof in profiles:
+            # accept either merged keys ('start') or daily keys ('start_date')
+            start_ts = pd.to_datetime(prof.get("start") or prof.get("start_date"), utc=True)
+
+            vah = prof.get("VAH")
+            val = prof.get("VAL")
+            poc = prof.get("POC")
+
+            if start_ts is None or vah is None or val is None:
+                continue
+
+            start_ts = pd.to_datetime(start_ts, utc=True)
+            # clamp to chart window
+            if start_ts < chart_start:
+                start_ts = chart_start
+            if start_ts > chart_end:
+                # starts after current chart window; nothing to draw
+                continue
+
+            # start_iso = _ts_iso(start_ts)
+            start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
+            
+            # Boxes span from start to chart end
+            end_ts = pd.to_datetime(prof.get("end") or prof.get("end_date") or chart_end, utc=True)
+            if end_ts > chart_end:
+                end_ts = chart_end
+
+            out_boxes.append({
+                "x1": _to_unix_s(start_ts),   # epoch seconds
+                "x2": _to_unix_s(end_ts),     # epoch seconds
+                "y1": float(val),             # VAL
+                "y2": float(vah),             # VAH
+                "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
+            })
+
+            # ----- price lines (Lightweight "price line" settings) -----
+            # VAL (solid)
+            out_lines.append({
+                "price": float(val),
+                "title": "VAL",
+                "time": start_str,          # when the line begins
+                "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
+                "lineWidth": 1,
+                "extend": "right",
+                "axisLabelVisible": True,
+                "color": "#6b7280",
+            })
+            # POC (dashed) — if available
+            if poc is not None:
+                out_lines.append({
+                    "price": float(poc),
+                    "title": "POC",
+                    "time": start_str,
+                    "lineStyle": 2,         # dashed to distinguish from VA band edges
+                    "lineWidth": 1,
+                    "extend": "right",
+                    "axisLabelVisible": True,
+                    "color": "#f59e0b",
+                })
+            # VAH (solid)
+            out_lines.append({
+                "price": float(vah),
+                "title": "VAH",
+                "time": start_str,
+                "lineStyle": 0,
+                "lineWidth": 1,
+                "extend": "right",
+                "axisLabelVisible": True,
+                "color": "#6b7280",
+            })
+
+            # ----- touchpoint markers (optional) -----
+            if include_touches:
+                out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
+                out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+
+        return {
+            "price_lines": out_lines,
+            "markers": out_markers,
+            "boxes": out_boxes
+        }
 #Rules below
 
 def breakout_rule(context: Dict, va: Dict) -> List[Dict]:
