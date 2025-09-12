@@ -32,52 +32,54 @@ export const IndicatorSection = ({ chartId }) => {
     return [sISO, eISO]
   }, [chartState?.dateRange?.[0], chartState?.dateRange?.[1]])
 
-  // Fetch indicators when chart version bumps (Apply)
-  useEffect(() => {
-    if (!chartState || !chartState._version) {
-      console.warn('[IndicatorSection] No chart state version yet, skipping fetch')
-      setIsLoading(false)
-      return
-    }
-    if (!chartState.symbol || !chartState.interval) {
-      console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch')
-      setIsLoading(false)
-      return
-    }
+    useEffect(() => {
+      if (!chartState || !chartState._version) {
+        console.warn('[IndicatorSection] No chart state version yet, skipping fetch');
+        setIsLoading(false);
+        return;
+      }
+      if (!chartState.symbol || !chartState.interval) {
+        console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch');
+        setIsLoading(false);
+        return;
+      }
 
-    let isMounted = true
-    setIsLoading(true)
-    console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval)
+      let isMounted = true;
+      let fetched = []; // capture fetched list
+      setIsLoading(true);
+      console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval);
 
-    fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
-      .then(data => {
-        if (!isMounted) return
-        setIndicators(data || [])
-        updateChart(chartId, { indicators: data || [] }) // store list for reference
-      })
-      .catch(e => {
-        if (!isMounted) return
-        setError(e.message)
-        console.error('[IndicatorSection] Error fetching indicators:', e)
-      })
-      .finally(async () => {
-        await refreshEnabledOverlays()
-        if (isMounted) setIsLoading(false)
-        console.log('[IndicatorSection] Indicator fetch complete')
-      })
+      fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
+        .then(async (data) => {
+          if (!isMounted) return;
+          fetched = Array.isArray(data) ? data : [];
+          setIndicators(fetched);
+          updateChart(chartId, { indicators: fetched });
+          await refreshEnabledOverlays(fetched); // use the fresh list
+        })
+        .catch(e => {
+          if (!isMounted) return;
+          setError(e.message);
+          console.error('[IndicatorSection] Error fetching indicators:', e);
+        })
+        .finally(() => {
+          if (isMounted) setIsLoading(false);
+          console.log('[IndicatorSection] Indicator fetch complete');
+        });
 
-    return () => { isMounted = false }
-  }, [chartId, chartState?._version]) // version is bumped by ChartComponent.handleApply
+      return () => { isMounted = false; };
+    }, [chartId, chartState?._version]
+  );
 
   // Refresh overlays for enabled indicators
-  const refreshEnabledOverlays = async () => {
-    console.log('[IndicatorSection - Overlays] Refreshing for chartId:', chartId)
-    if (!chartState) return
+  const refreshEnabledOverlays = async (list = indicators) => {
+    console.log('[IndicatorSection - Overlays] Refreshing for chartId:', chartId);
+    if (!chartState) return;
 
-    const enabled = indicators.filter(i => i.enabled)
+    const enabled = (list || []).filter(i => i.enabled);
     if (enabled.length === 0) {
-      updateChart(chartId, { overlays: [] })
-      return
+      updateChart(chartId, { overlays: [] });
+      return;
     }
 
     const body = {
@@ -85,31 +87,31 @@ export const IndicatorSection = ({ chartId }) => {
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
-    }
+    };
 
     const results = await Promise.all(enabled.map(async (ind) => {
       try {
-        const payload = await fetchIndicatorOverlays(ind.id, body)
-        return { ind_id: ind.id, type: ind.type, payload }
+        const payload = await fetchIndicatorOverlays(ind.id, body);
+        return { ind_id: ind.id, type: ind.type, payload };
       } catch (e) {
-        const msg = String(e.message || e)
+        const msg = String(e.message || e);
         if (
           msg.includes('Indicator not found') ||
           msg.includes('No candles available') ||
           msg.includes('No overlays computed')
         ) {
-          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`)
-          return null
+          console.warn(`[IndicatorSection - Overlays] Skipping overlays for ${ind.id}: ${msg}`);
+          return null;
         }
-        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e)
-        return null
+        console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
+        return null;
       }
-    }))
+    }));
 
-    const overlaysPayload = results.filter(Boolean)
-    updateChart(chartId, { overlays: overlaysPayload })
-    console.log('[IndicatorSection] Updated overlays:', overlaysPayload)
-  }
+    const overlaysPayload = results.filter(Boolean);
+    updateChart(chartId, { overlays: overlaysPayload });
+    console.log('[IndicatorSection] Updated overlays:', overlaysPayload);
+  };
 
   // Create or update indicator
   const handleSave = async (meta) => {
@@ -120,22 +122,31 @@ export const IndicatorSection = ({ chartId }) => {
         end: endISO,
         symbol: chartState?.symbol,
         interval: chartState?.interval,
+      };
+
+      let result;
+      if (meta.id) {
+        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
+        setIndicators(prev => {
+          const next = prev.map(i => i.id === result.id ? result : i);
+          queueMicrotask(() => { void refreshEnabledOverlays(next); }); // use fresh list
+          return next;
+        });
+      } else {
+        result = await createIndicator({ type: meta.type, params, name: meta.name });
+        setIndicators(prev => {
+          const next = [...prev, result];
+          queueMicrotask(() => { void refreshEnabledOverlays(next); }); // use fresh list
+          return next;
+        });
       }
 
-      let result
-      if (meta.id) {
-        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name })
-        setIndicators(prev => prev.map(i => i.id === result.id ? result : i))
-      } else {
-        result = await createIndicator({ type: meta.type, params, name: meta.name })
-        setIndicators(prev => [...prev, result])
-      }
-      setModalOpen(false)
+      setModalOpen(false);
     } catch (e) {
-      setError(e.message)
-      console.error('[IndicatorSection] Error saving indicator:', e)
+      setError(e.message);
+      console.error('[IndicatorSection] Error saving indicator:', e);
     }
-  }
+  };
 
   const handleDelete = async (id) => {
     try {
@@ -147,9 +158,21 @@ export const IndicatorSection = ({ chartId }) => {
     }
   }
 
+  // refresh overlays immediately after toggling; pass the fresh list to avoid stale closures
   const toggleEnable = (id) => {
-    setIndicators(prev => prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i))
-  }
+    setIndicators(prev => {
+      const next = prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i);
+      queueMicrotask(() => { void refreshEnabledOverlays(next); }); // microtask prevents state timing issues
+      return next;
+    });
+  };
+
+
+  // Regenerate signals (not yet implemented)
+  const generateSignals = async (id) => {
+    console.log('[IndicatorSection] generateSignals not yet implemented', id);
+  };
+
 
   const openEditModal = (indicator = null) => {
     setEditing(indicator)
