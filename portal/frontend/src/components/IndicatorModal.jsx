@@ -89,25 +89,20 @@ export default function IndicatorModal({
 
   // 3) When a type is chosen, fetch its metadata (required, defaults, types)
   useEffect(() => {
-    if (!typeId) return
+    if (!isOpen || !typeId) return; // fetch on each open even if typeId is unchanged
     fetchIndicatorType(typeId)
       .then(meta => {
-        setTypeMeta(meta)
+        setTypeMeta(meta);
         if (!initial) {
-          // seed params in create mode
-          const seed = {}
-          meta.required_params.forEach(key => { seed[key] = '' })
-
-          console.log("[IndicatorModal] Fetched type metadata:", meta)
-
-          Object.entries(meta.default_params).forEach(([k, v]) => {
-            seed[k] = v
-          })
-          setParams(seed)
+          const seed = {};
+          meta.required_params.forEach(key => { seed[key] = '' });
+          Object.entries(meta.default_params).forEach(([k, v]) => { seed[k] = v });
+          setParams(seed);
         }
       })
-      .catch(e => setMetaErr(e.message))
-  }, [typeId, initial])
+      .catch(e => setMetaErr(e.message));
+  }, [isOpen, typeId]);
+
 
   const handleParamChange = (key, val) => {
     setParams(p => ({ ...p, [key]: val }))
@@ -179,7 +174,7 @@ export default function IndicatorModal({
                       <input
                         type="text"
                         inputMode="numeric"
-                        pattern="[0-9,\\s;-]*"
+                        pattern="^[0-9\\s,;]*$"
                         className="w-full p-2 rounded bg-neutral-700"
                         value={listToString(params[key])}
                         onChange={e => handleParamChange(key, e.target.value)}
@@ -208,23 +203,35 @@ export default function IndicatorModal({
                         onChange={e => handleParamChange(key, e.target.value)}
                       />
                     )}
-                    
+
                   </div>
                 )
               })}
 
               {/* Optional Params */}
               {Object.entries(typeMeta.default_params).map(([key, def]) => {
-                const ftype = typeMeta.field_types[key] || 'string'
+                const ftype = typeMeta.field_types[key] || 'string';
                 return (
                   <div key={key}>
                     <label className="block text-sm mb-1">{key}</label>
-                    {['int','float','number'].includes(ftype.toLowerCase()) ? (
+
+                    {intListKeys.has(key) ? (
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="^[0-9\\s,;]*$"
+                        className="w-full p-2 rounded bg-neutral-700"
+                        value={listToString(params[key])}
+                        placeholder={Array.isArray(def) ? def.join(', ') : String(def)}
+                        onChange={e => handleParamChange(key, e.target.value)}
+                        onBlur={e => handleParamChange(key, toIntList(e.target.value))}
+                      />
+                    ) : ['int','float','number'].includes(ftype.toLowerCase()) ? (
                       <input
                         type="number"
                         step="any"
                         className="w-full p-2 rounded bg-neutral-700"
-                        value={params[key]}
+                        value={Number.isFinite(params[key]) ? params[key] : ''}
                         placeholder={String(def)}
                         onChange={e => handleParamChange(key, e.target.valueAsNumber)}
                       />
@@ -244,7 +251,7 @@ export default function IndicatorModal({
                       />
                     )}
                   </div>
-                )
+                );
               })}
             </div>
           )}
