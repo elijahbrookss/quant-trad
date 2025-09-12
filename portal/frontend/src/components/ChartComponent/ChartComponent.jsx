@@ -68,7 +68,7 @@ export const ChartComponent = ({ chartId }) => {
     });
 
     loadChartData();
-    
+
     if (!seededRef.current) {
       updateChart?.(chartId, { symbol, interval, dateRange });
       bumpRefresh?.(chartId); // trigger initial indicator load
@@ -148,8 +148,19 @@ export const ChartComponent = ({ chartId }) => {
         return;
       }
 
+      // seriesRef.current.setData(data);
+      // chartRef.current?.timeScale().fitContent();
       seriesRef.current.setData(data);
-      chartRef.current?.timeScale().fitContent();
+      // move view to the loaded window; add small padding for context
+      const first = data[0]?.time;
+      const last  = data.at(-1)?.time;
+      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+        const span = Math.max(1, last - first);
+        const pad  = Math.max(1, Math.floor(span * 0.05));
+        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
+      } else {
+        chartRef.current?.timeScale().scrollToRealTime(); // fallback to latest
+      }
 
       info('data set', {
         points: data.length,
@@ -286,8 +297,13 @@ export const ChartComponent = ({ chartId }) => {
   // Apply handler.
   const handleApply = useCallback(() => {
     info('apply', { chartId, symbol, interval, dateRange });
-    loadChartData();
+    
+    syncOverlays([]); // clear overlays on apply
+
     updateChart?.(chartId, { symbol, interval, dateRange });
+    
+    loadChartData();
+
     bumpRefresh?.(chartId);
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
 
