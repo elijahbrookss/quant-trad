@@ -1,80 +1,89 @@
-import { createContext, useContext, useState } from 'react'
+// src/contexts/ChartStateContext.jsx
+import { createContext, useContext, useReducer, useMemo, useCallback } from 'react';
+import { createLogger } from '../utils/logger.js';
 
-// Shape of a single chart's state
-// {
-//   symbol: string,
-//   interval: string,
-//   dateRange: [Date, Date],
-//   overlays: Array<any>
-// }
+const LOG_NS = 'ChartStateContext'; // file namespace
 
-const ChartStateContext = createContext(null)
-
-export const ChartStateProvider = ({ children }) => {
-  const [charts, setCharts] = useState({})
-
-  // Register a new chart or reset an existing one
-  const registerChart = (chartId, initialState = {}) => {
-    setCharts(prev => ({
-      ...prev,
-      [chartId]: {
-        symbol: initialState.symbol || '',
-        interval: initialState.interval || '',
-        start: initialState.start || '',
-        end: initialState.end || '',
-        overlays: initialState.overlays || [],
-        refreshKey: Date.now(), // Used to force re-render
-      },
-    }))
+// State shape: { [chartId]: { ...chartData, handles?, _version? } }
+function reducer(state, action) {
+  switch (action.type) {
+    case 'REGISTER': {
+      const { id, handles } = action;
+      const curr = state[id] || {};
+      if (curr.handles === handles) return state; // no-op
+      return { ...state, [id]: { ...curr, handles } };
+    }
+    case 'UPDATE': {
+      const { id, patch } = action;
+      const curr = state[id] || {};
+      // only update if at least one patched field changes
+      let changed = false;
+      for (const k of Object.keys(patch)) {
+        if (curr[k] !== patch[k]) { changed = true; break; }
+      }
+      if (!changed) return state; // no-op
+      return { ...state, [id]: { ...curr, ...patch } };
+    }
+    case 'BUMP': {
+      const { id } = action;
+      const curr = state[id] || {};
+      const v = (curr._version || 0) + 1;
+      return { ...state, [id]: { ...curr, _version: v } };
+    }
+    default:
+      return state;
   }
+}
 
-  const bumpRefresh = (chartId) => {
-    setCharts(prev => ({
-      ...prev,
-      [chartId]: {
-        ...prev[chartId],
-        refreshKey: Date.now(), // Update refresh key to force re-render
-      },
-    }))
-  }
+const ChartCtx = createContext(null);
 
-  // Update fields on an existing chart
-  const updateChart = (chartId, newState) => {
-    setCharts(prev => ({
-      ...prev,
-      [chartId]: {
-        ...prev[chartId],
-        ...newState,
-      },
-    }))
-  }
+export function ChartStateProvider({ children }) {
+  const { debug, info } = useMemo(() => createLogger(LOG_NS), []);
+  const [charts, dispatch] = useReducer(reducer, {});
 
-  // Retrieve chart state by ID
-  const getChart = (chartId, place) => { 
-    console.log("Getting chart state for ID and place:", chartId, place)
-    return charts[chartId] || null
-  }
+  // actions are stable; no effects that set state here
+  const registerChart = useCallback((id, handles) => {
+    info('register', { id });
+    dispatch({ type: 'REGISTER', id, handles });
+  }, [info]);
+
+  const updateChart = useCallback((id, patch) => {
+    debug('update', { id, keys: Object.keys(patch) });
+    dispatch({ type: 'UPDATE', id, patch });
+  }, [debug]);
+
+  const bumpRefresh = useCallback((id) => {
+    debug('bump', { id });
+    dispatch({ type: 'BUMP', id });
+  }, [debug]);
+
+  const getChart = useCallback((id) => charts[id], [charts]);
+
+  // context value is memoized to avoid churn
+  const value = useMemo(() => ({
+    charts,
+    getChart,
+    registerChart,
+    updateChart,
+    bumpRefresh,
+  }), [charts, getChart, registerChart, updateChart, bumpRefresh]);
 
   return (
-    <ChartStateContext.Provider value={{ charts, registerChart, updateChart, getChart, bumpRefresh }}>
+    <ChartCtx.Provider value={value}>
       {children}
-    </ChartStateContext.Provider>
-  )
+    </ChartCtx.Provider>
+  );
 }
 
-export const useChartState = () => {
-  const context = useContext(ChartStateContext)
-  if (!context) {
-    throw new Error('useChartState must be used within a ChartStateProvider')
-  }
-  return context
+// returns actions + whole state if needed
+export function useChartState() {
+  const ctx = useContext(ChartCtx);
+  if (!ctx) throw new Error('useChartState must be used within ChartStateProvider');
+  return ctx;
 }
 
-
-export const useChartValue = (chartId) => {
-  const context = useContext(ChartStateContext)
-  if (!context) {
-    throw new Error('useChartValue must be used within a ChartStateProvider')
-  }
-  return context.charts[chartId] || null
+// returns a single chart slice; simple selector
+export function useChartValue(id) {
+  const ctx = useChartState();
+  return ctx.charts[id];
 }
