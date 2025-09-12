@@ -10,6 +10,33 @@ import {
 import IndicatorModal from './IndicatorModal'
 import { useChartState } from '../contexts/ChartStateContext'
 
+const toInt = (v) => {
+  if (typeof v === 'number') return Math.trunc(v);
+  if (typeof v === 'string') {
+    const n = Number(v.trim());
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  }
+  return null;
+};
+
+const toIntList = (v) => {
+  if (Array.isArray(v)) return v.map(toInt).filter((n) => n !== null);
+  if (typeof v === 'string') {
+    const tokens = v.split(/[\s,;]+/).filter(Boolean);
+    return tokens.map(toInt).filter((n) => n !== null);
+  }
+  if (v == null) return [];
+  const n = toInt(v);
+  return n !== null ? [n] : [];
+};
+
+// normalize known params (add more keys here if needed)
+const normalizeParams = (params) => {
+  const p = { ...params };
+  if (p.lookbacks !== undefined) p.lookbacks = toIntList(p.lookbacks);
+  return p;
+};
+
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
@@ -32,44 +59,43 @@ export const IndicatorSection = ({ chartId }) => {
     return [sISO, eISO]
   }, [chartState?.dateRange?.[0], chartState?.dateRange?.[1]])
 
-    useEffect(() => {
-      if (!chartState || !chartState._version) {
-        console.warn('[IndicatorSection] No chart state version yet, skipping fetch');
-        setIsLoading(false);
-        return;
-      }
-      if (!chartState.symbol || !chartState.interval) {
-        console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch');
-        setIsLoading(false);
-        return;
-      }
+  useEffect(() => {
+    if (!chartState || !chartState._version) {
+      console.warn('[IndicatorSection] No chart state version yet, skipping fetch');
+      setIsLoading(false);
+      return;
+    }
+    if (!chartState.symbol || !chartState.interval) {
+      console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch');
+      setIsLoading(false);
+      return;
+    }
 
-      let isMounted = true;
-      let fetched = []; // capture fetched list
-      setIsLoading(true);
-      console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval);
+    let isMounted = true;
+    let fetched = []; // capture fetched list
+    setIsLoading(true);
+    console.log('[IndicatorSection] Fetching indicators for', chartState.symbol, chartState.interval);
 
-      fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
-        .then(async (data) => {
-          if (!isMounted) return;
-          fetched = Array.isArray(data) ? data : [];
-          setIndicators(fetched);
-          updateChart(chartId, { indicators: fetched });
-          await refreshEnabledOverlays(fetched); // use the fresh list
-        })
-        .catch(e => {
-          if (!isMounted) return;
-          setError(e.message);
-          console.error('[IndicatorSection] Error fetching indicators:', e);
-        })
-        .finally(() => {
-          if (isMounted) setIsLoading(false);
-          console.log('[IndicatorSection] Indicator fetch complete');
-        });
+    fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })
+      .then(async (data) => {
+        if (!isMounted) return;
+        fetched = Array.isArray(data) ? data : [];
+        setIndicators(fetched);
+        updateChart(chartId, { indicators: fetched });
+        await refreshEnabledOverlays(fetched); // use the fresh list
+      })
+      .catch(e => {
+        if (!isMounted) return;
+        setError(e.message);
+        console.error('[IndicatorSection] Error fetching indicators:', e);
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false);
+        console.log('[IndicatorSection] Indicator fetch complete');
+      });
 
-      return () => { isMounted = false; };
-    }, [chartId, chartState?._version]
-  );
+    return () => { isMounted = false; };
+  }, [chartId, chartState?._version]);
 
   // Refresh overlays for enabled indicators
   const refreshEnabledOverlays = async (list = indicators) => {
@@ -113,11 +139,21 @@ export const IndicatorSection = ({ chartId }) => {
     console.log('[IndicatorSection] Updated overlays:', overlaysPayload);
   };
 
-  // Create or update indicator
+  // Handlers for modal save/delete
   const handleSave = async (meta) => {
     try {
+      const core = normalizeParams(meta.params);
+
+      // light validation for lookbacks
+      if ('lookbacks' in core) {
+        if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
+          setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
+          return;
+        }
+      }
+
       const params = {
-        ...meta.params,
+        ...core,
         start: startISO,
         end: endISO,
         symbol: chartState?.symbol,
@@ -127,21 +163,22 @@ export const IndicatorSection = ({ chartId }) => {
       let result;
       if (meta.id) {
         result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
-        setIndicators(prev => {
-          const next = prev.map(i => i.id === result.id ? result : i);
-          queueMicrotask(() => { void refreshEnabledOverlays(next); }); // use fresh list
+        setIndicators((prev) => {
+          const next = prev.map((i) => (i.id === result.id ? result : i));
+          queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
       } else {
         result = await createIndicator({ type: meta.type, params, name: meta.name });
-        setIndicators(prev => {
+        setIndicators((prev) => {
           const next = [...prev, result];
-          queueMicrotask(() => { void refreshEnabledOverlays(next); }); // use fresh list
+          queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
       }
 
       setModalOpen(false);
+      setError(null);
     } catch (e) {
       setError(e.message);
       console.error('[IndicatorSection] Error saving indicator:', e);
