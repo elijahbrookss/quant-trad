@@ -5,7 +5,8 @@ import uuid
 import inspect
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-
+import math
+import numpy as np
 import pandas as pd
 
 from data_providers.alpaca_provider import AlpacaProvider
@@ -38,6 +39,28 @@ def _extract_ctor_params(inst) -> Dict[str, Any]:
         if hasattr(inst, name):
             out[name] = getattr(inst, name)
     return out
+
+def _sanitize_json(obj):
+    """Recursively drop/neutralize NaN/Inf and make timestamps JSON friendly."""
+    # numbers
+    if isinstance(obj, (int,)) or isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        v = float(obj)
+        return v if math.isfinite(v) else None
+    # pandas/np timestamps
+    if isinstance(obj, (pd.Timestamp,)):
+        return obj.isoformat()
+    # containers
+    if isinstance(obj, dict):
+        cleaned = {k: _sanitize_json(v) for k, v in obj.items()}
+        # if an overlay item has a price/value that ended up None, drop the item
+        if ("price" in cleaned and cleaned["price"] is None) or ("value" in cleaned and cleaned["value"] is None):
+            return None
+        return {k: v for k, v in cleaned.items() if v is not None}
+    if isinstance(obj, (list, tuple)):
+        return [v for v in (_sanitize_json(v) for v in obj) if v is not None]
+    return obj
 
 def list_types() -> List[str]:
     return list(_INDICATOR_MAP.keys())
@@ -197,11 +220,16 @@ def overlays_for_instance(
     else:
         raise RuntimeError("Indicator does not implement overlay serialization")
 
+    payload = _sanitize_json(payload)
     if not payload:
         raise LookupError("No overlays computed for given window")
 
-    # minimal shape validation
-    if not payload.get("price_lines") and not payload.get("markers"):
+    LAYERS = ("price_lines", "markers", "boxes", "segments", "polylines")
+    has_visuals = any(
+        isinstance(payload.get(k), (list, tuple)) and len(payload.get(k)) > 0
+        for k in LAYERS
+    )
+    if not has_visuals:
         raise LookupError("No overlays computed for given window")
 
     return payload

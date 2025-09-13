@@ -5,7 +5,7 @@ const INDICATOR_PANEVIEWS = {
   pivot_level: [PaneViewType.TOUCH],
   market_profile: [PaneViewType.VA_BOX, PaneViewType.TOUCH],
   trendline: [PaneViewType.SEGMENT, PaneViewType.TOUCH],
-  vwap_bands: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
+  vwap: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
 };
 
 export function getPaneViewsFor(type) {
