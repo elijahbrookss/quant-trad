@@ -1,26 +1,35 @@
 export function createVABoxPaneView(timeScaleApi, opts = {}) {
-  const { hatchOverlap = true, extendRight = true, outlineFront = false } = opts;
+  const {
+    hatchOverlap = true,
+    extendRight = true,
+    outlineFront = false,
+    rightEdgeMode = 'last-bar',        // 'pane' | 'last-bar'
+  } = opts;  
   let boxes = []; // [{ x1, x2, y1, y2, color, border? }]
+  let rightEdgeTimeSec = null;     // set from outside when you know last candle time
 
   const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
   const withAlpha = (rgba, a) =>
     rgba.replace(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*[^)]+\)/, `rgba($1,$2,$3,${a})`);
 
   // --- shared draw routine that can render fill/border based on flags
-  const paintRects = (ctx, priceToCoordinate, { fill = true, stroke = false, hatch = false }) => {
-    const vr = timeScaleApi.getVisibleRange?.();
-    const rightT = vr?.to; // epoch seconds
+  const paintRects = (ctx, mediaWidth, priceToCoordinate, hpr, vpr, { fill = true, stroke = false, hatch = false }) => {
     const pxRects = [];
 
     for (const b of boxes) {
-      const xLeft  = timeScaleApi.timeToCoordinate(toSec(b.x1));
-      const xRight = extendRight && rightT != null
-        ? timeScaleApi.timeToCoordinate(rightT)
-        : timeScaleApi.timeToCoordinate(toSec(b.x2));
+      const xLeft  = timeScaleApi.timeToCoordinate(toSec(b.x1)) * hpr;
+      let xRight;
+      if (!extendRight) {
+        xRight = timeScaleApi.timeToCoordinate(toSec(b.x2)) * hpr;
+      } else if (rightEdgeMode === 'last-bar' && rightEdgeTimeSec != null) {
+        xRight = timeScaleApi.timeToCoordinate(rightEdgeTimeSec) * hpr;
+      } else {
+        xRight = mediaWidth; // pane edge
+      } 
       if (xLeft == null || xRight == null) continue;
 
-      const y1 = priceToCoordinate(b.y1);
-      const y2 = priceToCoordinate(b.y2);
+      const y1 = priceToCoordinate(b.y1) * vpr;
+      const y2 = priceToCoordinate(b.y2) * vpr;
       if (y1 == null || y2 == null) continue;
 
       const left   = Math.min(xLeft, xRight);
@@ -75,13 +84,16 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
   };
 
   const renderer = {
-// Draw boxes in the foreground (visible), but the series itself is created first → low z-order.
+    // Draw boxes in the foreground (visible), but the series itself is created first → low z-order.
     draw: (target, priceToCoordinate) => {
-      const ctx = target.useMediaCoordinateSpace(({ context }) => context);
+      const { context: ctx, mediaSize, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } =
+       target.useBitmapCoordinateSpace(({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }) =>
+         ({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }));
+
       if (!ctx) return;
       ctx.save();
       // fill + hatch; keep outline off unless you set outlineFront=true
-      paintRects(ctx, priceToCoordinate, { fill: true, stroke: !!outlineFront, hatch: true });
+      paintRects(ctx, mediaSize.width, priceToCoordinate, hpr, vpr, { fill: true, stroke: !!outlineFront, hatch: true });
       ctx.restore();
     },
     // No background painting (prevents being hidden under pane/grid)
@@ -92,10 +104,11 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
   return {
     renderer: () => renderer,
     update: () => {},
-    priceValueBuilder: () => [0, 0, 0],
+    priceValueBuilder: () => [NaN, NaN, NaN],
     isWhitespace: () => false,
     defaultOptions() { return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }; },
     destroy: () => {},
     setBoxes(arr) { boxes = Array.isArray(arr) ? arr : []; },
+    setRightEdgeTime(sec) { rightEdgeTimeSec = Number.isFinite(sec) ? sec : null; },
   };
 }

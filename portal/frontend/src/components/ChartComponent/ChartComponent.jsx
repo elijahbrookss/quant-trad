@@ -40,6 +40,7 @@ export const ChartComponent = ({ chartId }) => {
   const seriesRef = useRef(null);
   const seededRef = useRef(false); // ensure we seed only once
   const pvMgrRef = useRef(null);
+  const lastBarRef = useRef(null);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -61,7 +62,10 @@ export const ChartComponent = ({ chartId }) => {
       height: el.clientHeight || 400,
     });
 
-    const series = chartRef.current.addSeries(CandlestickSeries, { ...seriesOptions })
+    const series = chartRef.current.addSeries(CandlestickSeries, {
+      ...seriesOptions,
+      priceScaleId: 'right',
+    })
     seriesRef.current = series
 
     // Create pane view manager.
@@ -169,7 +173,12 @@ export const ChartComponent = ({ chartId }) => {
 
       // seriesRef.current.setData(data);
       // chartRef.current?.timeScale().fitContent();
+      
       seriesRef.current.setData(data);
+
+      // Remember last bar for real-time updates.
+      lastBarRef.current = data.at(-1);
+
       // move view to the loaded window; add small padding for context
       const first = data[0]?.time;
       const last  = data.at(-1)?.time;
@@ -288,7 +297,6 @@ export const ChartComponent = ({ chartId }) => {
         console.log("Adding polylines", norm.polylines);
         allPolylines.push(...norm.polylines);
       }
-      
     }
 
     // Group touch points by time, strictly 1 item per time.
@@ -317,6 +325,46 @@ export const ChartComponent = ({ chartId }) => {
       pvMgrRef.current?.setVABlocks(boxes);
       pvMgrRef.current?.setSegments(allSegments);
       pvMgrRef.current?.setPolylines(allPolylines);
+
+      // --- C: VWAP vs Candles coverage + coordinate check ---
+      const ts = chartRef.current.timeScale();
+      const s = seriesRef.current;
+      const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t/1000) : t);
+
+      // last candle (from the ref set in loadChartData)
+      const c = lastBarRef.current;
+      const cTime = typeof c?.time === 'number' ? c.time : c?.time?.timestamp;
+      const cClose = Number(c?.close);
+
+      // last vwap point across ALL polylines
+      const vPts = (allPolylines || [])
+        .flatMap(l => (l.points || []).map(p => ({ t: toSec(p.time), p: +p.price })))
+        .filter(o => Number.isFinite(o.t) && Number.isFinite(o.p))
+        .sort((a,b) => a.t - b.t);
+      const vLast = vPts.at(-1);
+
+      // fallbacks if no candle ref yet
+      const vr = ts.getVisibleRange?.();
+      const vrTo = (vr?.to ?? cTime);
+
+      // log both time/price and pixel coords
+      console.log('[CHK] last candle', {
+        t: cTime ?? vrTo,
+        iso: (cTime ?? vrTo) ? new Date((cTime ?? vrTo) * 1000).toISOString() : null,
+        close: cClose,
+        x: cTime != null ? ts.timeToCoordinate(cTime) : (vrTo != null ? ts.timeToCoordinate(vrTo) : null),
+        y: Number.isFinite(cClose) ? s.priceToCoordinate(cClose) : null,
+      });
+
+      console.log('[CHK] last vwap', {
+        t: vLast?.t,
+        iso: vLast ? new Date(vLast.t * 1000).toISOString() : null,
+        p: vLast?.p,
+        x: vLast ? ts.timeToCoordinate(vLast.t) : null,
+        y: vLast ? s.priceToCoordinate(vLast.p) : null,
+        nPts: vPts.length,
+      });
+
 
       // seriesRef.current.setData(touch)
     } catch (e) {
