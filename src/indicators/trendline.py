@@ -19,6 +19,13 @@ class Trendline:
     lookback: int
     score: float = 0.0
 
+def _to_unix_s(ts) -> int:
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return int(ts.timestamp())
 
 class TrendlineIndicator(BaseIndicator):
     """
@@ -255,6 +262,59 @@ class TrendlineIndicator(BaseIndicator):
             })
 
         return overlays, legend_entries
+
+    def to_lightweight(self, plot_df: pd.DataFrame, include_touches: bool = True, top_n: int | None = None):
+        """
+        Emit custom-series 'segments' for each trendline + optional touch markers.
+        """
+        if plot_df is None or plot_df.empty:
+            return {"segments": [], "markers": []}
+
+        idx0, idx1 = 0, len(plot_df.index) - 1
+        t0, t1 = plot_df.index[idx0], plot_df.index[idx1]
+        x0, x1 = 0, idx1
+
+        segs, markers = [], []
+
+        lines = sorted(self.trendlines, key=lambda tl: tl.r2, reverse=True)
+        if top_n:
+            lines = lines[:top_n]
+
+        last_close = float(plot_df["close"].iat[idx1])
+
+        for tl in lines:
+            y0 = float(tl.slope * x0 + tl.intercept)
+            y1 = float(tl.slope * x1 + tl.intercept)
+
+            # dashed segments look nice for TLs; UI recolors
+            segs.append({
+                "x1": _to_unix_s(t0),
+                "x2": _to_unix_s(t1),
+                "y1": y0,
+                "y2": y1,
+                "lineStyle": 2,       # 0=solid, 2=dashed
+                "lineWidth": 1,
+                "color": "#6b7280",
+            })
+
+            if include_touches:
+                # decide marker side based on where the TL sits at the right edge
+                tl_last = y1
+                pos_for = ("belowBar" if last_close <= tl_last else "aboveBar")
+                for i, ts in enumerate(plot_df.index):
+                    price_on_line = float(tl.slope * i + tl.intercept)
+                    lo = float(plot_df.at[ts, "low"]); hi = float(plot_df.at[ts, "high"])
+                    if lo <= price_on_line <= hi:
+                        markers.append({
+                            "time": _to_unix_s(ts),
+                            "position": pos_for,
+                            "shape": "circle",
+                            "color": "#6b7280",
+                            "price": price_on_line,
+                            "subtype": "touch",
+                        })
+
+        return {"segments": segs, "markers": markers}
 
     @staticmethod
     def build_legend_handles(legend_entries: Set[Tuple[str, str]]):

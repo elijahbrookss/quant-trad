@@ -9,6 +9,9 @@ import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
 import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
 import LoadingOverlay from '../LoadingOverlay.jsx';
+import SymbolPresets from './SymbolPresets.jsx';
+import HotkeyHint from '../HotkeyHint.jsx';
+import SymbolPalette from '../SymbolPalette.jsx';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -24,6 +27,7 @@ export const ChartComponent = ({ chartId }) => {
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
+  const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
@@ -112,6 +116,20 @@ export const ChartComponent = ({ chartId }) => {
     return () => ro.disconnect();
   }, [debug]);
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const el = e.target;
+        const tag = (el?.tagName || '').toLowerCase();
+        const editable = el?.isContentEditable || tag === 'input' || tag === 'textarea';
+        if (!editable) { e.preventDefault(); setPalOpen(true); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
   // Data loader.
   const loadChartData = useCallback(async () => {
     try {
@@ -208,6 +226,8 @@ export const ChartComponent = ({ chartId }) => {
     const markers = [];
     const touchPoints = [];
     const boxes = [];
+    const allSegments = [];
+    const allPolylines = [];
 
     // 3) Walk overlays and apply.
     for (const ov of overlays) {
@@ -256,6 +276,14 @@ export const ChartComponent = ({ chartId }) => {
           }))
         );
       }
+
+      if (paneViews.includes('segment') && norm.segments?.length) {
+        allSegments.push(...norm.segments);
+      }
+      if (paneViews.includes('polyline') && norm.polylines?.length) {
+        allPolylines.push(...norm.polylines);
+      }
+      
     }
 
     // Group touch points by time, strictly 1 item per time.
@@ -278,8 +306,11 @@ export const ChartComponent = ({ chartId }) => {
       // seriesRef.current.setMarkers(markers);
       overlayHandlesRef.current.markersApi.setMarkers(markers);
       // Touch points via custom pane-view.
+      console.log("Setting touch points", touchPoints);
       pvMgrRef.current?.setTouchPoints(touchPoints);
       pvMgrRef.current?.setVABlocks(boxes);
+      pvMgrRef.current?.setSegments(allSegments);
+      pvMgrRef.current?.setPolylines(allPolylines);
 
       // seriesRef.current.setData(touch)
     } catch (e) {
@@ -345,8 +376,19 @@ export const ChartComponent = ({ chartId }) => {
         </button>
       </div>
       <div className="flex space-x-4 mt-5">
-        <div className="relative flex-1 rounded-lg overflow-hidden bg-gray-800 h-[400px]">
+        <div className="relative flex-1 rounded-lg overflow-hidden bg-gray-800 h-[550px]">
           <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+          <button
+            type="button"
+            onClick={() => setPalOpen(true)}
+            className="h-9 px-3 rounded-md border border-neutral-600 bg-neutral-800/70 text-neutral-200 hover:bg-neutral-700"
+            title="Open symbol presets (/)"
+          >
+            Presets
+          </button>
+
+          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+          <HotkeyHint />
           {/* overlay */}
           <LoadingOverlay
             show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
