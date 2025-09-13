@@ -310,6 +310,13 @@ export const IndicatorSection = ({ chartId }) => {
           })
         : ov.payload.boxes;
 
+        if (Array.isArray(ov.payload.segments)) {
+          ov.payload.segments = ov.payload.segments.map(s => ({ ...s, color: tintHex }));
+        }
+        if (Array.isArray(ov.payload.polylines)) {
+          ov.payload.polylines = ov.payload.polylines.map(l => ({ ...l, color: tintHex }));
+        }
+
       return { ...ov, payload: { ...ov.payload, price_lines, markers, boxes } };
     });
 
