@@ -167,6 +167,7 @@ class VWAPIndicator(BaseIndicator):
             "lineStyle": 0,
             "lineWidth": 1,
             "color": "#6b7280",
+            "role": "main",  
         })
 
         # Bands (dashed)
@@ -176,10 +177,12 @@ class VWAPIndicator(BaseIndicator):
             polylines.append({
                 "points": [ {"time": times[i], "price": float(up[i])} for i in range(n) ],
                 "lineStyle": 2, "lineWidth": .75, "color": "#9ca3af",
+                "band": float(m), "side": "upper", "shade": True,
             })
             polylines.append({
                 "points": [ {"time": times[i], "price": float(lo[i])} for i in range(n) ],
                 "lineStyle": 2, "lineWidth": .75, "color": "#9ca3af",
+                "band": float(m), "side": "lower", "shade": True,
             })
 
             if include_touches:
@@ -197,7 +200,7 @@ class VWAPIndicator(BaseIndicator):
                             "color": "#6b7280", "price": float(lo[i]), "subtype": "touch",
                         })
 
-        return {"polylines": polylines, "markers": markers}
+        return {"polylines": polylines, "markers": []}
 
     @staticmethod
     def build_legend_handles(legend_entries: set) -> list:

@@ -310,6 +310,8 @@ export const IndicatorSection = ({ chartId }) => {
           })
         : ov.payload.boxes;
 
+        const tintHex = hexToRgba(color, 0.7);
+
         if (Array.isArray(ov.payload.segments)) {
           ov.payload.segments = ov.payload.segments.map(s => ({ ...s, color: tintHex }));
         }

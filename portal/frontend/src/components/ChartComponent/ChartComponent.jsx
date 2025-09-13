@@ -237,6 +237,9 @@ export const ChartComponent = ({ chartId }) => {
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
 
+      // Norm
+      console.log("Overlay", { type, color, paneViews, norm });
+
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
         for (const pl of payload.price_lines) {
@@ -278,9 +281,11 @@ export const ChartComponent = ({ chartId }) => {
       }
 
       if (paneViews.includes('segment') && norm.segments?.length) {
+        console.log("Adding segments", norm.segments);
         allSegments.push(...norm.segments);
       }
       if (paneViews.includes('polyline') && norm.polylines?.length) {
+        console.log("Adding polylines", norm.polylines);
         allPolylines.push(...norm.polylines);
       }
       
@@ -305,8 +310,9 @@ export const ChartComponent = ({ chartId }) => {
     try {
       // seriesRef.current.setMarkers(markers);
       overlayHandlesRef.current.markersApi.setMarkers(markers);
-      // Touch points via custom pane-view.
-      console.log("Setting touch points", touchPoints);
+      
+
+      console.log("Custom overlays", { touchPoints: grouped, boxes, allSegments, allPolylines });
       pvMgrRef.current?.setTouchPoints(touchPoints);
       pvMgrRef.current?.setVABlocks(boxes);
       pvMgrRef.current?.setSegments(allSegments);
@@ -323,6 +329,8 @@ export const ChartComponent = ({ chartId }) => {
       markers: markers.length,
       touchPoints: touchPoints.length,
       boxes: boxes.length,
+      segments: allSegments.length,
+      polylines: allPolylines.length,
     });
 
     setDataLoading(false);
