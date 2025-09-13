@@ -1,16 +1,21 @@
+const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
+
 export function createSegmentPaneView(timeScaleApi) {
   let segs = []; // [{ x1,x2,y1,y2,color,lineWidth,lineStyle }]
 
   const renderer = {
     draw: (target, priceToCoordinate) => {
-      const ctx = target.useMediaCoordinateSpace(({ context }) => context);
+      const { context: ctx, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } =
+        target.useBitmapCoordinateSpace(({ context, horizontalPixelRatio, verticalPixelRatio }) =>
+          ({ context, horizontalPixelRatio, verticalPixelRatio }));
+
       if (!ctx) return;
       ctx.save();
       for (const s of segs) {
-        const x1 = timeScaleApi.timeToCoordinate(s.x1);
-        const x2 = timeScaleApi.timeToCoordinate(s.x2);
-        const y1 = priceToCoordinate(s.y1);
-        const y2 = priceToCoordinate(s.y2);
+        const x1 = timeScaleApi.timeToCoordinate(toSec(s.x1)) * hpr;
+        const x2 = timeScaleApi.timeToCoordinate(toSec(s.x2)) * hpr;
+        const y1 = priceToCoordinate(s.y1) * vpr;
+        const y2 = priceToCoordinate(s.y2) * vpr;
         if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
 
         ctx.beginPath();
@@ -30,7 +35,7 @@ export function createSegmentPaneView(timeScaleApi) {
   return {
     renderer: () => renderer,
     update: () => {},
-    priceValueBuilder: () => [0,0,0],
+    priceValueBuilder: () => [NaN, NaN, NaN],
     isWhitespace: () => false,
     defaultOptions() { return { priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false }; },
     destroy: () => {},

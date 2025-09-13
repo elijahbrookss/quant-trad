@@ -1,3 +1,6 @@
+const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
+
+
 export function createPolylinePaneView(timeScaleApi) {
   let lines = []; // [{ points:[{time,price}], color, lineWidth, lineStyle, role?, band?, side?, shade? }]
 
@@ -15,15 +18,15 @@ export function createPolylinePaneView(timeScaleApi) {
     return `rgba(107,114,128,${a})`;
   };
 
-  const drawStroke = (ctx, pts, priceToCoordinate, color, width, style) => {
+  const drawStroke = (ctx, pts, priceToCoordinate, color, width, style, hpr, vpr) => {
     let started = false;
     if (style === 2) ctx.setLineDash([6,4]); else ctx.setLineDash([]);
     ctx.lineWidth = width ?? 1;
     ctx.strokeStyle = color || 'rgba(107,114,128,1)';
     ctx.beginPath();
-    for (const p of pts) {
-      const x = timeScaleApi.timeToCoordinate(p.time);
-      const y = priceToCoordinate(p.price);
+    for (const p of [...pts].sort((a,b)=> toSec(a.time) - toSec(b.time))) {
+      const x = timeScaleApi.timeToCoordinate(toSec(p.time)) * hpr;
+      const y = priceToCoordinate(p.price) * vpr;
       if (x == null || y == null) continue;
       if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
     }
@@ -32,21 +35,22 @@ export function createPolylinePaneView(timeScaleApi) {
   };
 
   // Create a filled polygon between two time-aligned polylines
-  const drawBandFill = (ctx, upper, lower, priceToCoordinate, color) => {
+  const drawBandFill = (ctx, upper, lower, priceToCoordinate, color, hpr, vpr) => {
     // Build a time → {ux,uy} / {lx,ly} map; keep only times present in both
     const uMap = new Map();
     for (const p of upper.points || []) {
-      const x = timeScaleApi.timeToCoordinate(p.time);
-      const y = priceToCoordinate(p.price);
-      if (x != null && y != null) uMap.set(p.time, { x, y });
+      const x = timeScaleApi.timeToCoordinate(toSec(p.time)) * hpr;
+      const y = priceToCoordinate(p.price) * vpr;
+      if (x != null && y != null) uMap.set(toSec(p.time), { x, y });
     }
     const pair = [];
     for (const p of lower.points || []) {
-      const x = timeScaleApi.timeToCoordinate(p.time);
-      const y = priceToCoordinate(p.price);
-      if (x != null && y != null && uMap.has(p.time)) {
-        const u = uMap.get(p.time);
-        pair.push({ ux: u.x, uy: u.y, lx: x, ly: y, t: p.time });
+      const x = timeScaleApi.timeToCoordinate(toSec(p.time)) * hpr;
+      const y = priceToCoordinate(p.price) * vpr;
+      const t = toSec(p.time);
+      if (x != null && y != null && uMap.has(t)) {
+        const u = uMap.get(t);
+        pair.push({ ux: u.x, uy: u.y, lx: x, ly: y, t });
       }
     }
     if (pair.length < 2) return;
@@ -74,7 +78,10 @@ export function createPolylinePaneView(timeScaleApi) {
 
   const renderer = {
     draw: (target, priceToCoordinate) => {
-      const ctx = target.useMediaCoordinateSpace(({ context }) => context);
+      const { context: ctx, horizontalPixelRatio: hpr, verticalPixelRatio: vpr } =
+        target.useBitmapCoordinateSpace(({ context, horizontalPixelRatio, verticalPixelRatio }) =>
+          ({ context, horizontalPixelRatio, verticalPixelRatio }));      
+      
       if (!ctx) return;
       ctx.save();
 
@@ -94,12 +101,12 @@ export function createPolylinePaneView(timeScaleApi) {
 
       // 2) Draw fills first so strokes sit on top
       for (const [, g] of bands) {
-        if (g.upper && g.lower) drawBandFill(ctx, g.upper, g.lower, priceToCoordinate, g.color);
+        if (g.upper && g.lower) drawBandFill(ctx, g.upper, g.lower, priceToCoordinate, g.color, hpr, vpr);
       }
 
       // 3) Stroke all polylines (main + bands)
       for (const l of lines) {
-        drawStroke(ctx, l.points || [], priceToCoordinate, l.color, l.lineWidth, l.lineStyle);
+        drawStroke(ctx, l.points || [], priceToCoordinate, l.color, l.lineWidth, l.lineStyle, hpr, vpr);      
       }
 
       ctx.restore();
@@ -111,7 +118,7 @@ export function createPolylinePaneView(timeScaleApi) {
   return {
     renderer: () => renderer,
     update: () => {},
-    priceValueBuilder: () => [0,0,0],
+    priceValueBuilder: () => [NaN, NaN, NaN],
     isWhitespace: () => false,
     defaultOptions() { return { priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false }; },
     destroy: () => {},
