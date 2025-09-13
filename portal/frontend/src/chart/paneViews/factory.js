@@ -16,12 +16,13 @@ export class PaneViewManager {
     this.ts = chart.timeScale();
     this.series = new Map();
     this.views = new Map();
+    this.ensure(PaneViewType.VA_BOX); // create VA boxes first so they are in back
   }
   ensure(type) {
     if (this.series.has(type)) return;
     let view;
     if (type === PaneViewType.TOUCH)      view = createTouchPaneView(this.ts);
-    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { extendRight:true, hatchOverlap:true });
+    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { extendRight: true, hatchOverlap: false, outlineFront: true });
     else if (type === PaneViewType.SEGMENT) view = createSegmentPaneView(this.ts);
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
     else throw new Error(`Unknown pane view: ${type}`);
