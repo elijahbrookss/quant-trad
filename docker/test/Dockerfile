@@ -1,5 +1,5 @@
 # docker/test/Dockerfile
-FROM python:3.10-slim
+FROM python:3.10
 
 ENV PYTHONPATH=/app/src
 WORKDIR /app
