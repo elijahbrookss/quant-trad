@@ -9,7 +9,7 @@ typer==0.15.4
 yfinance==0.2.61
 psycopg2-binary
 mplfinance
-pandas-ta
+pandas-ta==0.3.14b0
 setuptools
 alpaca-py
 pytest
