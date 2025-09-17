@@ -1,5 +1,4 @@
 matplotlib==3.10.3
-mplfinance==0.12.10b0
 numpy==2.2.6
 pandas
 python-dotenv==1.1.0
@@ -10,7 +9,6 @@ typer==0.15.4
 yfinance==0.2.61
 psycopg2-binary
 mplfinance
-dataclasses
 pandas-ta
 setuptools
 alpaca-py

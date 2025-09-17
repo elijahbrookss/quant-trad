@@ -1,6 +1,7 @@
 # docker/test/Dockerfile
 FROM python:3.10-slim
 
+ENV PYTHONPATH=/app/src
 WORKDIR /app
 
 # Upgrade pip (and build helpers), then install deps
