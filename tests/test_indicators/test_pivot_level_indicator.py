@@ -38,8 +38,8 @@ def test_pivot_level_indicator_plot():
         indicator = PivotLevelIndicator.from_context(
             provider=provider,
             ctx=indicator_ctx,
-            level_timeframe=tf,
             lookbacks=(2, 3, 5, 10, 20),
+            timeframe=tf
         )
         # Get overlay lines + legend data for charting
         tf_overlays, tf_legend = indicator.to_overlays(
