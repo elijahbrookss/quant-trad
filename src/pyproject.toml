@@ -1,0 +1,9 @@
+[project]
+name = "quantlib"
+version = "0.1.0"
+description = "Core logic for Quant-Trad bot"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core", "data_providers", "indicators", "signals", "utils"]

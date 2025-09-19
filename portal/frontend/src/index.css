@@ -1,0 +1,4 @@
+@import "tailwindcss";
+#tv-attr-logo {
+  display: none !important;
+}
