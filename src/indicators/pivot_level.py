@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from .config import DataContext
-from typing import List, Optional, Tuple, Set
+from typing import List, Optional, Tuple, Set, Dict, Any
 import pandas as pd
 from mplfinance.plotting import make_addplot
 from core.logger import logger
@@ -54,7 +54,8 @@ class PivotLevelIndicator(BaseIndicator):
         df: pd.DataFrame,
         timeframe: str,
         lookbacks: Tuple[int, ...] = (10, 20, 50),
-        threshold: float = 0.005
+        threshold: float = 0.005,
+        days_back: int = 180
     ):
         """
         :param df: OHLC DataFrame indexed by timestamp
@@ -66,6 +67,7 @@ class PivotLevelIndicator(BaseIndicator):
         self.timeframe = timeframe
         self.lookbacks = lookbacks
         self.threshold = threshold
+        self.days_back = days_back
         self.levels: List[Level] = []
         self._compute()
 
@@ -206,7 +208,8 @@ class PivotLevelIndicator(BaseIndicator):
         cls,
         provider,
         ctx: DataContext,
-        level_timeframe: str,
+        timeframe: str,
+        days_back: int = 180,
         **kwargs
     ):
         """
@@ -216,15 +219,86 @@ class PivotLevelIndicator(BaseIndicator):
         :param level_timeframe: timeframe for the pivot levels (e.g., '1d', '4h')
 
         """
+        end_ts = pd.Timestamp(ctx.end)
+        start_dt = end_ts - pd.Timedelta(days=days_back)
+        if start_dt.tz is None:
+            start_dt = start_dt.tz_localize("UTC")
+        else:
+            start_dt = start_dt.tz_convert("UTC")
+
         level_ctx = DataContext(
             symbol=ctx.symbol,
-            start=ctx.start,
+            start=start_dt.isoformat(),
             end=ctx.end,
-            interval=level_timeframe
+            interval=timeframe,
         )
+
         df = provider.get_ohlcv(level_ctx)
         if df is None or df.empty:
             raise ValueError(
-                f"Data missing for {ctx.symbol} [{level_timeframe}]"
+                f"Data missing for {ctx.symbol} [{timeframe}]"
             )
-        return cls(df=df, timeframe=level_timeframe, **kwargs)
+        return cls(df=df, timeframe=timeframe, **kwargs)
+
+
+    def to_lightweight(
+        self,
+        plot_df: pd.DataFrame,
+        color_mode: str = 'timeframe'
+    ) -> Dict[str, Any]:
+        """
+        Produce TradingView Lightweight Charts overlays:
+        - price_lines: [{ id, price, title, color, lineStyle, lineWidth, axisLabelVisible, originTime }]
+        - markers:     [{ time, position, shape, color, text }]
+        """
+        role_colors = {'support': '#22c55e', 'resistance': '#ef4444'}  # green/red
+        tf_colors   = {self.timeframe: '#60a5fa'}                      # blue fallback
+
+        price_lines = []
+        markers = []
+
+        idx = plot_df.index
+
+        for i, lvl in enumerate(self.levels):
+            # color / label
+            if color_mode == 'role':
+                color = role_colors.get(lvl.kind, '#9ca3af')  # gray fallback
+                title = f"{lvl.kind[:3].upper()} · lb={lvl.lookback}"
+            else:
+                color = tf_colors.get(lvl.timeframe, '#9ca3af')
+                title = f"{lvl.timeframe} · lb={lvl.lookback}"
+
+            # ensure originTime exists (first visible bar or first_touched)
+            origin = lvl.first_touched if lvl.first_touched in idx else (idx[0] if len(idx) else lvl.first_touched)
+            origin_ts = int(pd.Timestamp(origin).timestamp())
+
+            price_lines.append({
+                "id": f"pivotlvl-{i}-{lvl.lookback}",
+                "price": float(lvl.price),
+                "title": title,
+                "color": color,
+                "lineStyle": 2,             # Dashed
+                "lineWidth": 2,
+                "axisLabelVisible": True,
+                "originTime": origin_ts     # for optional client logic
+            })
+
+            # touch markers on/after first_touched
+            touches = [ts for ts in lvl.get_touches(plot_df) if ts >= lvl.first_touched]
+            pos = "belowBar" if lvl.kind == "resistance" else "aboveBar"
+            for ts in touches:
+                markers.append({
+                    "time": int(pd.Timestamp(ts).timestamp()),
+                    "position": pos,
+                    "shape": "circle",
+                    "color": color,
+                    "price": float(lvl.price),
+                    "subtype": "touch",
+                })
+
+        return {
+            "type": "pivot-levels",
+            "timeframe": self.timeframe,
+            "price_lines": price_lines,
+            "markers": markers
+        }

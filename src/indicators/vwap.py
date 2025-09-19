@@ -4,6 +4,13 @@ from matplotlib import patches
 from indicators.base import BaseIndicator
 from indicators.config import DataContext
 
+def _to_unix_s(ts) -> int:
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return int(ts.timestamp())
 
 class VWAPIndicator(BaseIndicator):
     """
@@ -134,6 +141,66 @@ class VWAPIndicator(BaseIndicator):
             legend_entries.add((f"VWAP - {m}\u03c3", band_color))
 
         return overlays, legend_entries
+
+    def to_lightweight(self, plot_df: pd.DataFrame, include_touches: bool = True):
+        """
+        Emit 'polylines' for VWAP and each band + touch markers on hits.
+        """
+        if plot_df is None or plot_df.empty:
+            return {"polylines": [], "markers": []}
+
+        # Align by position (your prior mplfinance path used values-aligned arrays)
+        n = len(plot_df.index)
+        def arr(col: str):
+            s = self.df[col]
+            return (s.values[:n] if len(s) >= n else
+                    s.reindex(plot_df.index, method="nearest").values)
+
+        times = [ _to_unix_s(ts) for ts in plot_df.index ]
+        polylines = []
+        markers = []
+
+        # VWAP (solid)
+        vwap_vals = arr("vwap")
+        polylines.append({
+            "points": [ {"time": times[i], "price": float(vwap_vals[i])} for i in range(n) ],
+            "lineStyle": 0,
+            "lineWidth": 1,
+            "color": "#6b7280",
+            "role": "main",  
+        })
+
+        # Bands (dashed)
+        for m in self.stddev_multipliers:
+            up = arr(f"upper_{int(m)}std")
+            lo = arr(f"lower_{int(m)}std")
+            polylines.append({
+                "points": [ {"time": times[i], "price": float(up[i])} for i in range(n) ],
+                "lineStyle": 2, "lineWidth": .75, "color": "#9ca3af",
+                "band": float(m), "side": "upper", "shade": True,
+            })
+            polylines.append({
+                "points": [ {"time": times[i], "price": float(lo[i])} for i in range(n) ],
+                "lineStyle": 2, "lineWidth": .75, "color": "#9ca3af",
+                "band": float(m), "side": "lower", "shade": True,
+            })
+
+            if include_touches:
+                for i, ts in enumerate(plot_df.index):
+                    lo_b = float(plot_df.at[ts, "low"]); hi_b = float(plot_df.at[ts, "high"])
+                    # touches with upper / lower bands
+                    if lo_b <= float(up[i]) <= hi_b:
+                        markers.append({
+                            "time": times[i], "position": "belowBar", "shape": "circle",
+                            "color": "#6b7280", "price": float(up[i]), "subtype": "touch",
+                        })
+                    if lo_b <= float(lo[i]) <= hi_b:
+                        markers.append({
+                            "time": times[i], "position": "aboveBar", "shape": "circle",
+                            "color": "#6b7280", "price": float(lo[i]), "subtype": "touch",
+                        })
+
+        return {"polylines": polylines, "markers": []}
 
     @staticmethod
     def build_legend_handles(legend_entries: set) -> list:
