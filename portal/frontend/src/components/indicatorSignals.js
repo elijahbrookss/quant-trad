@@ -80,7 +80,7 @@ export async function runSignalGeneration({
     return false;
   }
 
-  updateChart(chartId, { signalsLoading: true });
+  updateChart(chartId, { signalsLoading: true, signalsLoadingFor: indicator.id });
 
   try {
     const confirmationBars = chartState?.signalsConfig?.pivotBreakoutConfirmationBars
@@ -129,6 +129,6 @@ export async function runSignalGeneration({
     setError?.(msg);
     return false;
   } finally {
-    updateChart(chartId, { signalsLoading: false });
+    updateChart(chartId, { signalsLoading: false, signalsLoadingFor: null });
   }
 }
