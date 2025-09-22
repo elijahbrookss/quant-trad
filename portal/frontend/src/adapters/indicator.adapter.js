@@ -1,11 +1,36 @@
 const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 
 async function handleResponse(res) {
-  if (!res.ok) {
-    const txt = await res.text()
-    throw new Error(txt || res.statusText)
+  if (res.ok) {
+    return res.status === 204 ? null : res.json()
   }
-  return res.status === 204 ? null : res.json()
+
+  const contentType = res.headers.get('content-type') || ''
+  let payload = null
+
+  try {
+    if (contentType.includes('application/json')) {
+      payload = await res.json()
+    } else {
+      const text = await res.text()
+      payload = text || null
+    }
+  } catch (err) {
+    console.warn('[IndicatorAdapter] Failed to parse error response:', err)
+  }
+
+  const detail =
+    (payload && typeof payload === 'object' && (payload.detail || payload.message)) ||
+    (typeof payload === 'string' ? payload : null)
+
+  const message = detail || res.statusText || `Request failed with status ${res.status}`
+  const error = new Error(message)
+  error.status = res.status
+  if (payload && typeof payload === 'object') {
+    error.payload = payload
+  }
+
+  throw error
 }
 
 export async function fetchIndicators() {

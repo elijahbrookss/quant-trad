@@ -32,6 +32,8 @@ export default function IndicatorCard({
   onDelete,
   onGenerateSignals,
   onSelectColor,
+  isGeneratingSignals = false,
+  disableSignalAction = false,
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -183,14 +185,26 @@ export default function IndicatorCard({
 
         {/* Generate Signals */}
         <button
+          type="button"
           onClick={() => onGenerateSignals?.(indicator.id)}
-          className="text-green-400 hover:text-green-200"
-          title="Generate signals"
+          className={`relative flex h-8 w-8 items-center justify-center rounded-full border border-green-500/40 text-green-300 transition ${
+            disableSignalAction ? 'opacity-50 cursor-not-allowed' : 'hover:text-green-100 hover:border-green-400'
+          }`}
+          title={isGeneratingSignals ? 'Generating…' : 'Generate signals'}
+          disabled={disableSignalAction || isGeneratingSignals}
+          aria-busy={isGeneratingSignals}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.6" stroke="currentColor" className="size-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z" />
-          </svg>
+          {isGeneratingSignals ? (
+            <svg className="size-4 animate-spin" viewBox="0 0 24 24" role="status" aria-label="Generating signals">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.6" stroke="currentColor" className="size-5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z" />
+            </svg>
+          )}
         </button>
 
         {/* Copy JSON */}

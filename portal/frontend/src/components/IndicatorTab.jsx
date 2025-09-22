@@ -1,5 +1,6 @@
-import  { useState, useEffect, Fragment, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
+import { X } from 'lucide-react'
 import {
   fetchIndicators,
   createIndicator,
@@ -298,13 +299,40 @@ export const IndicatorSection = ({ chartId }) => {
     setIndColors(prev => ({ ...prev, [indicatorId]: color }));
   };
 
-  if (isLoading) return <div>Loading indicators…</div>
-  if (error) return <div className="text-red-500">Error: {error}</div>
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
+  const isSignalsLoading = !!chartState?.signalsLoading
+  const signalsLoadingFor = chartState?.signalsLoadingFor
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+          <div className="pr-6">
+            <p className="font-medium text-red-200">Request failed</p>
+            <p className="mt-1 text-red-100">{error}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            aria-label="Dismiss error"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-300">
+          <svg className="size-4 animate-spin text-blue-300" viewBox="0 0 24 24" role="status" aria-hidden="true">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+          </svg>
+          Loading indicators…
+        </div>
+      )}
+
       <button
         onClick={() => openEditModal()}
         className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
@@ -318,18 +346,31 @@ export const IndicatorSection = ({ chartId }) => {
 
       {/* List of indicators */}
       <div className="space-y-1">
-          {indicators.map(indicator => (
-            <IndicatorCard
-              key={indicator.id}
-              indicator={indicator}
-              color={indColors[indicator.id] || '#60a5fa'}
-              onToggle={toggleEnable}
-              onEdit={openEditModal}
-              onDelete={handleDelete}
-              onGenerateSignals={generateSignals}
-              onSelectColor={handleSelectColor}
-            />
-          ))}
+          {indicators.map(indicator => {
+            const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
+            const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+            return (
+              <IndicatorCard
+                key={indicator.id}
+                indicator={indicator}
+                color={indColors[indicator.id] || '#60a5fa'}
+                onToggle={toggleEnable}
+                onEdit={openEditModal}
+                onDelete={handleDelete}
+                onGenerateSignals={generateSignals}
+                onSelectColor={handleSelectColor}
+                colorSwatches={COLOR_SWATCHES}
+                isGeneratingSignals={isGenerating}
+                disableSignalAction={disableSignals}
+              />
+            )
+          })}
+
+          {!isLoading && indicators.length === 0 && (
+            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+              No indicators yet. Create one to get started.
+            </div>
+          )}
       </div>
 
       <IndicatorModal
