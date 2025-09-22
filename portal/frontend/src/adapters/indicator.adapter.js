@@ -63,3 +63,30 @@ export async function fetchIndicatorOverlays(id, { start, end, interval, symbol 
   });
   return handleResponse(res);
 }
+
+export async function generateIndicatorSignals(
+  id,
+  { start, end, interval, symbol, config } = {},
+) {
+  const payload = {
+    start,
+    end,
+    interval,
+  };
+
+  if (symbol) payload.symbol = symbol;
+
+  const cfgEntries = Object.entries(config || {}).filter(([, v]) => v !== undefined && v !== null);
+  if (cfgEntries.length) {
+    payload.config = Object.fromEntries(cfgEntries);
+  }
+
+  const res = await fetch(`${BASE}/api/indicators/${id}/signals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  });
+
+  return handleResponse(res);
+}
