@@ -8,6 +8,10 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping,
 
 from signals.base import BaseSignal
 
+
+import time
+from pprint import pformat
+
 try:  # pragma: no cover - optional import for type checking only
     from pandas import DataFrame  # type: ignore
 except Exception:  # pragma: no cover
@@ -30,7 +34,30 @@ class IndicatorRegistration:
 
 _REGISTRY: MutableMapping[str, IndicatorRegistration] = {}
 _RESERVED_CONFIG_KEYS = {"rule_payloads"}
+_TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
 
+def _df_summary(df: "DataFrame") -> Mapping[str, Any]:
+    try:
+        rows = len(df)
+        cols = list(getattr(df, "columns", []))
+        start = getattr(getattr(df, "index", []), "__getitem__", lambda *_: None)(0)
+        end = getattr(getattr(df, "index", []), "__getitem__", lambda *_: None)(-1)
+        return {"rows": rows, "cols": cols, "start": start, "end": end}
+    except Exception:
+        shape = getattr(df, "shape", ("?", "?"))
+        return {"rows": shape[0], "cols": shape[1]}
+
+def enable_diagnostic_logging(level: int = logging.DEBUG) -> None:
+    """One-call pretty logger for local debugging."""
+    root = logging.getLogger()
+    if not root.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+        ))
+        root.addHandler(h)
+    root.setLevel(level)
+    logger.debug("Diagnostic logging enabled at level=%s", logging.getLevelName(level))
 
 def register_indicator_rules(
     indicator_type: str,
@@ -57,7 +84,13 @@ def register_indicator_rules(
         rules=normalized_rules,
         overlay_adapter=overlay_adapter,
     )
-    logger.debug("Registered %d rule(s) for indicator '%s'", len(normalized_rules), indicator_type)
+    logger.debug(
+        "Registered %d rule(s) for indicator '%s': %s | overlay_adapter=%s",
+        len(normalized_rules),
+        indicator_type,
+        [getattr(r, "__name__", repr(r)) for r in normalized_rules],
+        getattr(overlay_adapter, "__name__", None),
+    )
 
 
 def _normalise_indicator_type(indicator: Union[str, Any]) -> str:
@@ -113,33 +146,100 @@ def _metadata_to_signal(meta: Mapping[str, Any], default_confidence: float = 1.0
         metadata=metadata,
     )
 
-
 def run_indicator_rules(
     indicator: Union[str, Any],
     market_df: "DataFrame",
     **config: Any,
 ) -> List[BaseSignal]:
-    """Execute registered rules for an indicator and emit :class:`BaseSignal` objects."""
-
     indicator_type = _normalise_indicator_type(indicator)
     registration = _REGISTRY.get(indicator_type)
     if registration is None:
+        # Extra hint when the name doesn't match
+        logger.warning(
+            "No rules found for indicator '%s'. Registered types: %s",
+            indicator_type, list(_REGISTRY.keys())
+        )
         raise ValueError(f"No rules registered for indicator '{indicator_type}'")
 
     context = _build_context(indicator, indicator_type, market_df, config)
     payloads = _resolve_payloads(config)
 
+    trace = bool(config.get("trace") or config.get("log_context"))
+    validate_only = bool(config.get("validate_only"))
+
+    if trace:
+        logger.debug(
+            "Signal run start | indicator=%s | df=%s | payload_count=%d",
+            indicator_type, _df_summary(market_df), len(payloads)
+        )
+        # Safe context preview (without df)
+        ctx_preview = {k: v for k, v in context.items() if k not in {"df"}}
+        logger.debug("Context keys=%s", sorted(ctx_preview.keys()))
+        logger.debug("Context preview=\n%s", pformat(ctx_preview))
+
     signals: List[BaseSignal] = []
-    for rule in registration.rules:
-        for payload in payloads:
-            results = rule(context, payload)
+    total_rules = len(registration.rules)
+    for r_idx, rule in enumerate(registration.rules):
+        rule_name = getattr(rule, "__name__", repr(rule))
+        t_rule_start = time.perf_counter()
+        logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
+
+        for p_idx, payload in enumerate(payloads):
+            t_payload_start = time.perf_counter()
+            try:
+                results = rule(context, payload)
+            except Exception:
+                logger.exception(
+                    "Rule error | rule=%s | payload_idx=%d | payload=%r",
+                    rule_name, p_idx, payload
+                )
+                continue
+
+            took_ms = int((time.perf_counter() - t_payload_start) * 1000)
+            count = 0 if not results else len(results)
+            logger.debug(
+                "Rule payload done | rule=%s | payload_idx=%d | results=%d | %dms",
+                rule_name, p_idx, count, took_ms
+            )
+
             if not results:
                 continue
-            for meta in results:
+
+            for meta_idx, meta in enumerate(results):
+                # Validate minimal fields before conversion
+                missing = {"type", "time"} - set(meta.keys())
+                if missing:
+                    logger.warning(
+                        "Result missing required keys %s | rule=%s | payload_idx=%d | meta=%r",
+                        missing, rule_name, p_idx, meta
+                    )
+                    continue
+
+                # Ensure symbol is set
                 if "symbol" not in meta and "symbol" in context:
                     meta = dict(meta)
                     meta.setdefault("symbol", context["symbol"])
-                signals.append(_metadata_to_signal(meta))
+
+                if validate_only:
+                    logger.debug("VALIDATE-ONLY: would emit %r", meta)
+                    continue
+
+                try:
+                    sig = _metadata_to_signal(meta)
+                except Exception:
+                    logger.exception(
+                        "Failed to convert metadata to BaseSignal | rule=%s | meta_idx=%d | meta=%r",
+                        rule_name, meta_idx, meta
+                    )
+                    continue
+
+                signals.append(sig)
+
+        logger.debug(
+            "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
+            rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
+        )
+
     logger.debug(
         "Generated %d signal(s) for indicator '%s' using %d payload(s)",
         len(signals), indicator_type, len(payloads)
@@ -153,22 +253,36 @@ def build_signal_overlays(
     plot_df: "DataFrame",
     **kwargs: Any,
 ) -> List[Mapping[str, Any]]:
-    """Build plot overlays for an indicator if an adapter has been registered."""
-
     indicator_type = _normalise_indicator_type(indicator)
     registration = _REGISTRY.get(indicator_type)
     if registration is None:
+        logger.warning(
+            "No rules registered for indicator '%s' (overlay build requested). Registered: %s",
+            indicator_type, list(_REGISTRY.keys())
+        )
         raise ValueError(f"No rules registered for indicator '{indicator_type}'")
 
     adapter = registration.overlay_adapter
     if adapter is None:
+        logger.debug("No overlay adapter registered for '%s' -> returning []", indicator_type)
         return []
 
-    overlays = list(adapter(signals, plot_df, **kwargs))
     logger.debug(
-        "Built %d overlay artefact(s) for indicator '%s'", len(overlays), indicator_type
+        "Building overlays | indicator=%s | signals=%d | plot_df=%s | kwargs=%s",
+        indicator_type, len(signals), _df_summary(plot_df), list(kwargs.keys())
+    )
+    try:
+        overlays = list(adapter(signals, plot_df, **kwargs))
+    except Exception:
+        logger.exception("Overlay adapter error | indicator=%s", indicator_type)
+        return []
+
+    logger.debug(
+        "Built %d overlay artefact(s) for indicator '%s'",
+        len(overlays), indicator_type
     )
     return overlays
+
 
 
 __all__ = [
