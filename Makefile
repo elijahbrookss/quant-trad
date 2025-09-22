@@ -31,7 +31,7 @@ help: ## Show this help
 
 ## ============================ ORCHESTRATOR =============================== ##
 .PHONY: dev stop
-dev: venv deps dev-up api-up frontend-start ## One-shot: venv+deps → infra → API → Frontend
+dev: venv deps dev-up frontend-start api-up  ## One-shot: venv+deps → infra → API → Frontend
 stop: api-stop frontend-stop dev-down           ## Stop API & Frontend, then infra
 
 ## ============================ BOOTSTRAP ================================= ##
