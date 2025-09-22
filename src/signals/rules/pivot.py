@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
 from indicators.pivot_level import Level, PivotLevelIndicator
+from signals.base import BaseSignal
 
 
 @dataclass(frozen=True)
@@ -167,4 +169,146 @@ def pivot_breakout_rule(
     return results
 
 
-__all__ = ["PivotBreakoutConfig", "pivot_breakout_rule"]
+def _to_unix_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:  # pragma: no cover - defensive guard
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return int(ts.timestamp())
+
+
+_BREAKOUT_COLORS = {
+    "above": "#16a34a",  # green
+    "below": "#dc2626",  # red
+}
+
+
+def pivot_signals_to_overlays(
+    signals: Sequence[BaseSignal],
+    plot_df: "pd.DataFrame",
+) -> List[Dict[str, Any]]:
+    """Convert pivot breakout signals into Lightweight Charts overlay payloads."""
+
+    if not signals:
+        return []
+
+    markers: List[Dict[str, Any]] = []
+    price_lines: List[Dict[str, Any]] = []
+
+    index = getattr(plot_df, "index", None)
+
+    for signal in signals:
+        metadata = signal.metadata or {}
+        level_price = metadata.get("level_price")
+        if level_price is None:
+            continue
+
+        breakout_direction = metadata.get("breakout_direction")
+        color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")  # gray fallback
+
+        marker_time = _to_unix_seconds(signal.time)
+        level_kind = str(metadata.get("level_kind", "pivot")).capitalize()
+        marker_position = "belowBar" if breakout_direction == "above" else "aboveBar"
+        marker_shape = "triangleUp" if breakout_direction == "above" else "triangleDown"
+
+        markers.append(
+            {
+                "time": marker_time,
+                "price": float(level_price),
+                "color": color,
+                "position": marker_position,
+                "shape": marker_shape,
+                "text": f"{level_kind} breakout",
+                "subtype": "signal",
+            }
+        )
+
+        start_time = metadata.get("breakout_start")
+        origin_time = _to_unix_seconds(start_time)
+        if origin_time is None and index is not None and len(index):
+            origin_time = _to_unix_seconds(index[0])
+        if origin_time is None:
+            origin_time = marker_time
+        end_time = marker_time
+
+        if origin_time and end_time and origin_time > end_time:
+            origin_time, end_time = end_time, origin_time
+
+        price_lines.append(
+            {
+                "price": float(level_price),
+                "color": color,
+                "lineStyle": 0,
+                "lineWidth": 2,
+                "axisLabelVisible": True,
+                "title": f"{level_kind} lvl",
+                "extend": "none",
+                "originTime": origin_time,
+                "endTime": end_time,
+            }
+        )
+
+    if not markers and not price_lines:
+        return []
+
+    payload = {
+        "price_lines": price_lines,
+        "markers": markers,
+    }
+
+    return [
+        {
+            "type": PivotLevelIndicator.NAME,
+            "payload": payload,
+        }
+    ]
+
+
+def register_pivot_indicator(force: bool = False) -> None:
+    """Ensure the pivot breakout rule and overlays are registered with the engine."""
+
+    try:
+        from signals.engine import signal_generator
+    except ImportError:  # pragma: no cover - defensive guard
+        return
+
+    if not force and PivotLevelIndicator.NAME in signal_generator._REGISTRY:
+        registration = signal_generator._REGISTRY[PivotLevelIndicator.NAME]
+        if registration.overlay_adapter is not None:
+            return
+
+    from signals.engine.signal_generator import register_indicator_rules
+
+    try:
+        register_indicator_rules(
+            PivotLevelIndicator.NAME,
+            rules=[pivot_breakout_rule],
+            overlay_adapter=pivot_signals_to_overlays,
+        )
+    except ValueError:
+        if force:
+            # Re-register by clearing and setting explicitly.
+            signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
+                rules=(pivot_breakout_rule,),
+                overlay_adapter=pivot_signals_to_overlays,
+            )
+        # otherwise keep existing registration
+
+
+register_pivot_indicator()
+
+
+__all__ = [
+    "PivotBreakoutConfig",
+    "pivot_breakout_rule",
+    "pivot_signals_to_overlays",
+    "register_pivot_indicator",
+]
