@@ -6,7 +6,9 @@ import {
   updateIndicator,
   deleteIndicator,
   fetchIndicatorOverlays,
+  generateIndicatorSignals,
 } from '../adapters/indicator.adapter'
+import { applyIndicatorColors, runSignalGeneration } from './indicatorSignals.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
@@ -45,15 +47,6 @@ const normalizeParams = (params) => {
   const p = { ...params };
   if (p.lookbacks !== undefined) p.lookbacks = toIntList(p.lookbacks);
   return p;
-};
-
-const hexToRgba = (hex, a = 0.18) => {
-  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
-  const v = hex.slice(1);
-  const n = v.length === 3
-    ? v.split('').map(c => parseInt(c + c, 16))
-    : [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)];
-  return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
 };
 
 // Manages the list of indicators and syncs enabled ones to the chart context
@@ -279,7 +272,19 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Regenerate signals (not yet implemented)
   const generateSignals = async (id) => {
-    console.log('[IndicatorSection] generateSignals not yet implemented', id);
+    const indicator = indicators.find((ind) => ind.id === id);
+    await runSignalGeneration({
+      indicator,
+      chartId,
+      chartState,
+      startISO,
+      endISO,
+      indColors,
+      getChart,
+      updateChart,
+      setError,
+      signalsAdapter: generateIndicatorSignals,
+    });
   };
 
 
@@ -288,42 +293,6 @@ export const IndicatorSection = ({ chartId }) => {
     setModalOpen(true)
     setError(null)
   }
-
-    // apply selected colors to overlays' price_lines and markers
-  const applyIndicatorColors = (overlays = [], colors = {}) =>
-    (overlays || []).map(ov => {
-      if (!ov || !ov.ind_id || !ov.payload) return ov;
-      const color = colors[ov.ind_id];
-      if (!color) return ov;
-
-      // price lines → uniform color
-      const price_lines = Array.isArray(ov.payload.price_lines)
-        ? ov.payload.price_lines.map(pl => ({ ...pl, color }))
-        : ov.payload.price_lines;
-
-      // markers (touch + regular) → override color
-      const markers = Array.isArray(ov.payload.markers)
-        ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
-        : ov.payload.markers;
-
-      const boxes = Array.isArray(ov.payload.boxes)
-        ? ov.payload.boxes.map(b => {
-            if (!b) return b;
-            return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
-          })
-        : ov.payload.boxes;
-
-        const tintHex = hexToRgba(color, 0.7);
-
-        if (Array.isArray(ov.payload.segments)) {
-          ov.payload.segments = ov.payload.segments.map(s => ({ ...s, color: tintHex }));
-        }
-        if (Array.isArray(ov.payload.polylines)) {
-          ov.payload.polylines = ov.payload.polylines.map(l => ({ ...l, color: tintHex }));
-        }
-
-      return { ...ov, payload: { ...ov.payload, price_lines, markers, boxes } };
-    });
 
   const handleSelectColor = (indicatorId, color) => {
     setIndColors(prev => ({ ...prev, [indicatorId]: color }));
