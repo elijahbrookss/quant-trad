@@ -15,6 +15,10 @@ from indicators.vwap import VWAPIndicator
 from indicators.pivot_level import PivotLevelIndicator
 from indicators.trendline import TrendlineIndicator
 from indicators.market_profile import MarketProfileIndicator
+from signals.engine.signal_generator import (
+    build_signal_overlays,
+    run_indicator_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,3 +237,56 @@ def overlays_for_instance(
         raise LookupError("No overlays computed for given window")
 
     return payload
+
+
+def generate_signals_for_instance(
+    inst_id: str,
+    start: str,
+    end: str,
+    interval: str,
+    symbol: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Execute registered signal rules for an indicator instance."""
+
+    entry = _REGISTRY.get(inst_id)
+    if not entry:
+        raise KeyError("Indicator not found")
+
+    inst = entry["instance"]
+    base_params = entry["meta"].get("params", {})
+    sym = symbol or base_params.get("symbol")
+    if not sym:
+        raise ValueError("Stored indicator has no symbol and none was provided")
+
+    provider = AlpacaProvider()
+    ctx = DataContext(symbol=sym, start=start, end=end, interval=interval)
+    df = provider.get_ohlcv(ctx)
+    if df is None or df.empty:
+        raise LookupError("No candles available for given window")
+
+    rule_config: Dict[str, Any] = dict(config or {})
+    rule_config.setdefault("pivot_breakout_confirmation_bars", 1)
+
+    logger.info(
+        "Running signal rules for indicator %s (%s) with config=%s",
+        inst_id,
+        getattr(inst, "NAME", inst.__class__.__name__),
+        rule_config,
+    )
+
+    signals = run_indicator_rules(inst, df, **rule_config)
+    overlays = build_signal_overlays(inst, signals, df, **rule_config)
+
+    logger.info(
+        "Signal execution complete for indicator %s: %d signal(s), %d overlay artefact(s)",
+        inst_id,
+        len(signals),
+        len(overlays),
+    )
+
+    sanitized_overlays = _sanitize_json(overlays) or []
+    return {
+        "signals": [sig.to_dict() for sig in signals],
+        "overlays": sanitized_overlays,
+    }
