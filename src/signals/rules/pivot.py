@@ -194,6 +194,7 @@ _BREAKOUT_COLORS = {
 def pivot_signals_to_overlays(
     signals: Sequence[BaseSignal],
     plot_df: "pd.DataFrame",
+    **_ignored: Any,
 ) -> List[Dict[str, Any]]:
     """Convert pivot breakout signals into Lightweight Charts overlay payloads."""
 
