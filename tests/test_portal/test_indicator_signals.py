@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import importlib
 
 import pytest
 
@@ -6,6 +7,22 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from portal.backend.main import app
+from signals.engine import signal_generator as engine
+from signals.rules.pivot import PivotLevelIndicator
+
+
+def test_indicator_service_registers_pivot_rules():
+    module = importlib.import_module("portal.backend.service.indicator_service")
+    original_registry = dict(engine._REGISTRY)
+
+    try:
+        engine._REGISTRY.clear()
+        importlib.reload(module)
+
+        assert PivotLevelIndicator.NAME in engine._REGISTRY
+    finally:
+        engine._REGISTRY.clear()
+        engine._REGISTRY.update(original_registry)
 
 
 class _DummyFrame:

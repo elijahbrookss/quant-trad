@@ -19,6 +19,7 @@ from signals.engine.signal_generator import (
     build_signal_overlays,
     run_indicator_rules,
 )
+from signals.rules.pivot import register_pivot_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ _INDICATOR_MAP = {
     "trendline":      TrendlineIndicator,
     "market_profile": MarketProfileIndicator,
 }
+
+# Ensure default signal rules are registered for built-in indicators
+register_pivot_indicator()
 
 # In-memory registry: id -> {"meta": <pydantic-like dict>, "instance": <object>}
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
