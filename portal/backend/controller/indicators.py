@@ -2,13 +2,14 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from ..service.indicator_service import (
     list_types, get_type_details,
     list_instances_meta, get_instance_meta, delete_instance,
-    create_instance, update_instance, overlays_for_instance
+    create_instance, update_instance, overlays_for_instance,
+    generate_signals_for_instance,
 )
 
 router = APIRouter()
@@ -32,6 +33,13 @@ class OverlayRequest(BaseModel):
     end: str
     interval: str
     symbol: Optional[str] = None  # optional override; defaults to stored
+
+class SignalRequest(BaseModel):
+    start: str
+    end: str
+    interval: str
+    symbol: Optional[str] = None
+    config: Dict[str, Any] = Field(default_factory=dict)
 
 # ===== Instances =====
 @router.get("/", response_model=List[IndicatorInstanceOut])
@@ -112,3 +120,27 @@ async def overlays(inst_id: str, req: OverlayRequest):
     except Exception as e:
         logger.exception("Unexpected overlay error")
         raise HTTPException(500, "Unexpected error computing overlays")
+
+
+@router.post("/{inst_id}/signals")
+async def signals(inst_id: str, req: SignalRequest):
+    try:
+        return generate_signals_for_instance(
+            inst_id=inst_id,
+            start=req.start,
+            end=req.end,
+            interval=req.interval,
+            symbol=req.symbol,
+            config=req.config,
+        )
+    except KeyError:
+        raise HTTPException(404, "Indicator not found")
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    except Exception:
+        logger.exception("Unexpected signal generation error")
+        raise HTTPException(500, "Unexpected error generating signals")
