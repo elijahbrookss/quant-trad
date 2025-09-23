@@ -96,3 +96,24 @@ def test_build_signal_overlays_uses_registered_adapter():
     assert overlays == [{"kind": "custom", "label": "ok"}]
     assert called["signals"] == [dummy_signal]
     assert called["plot_df_shape"] == df.shape
+
+
+def test_run_indicator_rules_injects_symbol_into_context():
+    captured = {}
+
+    def rule(context, payload):
+        captured.update(context)
+        return []
+
+    indicator_type = "dummy_context"
+    register_indicator_rules(indicator_type, [rule])
+
+    class DummyFrame:
+        index = []
+        shape = (0, 0)
+
+    df = DummyFrame()
+
+    run_indicator_rules(indicator_type, df, symbol="NQ")
+
+    assert captured.get("symbol") == "NQ"
