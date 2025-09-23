@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React from 'react';
 
 /**
  * Available timeframes:
@@ -9,9 +9,9 @@ const options = [
   { label: '5 Minutes', value: '5m' },
   { label: '15 Minutes', value: '15m' },
   { label: '30 Minutes', value: '30m' },
-  { label: '1 Hour', value: '1h' },
-  { label: '4 Hours', value: '4h' },
-  { label: '1 Day', value: '1d' },
+  { label: '1 Hour', value: '1h', featured: true },
+  { label: '4 Hours', value: '4h', featured: true },
+  { label: '1 Day', value: '1d', featured: true },
   { label: '1 Week', value: '1w' },
   { label: '1 Month', value: '1M' },
 ];
@@ -23,56 +23,35 @@ const options = [
  * @param {function} props.onChange - Callback when a timeframe is selected
  * @param {string} [props.placeholder='Select timeframe...'] - Placeholder text
  */
-export function TimeframeSelect({ selected, onChange, placeholder = 'Select timeframe...' }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const containerRef = useRef(null);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const toggleOpen = () => setIsOpen(prev => !prev);
-
-  const handleSelect = (option) => {
-    onChange(option.value);
-    setIsOpen(false);
-  };
-
-  const selectedOption = options.find(o => o.value === selected);
-
+export function TimeframeSelect({ selected, onChange }) {
   return (
-    <div ref={containerRef} className="relative inline-block w-40">
-      <span className="text-neutral-500 text-sm"> Timeframe </span>
-      <button
-        type="button"
-        onClick={toggleOpen}
-        className="w-full text-left bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-2 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-      >
-        {selectedOption ? selectedOption.label : placeholder}
-        <span className="float-right ml-2">▽</span>
-        {/* ▼◿⌟ⅴ∇∨⋁⋎⨈⩔⩒⩖⩛⩢ */}
-      </button>
+    <div className="flex flex-col gap-2 min-w-[13rem]">
+      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Timeframe</span>
+      <div className="flex flex-wrap gap-2">
+        {options.map(option => {
+          const isActive = option.value === selected;
+          const baseClass = 'rounded-md border px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2';
+          const activeClass = option.featured
+            ? 'border-sky-400 bg-sky-500/20 text-sky-100'
+            : 'border-indigo-400 bg-indigo-500/20 text-indigo-100';
+          const inactiveClass = option.featured
+            ? 'border-neutral-800 bg-neutral-900/70 text-neutral-200 hover:border-sky-400 hover:text-sky-200'
+            : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-indigo-400 hover:text-indigo-200';
 
-      {isOpen && (
-        <ul className="absolute z-10 mt-1 w-full bg-neutral-800 border border-neutral-600 rounded-md shadow-lg max-h-60 overflow-auto">
-          {options.map(option => (
-            <li
+          return (
+            <button
               key={option.value}
-              onClick={() => handleSelect(option)}
-              className="px-4 py-2 hover:bg-indigo-600 hover:text-white cursor-pointer"
+              type="button"
+              title={option.label}
+              aria-pressed={isActive}
+              onClick={() => onChange(option.value)}
+              className={`${baseClass} ${isActive ? activeClass : inactiveClass}`}
             >
-              {option.label}
-            </li>
-          ))}
-        </ul>
-      )}
+              {option.value.toUpperCase()}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -80,15 +59,26 @@ export function TimeframeSelect({ selected, onChange, placeholder = 'Select time
 
 export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
   return (
-    <div className="flex flex-col">
-      <span className="text-neutral-500 text-sm"> Symbol </span>
-      <input
-        type="text"
-        className="w-40 bg-neutral-800 border border-neutral-600 rounded-md shadow-sm px-4 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
+    <div className="flex flex-col gap-2 min-w-[10rem]">
+      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Symbol</span>
+      <div className="relative flex items-center">
+        <span className="pointer-events-none absolute left-3 text-neutral-500">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-4 w-4">
+            <path strokeLinecap="round" strokeLinejoin="round" d="m19 19-3.5-3.5m1-4.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0Z" />
+          </svg>
+        </span>
+        <input
+          type="text"
+          inputMode="text"
+          spellCheck={false}
+          autoCapitalize="characters"
+          autoComplete="off"
+          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500/50"
+          value={value}
+          onChange={(e) => onChange(e.target.value.toUpperCase())}
+          placeholder={placeholder}
+        />
+      </div>
     </div>
   );
 }

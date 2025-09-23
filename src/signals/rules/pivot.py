@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -305,6 +305,50 @@ _BREAKOUT_COLORS = {
 }
 
 
+def _hex_to_rgb(color: str) -> Optional[Tuple[int, int, int]]:
+    """Return RGB tuple for a hex color string."""
+
+    if not isinstance(color, str):
+        return None
+
+    value = color.strip().lstrip("#")
+    if len(value) != 6:
+        return None
+
+    try:
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+    except ValueError:  # pragma: no cover - defensive guard
+        return None
+
+    return r, g, b
+
+
+def _rgba_from_hex(color: str, alpha: float) -> Optional[str]:
+    """Convert a hex color to an rgba() string with the provided alpha."""
+
+    rgb = _hex_to_rgb(color)
+    if rgb is None:
+        return None
+
+    r, g, b = rgb
+    a = min(max(alpha, 0.0), 1.0)
+    return f"rgba({r},{g},{b},{a:.2f})"
+
+
+def _readable_text_color(color: str) -> str:
+    """Pick a contrasting text color for the provided background color."""
+
+    rgb = _hex_to_rgb(color)
+    if rgb is None:
+        return "#0f172a"
+
+    r, g, b = rgb
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#0f172a" if luminance > 0.55 else "#f8fafc"
+
+
 def pivot_signals_to_overlays(
     signals: Sequence[BaseSignal],
     plot_df: "pd.DataFrame",
@@ -315,10 +359,7 @@ def pivot_signals_to_overlays(
     if not signals:
         return []
 
-    markers: List[Dict[str, Any]] = []
-    price_lines: List[Dict[str, Any]] = []
-
-    index = getattr(plot_df, "index", None)
+    bubbles: List[Dict[str, Any]] = []
 
     for signal in signals:
         metadata = signal.metadata or {}
@@ -331,52 +372,46 @@ def pivot_signals_to_overlays(
 
         marker_time = _to_unix_seconds(signal.time)
         level_kind = str(metadata.get("level_kind", "pivot")).capitalize()
-        marker_position = "belowBar" if breakout_direction == "above" else "aboveBar"
-        marker_shape = "triangleUp" if breakout_direction == "above" else "triangleDown"
+        if level_kind == "Resistance":
+            marker_label = "Resistance breakout"
+        elif level_kind == "Support":
+            marker_label = "Support breakdown"
+        else:
+            marker_label = f"{level_kind} breakout"
 
-        markers.append(
-            {
-                "time": marker_time,
-                "price": float(level_price),
-                "color": color,
-                "position": marker_position,
-                "shape": marker_shape,
-                "text": f"{level_kind} breakout",
-                "subtype": "signal",
-            }
-        )
+        trigger_close = metadata.get("trigger_close")
+        level_tf = metadata.get("level_timeframe")
+        detail_prefix = "Closed above" if breakout_direction == "above" else "Closed below"
+        detail = f"{detail_prefix} {level_price:.2f}"
 
-        start_time = metadata.get("breakout_start")
-        origin_time = _to_unix_seconds(start_time)
-        if origin_time is None and index is not None and len(index):
-            origin_time = _to_unix_seconds(index[0])
-        if origin_time is None:
-            origin_time = marker_time
-        end_time = marker_time
+        meta_bits = []
+        if trigger_close is not None:
+            meta_bits.append(f"Close {float(trigger_close):.2f}")
+        if level_tf:
+            meta_bits.append(f"TF {level_tf}")
+        timeframe_badge = " · ".join(meta_bits) if meta_bits else None
 
-        if origin_time and end_time and origin_time > end_time:
-            origin_time, end_time = end_time, origin_time
+        bubble_payload: Dict[str, Any] = {
+            "time": marker_time,
+            "price": float(level_price),
+            "label": marker_label,
+            "detail": detail,
+            "meta": timeframe_badge,
+            "accentColor": color,
+            "backgroundColor": _rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
+            "textColor": _readable_text_color(color),
+            "direction": breakout_direction,
+            "subtype": "bubble",
+        }
+        bubbles.append(bubble_payload)
 
-        price_lines.append(
-            {
-                "price": float(level_price),
-                "color": color,
-                "lineStyle": 0,
-                "lineWidth": 2,
-                "axisLabelVisible": True,
-                "title": f"{level_kind} lvl",
-                "extend": "none",
-                "originTime": origin_time,
-                "endTime": end_time,
-            }
-        )
-
-    if not markers and not price_lines:
+    if not bubbles:
         return []
 
     payload = {
-        "price_lines": price_lines,
-        "markers": markers,
+        "price_lines": [],
+        "markers": [],
+        "bubbles": bubbles,
     }
 
     return [
