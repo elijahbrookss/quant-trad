@@ -62,7 +62,6 @@ export class PaneViewManager {
     view.setBoxes(boxes || []);
 
     const normalizedLast = toSec(lastSeriesTime);
-
     const rawTimes = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
       .filter(Number.isFinite)
       .sort((a,b)=>a-b);
