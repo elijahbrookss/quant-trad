@@ -17,15 +17,19 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     const pxRects = [];
 
     for (const b of boxes) {
-      const xLeft  = timeScaleApi.timeToCoordinate(toSec(b.x1)) * hpr;
+      const leftCoord = timeScaleApi.timeToCoordinate(toSec(b.x1));
+      const xLeft = leftCoord != null ? leftCoord * hpr : null;
       let xRight;
-      if (!extendRight) {
-        xRight = timeScaleApi.timeToCoordinate(toSec(b.x2)) * hpr;
+      const hasExplicitRight = b?.x2 != null;
+      if (!extendRight || hasExplicitRight) {
+        const rightCoord = timeScaleApi.timeToCoordinate(toSec(hasExplicitRight ? b.x2 : b.x1));
+        xRight = rightCoord != null ? rightCoord * hpr : null;
       } else if (rightEdgeMode === 'last-bar' && rightEdgeTimeSec != null) {
-        xRight = timeScaleApi.timeToCoordinate(rightEdgeTimeSec) * hpr;
+        const rightCoord = timeScaleApi.timeToCoordinate(rightEdgeTimeSec);
+        xRight = rightCoord != null ? rightCoord * hpr : null;
       } else {
         xRight = mediaWidth; // pane edge
-      } 
+      }
       if (xLeft == null || xRight == null) continue;
 
       const y1 = priceToCoordinate(b.y1) * vpr;
