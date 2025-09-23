@@ -179,7 +179,6 @@ def _evaluate_level(
     results: List[Dict[str, Any]] = []
     for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
         close_value = float(closes.iloc[position])
-
         if waiting_for_reset:
             if not is_out_of_range:
                 waiting_for_reset = False
