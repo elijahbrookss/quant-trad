@@ -98,6 +98,7 @@ export function createSignalBubblePaneView(timeScaleApi) {
       const radius = 12 * Math.min(hpr, vpr);
       const verticalGap = 16 * vpr;
 
+
       ctx.save();
       ctx.textBaseline = 'top';
 
