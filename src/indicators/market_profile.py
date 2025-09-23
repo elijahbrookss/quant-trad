@@ -210,7 +210,11 @@ class MarketProfileIndicator(BaseIndicator):
         legend_entries = set()
         full_idx = plot_df.index
 
-        logger.info("Generating overlays for %d profiles (use_merged=%s)", len(profiles), use_merged)
+        logger.info(
+            "event=market_profile_overlay_start profiles=%d use_merged=%s",
+            len(profiles),
+            use_merged,
+        )
         for idx, prof in enumerate(profiles):
             # Robustly get the start timestamp
             try:
@@ -245,7 +249,12 @@ class MarketProfileIndicator(BaseIndicator):
                 "alpha": 0.2
             })
             legend_entries.add(("Value Area", "gray"))
-            logger.debug("Overlay rect: start=%s, VAL=%.2f, VAH=%.2f", start_ts, val, vah)
+            logger.debug(
+                "event=market_profile_rect start=%s val=%.4f vah=%.4f",
+                start_ts,
+                val,
+                vah,
+            )
 
             # 2) optional POC line as an addplot
             if poc is not None:
@@ -255,9 +264,12 @@ class MarketProfileIndicator(BaseIndicator):
                 ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
                 overlays.append({"kind": "addplot", "plot": ap})
                 legend_entries.add(("POC", "orange"))
-                logger.debug("Overlay POC: start=%s, POC=%.2f", start_ts, poc)
-
-        logger.info("Generated %d overlays", len(overlays))
+                logger.debug(
+                    "event=market_profile_poc start=%s poc=%.4f",
+                    start_ts,
+                    poc,
+                )
+        logger.info("event=market_profile_overlay_complete overlays=%d", len(overlays))
         return overlays, legend_entries
 
     @staticmethod
@@ -324,6 +336,13 @@ class MarketProfileIndicator(BaseIndicator):
 
         out_lines, out_markers, out_boxes = [], [], []
 
+        logger.info(
+            "event=market_profile_lightweight_start profiles=%d chart_start=%s chart_end=%s",
+            len(profiles),
+            chart_start,
+            chart_end,
+        )
+
         for prof in profiles:
             # accept either merged keys ('start') or daily keys ('start_date')
             start_ts = pd.to_datetime(prof.get("start") or prof.get("start_date"), utc=True)
@@ -358,6 +377,16 @@ class MarketProfileIndicator(BaseIndicator):
                 "y2": float(vah),             # VAH
                 "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
             })
+
+            logger.debug(
+                "event=market_profile_lightweight_box start=%s end=%s x1=%d x2=%d y1=%.4f y2=%.4f",
+                start_ts,
+                end_ts,
+                _to_unix_s(start_ts),
+                _to_unix_s(end_ts),
+                float(val),
+                float(vah),
+            )
 
             # ----- price lines (Lightweight "price line" settings) -----
             # # VAL (solid)
@@ -399,6 +428,13 @@ class MarketProfileIndicator(BaseIndicator):
             if include_touches:
                 out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
                 out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+
+        logger.info(
+            "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",
+            len(out_lines),
+            len(out_markers),
+            len(out_boxes),
+        )
 
         return {
             "price_lines": out_lines,
