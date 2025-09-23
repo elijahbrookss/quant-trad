@@ -42,6 +42,7 @@ export const ChartComponent = ({ chartId }) => {
   const seededRef = useRef(false); // ensure we seed only once
   const pvMgrRef = useRef(null);
   const lastBarRef = useRef(null);
+  const barSpacingRef = useRef(null);
   const timeframeWarningRef = useRef(null);
 
     // Overlay resource handles.
@@ -186,6 +187,24 @@ export const ChartComponent = ({ chartId }) => {
 
       // Remember last bar for real-time updates.
       lastBarRef.current = data.at(-1);
+
+      if (data.length > 1) {
+        let minStep = Infinity;
+        for (let i = 1; i < data.length; i += 1) {
+          const step = data[i].time - data[i - 1].time;
+          if (Number.isFinite(step) && step > 0 && step < minStep) {
+            minStep = step;
+          }
+        }
+        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
+      } else {
+        barSpacingRef.current = null;
+      }
+
+      pvMgrRef.current?.updateVABlockContext({
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
 
       // move view to the loaded window; add small padding for context
       const first = data[0]?.time;
@@ -332,7 +351,10 @@ export const ChartComponent = ({ chartId }) => {
       
 
       pvMgrRef.current?.setTouchPoints(touchPoints);
-      pvMgrRef.current?.setVABlocks(boxes);
+      pvMgrRef.current?.setVABlocks(boxes, {
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
       pvMgrRef.current?.setSegments(allSegments);
       pvMgrRef.current?.setPolylines(allPolylines);
       pvMgrRef.current?.setSignalBubbles(signalBubbles);
