@@ -113,3 +113,27 @@ def test_pivot_breakout_rule_requires_enough_bars():
     results = pivot_breakout_rule(context)
 
     assert results == []
+
+
+def test_pivot_breakout_rule_emits_multiple_breakouts_in_backtest():
+    closes = [100, 103, 104, 105, 106, 103, 102, 105, 107]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 2
+    first, second = results
+
+    assert first["trigger_close"] == pytest.approx(closes[4])
+    assert first["time"] == df.index[4].to_pydatetime()
+    assert second["trigger_close"] == pytest.approx(closes[8])
+    assert second["time"] == df.index[8].to_pydatetime()
