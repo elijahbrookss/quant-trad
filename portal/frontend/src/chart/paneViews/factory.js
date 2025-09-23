@@ -20,6 +20,7 @@ export class PaneViewManager {
     this.ts = chart.timeScale();
     this.series = new Map();
     this.views = new Map();
+    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
     this.ensure(PaneViewType.VA_BOX); // create VA boxes first so they are in back
   }
   ensure(type) {
@@ -44,7 +45,10 @@ export class PaneViewManager {
   clearFrame() {
     for (const [type, view] of this.views.entries()) {
       if (type === PaneViewType.TOUCH)    { view.setRows?.([]);   this.series.get(type)?.setData([]); }
-      if (type === PaneViewType.VA_BOX)   { view.setBoxes?.([]);  this.series.get(type)?.setData([]); }
+      if (type === PaneViewType.VA_BOX)   {
+        this.vaBoxState.boxes = [];
+        this._syncVABlocks();
+      }
       if (type === PaneViewType.SEGMENT)  { view.setSegments?.([]); this.series.get(type)?.setData([]); }
       if (type === PaneViewType.POLYLINE) { view.setPolylines?.([]); this.series.get(type)?.setData([]); }
       if (type === PaneViewType.SIGNAL_BUBBLE) { view.setBubbles?.([]); this.series.get(type)?.setData([]); }
@@ -53,16 +57,49 @@ export class PaneViewManager {
   destroy() {
     for (const s of this.series.values()) { try { this.chart.removeSeries(s); } catch {} }
     this.series.clear(); this.views.clear();
+    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
   }
 
-  setVABlocks(boxes, opts = {}){ this.ensure(PaneViewType.VA_BOX);
-    const view = this.views.get(PaneViewType.VA_BOX);
-    const { lastSeriesTime, barSpacing } = opts || {};
+  setVABlocks(boxes, opts = {}){
+    this.ensure(PaneViewType.VA_BOX);
 
-    view.setBoxes(boxes || []);
+    this.vaBoxState.boxes = Array.isArray(boxes) ? boxes : [];
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
+      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+    }
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
+      this.vaBoxState.barSpacing = opts.barSpacing;
+    }
+
+    this._syncVABlocks();
+  }
+
+  updateVABlockContext(opts = {}) {
+    if (!this.views.has(PaneViewType.VA_BOX)) return;
+    if (Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
+      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+    }
+    if (Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
+      this.vaBoxState.barSpacing = opts.barSpacing;
+    }
+    this._syncVABlocks();
+  }
+
+  _syncVABlocks() {
+    if (!this.views.has(PaneViewType.VA_BOX)) return;
+
+    const view = this.views.get(PaneViewType.VA_BOX);
+    const series = this.series.get(PaneViewType.VA_BOX);
+    if (!view || !series) return;
+
+    const boxes = this.vaBoxState.boxes || [];
+    const { lastSeriesTime, barSpacing } = this.vaBoxState;
+
+    view.setBoxes(boxes);
 
     const normalizedLast = toSec(lastSeriesTime);
-    const rawTimes = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
+
+    const rawTimes = [...new Set(boxes.flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
       .filter(Number.isFinite)
       .sort((a,b)=>a-b);
 
@@ -77,19 +114,18 @@ export class PaneViewManager {
     const inferredSpacing = Number.isFinite(barSpacing) && barSpacing > 0 ? barSpacing : extensionStep;
 
     const rightEdge = Math.max(
-      ...((boxes || [])
+      ...boxes
         .map(b => toSec(b.x2))
-        .filter((t) => typeof t === 'number' && Number.isFinite(t))),
+        .filter((t) => typeof t === 'number' && Number.isFinite(t)),
       -Infinity,
     );
 
-    const baseEdge = Math.max(
-      Number.isFinite(rightEdge) ? rightEdge : -Infinity,
-      Number.isFinite(normalizedLast) ? normalizedLast : -Infinity,
-    );
+    const baseEdge = Number.isFinite(normalizedLast)
+      ? normalizedLast
+      : (Number.isFinite(rightEdge) ? rightEdge : null);
 
     const paddedRightEdge = Number.isFinite(baseEdge)
-      ? baseEdge + inferredSpacing * 0.5
+      ? baseEdge + (Number.isFinite(inferredSpacing) ? inferredSpacing : 0)
       : null;
 
     const seriesTimes = [...new Set([
@@ -98,7 +134,6 @@ export class PaneViewManager {
       Number.isFinite(paddedRightEdge) ? paddedRightEdge : null,
     ].filter(Number.isFinite))].sort((a, b) => a - b);
 
-    const series = this.series.get(PaneViewType.VA_BOX);
     series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
 
     view.setRightEdgeTime(
