@@ -1,7 +1,14 @@
 // src/components/IndicatorModal.v2.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { Dialog, DialogPanel, DialogTitle, Disclosure, Switch } from "@headlessui/react";
-import { ChevronDown, Copy, RotateCcw } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Dialog, DialogPanel, DialogTitle, Switch } from "@headlessui/react";
+import {
+  Braces,
+  ChevronDown,
+  Copy,
+  RotateCcw,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
 import { fetchIndicatorTypes, fetchIndicatorType } from "../adapters/indicator.adapter";
 
 /**
@@ -140,12 +147,13 @@ export default function IndicatorModalV2({
         }
       })
       .catch((e) => setMetaErr(e.message));
-  }, [isOpen, typeId]);
+  }, [initial, isOpen, typeId]);
 
   /** UI state **/
   const [filter, setFilter] = useState("");
   const [showRaw, setShowRaw] = useState(false);
-  const [expandAll, setExpandAll] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const filterInputRef = useRef(null);
 
   // Heuristics for grouping: Essential vs Advanced
   const basicHints = useMemo(() => new Set([
@@ -193,34 +201,67 @@ export default function IndicatorModalV2({
   const enumsFor = (k) => typeMeta?.ui_enums?.[k];
   const ftypeOf = (k) => (typeMeta?.field_types?.[k] || "string").toLowerCase();
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e) => {
+      if (e.key === "/" && document.activeElement !== filterInputRef.current) {
+        e.preventDefault();
+        filterInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setAdvancedOpen(false);
+    setShowRaw(false);
+  }, [isOpen, typeId]);
+
+  const inputClass =
+    "w-full rounded-lg border border-neutral-700/80 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500";
+  const pillButtonClass =
+    "inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-700/70 bg-neutral-900/60 px-3 py-2 text-sm font-medium text-neutral-200 transition hover:border-indigo-500 hover:text-white";
+
   const renderField = (key) => {
     const ftype = ftypeOf(key);
     const val = params[key];
     const enumVals = enumsFor(key);
+    const boolChecked =
+      val === true || val === "true" || val === 1 || val === "1";
 
     // searchable filter
     if (filter && !key.toLowerCase().includes(filter.toLowerCase())) return null;
 
     return (
-      <div key={key} className="space-y-1">
-        <div className="flex items-center justify-between">
-          <label className="block text-sm font-medium text-neutral-200">
-            {key}
-            {typeMeta.required_params?.includes(key) && (
-              <span className="text-red-500 ml-1">*</span>
+      <div
+        key={key}
+        className="space-y-2 rounded-lg border border-neutral-700/70 bg-neutral-900/50 p-3 shadow-sm"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <label className="block text-sm font-semibold text-neutral-100">
+              {key}
+            </label>
+            {descriptionFor(key) && (
+              <p className="mt-1 text-xs leading-5 text-neutral-400">
+                {descriptionFor(key)}
+              </p>
             )}
-          </label>
-          {descriptionFor(key) && (
-            <span className="text-xs text-neutral-400 ml-2">{descriptionFor(key)}</span>
+          </div>
+          {typeMeta.required_params?.includes(key) && (
+            <span className="ml-2 inline-flex h-5 items-center justify-center rounded-full border border-red-500/40 bg-red-500/10 px-2 text-xs font-medium text-red-300">
+              Required
+            </span>
           )}
         </div>
-
         {intListKeys.has(key) ? (
           <input
             type="text"
             inputMode="numeric"
             pattern="^[0-9\\s,;]*$"
-            className="w-full p-2 rounded bg-neutral-700"
+            className={inputClass}
             value={listToString(val)}
             placeholder="e.g., 5, 10, 20"
             onChange={(e) => setParams((p) => ({ ...p, [key]: e.target.value }))}
@@ -228,7 +269,7 @@ export default function IndicatorModalV2({
           />
         ) : enumVals?.length ? (
           <select
-            className="w-full p-2 rounded bg-neutral-700"
+            className={inputClass}
             value={String(val ?? "")}
             onChange={(e) => setParams((p) => ({ ...p, [key]: e.target.value }))}
           >
@@ -241,11 +282,13 @@ export default function IndicatorModalV2({
         ) : ftype === "bool" ? (
           <div className="flex items-center gap-3">
             <Switch
-              checked={Boolean(val)}
+              checked={boolChecked}
               onChange={(checked) => setParams((p) => ({ ...p, [key]: checked }))}
-              className={`${Boolean(val) ? "bg-indigo-600" : "bg-neutral-600"} relative inline-flex h-6 w-11 items-center rounded-full transition-colors`}
+              className={`${boolChecked ? "bg-indigo-500" : "bg-neutral-700"} relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-neutral-900`}
             >
-              <span className={`${Boolean(val) ? "translate-x-6" : "translate-x-1"} inline-block h-4 w-4 transform rounded-full bg-white transition-transform`} />
+              <span
+                className={`${boolChecked ? "translate-x-6" : "translate-x-1"} inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
+              />
             </Switch>
             <span className="text-sm text-neutral-300">{String(val)}</span>
           </div>
@@ -253,7 +296,7 @@ export default function IndicatorModalV2({
           <input
             type="number"
             step={ftype === "int" ? 1 : "any"}
-            className="w-full p-2 rounded bg-neutral-700"
+            className={inputClass}
             value={Number.isFinite(val) ? val : ""}
             onChange={(e) =>
               setParams((p) => ({ ...p, [key]: e.target.valueAsNumber }))
@@ -262,7 +305,7 @@ export default function IndicatorModalV2({
         ) : (
           <input
             type="text"
-            className="w-full p-2 rounded bg-neutral-700"
+            className={inputClass}
             value={val ?? ""}
             onChange={(e) => setParams((p) => ({ ...p, [key]: e.target.value }))}
           />
@@ -297,9 +340,12 @@ export default function IndicatorModalV2({
     const fields = keys.map(renderField).filter(Boolean);
     if (!fields.length) return null;
     return (
-      <div className="space-y-3">
-        <h4 className="text-sm font-semibold text-neutral-300">{title}</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">{fields}</div>
+      <div className="space-y-3 rounded-xl border border-neutral-700/70 bg-neutral-900/40 p-4 shadow-inner">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-neutral-200">{title}</h4>
+          <span className="text-xs text-neutral-500">{fields.length} field(s)</span>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">{fields}</div>
       </div>
     );
   };
@@ -308,150 +354,214 @@ export default function IndicatorModalV2({
     <Dialog open={isOpen} onClose={onClose} className="relative z-50">
       <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
       <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-3xl bg-neutral-800 text-neutral-200 rounded-xl p-6 space-y-4 shadow-2xl border border-neutral-700">
-          <DialogTitle className="text-lg font-semibold">
-            {initial?.id ? "Edit Indicator" : "Create Indicator"}
-          </DialogTitle>
-
-          {(metaErr || error) && (
-            <div className="text-red-400 text-sm">{metaErr || error}</div>
-          )}
-
-          {/* Top: Name + Type */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="md:col-span-1">
-              <label className="block text-sm mb-1">Name</label>
-              <input
-                type="text"
-                className="w-full p-2 rounded bg-neutral-700"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div className="md:col-span-1">
-              <label className="block text-sm mb-1">Indicator Type</label>
-              {initial?.id ? (
-                <div className="px-3 py-2 bg-neutral-700 rounded">{typeId}</div>
-              ) : (
-                <select
-                  className="w-full p-2 rounded bg-neutral-700"
-                  value={typeId}
-                  onChange={(e) => setTypeId(e.target.value)}
-                >
-                  <option value="">— select type —</option>
-                  {types.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
+        <DialogPanel className="w-full max-w-5xl overflow-hidden rounded-2xl border border-neutral-700 bg-neutral-900/80 text-neutral-100 shadow-[0_30px_120px_-40px_rgba(99,102,241,0.6)] backdrop-blur">
+          <div className="border-b border-neutral-700/70 bg-gradient-to-r from-neutral-900 via-neutral-900 to-neutral-800 px-6 py-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <DialogTitle className="text-xl font-semibold text-white">
+                {initial?.id ? "Edit Indicator" : "Create Indicator"}
+              </DialogTitle>
+              {typeId && (
+                <span className="inline-flex items-center rounded-full border border-indigo-500/40 bg-indigo-500/10 px-3 py-1 text-xs font-medium uppercase tracking-wide text-indigo-200">
+                  {typeId}
+                </span>
               )}
             </div>
-
-            {/* Quick search for params */}
-            {typeId && (
-              <div className="md:col-span-1">
-                <label className="block text-sm mb-1">Search params</label>
-                <input
-                  type="text"
-                  className="w-full p-2 rounded bg-neutral-700"
-                  placeholder="Filter by name ( / to focus )"
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "/") {
-                      e.preventDefault();
-                      e.currentTarget.focus();
-                    }
-                  }}
-                />
+            <p className="mt-2 text-sm text-neutral-400">
+              Tune parameters faster with keyboard access (press <kbd className="rounded bg-neutral-800 px-1">/</kbd> to search) and quick actions for copying or resetting defaults.
+            </p>
+            {(metaErr || error) && (
+              <div className="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {metaErr || error}
               </div>
             )}
           </div>
 
-          {/* PARAMS */}
-          {typeId && (
+          <div className="grid max-h-[70vh] grid-cols-1 gap-6 overflow-y-auto px-6 py-6 lg:grid-cols-[320px,1fr]">
             <div className="space-y-4">
-              <Section title="Essential" keys={basicKeys} />
+              <div className="space-y-4 rounded-xl border border-neutral-700/70 bg-neutral-900/50 p-4 shadow-inner">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-widest text-neutral-500">
+                      {initial?.id ? "Editing existing indicator" : "New indicator"}
+                    </p>
+                    <p className="text-lg font-semibold text-white" title={name || "Untitled indicator"}>
+                      {name || "Untitled indicator"}
+                    </p>
+                  </div>
+                  {typeId ? (
+                    <span className="inline-flex items-center rounded-full border border-indigo-500/40 bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-200">
+                      {typeId}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-neutral-500">Select a type</span>
+                  )}
+                </div>
 
-              {/* Advanced is collapsible with count */}
-              {advancedKeys.length > 0 && (
-                <Disclosure defaultOpen={expandAll}>
-                  {({ open }) => (
-                    <div className="border-t border-neutral-700 pt-3">
-                      <Disclosure.Button className="w-full flex items-center justify-between text-left">
-                        <span className="text-sm font-semibold text-neutral-300">
-                          Advanced ({advancedKeys.length})
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                      Name
+                    </label>
+                    <input
+                      type="text"
+                      className={inputClass}
+                      value={name}
+                      placeholder="Name your indicator"
+                      onChange={(e) => setName(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                      Indicator type
+                    </label>
+                    {initial?.id ? (
+                      <div className="rounded-lg border border-neutral-700/70 bg-neutral-900/50 px-3 py-2 text-sm text-neutral-200">
+                        {typeId}
+                      </div>
+                    ) : (
+                      <select
+                        className={`${inputClass} appearance-none`}
+                        value={typeId}
+                        onChange={(e) => setTypeId(e.target.value)}
+                      >
+                        <option value="">— select type —</option>
+                        {types.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3 rounded-xl border border-neutral-700/70 bg-neutral-900/40 p-4 shadow-inner">
+                <h3 className="text-sm font-semibold text-neutral-200">Workflow shortcuts</h3>
+                <div className="grid grid-cols-1 gap-2">
+                  <button
+                    type="button"
+                    className={`${pillButtonClass} ${advancedOpen ? "border-indigo-500 bg-indigo-500/10 text-indigo-200" : ""}`}
+                    onClick={() => setAdvancedOpen((prev) => !prev)}
+                    disabled={!advancedKeys.length}
+                  >
+                    <SlidersHorizontal className="h-4 w-4" />
+                    {advancedOpen ? "Hide advanced fields" : `Show ${advancedKeys.length || "no"} advanced fields`}
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform ${advancedOpen ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    className={`${pillButtonClass} ${showRaw ? "border-indigo-500 bg-indigo-500/10 text-indigo-200" : ""}`}
+                    onClick={() => setShowRaw((prev) => !prev)}
+                  >
+                    <Braces className="h-4 w-4" />
+                    {showRaw ? "Hide raw JSON" : "Show raw JSON"}
+                  </button>
+                  <button
+                    type="button"
+                    className={pillButtonClass}
+                    onClick={copyParams}
+                  >
+                    <Copy className="h-4 w-4" /> Copy params JSON
+                  </button>
+                  <button
+                    type="button"
+                    className={pillButtonClass}
+                    onClick={resetToDefaults}
+                  >
+                    <RotateCcw className="h-4 w-4" /> Reset to defaults
+                  </button>
+                </div>
+                <p className="text-xs text-neutral-500">
+                  Required fields: {typeMeta?.required_params?.length || 0}. Defaults are applied when selecting a type.
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-5">
+              <div className="rounded-xl border border-neutral-700/70 bg-neutral-900/40 p-4 shadow-inner">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div className="relative w-full md:max-w-sm">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                    <input
+                      ref={filterInputRef}
+                      type="text"
+                      className={`${inputClass} pl-9`}
+                      placeholder={typeId ? "Filter by parameter name (press /)" : "Select a type to configure"}
+                      value={filter}
+                      onChange={(e) => setFilter(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-3 text-xs text-neutral-500">
+                    <span>Essential fields: {basicKeys.length}</span>
+                    <span>Advanced fields: {advancedKeys.length}</span>
+                  </div>
+                </div>
+              </div>
+
+              {typeId ? (
+                <div className="space-y-5">
+                  <Section title="Essential" keys={basicKeys} />
+
+                  {advancedKeys.length > 0 && (
+                    <div className="space-y-3 rounded-xl border border-neutral-700/70 bg-neutral-900/40 p-4 shadow-inner">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between rounded-lg border border-neutral-700/70 bg-neutral-900/60 px-3 py-2 text-left text-sm font-semibold text-neutral-200 transition hover:border-indigo-500 hover:text-white"
+                        onClick={() => setAdvancedOpen((prev) => !prev)}
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <SlidersHorizontal className="h-4 w-4 text-indigo-300" /> Advanced ({advancedKeys.length})
                         </span>
                         <ChevronDown
-                          className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
+                          className={`h-4 w-4 text-neutral-400 transition-transform ${advancedOpen ? "rotate-180" : ""}`}
                         />
-                      </Disclosure.Button>
-                      <Disclosure.Panel className="mt-3">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      </button>
+                      {advancedOpen && (
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                           {advancedKeys.map(renderField).filter(Boolean)}
                         </div>
-                      </Disclosure.Panel>
+                      )}
                     </div>
                   )}
-                </Disclosure>
-              )}
 
-              {/* Raw params viewer */}
-              <Disclosure>
-                {({ open }) => (
-                  <div className="border-t border-neutral-700 pt-3">
-                    <div className="flex items-center justify-between">
-                      <Disclosure.Button className="text-sm font-semibold text-neutral-300 flex items-center gap-2">
-                        <ChevronDown
-                          className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
-                        />
-                        Raw params JSON
-                      </Disclosure.Button>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={copyParams}
-                          type="button"
-                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-neutral-600 hover:bg-neutral-700"
-                          title="Copy JSON to clipboard"
-                        >
-                          <Copy className="h-3 w-3" /> Copy
-                        </button>
-                        <button
-                          onClick={resetToDefaults}
-                          type="button"
-                          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-neutral-600 hover:bg-neutral-700"
-                          title="Reset to defaults"
-                        >
-                          <RotateCcw className="h-3 w-3" /> Reset
-                        </button>
+                  {showRaw && (
+                    <div className="space-y-3 rounded-xl border border-neutral-700/70 bg-neutral-900/40 p-4">
+                      <div className="flex items-center justify-between text-sm font-semibold text-neutral-200">
+                        <span className="inline-flex items-center gap-2">
+                          <Braces className="h-4 w-4 text-indigo-300" /> Raw params JSON
+                        </span>
+                        <span className="text-xs text-neutral-500">Read only</span>
                       </div>
-                    </div>
-                    <Disclosure.Panel>
-                      <pre className="mt-2 max-h-56 overflow-auto bg-neutral-900 rounded p-3 text-xs leading-5">
+                      <pre className="max-h-60 overflow-auto rounded-lg border border-neutral-800 bg-neutral-950/70 p-3 text-xs leading-5 text-neutral-200">
                         {JSON.stringify(params, null, 2)}
                       </pre>
-                    </Disclosure.Panel>
-                  </div>
-                )}
-              </Disclosure>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-neutral-700/70 bg-neutral-900/30 p-8 text-center text-sm text-neutral-400">
+                  Choose an indicator type to reveal configurable parameters.
+                </div>
+              )}
             </div>
-          )}
+          </div>
 
-          {/* ACTIONS */}
-          <div className="sticky bottom-0 pt-4">
-            <div className="flex justify-end gap-3 border-t border-neutral-700 pt-4">
+          <div className="border-t border-neutral-700/70 bg-neutral-900/60 px-6 py-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
               <button
                 onClick={onClose}
-                className="px-4 py-2 rounded border border-gray-600 cursor-pointer hover:bg-neutral-700"
+                className="inline-flex items-center justify-center rounded-lg border border-neutral-700/70 px-4 py-2 text-sm font-medium text-neutral-200 transition hover:border-neutral-500 hover:text-white"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSubmit}
-                className="px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer disabled:opacity-50"
+                className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {initial?.id ? "Update" : "Create"}
+                {initial?.id ? "Update indicator" : "Create indicator"}
               </button>
             </div>
           </div>
