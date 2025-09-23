@@ -404,22 +404,38 @@ export const ChartComponent = ({ chartId }) => {
           </div>
         )}
 
-        <div className="rounded-xl border border-neutral-800/70 bg-neutral-950/70 p-4">
+        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
               <SymbolInput value={symbol} onChange={setSymbol} />
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
             </div>
-            <button
-              className="inline-flex items-center justify-center gap-2 self-start rounded-lg bg-sky-500/80 px-5 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-              onClick={handleApply}
-            >
-              <span>Apply changes</span>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
-              </svg>
-            </button>
+            <div className="flex items-center gap-2 self-start">
+              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
+              <button
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+                onClick={handleApply}
+                type="button"
+                title="Fetch latest data"
+                aria-label="Fetch latest data"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                  className="h-5 w-5"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>
