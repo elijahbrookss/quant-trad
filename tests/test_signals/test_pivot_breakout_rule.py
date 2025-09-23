@@ -113,3 +113,54 @@ def test_pivot_breakout_rule_requires_enough_bars():
     results = pivot_breakout_rule(context)
 
     assert results == []
+
+
+def test_pivot_breakout_rule_emits_multiple_breakouts_in_backtest():
+    closes = [100, 103, 104, 105, 106, 103, 102, 105, 107]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 2
+    first, second = results
+
+    assert first["trigger_close"] == pytest.approx(closes[4])
+    assert first["time"] == df.index[4].to_pydatetime()
+    assert second["trigger_close"] == pytest.approx(closes[8])
+    assert second["time"] == df.index[8].to_pydatetime()
+
+
+def test_pivot_breakout_rule_accelerates_confirmation_on_large_move():
+    # Level at 100 with a strong close 5% above the level on the first bar.
+    closes = [100, 105, 104, 103, 102]
+    df = _build_dataframe(closes)
+    level = _build_level(100, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(
+            confirmation_bars=3,
+            early_confirmation_distance_pct=0.03,
+        ),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 1
+    breakout = results[0]
+
+    assert breakout["bars_closed_beyond_level"] == 1
+    assert breakout["accelerated_confirmation"] is True
+    assert breakout["time"] == df.index[1].to_pydatetime()
