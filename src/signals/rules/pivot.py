@@ -106,7 +106,7 @@ def _evaluate_level(
     confirmation_bars: int,
     *,
     mode: str = "backtest",
-) -> Optional[Dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
 
@@ -116,7 +116,7 @@ def _evaluate_level(
             confirmation_bars + 1,
             len(df),
         )
-        return None
+        return []
 
     closes = df["close"]
 
@@ -134,7 +134,16 @@ def _evaluate_level(
     simulate_current_only = mode in {"sim", "live"}
 
     consecutive = 0
+    waiting_for_reset = False
+    results: List[Dict[str, Any]] = []
     for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
+        if waiting_for_reset:
+            if not is_out_of_range:
+                waiting_for_reset = False
+                consecutive = 0
+            else:
+                continue
+
         if is_out_of_range:
             consecutive += 1
         else:
@@ -196,14 +205,17 @@ def _evaluate_level(
             last_bar["close"],
         )
 
-        return meta
+        results.append(meta)
+        waiting_for_reset = True
 
-    log.debug(
-        "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
-        level_id,
-        confirmation_bars,
-    )
-    return None
+    if not results:
+        log.debug(
+            "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
+            level_id,
+            confirmation_bars,
+        )
+
+    return results
 
 
 def pivot_breakout_rule(
@@ -261,23 +273,24 @@ def pivot_breakout_rule(
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
-        meta = _evaluate_level(df, level, confirmation_bars, mode=mode)
-        if not meta:
+        metas = _evaluate_level(df, level, confirmation_bars, mode=mode)
+        if not metas:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
             continue
 
-        breakout_time = meta.get("trigger_time", df.index[-1])
-        results.append(
-            {
-                "type": "breakout",
-                "symbol": symbol,
-                "time": _to_datetime(breakout_time),
-                "source": getattr(indicator, "NAME", indicator.__class__.__name__),
-                "direction": level.kind,
-                **meta,
-            }
-        )
-        log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
+        for meta in metas:
+            breakout_time = meta.get("trigger_time", df.index[-1])
+            results.append(
+                {
+                    "type": "breakout",
+                    "symbol": symbol,
+                    "time": _to_datetime(breakout_time),
+                    "source": getattr(indicator, "NAME", indicator.__class__.__name__),
+                    "direction": level.kind,
+                    **meta,
+                }
+            )
+            log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
 
     log.debug("%s | run_complete | signals=%d", run_id, len(results))
     return results
