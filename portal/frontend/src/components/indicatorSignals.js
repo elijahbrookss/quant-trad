@@ -25,6 +25,21 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
       : ov.payload.markers;
 
+    const bubbles = Array.isArray(ov.payload.bubbles)
+      ? ov.payload.bubbles.map(bubble => {
+          if (!bubble) return bubble;
+          const accentColor = bubble.accentColor ?? color;
+          const backgroundColor = bubble.backgroundColor ?? hexToRgba(color, 0.12);
+          const textColor = bubble.textColor ?? '#f8fafc';
+          return {
+            ...bubble,
+            accentColor,
+            backgroundColor,
+            textColor,
+          };
+        })
+      : ov.payload.bubbles;
+
     const boxes = Array.isArray(ov.payload.boxes)
       ? ov.payload.boxes.map(b => {
           if (!b) return b;
@@ -50,6 +65,7 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
         price_lines,
         markers,
         boxes,
+        bubbles,
         segments,
         polylines,
       },

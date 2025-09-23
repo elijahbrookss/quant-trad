@@ -1,4 +1,27 @@
 @import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  background-color: #020617;
+  color: #e2e8f0;
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background-color: #020617;
+}
+
+#root {
+  min-height: 100vh;
+}
+
 #tv-attr-logo {
   display: none !important;
 }

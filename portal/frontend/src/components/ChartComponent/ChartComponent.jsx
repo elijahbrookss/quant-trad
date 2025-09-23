@@ -503,78 +503,96 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
+  const surfaceClass = 'rounded-3xl border border-slate-800/70 bg-slate-950/60 px-6 py-5 shadow-[0_35px_65px_-40px_rgba(15,23,42,0.85)] backdrop-blur';
+
   return (
-    <>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-400">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          Chart workspace
+        </span>
+        <h2 className="text-2xl font-semibold text-slate-50">Market snapshot</h2>
+        <p className="max-w-2xl text-sm text-slate-400">
+          Adjust the timeframe, symbol, and dates to explore opportunities with confidence.
+        </p>
+      </div>
 
-      <div className="space-y-3 mb-4">
-        {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            <span className="text-lg">⚠️</span>
-            <span className="font-medium">{rangeWarning}</span>
-          </div>
-        )}
+      {rangeWarning && (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <span className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
+        </div>
+      )}
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+      <div className={surfaceClass}>
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <h3 className="text-lg font-semibold text-slate-100">Chart controls</h3>
+              <p className="text-sm text-slate-400">Pick a market, timeframe, and date range. We will keep things simple and ready to refresh.</p>
+            </div>
             <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
               <SymbolInput value={symbol} onChange={setSymbol} />
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
             </div>
-            <div className="flex items-center gap-2 self-start">
-              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
-              <button
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-                onClick={handleApply}
-                type="button"
-                title="Fetch latest data"
-                aria-label="Fetch latest data"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="h-5 w-5"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
-                  />
-                </svg>
-              </button>
+          </div>
+          <div className="flex items-center gap-3 self-start rounded-2xl border border-slate-800/70 bg-slate-900/60 px-4 py-3">
+            <div className="flex flex-col">
+              <span className="text-[11px] font-medium uppercase tracking-[0.35em] text-slate-400">Refresh</span>
+              <span className="text-xs text-slate-500">Apply your latest settings</span>
             </div>
+            <button
+              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-sky-500/60 bg-sky-500/20 text-sky-100 transition hover:border-sky-400 hover:bg-sky-500/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+              onClick={handleApply}
+              type="button"
+              title="Fetch latest data"
+              aria-label="Fetch latest data"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                className="h-5 w-5"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
+                />
+              </svg>
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-          <button
-            type="button"
-            onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
-            title="Open symbol presets (/)"
-          >
-            Presets
-          </button>
+      <div className={`${surfaceClass} relative h-[560px] overflow-hidden px-0 py-0`}>
+        <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+        <button
+          type="button"
+          onClick={() => setPalOpen(true)}
+          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-slate-700/70 bg-slate-900/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-200 transition hover:border-sky-500/70 hover:text-sky-100"
+          title="Open symbol presets (/)"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-sky-400 transition group-hover:bg-sky-200" />
+          Presets
+        </button>
 
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
-        </div>
+        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+        <HotkeyHint />
+        {/* overlay */}
+        <LoadingOverlay
+          show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
+          message={
+            chartState?.signalsLoading ? 'Generating signals…'
+            : chartState?.overlayLoading ? 'Loading overlays…'
+            : 'Loading chart…'
+          }
+        />
       </div>
-    </>
+    </div>
   )
 };
