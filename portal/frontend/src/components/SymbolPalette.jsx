@@ -4,9 +4,13 @@ import { SYMBOL_GROUPS } from '../data/symbol-presets';
 const FAV_KEY = 'qt.symbolFavorites';
 
 const loadFavs = () => {
-  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); }
+  catch { return []; }
 };
-const saveFavs = (arr) => { try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {} };
+const saveFavs = (arr) => {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); }
+  catch { /* noop */ }
+};
 
 export default function SymbolPalette({ open, onClose, onPick }) {
   const [q, setQ] = useState('');

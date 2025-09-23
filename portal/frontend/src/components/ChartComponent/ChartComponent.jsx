@@ -124,7 +124,8 @@ export const ChartComponent = ({ chartId }) => {
     return () => {
       try {
         overlayHandlesRef.current?.priceLines?.forEach(h => {
-          try { seriesRef.current?.removePriceLine(h); } catch {}
+          try { seriesRef.current?.removePriceLine(h); }
+          catch { /* ignore cleanup failure */ }
         });
         overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
@@ -286,7 +287,8 @@ export const ChartComponent = ({ chartId }) => {
 
     // 1) Clear existing price lines.
     overlayHandlesRef.current.priceLines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h); } catch {}
+      try { seriesRef.current.removePriceLine(h); }
+      catch { /* ignore stale handles */ }
     });
     overlayHandlesRef.current.priceLines = [];
 
@@ -504,77 +506,56 @@ export const ChartComponent = ({ chartId }) => {
   }
 
   return (
-    <>
-
-      <div className="space-y-3 mb-4">
-        {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            <span className="text-lg">⚠️</span>
-            <span className="font-medium">{rangeWarning}</span>
-          </div>
-        )}
-
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
-              <TimeframeSelect selected={interval} onChange={setInterval} />
-              <SymbolInput value={symbol} onChange={setSymbol} />
-              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
-            </div>
-            <div className="flex items-center gap-2 self-start">
-              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
-              <button
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-                onClick={handleApply}
-                type="button"
-                title="Fetch latest data"
-                aria-label="Fetch latest data"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="h-5 w-5"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
-                  />
-                </svg>
-              </button>
-            </div>
-          </div>
+    <section className="rounded-3xl border border-slate-900/70 bg-slate-950/70 p-6 shadow-xl shadow-slate-950/40">
+      {rangeWarning && (
+        <div className="mb-4 flex items-center gap-3 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <span className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
         </div>
-      </div>
+      )}
 
-      <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+      <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+        <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
+          <TimeframeSelect selected={interval} onChange={setInterval} />
+          <SymbolInput value={symbol} onChange={setSymbol} />
+          <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+        </div>
+        <div className="flex items-center gap-3 self-start rounded-2xl border border-slate-800/70 bg-slate-950/70 px-3 py-2">
+          <span className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Refresh</span>
           <button
+            className="inline-flex h-9 items-center justify-center rounded-xl bg-sky-500/20 px-4 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+            onClick={handleApply}
             type="button"
-            onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
-            title="Open symbol presets (/)"
+            title="Fetch latest data"
+            aria-label="Fetch latest data"
           >
-            Presets
+            Sync now
           </button>
-
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
         </div>
       </div>
-    </>
+
+      <div className="relative mt-8 h-[560px] overflow-hidden rounded-3xl border border-slate-900/80 bg-slate-950/80">
+        <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+        <button
+          type="button"
+          onClick={() => setPalOpen(true)}
+          className="absolute left-5 top-5 inline-flex h-9 items-center justify-center rounded-xl border border-slate-800/70 bg-slate-950/80 px-4 text-sm font-medium text-slate-200 transition hover:border-slate-700 hover:bg-slate-900"
+          title="Open symbol presets (/)"
+        >
+          Presets
+        </button>
+
+        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+        <HotkeyHint />
+        <LoadingOverlay
+          show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
+          message={
+            chartState?.signalsLoading ? 'Generating signals…'
+            : chartState?.overlayLoading ? 'Loading overlays…'
+            : 'Loading chart…'
+          }
+        />
+      </div>
+    </section>
   )
 };

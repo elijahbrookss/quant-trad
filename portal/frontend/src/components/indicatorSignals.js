@@ -42,6 +42,19 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       ? ov.payload.polylines.map(l => (l ? { ...l, color: tintHex } : l))
       : ov.payload.polylines;
 
+    const bubbles = Array.isArray(ov.payload.bubbles)
+      ? ov.payload.bubbles.map(b => {
+          if (!b) return b;
+          const accentColor = b.accentColor || color;
+          return {
+            ...b,
+            accentColor,
+            backgroundColor: b.backgroundColor || hexToRgba(color, 0.14),
+            textColor: b.textColor || '#e2e8f0',
+          };
+        })
+      : ov.payload.bubbles;
+
     return {
       ...ov,
       color,
@@ -52,6 +65,7 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
         boxes,
         segments,
         polylines,
+        bubbles,
       },
     };
   });

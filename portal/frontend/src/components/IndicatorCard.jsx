@@ -73,11 +73,13 @@ export default function IndicatorCard({
   const copyParams = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(indicator?.params ?? {}, null, 2));
-    } catch {}
+    } catch {
+      // Clipboard access may be blocked by the browser; ignore gracefully.
+    }
   };
 
   return (
-    <div className="flex items-start justify-between gap-4 px-4 py-3 rounded-lg bg-neutral-900 shadow-lg">
+    <div className="flex items-start justify-between gap-4 rounded-2xl border border-slate-900/70 bg-slate-950/70 px-4 py-4 shadow-lg shadow-slate-950/40">
       {/* Left: title + pills */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -88,7 +90,7 @@ export default function IndicatorCard({
             {({ close }) => (
               <>
                 <PopoverButton
-                  className="h-4 w-4 rounded-sm border border-neutral-500 shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)]"
+                  className="h-4 w-4 rounded-sm border border-slate-700 shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)]"
                   style={{ backgroundColor: color }}
                   title="Set color"
                 />
@@ -100,12 +102,12 @@ export default function IndicatorCard({
                   leaveFrom="opacity-100 translate-y-0"
                   leaveTo="opacity-0 translate-y-1"
                 >
-                  <PopoverPanel className="absolute z-20 mt-2 rounded-md bg-neutral-800 p-2 shadow-lg ring-1 ring-black/20">
+                  <PopoverPanel className="absolute z-20 mt-2 rounded-md border border-slate-800 bg-slate-950/90 p-2 shadow-xl shadow-slate-950/40 ring-1 ring-black/20">
                     <div className="flex gap-2">
                       {colorSwatches.map((c) => (
                         <button
                           key={c}
-                          className="h-5 w-5 rounded-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-white/40"
+                          className="h-5 w-5 rounded-sm border border-white/30 focus:outline-none focus:ring-2 focus:ring-white/60"
                           style={{ backgroundColor: c }}
                           onClick={() => {
                             onSelectColor?.(indicator.id, c);
@@ -121,13 +123,13 @@ export default function IndicatorCard({
             )}
           </Popover>
         </div>
-        <div className="text-sm text-gray-500">{indicator?.type}</div>
+        <div className="text-sm text-slate-400">{indicator?.type}</div>
 
         {/* Pills */}
         <div className="mt-1 flex flex-wrap gap-1">
           {essentials.map(([k, v]) => (
-            <span key={k} className="inline-flex items-center gap-1 rounded-full bg-neutral-800 text-neutral-300 border border-neutral-700 px-2 py-0.5 text-xs">
-              <span className="text-neutral-400">{k}</span>
+            <span key={k} className="inline-flex items-center gap-1 rounded-full border border-slate-800 bg-slate-950/70 px-2 py-0.5 text-xs text-slate-200">
+              <span className="text-slate-400">{k}</span>
               <span>={formatVal(v)}</span>
             </span>
           ))}
@@ -135,7 +137,7 @@ export default function IndicatorCard({
           {/* Advanced fold */}
           {advanced.length > 0 && !showAdvanced && (
             <button
-              className="inline-flex items-center gap-1 rounded-full bg-neutral-800 text-blue-300 border border-neutral-700 px-2 py-0.5 text-xs hover:bg-neutral-700"
+              className="inline-flex items-center gap-1 rounded-full border border-slate-800 bg-slate-950/70 px-2 py-0.5 text-xs text-sky-200 transition hover:bg-slate-900"
               onClick={() => setShowAdvanced(true)}
             >
               +{advanced.length} more
@@ -146,13 +148,13 @@ export default function IndicatorCard({
         {showAdvanced && (
           <div className="mt-2 flex flex-wrap gap-1">
             {advanced.map(([k, v]) => (
-              <span key={k} className="inline-flex items-center gap-1 rounded-full bg-neutral-900 text-neutral-300 border border-neutral-700 px-2 py-0.5 text-xs">
-                <span className="text-neutral-500">{k}</span>
+              <span key={k} className="inline-flex items-center gap-1 rounded-full border border-slate-900 bg-slate-950/80 px-2 py-0.5 text-xs text-slate-200">
+                <span className="text-slate-500">{k}</span>
                 <span>={formatVal(v)}</span>
               </span>
             ))}
             <button
-              className="inline-flex items-center gap-1 rounded-full bg-neutral-900 text-neutral-300 border border-neutral-700 px-2 py-0.5 text-xs hover:bg-neutral-800"
+              className="inline-flex items-center gap-1 rounded-full border border-slate-900 bg-slate-950/80 px-2 py-0.5 text-xs text-slate-300 transition hover:bg-slate-900"
               onClick={() => setShowAdvanced(false)}
             >
               Show less

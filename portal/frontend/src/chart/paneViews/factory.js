@@ -55,7 +55,10 @@ export class PaneViewManager {
     }
   }
   destroy() {
-    for (const s of this.series.values()) { try { this.chart.removeSeries(s); } catch {} }
+    for (const s of this.series.values()) {
+      try { this.chart.removeSeries(s); }
+      catch { /* ignore stale series */ }
+    }
     this.series.clear(); this.views.clear();
     this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
   }

@@ -334,7 +334,7 @@ export const IndicatorSection = ({ chartId }) => {
   return (
     <div className="space-y-6">
       {error && (
-        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+        <div className="relative rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
           <div className="pr-6">
             <p className="font-medium text-red-200">Request failed</p>
             <p className="mt-1 text-red-100">{error}</p>
@@ -351,7 +351,7 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {isLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-300">
+        <div className="flex items-center gap-2 rounded-2xl border border-slate-900/70 bg-slate-950/70 px-3 py-2 text-sm text-slate-300">
           <svg className="size-4 animate-spin text-blue-300" viewBox="0 0 24 24" role="status" aria-hidden="true">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -362,7 +362,8 @@ export const IndicatorSection = ({ chartId }) => {
 
       <button
         onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
+        className="flex w-full flex-col items-center rounded-2xl border border-slate-900/70 bg-slate-950/70 px-4 py-4 text-slate-300 transition hover:border-sky-500/40 hover:text-sky-100 hover:shadow-lg hover:shadow-slate-950/30"
+        type="button"
       >
         {/* plus icon preserved */}
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
@@ -372,7 +373,7 @@ export const IndicatorSection = ({ chartId }) => {
       </button>
 
       {/* List of indicators */}
-      <div className="space-y-1">
+      <div className="space-y-2">
           {indicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
@@ -394,7 +395,7 @@ export const IndicatorSection = ({ chartId }) => {
           })}
 
           {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-950/70 px-4 py-6 text-center text-sm text-slate-400">
               No indicators yet. Create one to get started.
             </div>
           )}
