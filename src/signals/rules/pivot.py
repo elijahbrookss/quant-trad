@@ -158,65 +158,65 @@ def _evaluate_level(
         return []
 
     closes = df["close"]
+    level_price = float(level.price)
 
-    if level.kind == "support":
-        in_range = closes >= level.price
-        out_of_range_mask = closes < level.price
-        breakout_side = "below"
-    else:  # treat everything else as resistance
-        in_range = closes <= level.price
-        out_of_range_mask = closes > level.price
-        breakout_side = "above"
+    def _classify_side(value: float) -> str:
+        if value > level_price:
+            return "above"
+        if value < level_price:
+            return "below"
+        return "at"
 
     level_id = _summarise_level(level)
     last_idx_position = len(closes) - 1
     simulate_current_only = mode in {"sim", "live"}
 
     consecutive = 0
-    waiting_for_reset = False
     candidate_start_pos: Optional[int] = None
     candidate_max_distance = 0.0
+    active_side: Optional[str] = None
+    run_emitted = False
     results: List[Dict[str, Any]] = []
-    for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
-        close_value = float(closes.iloc[position])
-        if waiting_for_reset:
-            if not is_out_of_range:
-                waiting_for_reset = False
-                consecutive = 0
-                candidate_start_pos = None
-                candidate_max_distance = 0.0
-            else:
-                candidate_max_distance = max(
-                    candidate_max_distance, abs(close_value - float(level.price))
-                )
-                continue
+    for position, (index, close_value_obj) in enumerate(closes.items()):
+        close_value = float(close_value_obj)
+        side = _classify_side(close_value)
 
-        if is_out_of_range:
-            consecutive += 1
-            if candidate_start_pos is None:
-                candidate_start_pos = position
-                candidate_max_distance = 0.0
-            candidate_max_distance = max(
-                candidate_max_distance, abs(close_value - float(level.price))
-            )
-        else:
+        if side == "at":
             consecutive = 0
             candidate_start_pos = None
             candidate_max_distance = 0.0
+            active_side = None
+            run_emitted = False
+            continue
 
-        breakout_start_pos = position - consecutive + 1 if consecutive else None
+        if active_side != side:
+            active_side = side
+            candidate_start_pos = position
+            consecutive = 1
+            candidate_max_distance = abs(close_value - level_price)
+            run_emitted = False
+        else:
+            consecutive += 1
+            candidate_max_distance = max(
+                candidate_max_distance, abs(close_value - level_price)
+            )
+
+        breakout_start_pos = candidate_start_pos
+
+        if breakout_start_pos is None or run_emitted:
+            continue
 
         accelerated = False
         ready = consecutive >= confirmation_bars
-        if not ready and candidate_start_pos is not None and breakout_start_pos is not None:
-            bars_since_start = position - candidate_start_pos + 1
-            threshold = abs(float(level.price)) * early_distance_pct
+        if not ready:
+            bars_since_start = position - breakout_start_pos + 1
+            threshold = abs(level_price) * early_distance_pct
             if threshold > 0 and bars_since_start <= early_window:
                 if candidate_max_distance >= threshold:
                     ready = True
                     accelerated = True
 
-        if not ready or breakout_start_pos is None:
+        if not ready:
             continue
 
         prev_position = breakout_start_pos - 1
@@ -229,13 +229,10 @@ def _evaluate_level(
             )
             continue
 
-        prev_index = closes.index[prev_position]
-        if not bool(in_range.loc[prev_index]):
-            log.debug(
-                "pivotbrk | level_skip | level=%s | reason=never_in_range | prev_index=%s",
-                level_id,
-                prev_index,
-            )
+        prev_close = float(closes.iloc[prev_position])
+        prev_side = _classify_side(prev_close)
+        if prev_side == active_side:
+            # Never transitioned across the level, ignore this run.
             continue
 
         if simulate_current_only and position != last_idx_position:
@@ -246,10 +243,13 @@ def _evaluate_level(
         breakout_end_idx = index
         last_bar = df.loc[breakout_end_idx]
 
+        detected_level_kind = "resistance" if active_side == "above" else "support"
+
         meta: Dict[str, Any] = {
-            "level_kind": level.kind,
-            "level_price": float(level.price),
-            "breakout_direction": breakout_side,
+            "level_kind": detected_level_kind,
+            "source_level_kind": getattr(level, "kind", None),
+            "level_price": level_price,
+            "breakout_direction": active_side,
             "confirmation_bars_required": confirmation_bars,
             "bars_closed_beyond_level": consecutive,
             "breakout_start": _to_datetime(breakout_start_idx),
@@ -268,12 +268,12 @@ def _evaluate_level(
         log.debug(
             "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
             level_id,
-            breakout_side,
+            active_side,
             last_bar["close"],
         )
 
         results.append(meta)
-        waiting_for_reset = True
+        run_emitted = True
 
     if not results:
         log.debug(
@@ -354,13 +354,14 @@ def pivot_breakout_rule(
 
         for meta in metas:
             breakout_time = meta.get("trigger_time", df.index[-1])
+            detected_direction = meta.get("level_kind", getattr(level, "kind", None))
             results.append(
                 {
                     "type": "breakout",
                     "symbol": symbol,
                     "time": _to_datetime(breakout_time),
                     "source": getattr(indicator, "NAME", indicator.__class__.__name__),
-                    "direction": level.kind,
+                    "direction": detected_direction,
                     **meta,
                 }
             )
