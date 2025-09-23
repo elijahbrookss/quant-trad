@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -23,7 +24,32 @@ class PivotBreakoutConfig:
             raise ValueError("confirmation_bars must be >= 1")
 
 
+log = logging.getLogger("PivotBreakoutRule")
+
 _DEFAULT_CONFIG = PivotBreakoutConfig()
+
+
+def _summarise_level(level: Level) -> str:
+    return "|".join(
+        [
+            f"px={getattr(level, 'price', 'na'):.5f}" if hasattr(level, "price") else "px=na",
+            f"kind={getattr(level, 'kind', 'na')}",
+            f"lb={getattr(level, 'lookback', 'na')}",
+            f"tf={getattr(level, 'timeframe', 'na')}",
+        ]
+    )
+
+
+def _build_run_id(indicator: PivotLevelIndicator, df: pd.DataFrame, symbol: str) -> str:
+    last_index = df.index[-1] if len(df.index) else "na"
+    return "|".join(
+        [
+            "pivotbrk",
+            f"symbol={symbol}",
+            f"trace={getattr(indicator, 'trace_id', 'na')}",
+            f"end={last_index}",
+        ]
+    )
 
 
 def _to_datetime(value: Any) -> Any:
@@ -51,7 +77,13 @@ def _resolve_config(context: Mapping[str, Any]) -> PivotBreakoutConfig:
     if confirmation_bars < 1:
         confirmation_bars = _DEFAULT_CONFIG.confirmation_bars
 
-    return PivotBreakoutConfig(confirmation_bars=confirmation_bars)
+    resolved = PivotBreakoutConfig(confirmation_bars=confirmation_bars)
+    log.debug(
+        "pivotbrk | config_resolved | confirmation_bars=%d | context_keys=%s",
+        resolved.confirmation_bars,
+        sorted(context.keys()),
+    )
+    return resolved
 
 
 def _ensure_indicator_levels(indicator: Any) -> Iterable[Level]:
@@ -81,6 +113,11 @@ def _evaluate_level(
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
 
     if len(df) <= confirmation_bars:
+        log.debug(
+            "pivotbrk | level_skip | reason=insufficient_bars | required=%d | available=%d",
+            confirmation_bars + 1,
+            len(df),
+        )
         return None
 
     closes = df["close"]
@@ -96,7 +133,21 @@ def _evaluate_level(
         was_in_range = prev_close <= level.price
         breakout_side = "above"
 
-    if not was_in_range or not _level_out_of_range(out_of_range):
+    level_id = _summarise_level(level)
+    if not was_in_range:
+        log.debug(
+            "pivotbrk | level_skip | level=%s | reason=never_in_range | prev_close=%.5f",
+            level_id,
+            prev_close,
+        )
+        return None
+
+    if not _level_out_of_range(out_of_range):
+        log.debug(
+            "pivotbrk | level_skip | level=%s | reason=confirmation_failed | confirmation_bars=%d",
+            level_id,
+            confirmation_bars,
+        )
         return None
 
     breakout_start_idx = df.index[-confirmation_bars]
@@ -120,6 +171,13 @@ def _evaluate_level(
         if column in df.columns:
             meta[f"trigger_{column}"] = float(last_bar[column])
 
+    log.debug(
+        "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
+        level_id,
+        breakout_side,
+        last_bar["close"],
+    )
+
     return meta
 
 
@@ -131,27 +189,54 @@ def pivot_breakout_rule(
 
     indicator = context.get("indicator")
     if not isinstance(indicator, PivotLevelIndicator):
+        log.debug(
+            "pivotbrk | guard_fail | reason=indicator_type | indicator=%r",
+            type(indicator),
+        )
         return []
 
     df = context.get("df")
     if df is None or df.empty:
+        log.debug(
+            "pivotbrk | guard_fail | reason=missing_df | indicator=%s",
+            getattr(indicator, "NAME", type(indicator)),
+        )
         return []
 
     levels = _ensure_indicator_levels(indicator)
     if not levels:
+        log.debug(
+            "pivotbrk | guard_fail | reason=no_levels | indicator_trace=%s",
+            getattr(indicator, "trace_id", "unknown"),
+        )
         return []
 
     symbol = _select_symbol(context, indicator)
     if symbol is None:
+        log.debug(
+            "pivotbrk | guard_fail | reason=no_symbol | indicator_trace=%s",
+            getattr(indicator, "trace_id", "unknown"),
+        )
         return []
 
     config = _resolve_config(context)
     confirmation_bars = config.confirmation_bars
 
+    run_id = _build_run_id(indicator, df, symbol)
+    log.debug(
+        "%s | run_start | levels=%d | confirmation_bars=%d",
+        run_id,
+        len(levels),
+        confirmation_bars,
+    )
+
     results: List[Dict[str, Any]] = []
     for level in levels:
+        level_id = _summarise_level(level)
+        log.debug("%s | level_eval | level=%s", run_id, level_id)
         meta = _evaluate_level(df, level, confirmation_bars)
         if not meta:
+            log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
             continue
 
         breakout_time = df.index[-1]
@@ -165,7 +250,9 @@ def pivot_breakout_rule(
                 **meta,
             }
         )
+        log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
 
+    log.debug("%s | run_complete | signals=%d", run_id, len(results))
     return results
 
 
@@ -313,3 +400,4 @@ __all__ = [
     "pivot_signals_to_overlays",
     "register_pivot_indicator",
 ]
+
