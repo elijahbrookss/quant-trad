@@ -2,6 +2,7 @@ import { createTouchPaneView } from './touchPaneView';
 import { createVABoxPaneView } from './vaBoxPaneView';
 import { createSegmentPaneView } from './segmentPaneView';
 import { createPolylinePaneView } from './polylinePaneView';
+import { createSignalBubblePaneView } from './signalBubblePaneView';
 
 const toSec = (t) => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
 
@@ -10,6 +11,7 @@ export const PaneViewType = {
   VA_BOX: 'va_box',
   SEGMENT: 'segment',
   POLYLINE: 'polyline',
+  SIGNAL_BUBBLE: 'signal_bubble',
 };
 
 export class PaneViewManager {
@@ -27,6 +29,7 @@ export class PaneViewManager {
     else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { extendRight: true, hatchOverlap: false, outlineFront: true });
     else if (type === PaneViewType.SEGMENT) view = createSegmentPaneView(this.ts);
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
+    else if (type === PaneViewType.SIGNAL_BUBBLE) view = createSignalBubblePaneView(this.ts);
     else throw new Error(`Unknown pane view: ${type}`);
     const base = view.defaultOptions?.() ?? {};
     const s = this.chart.addCustomSeries(view, {
@@ -44,6 +47,7 @@ export class PaneViewManager {
       if (type === PaneViewType.VA_BOX)   { view.setBoxes?.([]);  this.series.get(type)?.setData([]); }
       if (type === PaneViewType.SEGMENT)  { view.setSegments?.([]); this.series.get(type)?.setData([]); }
       if (type === PaneViewType.POLYLINE) { view.setPolylines?.([]); this.series.get(type)?.setData([]); }
+      if (type === PaneViewType.SIGNAL_BUBBLE) { view.setBubbles?.([]); this.series.get(type)?.setData([]); }
     }
   }
   destroy() {
@@ -74,6 +78,24 @@ export class PaneViewManager {
        .filter(Number.isFinite).sort((a,b)=>a-b)
        .map(t => ({ time: t, originalData: {} }));
     this.series.get(PaneViewType.POLYLINE).setData(times);
+  }
+  setSignalBubbles(bubs){ this.ensure(PaneViewType.SIGNAL_BUBBLE);
+    const normalized = (bubs || []).map(b => ({ ...b, time: toSec(b.time) }));
+    this.views.get(PaneViewType.SIGNAL_BUBBLE).setBubbles(normalized);
+
+    const grouped = new Map();
+    for (const bubble of normalized) {
+      const time = bubble?.time;
+      if (!Number.isFinite(time)) continue;
+      if (!grouped.has(time)) grouped.set(time, []);
+      grouped.get(time).push(bubble);
+    }
+
+    const data = [...grouped.entries()]
+      .sort((a,b) => a[0] - b[0])
+      .map(([time, entries]) => ({ time, originalData: { bubbles: entries } }));
+
+    this.series.get(PaneViewType.SIGNAL_BUBBLE).setData(data);
   }
     setTouchPoints(points) {
     // points: [{ time, price, color, size }]

@@ -33,6 +33,7 @@ export const ChartComponent = ({ chartId }) => {
     new Date()
   ]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [rangeWarning, setRangeWarning] = useState(null);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -41,6 +42,7 @@ export const ChartComponent = ({ chartId }) => {
   const seededRef = useRef(false); // ensure we seed only once
   const pvMgrRef = useRef(null);
   const lastBarRef = useRef(null);
+  const timeframeWarningRef = useRef(null);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -131,6 +133,12 @@ export const ChartComponent = ({ chartId }) => {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => () => {
+    if (timeframeWarningRef.current) {
+      clearTimeout(timeframeWarningRef.current);
+    }
   }, []);
 
   const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
@@ -235,6 +243,7 @@ export const ChartComponent = ({ chartId }) => {
     const markers = [];
     const touchPoints = [];
     const boxes = [];
+    const signalBubbles = [];
     const allSegments = [];
     const allPolylines = [];
 
@@ -245,9 +254,6 @@ export const ChartComponent = ({ chartId }) => {
 
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
-
-      // Norm
-      console.log("Overlay", { type, color, paneViews, norm });
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
@@ -266,6 +272,13 @@ export const ChartComponent = ({ chartId }) => {
 
       // 3b) Markers.
       markers.push(...norm.markers);
+
+      if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
+        signalBubbles.push(...norm.bubbles.map(b => ({
+          ...b,
+          accentColor: b.accentColor ?? color,
+        })));
+      }
 
       // 3c) Touch points.
       if (paneViews.includes('touch') && norm.touchPoints?.length) {
@@ -290,11 +303,9 @@ export const ChartComponent = ({ chartId }) => {
       }
 
       if (paneViews.includes('segment') && norm.segments?.length) {
-        console.log("Adding segments", norm.segments);
         allSegments.push(...norm.segments);
       }
       if (paneViews.includes('polyline') && norm.polylines?.length) {
-        console.log("Adding polylines", norm.polylines);
         allPolylines.push(...norm.polylines);
       }
     }
@@ -320,52 +331,13 @@ export const ChartComponent = ({ chartId }) => {
       overlayHandlesRef.current.markersApi.setMarkers(markers);
       
 
-      console.log("Custom overlays", { touchPoints: grouped, boxes, allSegments, allPolylines });
       pvMgrRef.current?.setTouchPoints(touchPoints);
       pvMgrRef.current?.setVABlocks(boxes);
       pvMgrRef.current?.setSegments(allSegments);
       pvMgrRef.current?.setPolylines(allPolylines);
+      pvMgrRef.current?.setSignalBubbles(signalBubbles);
 
       // --- C: VWAP vs Candles coverage + coordinate check ---
-      const ts = chartRef.current.timeScale();
-      const s = seriesRef.current;
-      const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t/1000) : t);
-
-      // last candle (from the ref set in loadChartData)
-      const c = lastBarRef.current;
-      const cTime = typeof c?.time === 'number' ? c.time : c?.time?.timestamp;
-      const cClose = Number(c?.close);
-
-      // last vwap point across ALL polylines
-      const vPts = (allPolylines || [])
-        .flatMap(l => (l.points || []).map(p => ({ t: toSec(p.time), p: +p.price })))
-        .filter(o => Number.isFinite(o.t) && Number.isFinite(o.p))
-        .sort((a,b) => a.t - b.t);
-      const vLast = vPts.at(-1);
-
-      // fallbacks if no candle ref yet
-      const vr = ts.getVisibleRange?.();
-      const vrTo = (vr?.to ?? cTime);
-
-      // log both time/price and pixel coords
-      console.log('[CHK] last candle', {
-        t: cTime ?? vrTo,
-        iso: (cTime ?? vrTo) ? new Date((cTime ?? vrTo) * 1000).toISOString() : null,
-        close: cClose,
-        x: cTime != null ? ts.timeToCoordinate(cTime) : (vrTo != null ? ts.timeToCoordinate(vrTo) : null),
-        y: Number.isFinite(cClose) ? s.priceToCoordinate(cClose) : null,
-      });
-
-      console.log('[CHK] last vwap', {
-        t: vLast?.t,
-        iso: vLast ? new Date(vLast.t * 1000).toISOString() : null,
-        p: vLast?.p,
-        x: vLast ? ts.timeToCoordinate(vLast.t) : null,
-        y: vLast ? s.priceToCoordinate(vLast.p) : null,
-        nPts: vPts.length,
-      });
-
-
       // seriesRef.current.setData(touch)
     } catch (e) {
       error('setMarkers failed', e);
@@ -377,6 +349,7 @@ export const ChartComponent = ({ chartId }) => {
       markers: markers.length,
       touchPoints: touchPoints.length,
       boxes: boxes.length,
+      bubbles: signalBubbles.length,
       segments: allSegments.length,
       polylines: allPolylines.length,
     });
@@ -392,12 +365,24 @@ export const ChartComponent = ({ chartId }) => {
 
   // Apply handler.
   const handleApply = useCallback(() => {
+    const [start, end] = dateRange || [];
+    const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
+    const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
+    if (windowMs > maxWindowMs) {
+      warn('apply_blocked_range', { chartId, symbol, interval, windowMs });
+      setRangeWarning('Please choose a window of 90 days or less before applying.');
+      if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
+      timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
+      return;
+    }
+
+    setRangeWarning(null);
     info('apply', { chartId, symbol, interval, dateRange });
     syncOverlays([]); // clear overlays on apply
     updateChart?.(chartId, { symbol, interval, dateRange });
     loadChartData();
     bumpRefresh?.(chartId);
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -411,33 +396,41 @@ export const ChartComponent = ({ chartId }) => {
   return (
     <>
 
-      {/* 90-day note */}
-      <div className="mb-2">
-        <span className="inline-flex items-center rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
-          ⚠️Timeframe max is 90 days
-        </span>
+      <div className="space-y-3 mb-4">
+        {rangeWarning && (
+          <div className="flex items-center gap-2 rounded-xl border border-amber-400/50 bg-amber-500/15 px-3 py-2 text-sm text-amber-100 shadow-lg shadow-amber-900/40">
+            <span className="text-lg">⚠️</span>
+            <span className="font-medium">{rangeWarning}</span>
+          </div>
+        )}
+
+        <div className="rounded-2xl border border-neutral-700/60 bg-neutral-900/70 p-4 shadow-xl shadow-black/40 backdrop-blur">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
+              <TimeframeSelect selected={interval} onChange={setInterval} />
+              <SymbolInput value={symbol} onChange={setSymbol} />
+              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+            </div>
+            <button
+              className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-gradient-to-r from-indigo-500/80 to-sky-500/80 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-900/40 transition hover:from-indigo-400 hover:to-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+              onClick={handleApply}
+            >
+              <span>Apply changes</span>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="flex items-end space-x-4">
-        <TimeframeSelect selected={interval} onChange={setInterval} />
-        <SymbolInput value={symbol} onChange={setSymbol} />
-        <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
-        <button
-          className="mt-5.5 self-center border border-neutral-600 rounded-md p-2 hover:bg-neutral-700 transition-colors cursor-pointer"
-          onClick={handleApply}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-          </svg>
-        </button>
-      </div>
-      <div className="flex space-x-4 mt-5">
-        <div className="relative flex-1 rounded-lg overflow-hidden bg-gray-800 h-[550px]">
+      <div className="flex space-x-4">
+        <div className="relative flex-1 h-[560px] overflow-hidden rounded-3xl border border-neutral-800/70 bg-gradient-to-b from-neutral-950/90 to-neutral-900/70 shadow-2xl shadow-black/40">
           <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
           <button
             type="button"
             onClick={() => setPalOpen(true)}
-            className="h-9 px-3 rounded-md border border-neutral-600 bg-neutral-800/70 text-neutral-200 hover:bg-neutral-700"
+            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-lg border border-neutral-700/70 bg-neutral-900/70 px-3 text-sm font-medium text-neutral-200 shadow-lg shadow-black/30 backdrop-blur hover:bg-neutral-800"
             title="Open symbol presets (/)"
           >
             Presets
