@@ -1,18 +1,23 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { IndicatorSection } from './IndicatorTab.jsx'
+import { createLogger } from '../utils/logger.js'
 
 const tabs = ['Indicators', 'Signals', 'Strategies']
 
 export const TabManager = ({ chartId }) => {
   const [activeTab, setActiveTab] = useState(tabs[0])
 
-  // Debug: log tab changes and chartId
-  console.log("[TabManager] chartId:", chartId)
-  console.log("[TabManager] Active tab:", activeTab)
+  const logger = useMemo(() => createLogger('TabManager', { chartId }), [chartId])
+  const { info, debug } = logger
 
+  useEffect(() => {
+    debug('tab_manager_initialized', { activeTab })
+  }, [activeTab, debug])
+
+  // Debug: log tab changes and chartId
   const handleTabClick = (tab) => {
     setActiveTab(tab)
-    console.log("[TabManager] Switched to tab:", tab)
+    info('tab_switched', { tab })
   }
 
   return (

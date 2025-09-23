@@ -1,3 +1,7 @@
+import { createLogger } from '../utils/logger.js';
+
+const signalsLogger = createLogger('IndicatorSignals');
+
 export const hexToRgba = (hex, a = 0.18) => {
   if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
   const v = hex.slice(1);
@@ -66,19 +70,32 @@ export async function runSignalGeneration({
   colorizer = applyIndicatorColors,
 }) {
   if (!indicator) {
+    signalsLogger.warn('signal_generation_skipped_indicator_missing', { chartId });
     setError?.('Cannot generate signals: indicator not found.');
     return false;
   }
 
   if (!chartState || !chartState.symbol || !chartState.interval) {
+    signalsLogger.warn('signal_generation_skipped_chart_inputs', {
+      chartId,
+      hasChartState: Boolean(chartState),
+    });
     setError?.('Cannot generate signals: missing chart symbol or interval.');
     return false;
   }
 
   if (!startISO || !endISO) {
+    signalsLogger.warn('signal_generation_skipped_window', { chartId, startISO, endISO });
     setError?.('Cannot generate signals: chart window is not ready.');
     return false;
   }
+
+  const scopedLogger = signalsLogger.child({ chartId, indicatorId: indicator.id });
+  scopedLogger.info('signal_generation_start', {
+    start: startISO,
+    end: endISO,
+    interval: chartState.interval,
+  });
 
   updateChart(chartId, { signalsLoading: true, signalsLoadingFor: indicator.id });
 
@@ -91,6 +108,8 @@ export async function runSignalGeneration({
     if (confirmationBars != null) {
       config.pivot_breakout_confirmation_bars = confirmationBars;
     }
+
+    scopedLogger.debug('signal_generation_request', { config });
 
     const response = await signalsAdapter(indicator.id, {
       start: startISO,
@@ -121,11 +140,16 @@ export async function runSignalGeneration({
       signalResults: { ...prevSignals, [indicator.id]: rawSignals },
     });
 
+    scopedLogger.info('signal_generation_complete', {
+      signals: rawSignals.length,
+      overlays: signalOverlays.length,
+    });
+
     setError?.(null);
     return true;
   } catch (err) {
     const msg = err?.message || 'Failed to generate signals.';
-    console.error(`[IndicatorSection] generateSignals failed for ${indicator?.id}:`, err);
+    scopedLogger.error('signal_generation_failed', { message: msg }, err);
     setError?.(msg);
     return false;
   } finally {

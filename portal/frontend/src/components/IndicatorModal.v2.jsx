@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogPanel, DialogTitle, Disclosure, Switch } from "@headlessui/react";
 import { ChevronDown, Copy, RotateCcw } from "lucide-react";
 import { fetchIndicatorTypes, fetchIndicatorType } from "../adapters/indicator.adapter";
+import { createLogger } from "../utils/logger.js";
 
 /**
  * Goals
@@ -33,6 +34,11 @@ export default function IndicatorModalV2({
   const [name, setName] = useState(initial?.name || "");
   const [params, setParams] = useState(initial?.params || {});
   const [metaErr, setMetaErr] = useState(null);
+
+  const logger = useMemo(
+    () => createLogger("IndicatorModal", { indicatorId: initial?.id ?? null }),
+    [initial?.id]
+  );
   const [typeMeta, setTypeMeta] = useState({
     required_params: [],
     default_params: {},
@@ -288,7 +294,7 @@ export default function IndicatorModalV2({
     try {
       await navigator.clipboard.writeText(JSON.stringify(params, null, 2));
     } catch (e) {
-      console.error("copy failed", e);
+      logger.error("copy_params_failed", e);
     }
   };
 
