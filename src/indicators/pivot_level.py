@@ -3,9 +3,12 @@ from .config import DataContext
 from typing import List, Optional, Tuple, Set, Dict, Any
 import pandas as pd
 from mplfinance.plotting import make_addplot
-from core.logger import logger
+from core.logger import logger as core_logger
 from matplotlib import patches
 from .base import BaseIndicator
+
+log = core_logger.getChild("PivotLevelIndicator")
+
 
 @dataclass
 class Level:
@@ -36,9 +39,12 @@ class Level:
         mask = (df['low'] <= self.price) & (df['high'] >= self.price)
         touches = df[mask].index.tolist()
         self.touches = touches
-        logger.debug(
-            "Level %s at %.4f touched %d times.",
-            self.kind, self.price, len(touches)
+        log.debug(
+            "%s | touches | level_kind=%s | price=%.5f | count=%d",
+            getattr(self, "trace_id", "pivotlvl"),
+            self.kind,
+            self.price,
+            len(touches),
         )
         return touches
 
@@ -69,6 +75,16 @@ class PivotLevelIndicator(BaseIndicator):
         self.threshold = threshold
         self.days_back = days_back
         self.levels: List[Level] = []
+        self.trace_id = self._build_trace_id()
+
+        log.debug(
+            "%s | init | timeframe=%s | lookbacks=%s | threshold=%.5f | bars=%d",
+            self.trace_id,
+            self.timeframe,
+            self.lookbacks,
+            self.threshold,
+            len(self.df),
+        )
         self._compute()
 
     def _compute(self):
@@ -82,23 +98,56 @@ class PivotLevelIndicator(BaseIndicator):
         last_price = self.df['close'].iloc[-1]
         levels: List[Level] = []
 
+        log.debug(
+            "%s | compute | last_price=%.5f | pivot_batches=%d",
+            self.trace_id,
+            last_price,
+            len(pivot_map),
+        )
+
         for lb, (highs, lows) in pivot_map.items():
+            log.debug(
+                "%s | pivots | lookback=%d | highs=%d | lows=%d",
+                self.trace_id,
+                lb,
+                len(highs),
+                len(lows),
+            )
             for ts, price in highs + lows:
                 # skip if within threshold of existing
                 if any(abs(price - lvl.price) / price < self.threshold for lvl in levels):
+                    log.debug(
+                        "%s | dedupe_skip | lookback=%d | price=%.5f",
+                        self.trace_id,
+                        lb,
+                        price,
+                    )
                     continue
                 kind = 'support' if last_price > price else 'resistance'
-                levels.append(
-                    Level(
-                        price=price,
-                        kind=kind,
-                        lookback=lb,
-                        first_touched=ts,
-                        timeframe=self.timeframe
-                    )
+                level = Level(
+                    price=price,
+                    kind=kind,
+                    lookback=lb,
+                    first_touched=ts,
+                    timeframe=self.timeframe
+                )
+                level.trace_id = self.trace_id  # type: ignore[attr-defined]
+                levels.append(level)
+                log.debug(
+                    "%s | level_add | lookback=%d | kind=%s | price=%.5f | first_touched=%s",
+                    self.trace_id,
+                    lb,
+                    kind,
+                    price,
+                    ts,
                 )
         # sort levels and assign
         self.levels = sorted(levels, key=lambda lvl: lvl.price)
+        log.debug(
+            "%s | compute_complete | level_count=%d",
+            self.trace_id,
+            len(self.levels),
+        )
 
     def _find_pivots(self, lookback: int) -> Tuple[List[Tuple[pd.Timestamp, float]], List[Tuple[pd.Timestamp, float]]]:
         """
@@ -107,6 +156,8 @@ class PivotLevelIndicator(BaseIndicator):
         :param lookback: number of bars on each side for pivot detection
         :return: (highs, lows) lists of (timestamp, price)
         """
+        log.debug("%s | find_pivots_start | lookback=%d", self.trace_id, lookback)
+
         highs, lows = [], []
         def near_existing(price):
             return any(abs(price - p) / p < self.threshold for _, p in highs + lows)
@@ -121,7 +172,18 @@ class PivotLevelIndicator(BaseIndicator):
                 highs.append((ts, high))
             elif low < window_low.min() and not near_existing(low):
                 lows.append((ts, low))
+        log.debug(
+            "%s | find_pivots_done | lookback=%d | highs=%d | lows=%d",
+            self.trace_id,
+            lookback,
+            len(highs),
+            len(lows),
+        )
         return highs, lows
+
+    def _build_trace_id(self) -> str:
+        last_index = self.df.index[-1] if not self.df.empty else "na"
+        return f"pivotlvl|tf={self.timeframe}|bars={len(self.df)}|end={last_index}"
 
     def to_overlays(
         self,
