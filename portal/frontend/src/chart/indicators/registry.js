@@ -2,7 +2,7 @@ import { PaneViewType } from '../paneViews/factory';
 
 const INDICATOR_PANEVIEWS = {
   default: [PaneViewType.TOUCH],
-  pivot_level: [PaneViewType.TOUCH],
+  pivot_level: [PaneViewType.SIGNAL_BUBBLE, PaneViewType.TOUCH],
   market_profile: [PaneViewType.VA_BOX, PaneViewType.TOUCH],
   trendline: [PaneViewType.SEGMENT, PaneViewType.TOUCH],
   vwap: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
@@ -20,13 +20,19 @@ export function adaptPayload(type, payload, colorHex) {
   const boxes      = Array.isArray(payload?.boxes) ? payload.boxes : [];
   const segments   = Array.isArray(payload?.segments) ? payload.segments : [];
   const polylines  = Array.isArray(payload?.polylines) ? payload.polylines : [];
+  const bubbles    = Array.isArray(payload?.bubbles) ? payload.bubbles : [];
 
   const touchPoints = markersAll
     .filter(m => m?.subtype === 'touch' && typeof m?.price === 'number' && m?.time != null)
     .map(m => ({ time: m.time, price: Number(m.price), color: colorHex || m.color, size: m.size ?? 4 }));
 
-  const markers = markersAll.filter(m => m?.subtype !== 'touch')
+  const markers = markersAll
+    .filter(m => m?.subtype !== 'touch' && m?.subtype !== 'bubble')
     .map(m => ({ ...m, time: toSec(m.time) }));
+
+  const signalBubbles = bubbles
+    .concat(markersAll.filter(m => m?.subtype === 'bubble'))
+    .map(b => ({ ...b, time: toSec(b.time) }));
 
   // normalize times for new types
   const normSegments = segments.map(s => ({
@@ -38,5 +44,13 @@ export function adaptPayload(type, payload, colorHex) {
     points: (l.points || []).map(p => ({ time: toSec(p.time), price: Number(p.price) })),
   }));
 
-  return { priceLines, markers, touchPoints, boxes, segments: normSegments, polylines: normPolylines };
+  return {
+    priceLines,
+    markers,
+    touchPoints,
+    boxes,
+    segments: normSegments,
+    polylines: normPolylines,
+    bubbles: signalBubbles,
+  };
 }
