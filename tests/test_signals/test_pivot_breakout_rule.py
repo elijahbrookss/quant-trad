@@ -55,6 +55,8 @@ def test_pivot_breakout_rule_detects_resistance_breakout():
     assert result["level_price"] == pytest.approx(104)
     assert result["bars_closed_beyond_level"] == 2
     assert result["breakout_direction"] == "above"
+    assert result["level_kind"] == "resistance"
+    assert result["source_level_kind"] == "resistance"
 
 
 def test_pivot_breakout_rule_emits_mid_series_breakout():
@@ -98,6 +100,34 @@ def test_pivot_breakout_rule_requires_transition_from_range():
     assert results == []
 
 
+def test_pivot_breakout_rule_detects_support_breakdown_after_flip():
+    closes = [99, 103, 105, 106, 102, 101, 99]
+    df = _build_dataframe(closes)
+    # Level initially labelled as resistance because last price is below.
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 2
+    first, second = results
+
+    assert first["direction"] == "resistance"
+    assert first["breakout_direction"] == "above"
+    assert first["time"] == df.index[3].to_pydatetime()
+
+    assert second["direction"] == "support"
+    assert second["breakout_direction"] == "below"
+    assert second["time"] == df.index[5].to_pydatetime()
+
+
 def test_pivot_breakout_rule_requires_enough_bars():
     df = _build_dataframe([100, 101])
     level = _build_level(99, kind="support")
@@ -130,13 +160,19 @@ def test_pivot_breakout_rule_emits_multiple_breakouts_in_backtest():
 
     results = pivot_breakout_rule(context)
 
-    assert len(results) == 2
-    first, second = results
+    assert len(results) == 3
+    first, second, third = results
 
     assert first["trigger_close"] == pytest.approx(closes[4])
     assert first["time"] == df.index[4].to_pydatetime()
-    assert second["trigger_close"] == pytest.approx(closes[8])
-    assert second["time"] == df.index[8].to_pydatetime()
+    assert first["direction"] == "resistance"
+    assert second["trigger_close"] == pytest.approx(closes[6])
+    assert second["time"] == df.index[6].to_pydatetime()
+    assert second["direction"] == "support"
+    assert third["trigger_close"] == pytest.approx(closes[8])
+    assert third["time"] == df.index[8].to_pydatetime()
+    assert third["direction"] == "resistance"
+
 
 def test_pivot_breakout_rule_accelerates_confirmation_on_large_move():
     # Level at 100 with a strong close 5% above the level on the first bar.
