@@ -138,7 +138,6 @@ def test_pivot_breakout_rule_emits_multiple_breakouts_in_backtest():
     assert second["trigger_close"] == pytest.approx(closes[8])
     assert second["time"] == df.index[8].to_pydatetime()
 
-
 def test_pivot_breakout_rule_accelerates_confirmation_on_large_move():
     # Level at 100 with a strong close 5% above the level on the first bar.
     closes = [100, 105, 104, 103, 102]
