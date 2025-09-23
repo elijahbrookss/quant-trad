@@ -91,11 +91,13 @@ export function createSignalBubblePaneView(timeScaleApi) {
       const widthPx = bitmapSize?.width ?? ctx.canvas.width;
       const heightPx = bitmapSize?.height ?? ctx.canvas.height;
 
-      const padX = 16 * hpr;
-      const padY = 12 * vpr;
-      const pointerHeight = 14 * vpr;
-      const pointerWidth = 24 * hpr;
-      const radius = 14 * Math.min(hpr, vpr);
+      const padX = 12 * hpr;
+      const padY = 10 * vpr;
+      const pointerHeight = 12 * vpr;
+      const pointerWidth = 18 * hpr;
+      const radius = 12 * Math.min(hpr, vpr);
+      const verticalGap = 16 * vpr;
+
 
       ctx.save();
       ctx.textBaseline = 'top';
@@ -109,9 +111,9 @@ export function createSignalBubblePaneView(timeScaleApi) {
         if (py == null) continue;
 
         const accent = bubble.accentColor ?? '#38bdf8';
-        const background = bubble.backgroundColor ?? hexToRgba(accent, 0.18) ?? 'rgba(30,41,59,0.85)';
+        const background = bubble.backgroundColor ?? hexToRgba(accent, 0.12) ?? 'rgba(30,41,59,0.78)';
         const textColor = bubble.textColor ?? '#f8fafc';
-        const shadow = hexToRgba(accent, 0.45);
+        const shadow = hexToRgba(accent, 0.2);
 
         const label = bubble.label ?? 'Signal';
         const detail = bubble.detail ?? '';
@@ -119,8 +121,8 @@ export function createSignalBubblePaneView(timeScaleApi) {
 
         const direction = bubble.direction === 'below' ? 'below' : 'above';
 
-        const headingFontSize = 13;
-        const bodyFontSize = 11;
+        const headingFontSize = 12;
+        const bodyFontSize = 10;
 
         ctx.font = `600 ${headingFontSize * vpr}px "Inter", "Segoe UI", sans-serif`;
         const headingWidth = ctx.measureText(label).width;
@@ -146,9 +148,9 @@ export function createSignalBubblePaneView(timeScaleApi) {
 
         let bubbleY;
         if (direction === 'above') {
-          bubbleY = py * vpr - pointerHeight - bubbleHeight;
+          bubbleY = py * vpr - pointerHeight - verticalGap - bubbleHeight;
         } else {
-          bubbleY = py * vpr + pointerHeight;
+          bubbleY = py * vpr + pointerHeight + verticalGap;
         }
 
         const minY = 12 * vpr;
@@ -199,7 +201,7 @@ export function createSignalBubblePaneView(timeScaleApi) {
           : bubbleY - pointerHeight;
         const pointerTipX = pointerBaseX;
         ctx.fillStyle = accent;
-        ctx.arc(pointerTipX, pointerTipY, 3.5 * Math.min(hpr, vpr), 0, Math.PI * 2);
+        ctx.arc(pointerTipX, pointerTipY, 3 * Math.min(hpr, vpr), 0, Math.PI * 2);
         ctx.fill();
       }
 

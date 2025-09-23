@@ -398,13 +398,13 @@ export const ChartComponent = ({ chartId }) => {
 
       <div className="space-y-3 mb-4">
         {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-xl border border-amber-400/50 bg-amber-500/15 px-3 py-2 text-sm text-amber-100 shadow-lg shadow-amber-900/40">
+          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
             <span className="text-lg">⚠️</span>
             <span className="font-medium">{rangeWarning}</span>
           </div>
         )}
 
-        <div className="rounded-2xl border border-neutral-700/60 bg-neutral-900/70 p-4 shadow-xl shadow-black/40 backdrop-blur">
+        <div className="rounded-xl border border-neutral-800/70 bg-neutral-950/70 p-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
@@ -412,7 +412,7 @@ export const ChartComponent = ({ chartId }) => {
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
             </div>
             <button
-              className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-gradient-to-r from-indigo-500/80 to-sky-500/80 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-900/40 transition hover:from-indigo-400 hover:to-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+              className="inline-flex items-center justify-center gap-2 self-start rounded-lg bg-sky-500/80 px-5 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
               onClick={handleApply}
             >
               <span>Apply changes</span>
@@ -425,12 +425,12 @@ export const ChartComponent = ({ chartId }) => {
       </div>
 
       <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-3xl border border-neutral-800/70 bg-gradient-to-b from-neutral-950/90 to-neutral-900/70 shadow-2xl shadow-black/40">
+        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
           <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
           <button
             type="button"
             onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-lg border border-neutral-700/70 bg-neutral-900/70 px-3 text-sm font-medium text-neutral-200 shadow-lg shadow-black/30 backdrop-blur hover:bg-neutral-800"
+            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
             title="Open symbol presets (/)"
           >
             Presets

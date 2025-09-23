@@ -30,13 +30,13 @@ export function TimeframeSelect({ selected, onChange }) {
       <div className="flex flex-wrap gap-2">
         {options.map(option => {
           const isActive = option.value === selected;
-          const baseClass = 'rounded-lg border px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2';
+          const baseClass = 'rounded-md border px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2';
           const activeClass = option.featured
-            ? 'border-sky-400/90 bg-sky-500/20 text-sky-100 shadow-lg shadow-sky-900/40'
-            : 'border-indigo-400/80 bg-indigo-500/20 text-indigo-100 shadow';
+            ? 'border-sky-400 bg-sky-500/20 text-sky-100'
+            : 'border-indigo-400 bg-indigo-500/20 text-indigo-100';
           const inactiveClass = option.featured
-            ? 'border-neutral-700/70 bg-neutral-900/70 text-neutral-200 hover:border-sky-400/70 hover:text-sky-200'
-            : 'border-neutral-700/60 bg-neutral-900/60 text-neutral-300 hover:border-indigo-400/60 hover:text-indigo-200';
+            ? 'border-neutral-800 bg-neutral-900/70 text-neutral-200 hover:border-sky-400 hover:text-sky-200'
+            : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-indigo-400 hover:text-indigo-200';
 
           return (
             <button
@@ -73,7 +73,7 @@ export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
           spellCheck={false}
           autoCapitalize="characters"
           autoComplete="off"
-          className="w-40 rounded-lg border border-neutral-700/70 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 shadow-inner shadow-black/30 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-500/50"
+          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500/50"
           value={value}
           onChange={(e) => onChange(e.target.value.toUpperCase())}
           placeholder={placeholder}
