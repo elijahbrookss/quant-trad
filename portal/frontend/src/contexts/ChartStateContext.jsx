@@ -43,17 +43,17 @@ export function ChartStateProvider({ children }) {
 
   // actions are stable; no effects that set state here
   const registerChart = useCallback((id, handles) => {
-    info('register', { id });
+    info('chart_register', { chartId: id });
     dispatch({ type: 'REGISTER', id, handles });
   }, [info]);
 
   const updateChart = useCallback((id, patch) => {
-    debug('update', { id, keys: Object.keys(patch) });
+    debug('chart_update', { chartId: id, keys: Object.keys(patch) });
     dispatch({ type: 'UPDATE', id, patch });
   }, [debug]);
 
   const bumpRefresh = useCallback((id) => {
-    debug('bump', { id });
+    debug('chart_bump', { chartId: id });
     dispatch({ type: 'BUMP', id });
   }, [debug]);
 

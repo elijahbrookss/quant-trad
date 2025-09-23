@@ -1,4 +1,7 @@
+import { createLogger } from '../utils/logger.js';
+
 const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+const adapterLogger = createLogger('IndicatorAdapter');
 
 async function handleResponse(res) {
   if (res.ok) {
@@ -16,7 +19,11 @@ async function handleResponse(res) {
       payload = text || null
     }
   } catch (err) {
-    console.warn('[IndicatorAdapter] Failed to parse error response:', err)
+    adapterLogger.warn('error_response_parse_failed', {
+      status: res.status,
+      url: res.url,
+      contentType,
+    }, err)
   }
 
   const detail =
@@ -49,8 +56,11 @@ export async function fetchIndicatorType(id) {
 }
 
 export async function createIndicator({ type, name, params }) {
-  var body = JSON.stringify({ type, name, params })
-  console.log("[IndicatorAdapter] createIndicator body:", body)
+  adapterLogger.debug('create_indicator_request', {
+    type,
+    hasName: Boolean(name),
+    paramKeys: Object.keys(params || {}),
+  })
   const res = await fetch(`${BASE}/api/indicators/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -79,7 +89,7 @@ export async function deleteIndicator(id) {
 }
 
 export async function fetchIndicatorOverlays(id, { start, end, interval, symbol }) {
-  console.log("[IndicatorAdapter] fetchIndicatorOverlays params:", { id, start, end, interval, symbol })
+  adapterLogger.debug('fetch_indicator_overlays_request', { id, start, end, interval, symbol })
   const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

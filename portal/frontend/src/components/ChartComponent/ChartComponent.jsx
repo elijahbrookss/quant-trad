@@ -18,7 +18,8 @@ const LOG_NS = 'ChartComponent';
 
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
-  const { debug, info, warn, error } = useMemo(() => createLogger(LOG_NS), []);
+  const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
+  const { debug, info, warn, error } = logger;
 
   // Context wiring.
   const { registerChart, updateChart, bumpRefresh } = useChartState();
@@ -88,7 +89,7 @@ export const ChartComponent = ({ chartId }) => {
       seededRef.current = true;
     }
 
-    info('chart created', { chartId });
+    info('chart_created');
 
     return () => {
       try {
@@ -101,7 +102,7 @@ export const ChartComponent = ({ chartId }) => {
         chartRef.current?.remove();
         chartRef.current = null;
         seriesRef.current = null;
-        info('chart removed', { chartId });
+        info('chart_removed');
       } catch (e) {
         error('cleanup failed', e);
       }
@@ -116,7 +117,7 @@ export const ChartComponent = ({ chartId }) => {
     const ro = new ResizeObserver(([entry]) => {
       const r = entry?.contentRect; if (!r) return;
       chartRef.current.applyOptions({ width: r.width, height: r.height });
-      debug('resize', { w: r.width, h: r.height });
+      debug('chart_resize', { width: r.width, height: r.height });
     });
 
     ro.observe(el);
@@ -148,11 +149,11 @@ export const ChartComponent = ({ chartId }) => {
     try {
       setDataLoading(true);
       if (!symbol || !interval || !startISO || !endISO) {
-        warn('missing inputs', { symbol, interval, startISO, endISO });
+        warn('chart_load_missing_inputs', { symbol, interval, startISO, endISO });
         return;
       }
 
-      info('fetch', { symbol, interval, startISO, endISO });
+      info('candles_fetch_start', { symbol, interval, startISO, endISO });
       const resp = await fetchCandleData({
         symbol,
         timeframe: interval,
@@ -216,13 +217,13 @@ export const ChartComponent = ({ chartId }) => {
         chartRef.current?.timeScale().scrollToRealTime(); // fallback to latest
       }
 
-      info('data set', {
+      info('candles_fetch_success', {
         points: data.length,
         first: data[0]?.time,
         last: data.at(-1)?.time,
       });
     } catch (e) {
-      error('load failed', e);
+      error('candles_fetch_failed', e);
     } finally {
       setDataLoading(false);
     }
@@ -267,11 +268,29 @@ export const ChartComponent = ({ chartId }) => {
 
     // 3) Walk overlays and apply.
     for (const ov of overlays) {
-      const { type, payload, color } = ov || {};
+      const { type, payload, color, ind_id: indicatorId } = ov || {};
       if (!payload) continue;
+
+      const overlayLogger = logger.child({ indicatorId, indicatorType: type });
+      overlayLogger.debug('overlay_payload_received', {
+        priceLines: Array.isArray(payload.price_lines) ? payload.price_lines.length : 0,
+        markers: Array.isArray(payload.markers) ? payload.markers.length : 0,
+        boxes: Array.isArray(payload.boxes) ? payload.boxes.length : 0,
+        segments: Array.isArray(payload.segments) ? payload.segments.length : 0,
+        polylines: Array.isArray(payload.polylines) ? payload.polylines.length : 0,
+      });
 
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
+      overlayLogger.debug('overlay_adapted', {
+        priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,
+        markers: Array.isArray(norm.markers) ? norm.markers.length : 0,
+        touchPoints: Array.isArray(norm.touchPoints) ? norm.touchPoints.length : 0,
+        boxes: Array.isArray(norm.boxes) ? norm.boxes.length : 0,
+        segments: Array.isArray(norm.segments) ? norm.segments.length : 0,
+        polylines: Array.isArray(norm.polylines) ? norm.polylines.length : 0,
+        bubbles: Array.isArray(norm.bubbles) ? norm.bubbles.length : 0,
+      });
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
@@ -308,16 +327,28 @@ export const ChartComponent = ({ chartId }) => {
 
       // 3d) VA Boxes.
       if (paneViews.includes('va_box') && norm.boxes?.length) {
-        boxes.push(
-          ...norm.boxes.map(b => ({
-            x1: toSec(b.x1),
-            x2: toSec(b.x2),
-            y1: Number(b.y1),
-            y2: Number(b.y2),
-            color: b.color,
-            border: b.border,
-          }))
-        );
+        const normalizedBoxes = norm.boxes.map(b => ({
+          x1: toSec(b.x1),
+          x2: toSec(b.x2),
+          y1: Number(b.y1),
+          y2: Number(b.y2),
+          color: b.color,
+          border: b.border,
+        }));
+        boxes.push(...normalizedBoxes);
+        normalizedBoxes.forEach((b, idx) => {
+          const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
+            ? Number(b.x2) - Number(b.x1)
+            : null;
+          overlayLogger.debug('va_box_applied', {
+            boxIndex: idx,
+            x1: b.x1,
+            x2: b.x2,
+            y1: b.y1,
+            y2: b.y2,
+            width,
+          });
+        });
       }
 
       if (paneViews.includes('segment') && norm.segments?.length) {
@@ -361,11 +392,11 @@ export const ChartComponent = ({ chartId }) => {
       // --- C: VWAP vs Candles coverage + coordinate check ---
       // seriesRef.current.setData(touch)
     } catch (e) {
-      error('setMarkers failed', e);
+      error('overlays_apply_failed', e);
     }
 
     // 6) Log summary for quick tracing.
-    info('overlays applied', {
+    info('overlays_applied', {
       priceLines: overlayHandlesRef.current.priceLines.length,
       markers: markers.length,
       touchPoints: touchPoints.length,
@@ -376,7 +407,7 @@ export const ChartComponent = ({ chartId }) => {
     });
 
     setDataLoading(false);
-  }, [info, error]);
+  }, [info, error, logger]);
 
   // React to overlay changes.
   useEffect(() => {
