@@ -16,6 +16,35 @@ import SymbolPalette from '../SymbolPalette.jsx';
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 
+const deriveTimeScaleOptions = (rawInterval) => {
+  const interval = (rawInterval || '').toString().toLowerCase();
+  const base = { timeVisible: true, secondsVisible: false };
+
+  if (!interval) return base;
+
+  if (interval.endsWith('s')) {
+    return { ...base, secondsVisible: true };
+  }
+
+  if (interval.endsWith('m')) {
+    return base;
+  }
+
+  if (interval.endsWith('h')) {
+    return base;
+  }
+
+  if (interval.endsWith('d')) {
+    return { timeVisible: false, secondsVisible: false };
+  }
+
+  if (interval.endsWith('w') || interval.endsWith('mo') || interval.endsWith('y')) {
+    return { timeVisible: false, secondsVisible: false };
+  }
+
+  return base;
+};
+
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
@@ -64,6 +93,7 @@ export const ChartComponent = ({ chartId }) => {
       ...options,
       width: el.clientWidth,
       height: el.clientHeight || 400,
+      timeScale: deriveTimeScaleOptions(interval),
     });
 
     const series = chartRef.current.addSeries(CandlestickSeries, {
@@ -108,6 +138,17 @@ export const ChartComponent = ({ chartId }) => {
       }
     };
   }, [chartId, registerChart, updateChart, bumpRefresh, info, error]);
+
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const scaleOpts = deriveTimeScaleOptions(interval);
+    chartRef.current.applyOptions({ timeScale: scaleOpts });
+    debug('time_scale_updated', {
+      interval,
+      timeVisible: scaleOpts.timeVisible,
+      secondsVisible: scaleOpts.secondsVisible,
+    });
+  }, [interval, debug]);
 
   // Resize via ResizeObserver.
   useEffect(() => {
@@ -327,14 +368,31 @@ export const ChartComponent = ({ chartId }) => {
 
       // 3d) VA Boxes.
       if (paneViews.includes('va_box') && norm.boxes?.length) {
-        const normalizedBoxes = norm.boxes.map(b => ({
-          x1: toSec(b.x1),
-          x2: toSec(b.x2),
-          y1: Number(b.y1),
-          y2: Number(b.y2),
-          color: b.color,
-          border: b.border,
-        }));
+        const lastCandleSec = toSec(lastBarRef.current?.time);
+        const normalizedBoxes = norm.boxes.map((b, idxInGroup) => {
+          const x1 = toSec(b.x1);
+          const requestedX2 = toSec(b.x2);
+          const x2 = Number.isFinite(lastCandleSec) ? lastCandleSec : requestedX2;
+
+          if (Number.isFinite(lastCandleSec) && lastCandleSec !== requestedX2) {
+            overlayLogger.debug('va_box_span_adjusted', {
+              boxIndex: boxes.length + idxInGroup,
+              x1,
+              originalX2: requestedX2,
+              forcedX2: x2,
+              lastCandle: lastCandleSec,
+            });
+          }
+
+          return {
+            x1,
+            x2,
+            y1: Number(b.y1),
+            y2: Number(b.y2),
+            color: b.color,
+            border: b.border,
+          };
+        });
         boxes.push(...normalizedBoxes);
         normalizedBoxes.forEach((b, idx) => {
           const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
