@@ -58,12 +58,19 @@ export class PaneViewManager {
   setVABlocks(boxes){ this.ensure(PaneViewType.VA_BOX);
     const view = this.views.get(PaneViewType.VA_BOX);
     view.setBoxes(boxes || []);
-    // seed unique ascending times
-    const times = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
-      .filter(Number.isFinite).sort((a,b)=>a-b)
-      .map(t => ({ time: t, originalData: {} }));
-    const series = this.series.get(PaneViewType.VA_BOX);
-    series.setData(times);
+
+    const rawTimes = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
+      .filter(Number.isFinite)
+      .sort((a,b)=>a-b);
+
+    let smallestStep = Infinity;
+    for (let i = 1; i < rawTimes.length; i++) {
+      const step = rawTimes[i] - rawTimes[i - 1];
+      if (step > 0 && step < smallestStep) smallestStep = step;
+    }
+
+    const fallbackStep = 60; // 1 minute padding if we cannot infer spacing
+    const extensionStep = Number.isFinite(smallestStep) && smallestStep > 0 ? smallestStep : fallbackStep;
 
     const rightEdge = Math.max(
       ...((boxes || [])
@@ -71,7 +78,21 @@ export class PaneViewManager {
         .filter((t) => typeof t === 'number' && Number.isFinite(t))),
       -Infinity,
     );
-    view.setRightEdgeTime(Number.isFinite(rightEdge) ? rightEdge : null);
+
+    const paddedRightEdge = Number.isFinite(rightEdge)
+      ? rightEdge + (extensionStep * 0.25)
+      : null;
+
+    const seriesTimes = rawTimes.slice();
+    if (Number.isFinite(paddedRightEdge)) {
+      seriesTimes.push(paddedRightEdge);
+      seriesTimes.sort((a, b) => a - b);
+    }
+
+    const series = this.series.get(PaneViewType.VA_BOX);
+    series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
+
+    view.setRightEdgeTime(Number.isFinite(paddedRightEdge) ? paddedRightEdge : (Number.isFinite(rightEdge) ? rightEdge : null));
   }
   setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
     this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
