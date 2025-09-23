@@ -382,12 +382,14 @@ def pivot_signals_to_overlays(
         trigger_close = metadata.get("trigger_close")
         level_tf = metadata.get("level_timeframe")
         detail_prefix = "Closed above" if breakout_direction == "above" else "Closed below"
-        detail = None
+        detail = f"{detail_prefix} {level_price:.2f}"
+
+        meta_bits = []
         if trigger_close is not None:
-            detail = f"{detail_prefix} {level_price:.2f} at {trigger_close:.2f}"
-        timeframe_badge = None
+            meta_bits.append(f"Close {float(trigger_close):.2f}")
         if level_tf:
-            timeframe_badge = f"TF {level_tf}"
+            meta_bits.append(f"TF {level_tf}")
+        timeframe_badge = " · ".join(meta_bits) if meta_bits else None
 
         bubble_payload: Dict[str, Any] = {
             "time": marker_time,
