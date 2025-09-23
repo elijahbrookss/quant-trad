@@ -55,10 +55,13 @@ export class PaneViewManager {
     this.series.clear(); this.views.clear();
   }
 
-  setVABlocks(boxes){ this.ensure(PaneViewType.VA_BOX);
+  setVABlocks(boxes, opts = {}){ this.ensure(PaneViewType.VA_BOX);
     const view = this.views.get(PaneViewType.VA_BOX);
+    const { lastSeriesTime, barSpacing } = opts || {};
+
     view.setBoxes(boxes || []);
 
+    const normalizedLast = toSec(lastSeriesTime);
     const rawTimes = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
       .filter(Number.isFinite)
       .sort((a,b)=>a-b);
@@ -71,6 +74,7 @@ export class PaneViewManager {
 
     const fallbackStep = 60; // 1 minute padding if we cannot infer spacing
     const extensionStep = Number.isFinite(smallestStep) && smallestStep > 0 ? smallestStep : fallbackStep;
+    const inferredSpacing = Number.isFinite(barSpacing) && barSpacing > 0 ? barSpacing : extensionStep;
 
     const rightEdge = Math.max(
       ...((boxes || [])
@@ -79,20 +83,29 @@ export class PaneViewManager {
       -Infinity,
     );
 
-    const paddedRightEdge = Number.isFinite(rightEdge)
-      ? rightEdge + (extensionStep * 0.25)
+    const baseEdge = Math.max(
+      Number.isFinite(rightEdge) ? rightEdge : -Infinity,
+      Number.isFinite(normalizedLast) ? normalizedLast : -Infinity,
+    );
+
+    const paddedRightEdge = Number.isFinite(baseEdge)
+      ? baseEdge + inferredSpacing * 0.5
       : null;
 
-    const seriesTimes = rawTimes.slice();
-    if (Number.isFinite(paddedRightEdge)) {
-      seriesTimes.push(paddedRightEdge);
-      seriesTimes.sort((a, b) => a - b);
-    }
+    const seriesTimes = [...new Set([
+      ...rawTimes,
+      Number.isFinite(normalizedLast) ? normalizedLast : null,
+      Number.isFinite(paddedRightEdge) ? paddedRightEdge : null,
+    ].filter(Number.isFinite))].sort((a, b) => a - b);
 
     const series = this.series.get(PaneViewType.VA_BOX);
     series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
 
-    view.setRightEdgeTime(Number.isFinite(paddedRightEdge) ? paddedRightEdge : (Number.isFinite(rightEdge) ? rightEdge : null));
+    view.setRightEdgeTime(
+      Number.isFinite(paddedRightEdge)
+        ? paddedRightEdge
+        : (Number.isFinite(baseEdge) ? baseEdge : null)
+    );
   }
   setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
     this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
