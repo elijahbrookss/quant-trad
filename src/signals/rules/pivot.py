@@ -18,10 +18,16 @@ class PivotBreakoutConfig:
     """Configuration for validating pivot level breakouts."""
 
     confirmation_bars: int = 1
+    early_confirmation_window: int = 3
+    early_confirmation_distance_pct: float = 0.01
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
         if self.confirmation_bars < 1:
             raise ValueError("confirmation_bars must be >= 1")
+        if self.early_confirmation_window < 1:
+            raise ValueError("early_confirmation_window must be >= 1")
+        if self.early_confirmation_distance_pct < 0:
+            raise ValueError("early_confirmation_distance_pct must be >= 0")
 
 
 log = logging.getLogger("PivotBreakoutRule")
@@ -77,10 +83,41 @@ def _resolve_config(context: Mapping[str, Any]) -> PivotBreakoutConfig:
     if confirmation_bars < 1:
         confirmation_bars = _DEFAULT_CONFIG.confirmation_bars
 
-    resolved = PivotBreakoutConfig(confirmation_bars=confirmation_bars)
+    early_window = context.get(
+        "pivot_breakout_early_window",
+        _DEFAULT_CONFIG.early_confirmation_window,
+    )
+    try:
+        early_window = int(early_window)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_window = _DEFAULT_CONFIG.early_confirmation_window
+    if early_window < 1:
+        early_window = _DEFAULT_CONFIG.early_confirmation_window
+
+    early_pct = context.get(
+        "pivot_breakout_early_distance_pct",
+        _DEFAULT_CONFIG.early_confirmation_distance_pct,
+    )
+    try:
+        early_pct = float(early_pct)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_pct = _DEFAULT_CONFIG.early_confirmation_distance_pct
+    if early_pct < 0:
+        early_pct = _DEFAULT_CONFIG.early_confirmation_distance_pct
+
+    resolved = PivotBreakoutConfig(
+        confirmation_bars=confirmation_bars,
+        early_confirmation_window=early_window,
+        early_confirmation_distance_pct=early_pct,
+    )
     log.debug(
-        "pivotbrk | config_resolved | confirmation_bars=%d | context_keys=%s",
+        (
+            "pivotbrk | config_resolved | confirmation_bars=%d | early_window=%d "
+            "| early_pct=%.4f | context_keys=%s"
+        ),
         resolved.confirmation_bars,
+        resolved.early_confirmation_window,
+        resolved.early_confirmation_distance_pct,
         sorted(context.keys()),
     )
     return resolved
@@ -106,6 +143,8 @@ def _evaluate_level(
     confirmation_bars: int,
     *,
     mode: str = "backtest",
+    early_window: int,
+    early_distance_pct: float,
 ) -> List[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
@@ -135,24 +174,51 @@ def _evaluate_level(
 
     consecutive = 0
     waiting_for_reset = False
+    candidate_start_pos: Optional[int] = None
+    candidate_max_distance = 0.0
     results: List[Dict[str, Any]] = []
     for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
+        close_value = float(closes.iloc[position])
         if waiting_for_reset:
             if not is_out_of_range:
                 waiting_for_reset = False
                 consecutive = 0
+                candidate_start_pos = None
+                candidate_max_distance = 0.0
             else:
+                candidate_max_distance = max(
+                    candidate_max_distance, abs(close_value - float(level.price))
+                )
                 continue
 
         if is_out_of_range:
             consecutive += 1
+            if candidate_start_pos is None:
+                candidate_start_pos = position
+                candidate_max_distance = 0.0
+            candidate_max_distance = max(
+                candidate_max_distance, abs(close_value - float(level.price))
+            )
         else:
             consecutive = 0
+            candidate_start_pos = None
+            candidate_max_distance = 0.0
 
-        if consecutive < confirmation_bars:
+        breakout_start_pos = position - consecutive + 1 if consecutive else None
+
+        accelerated = False
+        ready = consecutive >= confirmation_bars
+        if not ready and candidate_start_pos is not None and breakout_start_pos is not None:
+            bars_since_start = position - candidate_start_pos + 1
+            threshold = abs(float(level.price)) * early_distance_pct
+            if threshold > 0 and bars_since_start <= early_window:
+                if candidate_max_distance >= threshold:
+                    ready = True
+                    accelerated = True
+
+        if not ready or breakout_start_pos is None:
             continue
 
-        breakout_start_pos = position - confirmation_bars + 1
         prev_position = breakout_start_pos - 1
 
         if prev_position < 0:
@@ -185,13 +251,14 @@ def _evaluate_level(
             "level_price": float(level.price),
             "breakout_direction": breakout_side,
             "confirmation_bars_required": confirmation_bars,
-            "bars_closed_beyond_level": confirmation_bars,
+            "bars_closed_beyond_level": consecutive,
             "breakout_start": _to_datetime(breakout_start_idx),
             "level_lookback": getattr(level, "lookback", None),
             "level_timeframe": getattr(level, "timeframe", None),
             "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
             "trigger_close": float(last_bar["close"]),
             "trigger_time": _to_datetime(breakout_end_idx),
+            "accelerated_confirmation": accelerated,
         }
 
         for column in ("open", "high", "low", "volume"):
@@ -273,7 +340,14 @@ def pivot_breakout_rule(
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
-        metas = _evaluate_level(df, level, confirmation_bars, mode=mode)
+        metas = _evaluate_level(
+            df,
+            level,
+            confirmation_bars,
+            mode=mode,
+            early_window=config.early_confirmation_window,
+            early_distance_pct=config.early_confirmation_distance_pct,
+        )
         if not metas:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
             continue
@@ -393,6 +467,8 @@ def pivot_signals_to_overlays(
             marker_label = f"{level_kind} breakout"
 
         trigger_close = metadata.get("trigger_close")
+        trigger_high = metadata.get("trigger_high")
+        trigger_low = metadata.get("trigger_low")
         level_tf = metadata.get("level_timeframe")
         detail_prefix = "Closed above" if breakout_direction == "above" else "Closed below"
         detail = f"{detail_prefix} {level_price:.2f}"
@@ -404,9 +480,28 @@ def pivot_signals_to_overlays(
             meta_bits.append(f"TF {level_tf}")
         timeframe_badge = " · ".join(meta_bits) if meta_bits else None
 
+        anchor_price = float(trigger_close) if trigger_close is not None else float(level_price)
+        level_gap = abs(anchor_price - float(level_price))
+        wick_gap_above = 0.0
+        wick_gap_below = 0.0
+        if trigger_high is not None:
+            wick_gap_above = max(0.0, float(trigger_high) - anchor_price)
+        if trigger_low is not None:
+            wick_gap_below = max(0.0, anchor_price - float(trigger_low))
+
+        base_offset = max(anchor_price * 0.001, 0.1)
+        if breakout_direction == "above":
+            offset = max(level_gap * 0.25, wick_gap_above * 0.5, base_offset)
+            bubble_price = anchor_price + offset
+        elif breakout_direction == "below":
+            offset = max(level_gap * 0.25, wick_gap_below * 0.5, base_offset)
+            bubble_price = anchor_price - offset
+        else:
+            bubble_price = anchor_price + base_offset
+
         bubble_payload: Dict[str, Any] = {
             "time": marker_time,
-            "price": float(level_price),
+            "price": bubble_price,
             "label": marker_label,
             "detail": detail,
             "meta": timeframe_badge,
