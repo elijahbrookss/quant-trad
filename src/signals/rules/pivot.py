@@ -18,10 +18,16 @@ class PivotBreakoutConfig:
     """Configuration for validating pivot level breakouts."""
 
     confirmation_bars: int = 1
+    early_confirmation_window: int = 3
+    early_confirmation_distance_pct: float = 0.01
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
         if self.confirmation_bars < 1:
             raise ValueError("confirmation_bars must be >= 1")
+        if self.early_confirmation_window < 1:
+            raise ValueError("early_confirmation_window must be >= 1")
+        if self.early_confirmation_distance_pct < 0:
+            raise ValueError("early_confirmation_distance_pct must be >= 0")
 
 
 log = logging.getLogger("PivotBreakoutRule")
@@ -77,10 +83,41 @@ def _resolve_config(context: Mapping[str, Any]) -> PivotBreakoutConfig:
     if confirmation_bars < 1:
         confirmation_bars = _DEFAULT_CONFIG.confirmation_bars
 
-    resolved = PivotBreakoutConfig(confirmation_bars=confirmation_bars)
+    early_window = context.get(
+        "pivot_breakout_early_window",
+        _DEFAULT_CONFIG.early_confirmation_window,
+    )
+    try:
+        early_window = int(early_window)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_window = _DEFAULT_CONFIG.early_confirmation_window
+    if early_window < 1:
+        early_window = _DEFAULT_CONFIG.early_confirmation_window
+
+    early_pct = context.get(
+        "pivot_breakout_early_distance_pct",
+        _DEFAULT_CONFIG.early_confirmation_distance_pct,
+    )
+    try:
+        early_pct = float(early_pct)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_pct = _DEFAULT_CONFIG.early_confirmation_distance_pct
+    if early_pct < 0:
+        early_pct = _DEFAULT_CONFIG.early_confirmation_distance_pct
+
+    resolved = PivotBreakoutConfig(
+        confirmation_bars=confirmation_bars,
+        early_confirmation_window=early_window,
+        early_confirmation_distance_pct=early_pct,
+    )
     log.debug(
-        "pivotbrk | config_resolved | confirmation_bars=%d | context_keys=%s",
+        (
+            "pivotbrk | config_resolved | confirmation_bars=%d | early_window=%d "
+            "| early_pct=%.4f | context_keys=%s"
+        ),
         resolved.confirmation_bars,
+        resolved.early_confirmation_window,
+        resolved.early_confirmation_distance_pct,
         sorted(context.keys()),
     )
     return resolved
@@ -106,7 +143,9 @@ def _evaluate_level(
     confirmation_bars: int,
     *,
     mode: str = "backtest",
-) -> Optional[Dict[str, Any]]:
+    early_window: int,
+    early_distance_pct: float,
+) -> List[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
 
@@ -116,34 +155,70 @@ def _evaluate_level(
             confirmation_bars + 1,
             len(df),
         )
-        return None
+        return []
 
     closes = df["close"]
+    level_price = float(level.price)
 
-    if level.kind == "support":
-        in_range = closes >= level.price
-        out_of_range_mask = closes < level.price
-        breakout_side = "below"
-    else:  # treat everything else as resistance
-        in_range = closes <= level.price
-        out_of_range_mask = closes > level.price
-        breakout_side = "above"
+    def _classify_side(value: float) -> str:
+        if value > level_price:
+            return "above"
+        if value < level_price:
+            return "below"
+        return "at"
 
     level_id = _summarise_level(level)
     last_idx_position = len(closes) - 1
     simulate_current_only = mode in {"sim", "live"}
 
     consecutive = 0
-    for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
-        if is_out_of_range:
-            consecutive += 1
-        else:
-            consecutive = 0
+    candidate_start_pos: Optional[int] = None
+    candidate_max_distance = 0.0
+    active_side: Optional[str] = None
+    run_emitted = False
+    results: List[Dict[str, Any]] = []
+    for position, (index, close_value_obj) in enumerate(closes.items()):
+        close_value = float(close_value_obj)
+        side = _classify_side(close_value)
 
-        if consecutive < confirmation_bars:
+        if side == "at":
+            consecutive = 0
+            candidate_start_pos = None
+            candidate_max_distance = 0.0
+            active_side = None
+            run_emitted = False
             continue
 
-        breakout_start_pos = position - confirmation_bars + 1
+        if active_side != side:
+            active_side = side
+            candidate_start_pos = position
+            consecutive = 1
+            candidate_max_distance = abs(close_value - level_price)
+            run_emitted = False
+        else:
+            consecutive += 1
+            candidate_max_distance = max(
+                candidate_max_distance, abs(close_value - level_price)
+            )
+
+        breakout_start_pos = candidate_start_pos
+
+        if breakout_start_pos is None or run_emitted:
+            continue
+
+        accelerated = False
+        ready = consecutive >= confirmation_bars
+        if not ready:
+            bars_since_start = position - breakout_start_pos + 1
+            threshold = abs(level_price) * early_distance_pct
+            if threshold > 0 and bars_since_start <= early_window:
+                if candidate_max_distance >= threshold:
+                    ready = True
+                    accelerated = True
+
+        if not ready:
+            continue
+
         prev_position = breakout_start_pos - 1
 
         if prev_position < 0:
@@ -154,13 +229,10 @@ def _evaluate_level(
             )
             continue
 
-        prev_index = closes.index[prev_position]
-        if not bool(in_range.loc[prev_index]):
-            log.debug(
-                "pivotbrk | level_skip | level=%s | reason=never_in_range | prev_index=%s",
-                level_id,
-                prev_index,
-            )
+        prev_close = float(closes.iloc[prev_position])
+        prev_side = _classify_side(prev_close)
+        if prev_side == active_side:
+            # Never transitioned across the level, ignore this run.
             continue
 
         if simulate_current_only and position != last_idx_position:
@@ -171,18 +243,22 @@ def _evaluate_level(
         breakout_end_idx = index
         last_bar = df.loc[breakout_end_idx]
 
+        detected_level_kind = "resistance" if active_side == "above" else "support"
+
         meta: Dict[str, Any] = {
-            "level_kind": level.kind,
-            "level_price": float(level.price),
-            "breakout_direction": breakout_side,
+            "level_kind": detected_level_kind,
+            "source_level_kind": getattr(level, "kind", None),
+            "level_price": level_price,
+            "breakout_direction": active_side,
             "confirmation_bars_required": confirmation_bars,
-            "bars_closed_beyond_level": confirmation_bars,
+            "bars_closed_beyond_level": consecutive,
             "breakout_start": _to_datetime(breakout_start_idx),
             "level_lookback": getattr(level, "lookback", None),
             "level_timeframe": getattr(level, "timeframe", None),
             "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
             "trigger_close": float(last_bar["close"]),
             "trigger_time": _to_datetime(breakout_end_idx),
+            "accelerated_confirmation": accelerated,
         }
 
         for column in ("open", "high", "low", "volume"):
@@ -192,18 +268,21 @@ def _evaluate_level(
         log.debug(
             "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
             level_id,
-            breakout_side,
+            active_side,
             last_bar["close"],
         )
 
-        return meta
+        results.append(meta)
+        run_emitted = True
 
-    log.debug(
-        "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
-        level_id,
-        confirmation_bars,
-    )
-    return None
+    if not results:
+        log.debug(
+            "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
+            level_id,
+            confirmation_bars,
+        )
+
+    return results
 
 
 def pivot_breakout_rule(
@@ -261,23 +340,32 @@ def pivot_breakout_rule(
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
-        meta = _evaluate_level(df, level, confirmation_bars, mode=mode)
-        if not meta:
+        metas = _evaluate_level(
+            df,
+            level,
+            confirmation_bars,
+            mode=mode,
+            early_window=config.early_confirmation_window,
+            early_distance_pct=config.early_confirmation_distance_pct,
+        )
+        if not metas:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
             continue
 
-        breakout_time = meta.get("trigger_time", df.index[-1])
-        results.append(
-            {
-                "type": "breakout",
-                "symbol": symbol,
-                "time": _to_datetime(breakout_time),
-                "source": getattr(indicator, "NAME", indicator.__class__.__name__),
-                "direction": level.kind,
-                **meta,
-            }
-        )
-        log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
+        for meta in metas:
+            breakout_time = meta.get("trigger_time", df.index[-1])
+            detected_direction = meta.get("level_kind", getattr(level, "kind", None))
+            results.append(
+                {
+                    "type": "breakout",
+                    "symbol": symbol,
+                    "time": _to_datetime(breakout_time),
+                    "source": getattr(indicator, "NAME", indicator.__class__.__name__),
+                    "direction": detected_direction,
+                    **meta,
+                }
+            )
+            log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
 
     log.debug("%s | run_complete | signals=%d", run_id, len(results))
     return results
@@ -380,6 +468,8 @@ def pivot_signals_to_overlays(
             marker_label = f"{level_kind} breakout"
 
         trigger_close = metadata.get("trigger_close")
+        trigger_high = metadata.get("trigger_high")
+        trigger_low = metadata.get("trigger_low")
         level_tf = metadata.get("level_timeframe")
         detail_prefix = "Closed above" if breakout_direction == "above" else "Closed below"
         detail = f"{detail_prefix} {level_price:.2f}"
@@ -391,9 +481,28 @@ def pivot_signals_to_overlays(
             meta_bits.append(f"TF {level_tf}")
         timeframe_badge = " · ".join(meta_bits) if meta_bits else None
 
+        anchor_price = float(trigger_close) if trigger_close is not None else float(level_price)
+        level_gap = abs(anchor_price - float(level_price))
+        wick_gap_above = 0.0
+        wick_gap_below = 0.0
+        if trigger_high is not None:
+            wick_gap_above = max(0.0, float(trigger_high) - anchor_price)
+        if trigger_low is not None:
+            wick_gap_below = max(0.0, anchor_price - float(trigger_low))
+
+        base_offset = max(anchor_price * 0.001, 0.1)
+        if breakout_direction == "above":
+            offset = max(level_gap * 0.25, wick_gap_above * 0.5, base_offset)
+            bubble_price = anchor_price + offset
+        elif breakout_direction == "below":
+            offset = max(level_gap * 0.25, wick_gap_below * 0.5, base_offset)
+            bubble_price = anchor_price - offset
+        else:
+            bubble_price = anchor_price + base_offset
+
         bubble_payload: Dict[str, Any] = {
             "time": marker_time,
-            "price": float(level_price),
+            "price": bubble_price,
             "label": marker_label,
             "detail": detail,
             "meta": timeframe_badge,

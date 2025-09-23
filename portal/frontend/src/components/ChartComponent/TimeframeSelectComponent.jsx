@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 
 /**
  * Available timeframes:
@@ -24,33 +24,81 @@ const options = [
  * @param {string} [props.placeholder='Select timeframe...'] - Placeholder text
  */
 export function TimeframeSelect({ selected, onChange }) {
-  return (
-    <div className="flex flex-col gap-2 min-w-[13rem]">
-      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Timeframe</span>
-      <div className="flex flex-wrap gap-2">
-        {options.map(option => {
-          const isActive = option.value === selected;
-          const baseClass = 'rounded-md border px-3 py-1.5 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2';
-          const activeClass = option.featured
-            ? 'border-sky-400 bg-sky-500/20 text-sky-100'
-            : 'border-indigo-400 bg-indigo-500/20 text-indigo-100';
-          const inactiveClass = option.featured
-            ? 'border-neutral-800 bg-neutral-900/70 text-neutral-200 hover:border-sky-400 hover:text-sky-200'
-            : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-indigo-400 hover:text-indigo-200';
+  const [open, setOpen] = useState(false);
+  const activeOption = useMemo(
+    () => options.find(option => option.value === selected) ?? options[0],
+    [selected]
+  );
 
-          return (
-            <button
-              key={option.value}
-              type="button"
-              title={option.label}
-              aria-pressed={isActive}
-              onClick={() => onChange(option.value)}
-              className={`${baseClass} ${isActive ? activeClass : inactiveClass}`}
-            >
-              {option.value.toUpperCase()}
-            </button>
-          );
-        })}
+  const toggle = () => setOpen(prev => !prev);
+  const handleSelect = (value) => {
+    onChange(value);
+    setOpen(false);
+  };
+
+  return (
+    <div className="flex min-w-[13rem] flex-col gap-2">
+      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-300">Timeframe</span>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+        >
+          <span>{(activeOption?.label || activeOption?.value || '').toUpperCase()}</span>
+          <svg
+            className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`}
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+          </svg>
+        </button>
+
+        <div
+          role="listbox"
+          className={`absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900/95 shadow-lg backdrop-blur transition-all ${open ? 'max-h-80 opacity-100' : 'pointer-events-none max-h-0 opacity-0'}`}
+        >
+          <div className="divide-y divide-slate-800/80">
+            <div className="grid grid-cols-2 gap-px bg-slate-800/70 p-2">
+              {options.filter(o => o.featured).map(option => {
+                const isActive = option.value === selected;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => handleSelect(option.value)}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-sky-500/20 text-sky-100 ring-1 ring-sky-400/70' : 'text-slate-200 hover:bg-sky-500/10 hover:text-sky-100'}`}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col p-2">
+              {options.filter(o => !o.featured).map(option => {
+                const isActive = option.value === selected;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => handleSelect(option.value)}
+                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-400/60' : 'text-slate-200 hover:bg-indigo-500/10 hover:text-indigo-100'}`}
+                  >
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-xs uppercase tracking-[0.25em] text-slate-400">{option.value}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
