@@ -56,12 +56,22 @@ export class PaneViewManager {
   }
 
   setVABlocks(boxes){ this.ensure(PaneViewType.VA_BOX);
-    this.views.get(PaneViewType.VA_BOX).setBoxes(boxes || []);
+    const view = this.views.get(PaneViewType.VA_BOX);
+    view.setBoxes(boxes || []);
     // seed unique ascending times
     const times = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
       .filter(Number.isFinite).sort((a,b)=>a-b)
       .map(t => ({ time: t, originalData: {} }));
-    this.series.get(PaneViewType.VA_BOX).setData(times);
+    const series = this.series.get(PaneViewType.VA_BOX);
+    series.setData(times);
+
+    const rightEdge = Math.max(
+      ...((boxes || [])
+        .map(b => toSec(b.x2))
+        .filter((t) => typeof t === 'number' && Number.isFinite(t))),
+      -Infinity,
+    );
+    view.setRightEdgeTime(Number.isFinite(rightEdge) ? rightEdge : null);
   }
   setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
     this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
