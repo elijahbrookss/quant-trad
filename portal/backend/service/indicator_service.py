@@ -215,6 +215,14 @@ def overlays_for_instance(
 
     # fetch windowed OHLCV for overlay computation
     provider = AlpacaProvider()
+    logger.info(
+        "Preparing overlay data | indicator=%s | symbol=%s | interval=%s | start=%s | end=%s",
+        inst_id,
+        sym,
+        interval,
+        start,
+        end,
+    )
     ctx = DataContext(symbol=sym, start=start, end=end, interval=interval)
     df = provider.get_ohlcv(ctx)
     if df is None or df.empty:
@@ -264,6 +272,14 @@ def generate_signals_for_instance(
         raise ValueError("Stored indicator has no symbol and none was provided")
 
     provider = AlpacaProvider()
+    logger.info(
+        "Preparing signal data | indicator=%s | symbol=%s | interval=%s | start=%s | end=%s",
+        inst_id,
+        sym,
+        interval,
+        start,
+        end,
+    )
     ctx = DataContext(symbol=sym, start=start, end=end, interval=interval)
     df = provider.get_ohlcv(ctx)
     if df is None or df.empty:
@@ -271,11 +287,16 @@ def generate_signals_for_instance(
 
     rule_config: Dict[str, Any] = dict(config or {})
     rule_config.setdefault("pivot_breakout_confirmation_bars", 1)
+    rule_config.setdefault("symbol", sym)
 
     logger.info(
-        "Running signal rules for indicator %s (%s) with config=%s",
+        "Running signal rules for indicator %s (%s) | symbol=%s | interval=%s | start=%s | end=%s | config=%s",
         inst_id,
         getattr(inst, "NAME", inst.__class__.__name__),
+        sym,
+        interval,
+        start,
+        end,
         rule_config,
     )
 
