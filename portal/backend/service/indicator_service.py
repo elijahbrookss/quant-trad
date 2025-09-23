@@ -286,7 +286,7 @@ def generate_signals_for_instance(
         raise LookupError("No candles available for given window")
 
     rule_config: Dict[str, Any] = dict(config or {})
-    rule_config.setdefault("pivot_breakout_confirmation_bars", 1)
+    rule_config.setdefault("pivot_breakout_confirmation_bars", 3)
     rule_config.setdefault("symbol", sym)
 
     logger.info(
