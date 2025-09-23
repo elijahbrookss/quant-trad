@@ -201,6 +201,10 @@ export const ChartComponent = ({ chartId }) => {
         barSpacingRef.current = null;
       }
 
+      pvMgrRef.current?.updateVABlockContext({
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
       // move view to the loaded window; add small padding for context
       const first = data[0]?.time;
       const last  = data.at(-1)?.time;
