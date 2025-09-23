@@ -57,6 +57,30 @@ def test_pivot_breakout_rule_detects_resistance_breakout():
     assert result["breakout_direction"] == "above"
 
 
+def test_pivot_breakout_rule_emits_mid_series_breakout():
+    closes = [100, 101, 102, 105, 106, 107, 108]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 1
+    breakout = results[0]
+
+    expected_time = df.index[4]
+    assert breakout["time"] == expected_time.to_pydatetime()
+    assert breakout["breakout_start"] == df.index[3].to_pydatetime()
+    assert breakout["trigger_close"] == pytest.approx(closes[4])
+
+
 def test_pivot_breakout_rule_requires_transition_from_range():
     df = _build_dataframe([103, 102, 101, 100, 99])
     level = _build_level(100, kind="support")
