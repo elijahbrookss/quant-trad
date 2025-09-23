@@ -1,15 +1,16 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { ChartStateProvider } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
 import { TabManager } from './components/TabManager'
+import { createLogger } from './utils/logger.js'
 
 export default function App() {
   const chartId = 'main'
+  const { info } = useMemo(() => createLogger('App', { chartId }), [chartId])
 
   useEffect(() => {
-    console.log('[App] Mounted QuantTrad Lab')
-    console.log('[App] chartId:', chartId)
-  }, [])
+    info('app_mounted')
+  }, [info])
 
   return (
     <ChartStateProvider>

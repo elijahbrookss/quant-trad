@@ -134,7 +134,7 @@ def create_instance(type_str: str, name: Optional[str], params: Dict[str, Any]) 
     provider = AlpacaProvider()
 
     try:
-        logger.info("Instantiating %s with params=%s", type_str, params)
+        logger.info("event=indicator_create type=%s params=%s", type_str, params)
         inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as e:
         raise RuntimeError(f"Failed to instantiate indicator: {e}")
@@ -216,7 +216,7 @@ def overlays_for_instance(
     # fetch windowed OHLCV for overlay computation
     provider = AlpacaProvider()
     logger.info(
-        "Preparing overlay data | indicator=%s | symbol=%s | interval=%s | start=%s | end=%s",
+        "event=indicator_overlay_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
         sym,
         interval,
@@ -236,6 +236,7 @@ def overlays_for_instance(
     else:
         raise RuntimeError("Indicator does not implement overlay serialization")
 
+    raw_payload = payload
     payload = _sanitize_json(payload)
     if not payload:
         raise LookupError("No overlays computed for given window")
@@ -247,6 +248,38 @@ def overlays_for_instance(
     )
     if not has_visuals:
         raise LookupError("No overlays computed for given window")
+
+    if isinstance(payload, dict):
+        counts = {k: len(payload.get(k) or []) for k in LAYERS if isinstance(payload.get(k), (list, tuple))}
+    else:
+        counts = {}
+
+    logger.info(
+        "event=indicator_overlay_result indicator=%s price_lines=%s markers=%s boxes=%s segments=%s polylines=%s",
+        inst_id,
+        counts.get("price_lines", 0),
+        counts.get("markers", 0),
+        counts.get("boxes", 0),
+        counts.get("segments", 0),
+        counts.get("polylines", 0),
+    )
+
+    boxes = []
+    if isinstance(raw_payload, dict):
+        boxes = raw_payload.get("boxes") or []
+    if isinstance(boxes, list):
+        for idx, box in enumerate(boxes):
+            if not isinstance(box, dict):
+                continue
+            logger.debug(
+                "event=indicator_overlay_box indicator=%s index=%d x1=%s x2=%s y1=%s y2=%s",
+                inst_id,
+                idx,
+                box.get("x1"),
+                box.get("x2"),
+                box.get("y1"),
+                box.get("y2"),
+            )
 
     return payload
 
@@ -273,7 +306,7 @@ def generate_signals_for_instance(
 
     provider = AlpacaProvider()
     logger.info(
-        "Preparing signal data | indicator=%s | symbol=%s | interval=%s | start=%s | end=%s",
+        "event=indicator_signal_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
         sym,
         interval,
@@ -290,7 +323,7 @@ def generate_signals_for_instance(
     rule_config.setdefault("symbol", sym)
 
     logger.info(
-        "Running signal rules for indicator %s (%s) | symbol=%s | interval=%s | start=%s | end=%s | config=%s",
+        "event=indicator_signal_execute indicator=%s name=%s symbol=%s interval=%s start=%s end=%s config=%s",
         inst_id,
         getattr(inst, "NAME", inst.__class__.__name__),
         sym,
@@ -304,7 +337,7 @@ def generate_signals_for_instance(
     overlays = build_signal_overlays(inst, signals, df, **rule_config)
 
     logger.info(
-        "Signal execution complete for indicator %s: %d signal(s), %d overlay artefact(s)",
+        "event=indicator_signal_complete indicator=%s signals=%d overlays=%d",
         inst_id,
         len(signals),
         len(overlays),

@@ -15,6 +15,7 @@ import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
+import { createLogger } from '../utils/logger.js';
 
 
 // Gold, Maroon, Orange, Purple, Lime, Gray
@@ -62,9 +63,19 @@ export const IndicatorSection = ({ chartId }) => {
 
   const { updateChart, getChart } = useChartState()
 
+  const logger = useMemo(() => createLogger('IndicatorSection', { chartId }), [chartId])
+  const { debug, info, warn, error: logError } = logger
+
   // Read current chart slice
   const chartState = getChart(chartId)
-  console.log('[IndicatorSection] chartId:', chartId, 'chartState:', chartState)
+
+  useEffect(() => {
+    debug('indicator_chart_state_snapshot', {
+      hasState: Boolean(chartState),
+      version: chartState?._version ?? 0,
+      overlayCount: chartState?.overlays?.length ?? 0,
+    });
+  }, [chartState, debug]);
 
   // Derive ISO start/end from dateRange
   const [startISO, endISO] = useMemo(() => {
@@ -76,12 +87,15 @@ export const IndicatorSection = ({ chartId }) => {
 
   useEffect(() => {
     if (!chartState || !chartState._version) {
-      console.warn('[IndicatorSection] No chart state version yet, skipping fetch');
+      warn('indicator_refresh_skipped_version', { reason: 'no_version' });
       setIsLoading(false);
       return;
     }
     if (!chartState.symbol || !chartState.interval) {
-      console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch');
+      warn('indicator_refresh_skipped_inputs', {
+        symbol: chartState.symbol,
+        interval: chartState.interval,
+      });
       setIsLoading(false);
       return;
     }
@@ -98,7 +112,7 @@ export const IndicatorSection = ({ chartId }) => {
       } catch (e) {
         if (isMounted) {
           setError(e.message);
-          console.error('[IndicatorSection] Refresh failed:', e);
+          logError('indicator_refresh_failed', e);
         }
       } finally {
         if (isMounted) setIsLoading(false);
@@ -124,7 +138,6 @@ export const IndicatorSection = ({ chartId }) => {
   const refreshEnabledOverlays = async (list = indicators) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
-    console.log('[IndicatorSection - Overlays] Refresh start for chartId:', chartId);
     if (!chartState) return;
 
     // if list is empty/undefined, try one fetch to seed; otherwise use provided/current list
@@ -135,7 +148,7 @@ export const IndicatorSection = ({ chartId }) => {
         setIndicators(working);
         updateChart(chartId, { indicators: working });
       } catch (e) {
-        console.error('[IndicatorSection - Overlays] Failed to seed indicators:', e);
+        logError('indicator_seed_failed', e);
         updateChart(chartId, { overlays: [] });
         return;
       }
@@ -143,6 +156,11 @@ export const IndicatorSection = ({ chartId }) => {
 
     // patch params for enabled indicators if symbol/interval mismatch
     const enabled = working.filter(i => i?.enabled);
+    info('overlay_refresh_start', {
+      enabled: enabled.length,
+      symbol: chartState.symbol,
+      interval: chartState.interval,
+    });
     const patched = await Promise.all(enabled.map(async (ind) => {
       const p = ind?.params || {};
       const desiredSymbol = chartState.symbol;
@@ -156,7 +174,7 @@ export const IndicatorSection = ({ chartId }) => {
         const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
         return updated || { ...ind, params: nextParams };
       } catch (e) {
-        console.warn('[IndicatorSection - Overlays] Param patch failed for', ind.id, e);
+        warn('indicator_param_patch_failed', { indicatorId: ind.id, message: e?.message }, e);
         // fall back locally so overlays still align this session
         return { ...ind, params: { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO } };
       }
@@ -182,6 +200,11 @@ export const IndicatorSection = ({ chartId }) => {
       patched.map(async (ind) => {
         try {
           const payload = await fetchIndicatorOverlays(ind.id, body);
+          info('overlay_fetch_success', {
+            indicatorId: ind.id,
+            indicatorType: ind.type,
+            hasPayload: Boolean(payload),
+          });
           return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
         } catch (e) {
           const msg = String(e?.message ?? e);
@@ -190,10 +213,10 @@ export const IndicatorSection = ({ chartId }) => {
             msg.includes('No candles available') ||
             msg.includes('No overlays computed')
           ) {
-            console.warn(`[IndicatorSection - Overlays] Skipping ${ind.id}: ${msg}`);
+            warn('overlay_fetch_skipped', { indicatorId: ind.id, message: msg });
             return null;
           }
-          console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
+          logError('overlay_fetch_failed', { indicatorId: ind.id }, e);
           return null;
         }
       })
@@ -202,7 +225,11 @@ export const IndicatorSection = ({ chartId }) => {
     const overlaysPayload = results.filter(Boolean);
     const colored = applyIndicatorColors(overlaysPayload, indColors);
     updateChart(chartId, { overlays: colored, overlayLoading: false });
-    console.log('[IndicatorSection] Updated overlays (colored):', colored);
+    info('overlay_refresh_complete', {
+      overlays: colored.length,
+      indicatorsProcessed: patched.length,
+      enabledCount: enabled.length,
+    });
   };
 
   // Handlers for modal save/delete
@@ -247,7 +274,7 @@ export const IndicatorSection = ({ chartId }) => {
       setError(null);
     } catch (e) {
       setError(e.message);
-      console.error('[IndicatorSection] Error saving indicator:', e);
+      logError('indicator_save_failed', e);
     }
   };
 
@@ -257,7 +284,7 @@ export const IndicatorSection = ({ chartId }) => {
       setIndicators(prev => prev.filter(i => i.id !== id))
     } catch (e) {
       setError(e.message)
-      console.error('[IndicatorSection] Error deleting indicator:', e)
+      logError('indicator_delete_failed', e)
     }
   }
 
