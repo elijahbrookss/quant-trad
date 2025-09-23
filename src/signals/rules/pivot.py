@@ -100,14 +100,12 @@ def _select_symbol(context: Mapping[str, Any], indicator: Any) -> Optional[str]:
     return getattr(indicator, "symbol", None)
 
 
-def _level_out_of_range(mask: pd.Series) -> bool:
-    return bool(mask.all()) if len(mask) else False
-
-
 def _evaluate_level(
     df: pd.DataFrame,
     level: Level,
     confirmation_bars: int,
+    *,
+    mode: str = "backtest",
 ) -> Optional[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
@@ -121,64 +119,91 @@ def _evaluate_level(
         return None
 
     closes = df["close"]
-    recent = closes.iloc[-confirmation_bars:]
-    prev_close = closes.iloc[-confirmation_bars - 1]
 
     if level.kind == "support":
-        out_of_range = recent < level.price
-        was_in_range = prev_close >= level.price
+        in_range = closes >= level.price
+        out_of_range_mask = closes < level.price
         breakout_side = "below"
     else:  # treat everything else as resistance
-        out_of_range = recent > level.price
-        was_in_range = prev_close <= level.price
+        in_range = closes <= level.price
+        out_of_range_mask = closes > level.price
         breakout_side = "above"
 
     level_id = _summarise_level(level)
-    if not was_in_range:
+    last_idx_position = len(closes) - 1
+    simulate_current_only = mode in {"sim", "live"}
+
+    consecutive = 0
+    for position, (index, is_out_of_range) in enumerate(out_of_range_mask.items()):
+        if is_out_of_range:
+            consecutive += 1
+        else:
+            consecutive = 0
+
+        if consecutive < confirmation_bars:
+            continue
+
+        breakout_start_pos = position - confirmation_bars + 1
+        prev_position = breakout_start_pos - 1
+
+        if prev_position < 0:
+            log.debug(
+                "pivotbrk | level_skip | level=%s | reason=no_prior_bar | position=%d",
+                level_id,
+                position,
+            )
+            continue
+
+        prev_index = closes.index[prev_position]
+        if not bool(in_range.loc[prev_index]):
+            log.debug(
+                "pivotbrk | level_skip | level=%s | reason=never_in_range | prev_index=%s",
+                level_id,
+                prev_index,
+            )
+            continue
+
+        if simulate_current_only and position != last_idx_position:
+            # In live/sim modes only emit for the latest candle.
+            continue
+
+        breakout_start_idx = closes.index[breakout_start_pos]
+        breakout_end_idx = index
+        last_bar = df.loc[breakout_end_idx]
+
+        meta: Dict[str, Any] = {
+            "level_kind": level.kind,
+            "level_price": float(level.price),
+            "breakout_direction": breakout_side,
+            "confirmation_bars_required": confirmation_bars,
+            "bars_closed_beyond_level": confirmation_bars,
+            "breakout_start": _to_datetime(breakout_start_idx),
+            "level_lookback": getattr(level, "lookback", None),
+            "level_timeframe": getattr(level, "timeframe", None),
+            "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
+            "trigger_close": float(last_bar["close"]),
+            "trigger_time": _to_datetime(breakout_end_idx),
+        }
+
+        for column in ("open", "high", "low", "volume"):
+            if column in df.columns:
+                meta[f"trigger_{column}"] = float(last_bar[column])
+
         log.debug(
-            "pivotbrk | level_skip | level=%s | reason=never_in_range | prev_close=%.5f",
+            "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
             level_id,
-            prev_close,
+            breakout_side,
+            last_bar["close"],
         )
-        return None
 
-    if not _level_out_of_range(out_of_range):
-        log.debug(
-            "pivotbrk | level_skip | level=%s | reason=confirmation_failed | confirmation_bars=%d",
-            level_id,
-            confirmation_bars,
-        )
-        return None
-
-    breakout_start_idx = df.index[-confirmation_bars]
-    breakout_end_idx = df.index[-1]
-    last_bar = df.iloc[-1]
-
-    meta: Dict[str, Any] = {
-        "level_kind": level.kind,
-        "level_price": float(level.price),
-        "breakout_direction": breakout_side,
-        "confirmation_bars_required": confirmation_bars,
-        "bars_closed_beyond_level": confirmation_bars,
-        "breakout_start": _to_datetime(breakout_start_idx),
-        "level_lookback": getattr(level, "lookback", None),
-        "level_timeframe": getattr(level, "timeframe", None),
-        "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
-        "trigger_close": float(last_bar["close"]),
-    }
-
-    for column in ("open", "high", "low", "volume"):
-        if column in df.columns:
-            meta[f"trigger_{column}"] = float(last_bar[column])
+        return meta
 
     log.debug(
-        "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
+        "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
         level_id,
-        breakout_side,
-        last_bar["close"],
+        confirmation_bars,
     )
-
-    return meta
+    return None
 
 
 def pivot_breakout_rule(
@@ -230,16 +255,18 @@ def pivot_breakout_rule(
         confirmation_bars,
     )
 
+    mode = str(context.get("mode", "backtest")).lower()
+
     results: List[Dict[str, Any]] = []
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
-        meta = _evaluate_level(df, level, confirmation_bars)
+        meta = _evaluate_level(df, level, confirmation_bars, mode=mode)
         if not meta:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
             continue
 
-        breakout_time = df.index[-1]
+        breakout_time = meta.get("trigger_time", df.index[-1])
         results.append(
             {
                 "type": "breakout",
