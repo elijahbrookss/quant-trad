@@ -138,6 +138,103 @@ export const ChartComponent = ({ chartId }) => {
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
 
+  const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
+    const effectiveSymbol = targetSymbol ?? symbol;
+    const effectiveInterval = targetInterval ?? interval;
+    const effectiveRange = targetRange ?? dateRange;
+    const [startDate, endDate] = effectiveRange || [];
+    const startISO = startDate?.toISOString();
+    const endISO = endDate?.toISOString();
+
+    try {
+      setDataLoading(true);
+      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
+        warn('chart_load_missing_inputs', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+        return;
+      }
+
+      markAttempt();
+      info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+      const resp = await fetchCandleData({
+        symbol: effectiveSymbol,
+        timeframe: effectiveInterval,
+        start: startISO,
+        end: endISO,
+      });
+
+      if (!Array.isArray(resp) || resp.length === 0) {
+        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
+        markSuccess();
+        return;
+      }
+
+      const data = resp
+        .filter(c => c && typeof c.time === 'number')
+        .map(c => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+
+      if (!seriesRef.current) {
+        warn('series missing');
+        return;
+      }
+
+      seriesRef.current.setData(data);
+
+      lastBarRef.current = data.at(-1);
+
+      if (data.length > 1) {
+        let minStep = Infinity;
+        for (let i = 1; i < data.length; i += 1) {
+          const step = data[i].time - data[i - 1].time;
+          if (Number.isFinite(step) && step > 0 && step < minStep) {
+            minStep = step;
+          }
+        }
+        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
+      } else {
+        barSpacingRef.current = null;
+      }
+
+      pvMgrRef.current?.updateVABlockContext({
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
+      const first = data[0]?.time;
+      const last = data.at(-1)?.time;
+      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+        const span = Math.max(1, last - first);
+        const pad = Math.max(1, Math.floor(span * 0.05));
+        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
+      } else {
+        chartRef.current?.timeScale().scrollToRealTime();
+      }
+
+      info('candles_fetch_success', {
+        points: data.length,
+        first: data[0]?.time,
+        last: data.at(-1)?.time,
+      });
+
+      markSuccess();
+      updateChart?.(chartId, {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        dateRange: effectiveRange,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      markError(e);
+      error('candles_fetch_failed', e);
+    } finally {
+      setDataLoading(false);
+    }
+  }, [symbol, interval, dateRange, info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
+
   // Create chart once.
   useEffect(() => {
     const el = chartContainerRef.current;
@@ -153,8 +250,8 @@ export const ChartComponent = ({ chartId }) => {
     const series = chartRef.current.addSeries(CandlestickSeries, {
       ...seriesOptions,
       priceScaleId: 'right',
-    })
-    seriesRef.current = series
+    });
+    seriesRef.current = series;
 
     // Create pane view manager.
     pvMgrRef.current = new PaneViewManager(chartRef.current);
@@ -264,104 +361,6 @@ export const ChartComponent = ({ chartId }) => {
     setPalOpen(false);
     handleApply({ symbol: sym });
   };
-
-  const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
-    const effectiveSymbol = targetSymbol ?? symbol;
-    const effectiveInterval = targetInterval ?? interval;
-    const effectiveRange = targetRange ?? dateRange;
-    const [startDate, endDate] = effectiveRange || [];
-    const startISO = startDate?.toISOString();
-    const endISO = endDate?.toISOString();
-
-    try {
-      setDataLoading(true);
-      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
-        warn('chart_load_missing_inputs', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
-        return;
-      }
-
-      markAttempt();
-      info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
-      const resp = await fetchCandleData({
-        symbol: effectiveSymbol,
-        timeframe: effectiveInterval,
-        start: startISO,
-        end: endISO,
-      });
-
-      if (!Array.isArray(resp) || resp.length === 0) {
-        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
-        markSuccess();
-        return;
-      }
-
-      const data = resp
-        .filter(c => c && typeof c.time === 'number')
-        .map(c => ({
-          time: c.time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }));
-
-      if (!seriesRef.current) {
-        warn('series missing');
-        return;
-      }
-
-      seriesRef.current.setData(data);
-
-      lastBarRef.current = data.at(-1);
-
-      if (data.length > 1) {
-        let minStep = Infinity;
-        for (let i = 1; i < data.length; i += 1) {
-          const step = data[i].time - data[i - 1].time;
-          if (Number.isFinite(step) && step > 0 && step < minStep) {
-            minStep = step;
-          }
-        }
-        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
-      } else {
-        barSpacingRef.current = null;
-      }
-
-      pvMgrRef.current?.updateVABlockContext({
-        lastSeriesTime: lastBarRef.current?.time,
-        barSpacing: barSpacingRef.current,
-      });
-      const first = data[0]?.time;
-      const last = data.at(-1)?.time;
-      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
-        const span = Math.max(1, last - first);
-        const pad = Math.max(1, Math.floor(span * 0.05));
-        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
-      } else {
-        chartRef.current?.timeScale().scrollToRealTime();
-      }
-
-      info('candles_fetch_success', {
-        points: data.length,
-        first: data[0]?.time,
-        last: data.at(-1)?.time,
-      });
-
-      markSuccess();
-      updateChart?.(chartId, {
-        symbol: effectiveSymbol,
-        interval: effectiveInterval,
-        dateRange: effectiveRange,
-        lastUpdatedAt: new Date().toISOString(),
-      });
-    } catch (e) {
-      markError(e);
-      error('candles_fetch_failed', e);
-    } finally {
-      setDataLoading(false);
-    }
-  }, [symbol, interval, dateRange, info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
-
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
