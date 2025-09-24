@@ -509,19 +509,19 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
-  const surfaceClass = 'rounded-3xl border border-zinc-200 bg-white px-6 py-6 shadow-sm';
+  const surfaceClass = 'rounded-3xl border border-neutral-900 bg-neutral-900/60 px-6 py-6 shadow-[0_28px_90px_-60px_rgba(0,0,0,0.85)]';
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <h2 className="text-2xl font-semibold text-zinc-900">Market snapshot</h2>
-        <p className="max-w-2xl text-sm text-zinc-500">
-          Adjust the timeframe, symbol, and window to plan your next move.
+        <h2 className="text-2xl font-semibold text-neutral-100">Market snapshot</h2>
+        <p className="max-w-2xl text-sm text-neutral-400">
+          Core workspace inputs for this symbol.
         </p>
       </div>
 
       {rangeWarning && (
-        <div className="flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-900/60 bg-amber-950/50 px-4 py-3 text-sm text-amber-200">
           <span aria-hidden className="text-lg">⚠️</span>
           <span className="font-medium">{rangeWarning}</span>
         </div>
@@ -533,11 +533,11 @@ export const ChartComponent = ({ chartId }) => {
             <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
               <div className="flex min-w-[10rem] flex-col gap-2">
-                <span className="text-[11px] uppercase tracking-[0.24em] text-zinc-400">Symbol</span>
+                <span className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Symbol</span>
                 <button
                   type="button"
                   onClick={() => setPalOpen(true)}
-                  className="inline-flex w-full items-center justify-between rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
+                  className="inline-flex w-full items-center justify-between rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm font-semibold text-neutral-200 transition hover:border-neutral-600 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
                 >
                   <span className="uppercase tracking-wide">{symbol}</span>
                   <svg
@@ -546,7 +546,7 @@ export const ChartComponent = ({ chartId }) => {
                     fill="none"
                     stroke="currentColor"
                     strokeWidth={1.5}
-                    className="h-4 w-4 text-zinc-400"
+                    className="h-4 w-4 text-neutral-500"
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487 19.5 7.125M4.5 19.5l2.569-.428a2 2 0 0 0 1.093-.554L19.5 7.125a1.875 1.875 0 1 0-2.652-2.652L5.51 16.366a2 2 0 0 0-.554 1.093L4.5 19.5Z" />
                   </svg>
@@ -556,12 +556,12 @@ export const ChartComponent = ({ chartId }) => {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="text-left text-xs text-zinc-500">
-              <div className="font-semibold uppercase tracking-[0.24em] text-zinc-400">Refresh</div>
-              <div>Apply your latest settings</div>
+            <div className="text-left text-xs text-neutral-500">
+              <div className="font-semibold uppercase tracking-[0.24em] text-neutral-500">Refresh</div>
+              <div className="text-neutral-400">Apply your latest settings</div>
             </div>
             <button
-              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-zinc-300 bg-white text-zinc-600 shadow-sm transition hover:border-zinc-400 hover:text-zinc-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-neutral-700 bg-neutral-900 text-neutral-200 shadow-sm transition hover:border-neutral-500 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
               onClick={handleApply}
               type="button"
               title="Fetch latest data"
@@ -587,14 +587,14 @@ export const ChartComponent = ({ chartId }) => {
       </div>
 
       <div className={`${surfaceClass} relative h-[560px] overflow-hidden px-0 py-0`}>
-        <div ref={chartContainerRef} className="h-full w-full rounded-[28px] bg-zinc-50" />
+        <div ref={chartContainerRef} className="h-full w-full rounded-[28px] bg-neutral-950" />
         <button
           type="button"
           onClick={() => setPalOpen(true)}
-          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/90 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-zinc-600 shadow-sm transition hover:border-zinc-300 hover:text-zinc-900"
+          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-neutral-300 shadow-sm transition hover:border-neutral-500 hover:text-neutral-50"
           title="Open symbol presets (/)"
         >
-          <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 transition group-hover:bg-zinc-600" />
+          <span className="h-1.5 w-1.5 rounded-full bg-neutral-500 transition group-hover:bg-neutral-200" />
           Presets
         </button>
 

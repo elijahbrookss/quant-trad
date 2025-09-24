@@ -41,6 +41,7 @@ export default function IndicatorModalV2({
   const [name, setName] = useState(initial?.name || "");
   const [params, setParams] = useState(initial?.params || {});
   const [metaErr, setMetaErr] = useState(null);
+  const [intDrafts, setIntDrafts] = useState({});
 
   const logger = useMemo(
     () => createLogger("IndicatorModal", { indicatorId: initial?.id ?? null }),
@@ -133,6 +134,7 @@ export default function IndicatorModalV2({
       ui_enums: undefined,
     });
     setMetaErr(null);
+    setIntDrafts({});
   }, [initial, isOpen]);
 
   // 3) When a type is chosen, fetch its metadata
@@ -165,6 +167,36 @@ export default function IndicatorModalV2({
     setAdvancedOpen(false);
     setRawOpen(false);
   }, [isOpen, typeId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setIntDrafts((prev) => {
+      let changed = false;
+      const next = { ...prev };
+
+      intListKeys.forEach((key) => {
+        const raw = params[key];
+        const normalized = Array.isArray(raw)
+          ? listToString(raw)
+          : typeof raw === "string"
+            ? raw
+            : raw ?? "";
+        if (prev[key] !== normalized) {
+          next[key] = normalized;
+          changed = true;
+        }
+      });
+
+      Object.keys(next).forEach((key) => {
+        if (!intListKeys.has(key)) {
+          delete next[key];
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [isOpen, params, intListKeys]);
 
   // Heuristics for grouping: Essential vs Advanced
   const basicHints = useMemo(() => new Set([
@@ -221,6 +253,10 @@ export default function IndicatorModalV2({
     // searchable filter
     if (filter && !key.toLowerCase().includes(filter.toLowerCase())) return null;
 
+    const displayValue = intListKeys.has(key)
+      ? intDrafts[key] ?? listToString(val)
+      : val ?? "";
+
     return (
       <div
         key={key}
@@ -248,10 +284,13 @@ export default function IndicatorModalV2({
             inputMode="numeric"
             pattern="^[0-9\\s,;]*$"
             className="w-full rounded-lg border border-neutral-700/70 bg-neutral-900/60 px-3 py-2 text-sm focus:border-indigo-500/70 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-            value={listToString(val)}
+            value={displayValue}
             placeholder="e.g., 5, 10, 20"
-            onChange={(e) => setParams((p) => ({ ...p, [key]: e.target.value }))}
-            onBlur={(e) => setParams((p) => ({ ...p, [key]: toIntList(e.target.value) }))}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              setIntDrafts((prev) => ({ ...prev, [key]: nextVal }));
+              setParams((p) => ({ ...p, [key]: nextVal }));
+            }}
           />
         ) : enumVals?.length ? (
           <select
@@ -303,7 +342,16 @@ export default function IndicatorModalV2({
   const handleSubmit = () => {
     if (!typeId) return setMetaErr("Please select a type.");
     if (!name.trim()) return setMetaErr("Please enter a name.");
-    onSave({ id: initial?.id, type: typeId, name, params });
+    const cooked = Object.fromEntries(
+      Object.entries(params).map(([key, value]) => {
+        if (intListKeys.has(key)) {
+          return [key, toIntList(value)];
+        }
+        return [key, value];
+      }),
+    );
+
+    onSave({ id: initial?.id, type: typeId, name, params: cooked });
   };
 
   const resetToDefaults = () => {
@@ -311,6 +359,7 @@ export default function IndicatorModalV2({
     (typeMeta.required_params || []).forEach((key) => (seed[key] = ""));
     Object.entries(typeMeta.default_params || {}).forEach(([k, v]) => (seed[k] = v));
     setParams(seed);
+    setIntDrafts({});
   };
 
   const copyParams = async () => {
@@ -345,9 +394,6 @@ export default function IndicatorModalV2({
             <DialogTitle className="text-lg font-semibold">
               {initial?.id ? "Edit Indicator" : "Create Indicator"}
             </DialogTitle>
-            <p className="mt-1 text-sm text-neutral-400">
-              Configure signal logic quickly with grouped essentials and one-click tools.
-            </p>
           </div>
 
           <div className="flex flex-col gap-6 px-6 py-6 lg:flex-row">

@@ -38,14 +38,14 @@ export function TimeframeSelect({ selected, onChange }) {
 
   return (
     <div className="flex min-w-[13rem] flex-col gap-2">
-      <span className="text-[11px] uppercase tracking-[0.24em] text-zinc-400">Timeframe</span>
+      <span className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Timeframe</span>
       <div className="relative">
         <button
           type="button"
           onClick={toggle}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className="flex w-full items-center justify-between rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
+          className="flex w-full items-center justify-between rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm font-semibold text-neutral-200 transition hover:border-neutral-600 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
         >
           <span>{(activeOption?.label || activeOption?.value || '').toUpperCase()}</span>
           <svg
@@ -62,10 +62,10 @@ export function TimeframeSelect({ selected, onChange }) {
 
         <div
           role="listbox"
-          className={`absolute z-40 mt-2 w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg transition-all ${open ? 'max-h-80 opacity-100' : 'pointer-events-none max-h-0 opacity-0'}`}
+          className={`absolute z-40 mt-2 w-full overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950/95 shadow-xl backdrop-blur transition-all ${open ? 'max-h-80 opacity-100' : 'pointer-events-none max-h-0 opacity-0'}`}
         >
-          <div className="divide-y divide-zinc-100">
-            <div className="grid grid-cols-2 gap-px bg-zinc-100 p-2">
+          <div className="divide-y divide-neutral-800/60">
+            <div className="grid grid-cols-2 gap-px bg-neutral-900/60 p-2">
               {options.filter(o => o.featured).map(option => {
                 const isActive = option.value === selected;
                 return (
@@ -73,7 +73,7 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400 ${isActive ? 'bg-zinc-200 text-zinc-900 ring-1 ring-zinc-300' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500 ${isActive ? 'bg-neutral-800 text-neutral-50 ring-1 ring-neutral-500' : 'text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100'}`}
                   >
                     {option.label}
                   </button>
@@ -89,10 +89,10 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400 ${isActive ? 'bg-zinc-200 text-zinc-900 ring-1 ring-zinc-300' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`}
+                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500 ${isActive ? 'bg-neutral-800 text-neutral-50 ring-1 ring-neutral-500' : 'text-neutral-400 hover:bg-neutral-800/70 hover:text-neutral-100'}`}
                   >
                     <span className="font-medium">{option.label}</span>
-                    <span className="text-xs uppercase tracking-[0.25em] text-zinc-400">{option.value}</span>
+                    <span className="text-xs uppercase tracking-[0.25em] text-neutral-500">{option.value}</span>
                   </button>
                 );
               })}

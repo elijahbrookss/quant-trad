@@ -12,8 +12,8 @@ export default function SymbolPresets({ selected, onPick }) {
         'px-2.5 py-1 rounded-full text-xs transition-colors',
         'border',
         active
-          ? 'bg-blue-600/80 text-white border-blue-400 shadow-sm'
-          : 'bg-neutral-800/70 text-neutral-200 border-neutral-600 hover:bg-neutral-700',
+          ? 'bg-emerald-600/70 text-neutral-50 border-emerald-400 shadow-sm'
+          : 'bg-neutral-900/60 text-neutral-300 border-neutral-700 hover:bg-neutral-800',
       ].join(' ')}
       title={`Load ${label}`}
     >

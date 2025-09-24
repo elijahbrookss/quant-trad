@@ -21,7 +21,7 @@ export function DateRangePickerComponent({
   useEffect(() => {
     if (!startDate || !endDate) return;
     if (startDate > endDate) setDateRange([startDate, startDate]);
-  }, [startDate, endDate]);
+  }, [startDate, endDate, setDateRange]);
 
   return (
     <div className="flex flex-col gap-2 min-w-[19rem]">
@@ -43,7 +43,7 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
           />
         </div>
 
@@ -67,7 +67,7 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
           />
         </div>
       </div>

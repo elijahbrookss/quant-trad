@@ -1,10 +1,10 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
-  background-color: #f4f5f7;
-  color: #1f2933;
+  background-color: #09090b;
+  color: #e4e4e7;
 }
 
 * {
@@ -15,8 +15,8 @@
 body {
   margin: 0;
   min-height: 100%;
-  background-color: #f4f5f7;
-  color: #1f2933;
+  background-color: #09090b;
+  color: #e4e4e7;
 }
 
 #root {

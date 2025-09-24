@@ -52,7 +52,7 @@ const normalizeParams = (params) => {
 };
 
 // Manages the list of indicators and syncs enabled ones to the chart context
-export const IndicatorSection = ({ chartId }) => {
+export const IndicatorSection = ({ chartId, showEnabledOnly = false, onToggleEnabledOnly }) => {
   const [indicators, setIndicators] = useState([])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -258,6 +258,7 @@ export const IndicatorSection = ({ chartId }) => {
         result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
         setIndicators((prev) => {
           const next = prev.map((i) => (i.id === result.id ? result : i));
+          updateChart(chartId, { indicators: next });
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
@@ -265,6 +266,7 @@ export const IndicatorSection = ({ chartId }) => {
         result = await createIndicator({ type: meta.type, params, name: meta.name });
         setIndicators((prev) => {
           const next = [...prev, result];
+          updateChart(chartId, { indicators: next });
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
@@ -281,7 +283,11 @@ export const IndicatorSection = ({ chartId }) => {
   const handleDelete = async (id) => {
     try {
       await deleteIndicator(id)
-      setIndicators(prev => prev.filter(i => i.id !== id))
+      setIndicators(prev => {
+        const next = prev.filter(i => i.id !== id);
+        updateChart(chartId, { indicators: next });
+        return next;
+      })
     } catch (e) {
       setError(e.message)
       logError('indicator_delete_failed', e)
@@ -292,9 +298,48 @@ export const IndicatorSection = ({ chartId }) => {
   const toggleEnable = (id) => {
     setIndicators(prev => {
       const next = prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i);
+      updateChart(chartId, { indicators: next });
       queueMicrotask(() => { void refreshEnabledOverlays(next); }); // microtask prevents state timing issues
       return next;
     });
+  };
+
+  const handleClone = async (id) => {
+    const base = indicators.find((i) => i.id === id);
+    if (!base) return;
+
+    try {
+      const core = normalizeParams(base.params || {});
+      const params = {
+        ...core,
+        start: startISO,
+        end: endISO,
+        symbol: chartState?.symbol,
+        interval: chartState?.interval,
+      };
+
+      const baseName = base.name?.trim() ? base.name.trim() : base.type;
+      const cloneName = `${baseName} Copy`;
+      const created = await createIndicator({ type: base.type, name: cloneName, params });
+      const enriched = { ...created, enabled: false };
+
+      setIndicators((prev) => {
+        const next = [...prev, enriched];
+        updateChart(chartId, { indicators: next });
+        queueMicrotask(() => { void refreshEnabledOverlays(next); });
+        return next;
+      });
+
+      setIndColors((prev) => {
+        const baseColor = prev[base.id];
+        return baseColor ? { ...prev, [enriched.id]: baseColor } : prev;
+      });
+
+      info('indicator_cloned', { sourceId: base.id, cloneId: enriched.id });
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_clone_failed', e);
+    }
   };
 
 
@@ -326,6 +371,13 @@ export const IndicatorSection = ({ chartId }) => {
     setIndColors(prev => ({ ...prev, [indicatorId]: color }));
   };
 
+  const visibleIndicators = useMemo(
+    () => (showEnabledOnly ? indicators.filter((ind) => ind?.enabled) : indicators),
+    [indicators, showEnabledOnly],
+  );
+
+  const hasAnyIndicators = indicators.length > 0;
+
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   const isSignalsLoading = !!chartState?.signalsLoading
@@ -334,15 +386,15 @@ export const IndicatorSection = ({ chartId }) => {
   return (
     <div className="space-y-6">
       {error && (
-        <div className="relative rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600 shadow-sm">
+        <div className="relative rounded-lg border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200 shadow-lg">
           <div className="pr-6">
-            <p className="font-medium text-rose-700">Request failed</p>
-            <p className="mt-1 text-rose-600">{error}</p>
+            <p className="font-medium text-rose-200">Request failed</p>
+            <p className="mt-1 text-rose-300">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="absolute right-3 top-3 text-rose-400 transition hover:text-rose-600"
+            className="absolute right-3 top-3 text-rose-400 transition hover:text-rose-200"
             aria-label="Dismiss error"
           >
             <X className="size-4" />
@@ -351,8 +403,8 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {isLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">
-          <svg className="size-4 animate-spin text-zinc-400" viewBox="0 0 24 24" role="status" aria-hidden="true">
+        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/80 px-3 py-2 text-sm text-neutral-400">
+          <svg className="size-4 animate-spin text-neutral-500" viewBox="0 0 24 24" role="status" aria-hidden="true">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
           </svg>
@@ -362,7 +414,7 @@ export const IndicatorSection = ({ chartId }) => {
 
       <button
         onClick={() => openEditModal()}
-        className="flex w-full cursor-pointer flex-col items-center rounded-lg border border-dashed border-zinc-300 bg-white px-4 py-3 text-zinc-500 shadow-sm transition hover:border-zinc-400 hover:text-zinc-700"
+        className="flex w-full cursor-pointer flex-col items-center rounded-lg border border-dashed border-neutral-800 bg-neutral-900/60 px-4 py-3 text-neutral-400 shadow-sm transition hover:border-neutral-700 hover:text-neutral-200"
       >
         {/* plus icon preserved */}
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
@@ -373,17 +425,18 @@ export const IndicatorSection = ({ chartId }) => {
 
       {/* List of indicators */}
       <div className="space-y-1">
-          {indicators.map(indicator => {
+          {visibleIndicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
             return (
               <IndicatorCard
                 key={indicator.id}
                 indicator={indicator}
-                color={indColors[indicator.id] || '#60a5fa'}
+                color={indColors[indicator.id] || '#f97316'}
                 onToggle={toggleEnable}
                 onEdit={openEditModal}
                 onDelete={handleDelete}
+                onClone={handleClone}
                 onGenerateSignals={generateSignals}
                 onSelectColor={handleSelectColor}
                 colorSwatches={COLOR_SWATCHES}
@@ -393,8 +446,21 @@ export const IndicatorSection = ({ chartId }) => {
             )
           })}
 
-          {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 py-6 text-center text-sm text-zinc-500">
+          {!isLoading && showEnabledOnly && hasAnyIndicators && visibleIndicators.length === 0 && (
+            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/60 px-4 py-6 text-center text-sm text-neutral-400">
+              No enabled indicators right now.
+              <button
+                type="button"
+                className="ml-2 rounded-full border border-neutral-700 px-3 py-1 text-xs uppercase tracking-[0.2em] text-neutral-300 transition hover:border-neutral-500 hover:text-neutral-100"
+                onClick={() => onToggleEnabledOnly?.(false)}
+              >
+                Show all
+              </button>
+            </div>
+          )}
+
+          {!isLoading && !hasAnyIndicators && (
+            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/60 px-4 py-6 text-center text-sm text-neutral-400">
               No indicators yet. Create one to get started.
             </div>
           )}
