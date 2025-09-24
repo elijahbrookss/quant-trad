@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
-import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
+import { TimeframeSelect } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent';
 import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
@@ -165,7 +165,7 @@ export const ChartComponent = ({ chartId }) => {
     return () => ro.disconnect();
   }, [debug]);
 
-  useEffect(() => {
+  useEffect(() => { 
     const onKey = (e) => {
       if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const el = e.target;
@@ -178,13 +178,19 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    const openPalette = () => setPalOpen(true);
+    window.addEventListener('qt-open-symbol-palette', openPalette);
+    return () => window.removeEventListener('qt-open-symbol-palette', openPalette);
+  }, []);
+
   useEffect(() => () => {
     if (timeframeWarningRef.current) {
       clearTimeout(timeframeWarningRef.current);
     }
   }, []);
 
-  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
+  const applySymbol = (sym) => { setSymbol(sym); setPalOpen(false); handleApply(); };
   // Data loader.
   const loadChartData = useCallback(async () => {
     try {
@@ -503,48 +509,59 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
-  const surfaceClass = 'rounded-3xl border border-slate-800/70 bg-slate-950/60 px-6 py-5 shadow-[0_35px_65px_-40px_rgba(15,23,42,0.85)] backdrop-blur';
+  const surfaceClass = 'rounded-3xl border border-zinc-200 bg-white px-6 py-6 shadow-sm';
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          Chart workspace
-        </span>
-        <h2 className="text-2xl font-semibold text-slate-50">Market snapshot</h2>
-        <p className="max-w-2xl text-sm text-slate-400">
-          Adjust the timeframe, symbol, and dates to explore opportunities with confidence.
+        <h2 className="text-2xl font-semibold text-zinc-900">Market snapshot</h2>
+        <p className="max-w-2xl text-sm text-zinc-500">
+          Adjust the timeframe, symbol, and window to plan your next move.
         </p>
       </div>
 
       {rangeWarning && (
-        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          <span className="text-lg">⚠️</span>
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+          <span aria-hidden className="text-lg">⚠️</span>
           <span className="font-medium">{rangeWarning}</span>
         </div>
       )}
 
       <div className={surfaceClass}>
-        <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1">
-              <h3 className="text-lg font-semibold text-slate-100">Chart controls</h3>
-              <p className="text-sm text-slate-400">Pick a market, timeframe, and date range. We will keep things simple and ready to refresh.</p>
-            </div>
-            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
+            <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
-              <SymbolInput value={symbol} onChange={setSymbol} />
+              <div className="flex min-w-[10rem] flex-col gap-2">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-zinc-400">Symbol</span>
+                <button
+                  type="button"
+                  onClick={() => setPalOpen(true)}
+                  className="inline-flex w-full items-center justify-between rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
+                >
+                  <span className="uppercase tracking-wide">{symbol}</span>
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    className="h-4 w-4 text-zinc-400"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487 19.5 7.125M4.5 19.5l2.569-.428a2 2 0 0 0 1.093-.554L19.5 7.125a1.875 1.875 0 1 0-2.652-2.652L5.51 16.366a2 2 0 0 0-.554 1.093L4.5 19.5Z" />
+                  </svg>
+                </button>
+              </div>
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
             </div>
           </div>
-          <div className="flex items-center gap-3 self-start rounded-2xl border border-slate-800/70 bg-slate-900/60 px-4 py-3">
-            <div className="flex flex-col">
-              <span className="text-[11px] font-medium uppercase tracking-[0.35em] text-slate-400">Refresh</span>
-              <span className="text-xs text-slate-500">Apply your latest settings</span>
+          <div className="flex items-center gap-3">
+            <div className="text-left text-xs text-zinc-500">
+              <div className="font-semibold uppercase tracking-[0.24em] text-zinc-400">Refresh</div>
+              <div>Apply your latest settings</div>
             </div>
             <button
-              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-sky-500/60 bg-sky-500/20 text-sky-100 transition hover:border-sky-400 hover:bg-sky-500/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-zinc-300 bg-white text-zinc-600 shadow-sm transition hover:border-zinc-400 hover:text-zinc-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
               onClick={handleApply}
               type="button"
               title="Fetch latest data"
@@ -570,14 +587,14 @@ export const ChartComponent = ({ chartId }) => {
       </div>
 
       <div className={`${surfaceClass} relative h-[560px] overflow-hidden px-0 py-0`}>
-        <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+        <div ref={chartContainerRef} className="h-full w-full rounded-[28px] bg-zinc-50" />
         <button
           type="button"
           onClick={() => setPalOpen(true)}
-          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-slate-700/70 bg-slate-900/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-200 transition hover:border-sky-500/70 hover:text-sky-100"
+          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/90 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-zinc-600 shadow-sm transition hover:border-zinc-300 hover:text-zinc-900"
           title="Open symbol presets (/)"
         >
-          <span className="h-1.5 w-1.5 rounded-full bg-sky-400 transition group-hover:bg-sky-200" />
+          <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 transition group-hover:bg-zinc-600" />
           Presets
         </button>
 

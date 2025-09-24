@@ -38,14 +38,14 @@ export function TimeframeSelect({ selected, onChange }) {
 
   return (
     <div className="flex min-w-[13rem] flex-col gap-2">
-      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-300">Timeframe</span>
+      <span className="text-[11px] uppercase tracking-[0.24em] text-zinc-400">Timeframe</span>
       <div className="relative">
         <button
           type="button"
           onClick={toggle}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+          className="flex w-full items-center justify-between rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400"
         >
           <span>{(activeOption?.label || activeOption?.value || '').toUpperCase()}</span>
           <svg
@@ -62,10 +62,10 @@ export function TimeframeSelect({ selected, onChange }) {
 
         <div
           role="listbox"
-          className={`absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-slate-700/70 bg-slate-900/95 shadow-lg backdrop-blur transition-all ${open ? 'max-h-80 opacity-100' : 'pointer-events-none max-h-0 opacity-0'}`}
+          className={`absolute z-40 mt-2 w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg transition-all ${open ? 'max-h-80 opacity-100' : 'pointer-events-none max-h-0 opacity-0'}`}
         >
-          <div className="divide-y divide-slate-800/80">
-            <div className="grid grid-cols-2 gap-px bg-slate-800/70 p-2">
+          <div className="divide-y divide-zinc-100">
+            <div className="grid grid-cols-2 gap-px bg-zinc-100 p-2">
               {options.filter(o => o.featured).map(option => {
                 const isActive = option.value === selected;
                 return (
@@ -73,7 +73,7 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-sky-500/20 text-sky-100 ring-1 ring-sky-400/70' : 'text-slate-200 hover:bg-sky-500/10 hover:text-sky-100'}`}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400 ${isActive ? 'bg-zinc-200 text-zinc-900 ring-1 ring-zinc-300' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`}
                   >
                     {option.label}
                   </button>
@@ -89,43 +89,16 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-400/60' : 'text-slate-200 hover:bg-indigo-500/10 hover:text-indigo-100'}`}
+                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-400 ${isActive ? 'bg-zinc-200 text-zinc-900 ring-1 ring-zinc-300' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'}`}
                   >
                     <span className="font-medium">{option.label}</span>
-                    <span className="text-xs uppercase tracking-[0.25em] text-slate-400">{option.value}</span>
+                    <span className="text-xs uppercase tracking-[0.25em] text-zinc-400">{option.value}</span>
                   </button>
                 );
               })}
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-
-export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
-  return (
-    <div className="flex flex-col gap-2 min-w-[10rem]">
-      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Symbol</span>
-      <div className="relative flex items-center">
-        <span className="pointer-events-none absolute left-3 text-neutral-500">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-4 w-4">
-            <path strokeLinecap="round" strokeLinejoin="round" d="m19 19-3.5-3.5m1-4.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0Z" />
-          </svg>
-        </span>
-        <input
-          type="text"
-          inputMode="text"
-          spellCheck={false}
-          autoCapitalize="characters"
-          autoComplete="off"
-          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500/50"
-          value={value}
-          onChange={(e) => onChange(e.target.value.toUpperCase())}
-          placeholder={placeholder}
-        />
       </div>
     </div>
   );

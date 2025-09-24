@@ -334,15 +334,15 @@ export const IndicatorSection = ({ chartId }) => {
   return (
     <div className="space-y-6">
       {error && (
-        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+        <div className="relative rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600 shadow-sm">
           <div className="pr-6">
-            <p className="font-medium text-red-200">Request failed</p>
-            <p className="mt-1 text-red-100">{error}</p>
+            <p className="font-medium text-rose-700">Request failed</p>
+            <p className="mt-1 text-rose-600">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            className="absolute right-3 top-3 text-rose-400 transition hover:text-rose-600"
             aria-label="Dismiss error"
           >
             <X className="size-4" />
@@ -351,8 +351,8 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {isLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-300">
-          <svg className="size-4 animate-spin text-blue-300" viewBox="0 0 24 24" role="status" aria-hidden="true">
+        <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">
+          <svg className="size-4 animate-spin text-zinc-400" viewBox="0 0 24 24" role="status" aria-hidden="true">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
           </svg>
@@ -362,7 +362,7 @@ export const IndicatorSection = ({ chartId }) => {
 
       <button
         onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
+        className="flex w-full cursor-pointer flex-col items-center rounded-lg border border-dashed border-zinc-300 bg-white px-4 py-3 text-zinc-500 shadow-sm transition hover:border-zinc-400 hover:text-zinc-700"
       >
         {/* plus icon preserved */}
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
@@ -394,7 +394,7 @@ export const IndicatorSection = ({ chartId }) => {
           })}
 
           {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            <div className="rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-4 py-6 text-center text-sm text-zinc-500">
               No indicators yet. Create one to get started.
             </div>
           )}
