@@ -274,21 +274,6 @@ def _evaluate_level(
         if not ready:
             continue
 
-        prev_position = breakout_start_pos - 1
-
-        if prev_position < 0:
-            log.debug(
-                "pivotbrk | level_skip | level=%s | reason=no_prior_bar | position=%d",
-                level_id,
-                position,
-            )
-            continue
-
-        prev_side = sides[prev_position]
-        if prev_side == active_side or prev_side not in {"above", "below"}:
-            # Never transitioned across the level, ignore this run.
-            continue
-
         if simulate_current_only and position != last_idx_position:
             # In live/sim modes only emit for the latest candle.
             continue
