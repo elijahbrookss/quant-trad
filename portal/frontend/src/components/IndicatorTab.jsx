@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
-import { X } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import {
   fetchIndicators,
   createIndicator,
@@ -336,6 +336,24 @@ export const IndicatorSection = ({ chartId }) => {
     [showEnabledOnly, indicators]
   );
 
+  const enabledCount = useMemo(
+    () => indicators.filter((indicator) => indicator?.enabled).length,
+    [indicators]
+  );
+
+  const totalCount = indicators.length;
+  const filteredCount = filteredIndicators.length;
+
+  const indicatorSummary = useMemo(() => {
+    if (!totalCount) return 'No indicators created yet.';
+    if (showEnabledOnly) {
+      return enabledCount
+        ? `${enabledCount} enabled ${enabledCount === 1 ? 'indicator' : 'indicators'} visible`
+        : 'No enabled indicators found.';
+    }
+    return `Showing ${filteredCount} of ${totalCount} indicators`;
+  }, [enabledCount, filteredCount, showEnabledOnly, totalCount]);
+
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
@@ -357,65 +375,80 @@ export const IndicatorSection = ({ chartId }) => {
         </div>
       )}
 
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <button
-          onClick={() => openEditModal()}
-          className="flex w-full flex-col items-center rounded-lg bg-neutral-900 px-4 py-3 text-neutral-400 shadow-lg transition-colors hover:text-neutral-100 sm:w-auto"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="mb-2 size-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-          </svg>
-          Create Indicator
-        </button>
-
-        <div className="flex flex-col gap-2 text-xs text-slate-400 sm:items-end">
-          <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
-          <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-200">
-            <input
-              type="checkbox"
-              className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
-              checked={showEnabledOnly}
-              onChange={(event) => setShowEnabledOnly(event.target.checked)}
-            />
-            <span className="font-medium text-slate-200">Show enabled only</span>
-          </label>
-        </div>
-      </div>
-
       {/* List of indicators */}
-      <div className="relative overflow-visible rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
+      <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/80 shadow-inner shadow-black/30">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
-        <div className={`space-y-4 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
-          <div className="text-[11px] uppercase tracking-[0.32em] text-slate-500">Indicators</div>
-          {filteredIndicators.map(indicator => {
-            const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
-            const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
-            return (
-              <IndicatorCard
-                key={indicator.id}
-                indicator={indicator}
-                color={indColors[indicator.id] || '#60a5fa'}
-                onToggle={toggleEnable}
-                onEdit={openEditModal}
-                onDelete={handleDelete}
-                onGenerateSignals={generateSignals}
-                onSelectColor={handleSelectColor}
-                colorSwatches={COLOR_SWATCHES}
-                isGeneratingSignals={isGenerating}
-                disableSignalAction={disableSignals}
-              />
-            )
-          })}
-
-          {!isLoading && filteredIndicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
-              {showEnabledOnly
-                ? 'No enabled indicators yet. Toggle the filter to view all indicators.'
-                : 'No indicators yet. Create one to get started.'}
+        <div
+          className={`flex flex-col gap-6 p-6 transition ${
+            isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'
+          }`}
+        >
+          <header className="flex flex-col gap-4 border-b border-white/5 pb-4 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-1">
+              <p className="text-[11px] uppercase tracking-[0.32em] text-slate-500">Indicators</p>
+              <h3 className="text-base font-semibold text-slate-100">Manage overlay configurations</h3>
+              <p className="text-xs text-slate-400">
+                Review saved indicators, toggle their availability, and open edits without leaving the console.
+              </p>
             </div>
-          )}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => openEditModal()}
+                className="inline-flex items-center gap-2 rounded-lg bg-sky-500/90 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-sky-500/20 transition hover:bg-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+              >
+                <Plus className="size-4" aria-hidden="true" />
+                Create indicator
+              </button>
+            </div>
+          </header>
+
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
+              <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-medium text-slate-200">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+                  checked={showEnabledOnly}
+                  onChange={(event) => setShowEnabledOnly(event.target.checked)}
+                />
+                Show enabled only
+              </label>
+            </div>
+            <p className="text-xs text-slate-500">{indicatorSummary}</p>
+          </div>
+
+          <div className="space-y-4">
+            {filteredIndicators.map(indicator => {
+              const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
+              const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+              return (
+                <IndicatorCard
+                  key={indicator.id}
+                  indicator={indicator}
+                  color={indColors[indicator.id] || '#60a5fa'}
+                  onToggle={toggleEnable}
+                  onEdit={openEditModal}
+                  onDelete={handleDelete}
+                  onGenerateSignals={generateSignals}
+                  onSelectColor={handleSelectColor}
+                  colorSwatches={COLOR_SWATCHES}
+                  isGeneratingSignals={isGenerating}
+                  disableSignalAction={disableSignals}
+                />
+              )
+            })}
+
+            {!isLoading && filteredIndicators.length === 0 && (
+              <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+                {showEnabledOnly
+                  ? 'No enabled indicators yet. Toggle the filter to view all indicators.'
+                  : 'No indicators yet. Create one to get started.'}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </section>
 
       <IndicatorModal
         isOpen={modalOpen}
