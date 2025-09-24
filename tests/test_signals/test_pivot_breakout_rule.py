@@ -27,6 +27,21 @@ def _build_dataframe(closes):
     return pd.DataFrame(data, index=index)
 
 
+def _build_dataframe_from_ohlc(rows):
+    periods = len(rows)
+    index = pd.date_range("2024-02-01", periods=periods, freq="H")
+    data = {"open": [], "high": [], "low": [], "close": [], "volume": []}
+
+    for open_, high, low, close in rows:
+        data["open"].append(float(open_))
+        data["high"].append(float(high))
+        data["low"].append(float(low))
+        data["close"].append(float(close))
+        data["volume"].append(1000.0)
+
+    return pd.DataFrame(data, index=index)
+
+
 def _build_level(price, kind="resistance"):
     ts = pd.Timestamp("2023-12-31T00:00:00Z")
     return Level(price=float(price), kind=kind, lookback=5, first_touched=ts, timeframe="1h")
@@ -199,6 +214,37 @@ def test_pivot_breakout_rule_accelerates_confirmation_on_large_move():
     assert breakout["bars_closed_beyond_level"] == 1
     assert breakout["accelerated_confirmation"] is True
     assert breakout["time"] == df.index[1].to_pydatetime()
+
+
+def test_pivot_breakout_rule_requires_full_candles_for_confirmation():
+    rows = [
+        (100.0, 101.0, 99.5, 100.5),
+        (101.0, 101.8, 100.2, 101.4),
+        (102.5, 103.5, 101.5, 103.2),  # straddles the level with a low below
+        (103.0, 104.0, 101.8, 103.5),  # straddles the level with a low below
+        (104.0, 104.8, 102.1, 104.2),
+        (104.5, 105.2, 102.6, 104.9),
+    ]
+    df = _build_dataframe_from_ohlc(rows)
+    level = _build_level(102.0, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 1
+    breakout = results[0]
+
+    # Breakout should begin on the first full candle above the level (index 4)
+    assert breakout["breakout_start"] == df.index[4].to_pydatetime()
+    assert breakout["time"] == df.index[5].to_pydatetime()
+    assert breakout["bars_closed_beyond_level"] == 2
 
 
 def test_pivot_breakout_rule_requires_prior_confirmation_for_breakout_label():

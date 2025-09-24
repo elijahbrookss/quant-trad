@@ -158,15 +158,56 @@ def _evaluate_level(
         return []
 
     closes = df["close"]
+    highs = df["high"] if "high" in df.columns else None
+    lows = df["low"] if "low" in df.columns else None
     level_price = float(level.price)
 
-    def _classify_side(value: float) -> str:
-        if value > level_price:
-            return "above"
-        if value < level_price:
-            return "below"
-        return "at"
+    def _get_series_value(series: Optional[pd.Series], position: int, fallback: float) -> float:
+        if series is None:
+            return fallback
+        return float(series.iloc[position])
 
+    def _classify_position(position: int) -> Tuple[str, float]:
+        """Return the side of the level for a candle and the clearance distance."""
+
+        close_value = float(closes.iloc[position])
+        high_value = _get_series_value(highs, position, close_value)
+        low_value = _get_series_value(lows, position, close_value)
+
+        # Require the full candle to be beyond the level before classifying as above/below.
+        above = False
+        below = False
+        clearance = 0.0
+
+        if lows is not None:
+            above = low_value > level_price
+            clearance = max(clearance, low_value - level_price)
+        else:
+            above = close_value > level_price
+            clearance = max(clearance, close_value - level_price)
+
+        if highs is not None:
+            below = high_value < level_price
+            clearance = max(clearance, level_price - high_value)
+        else:
+            below = close_value < level_price
+            clearance = max(clearance, level_price - close_value)
+
+        if above:
+            return "above", clearance
+        if below:
+            return "below", clearance
+
+        is_at_level = (
+            close_value == level_price
+            and (highs is None or high_value == level_price)
+            and (lows is None or low_value == level_price)
+        )
+
+        if is_at_level:
+            return "at", 0.0
+
+        return "straddle", 0.0
     level_id = _summarise_level(level)
     last_idx_position = len(closes) - 1
     simulate_current_only = mode in {"sim", "live"}
@@ -180,11 +221,14 @@ def _evaluate_level(
     confirmed_side: Optional[str] = None
     current_run_prior_confirmed_side: Optional[str] = None
     results: List[Dict[str, Any]] = []
-    for position, (index, close_value_obj) in enumerate(closes.items()):
-        close_value = float(close_value_obj)
-        side = _classify_side(close_value)
+    sides: List[str] = []
+    for position, (index, _close_value_obj) in enumerate(closes.items()):
+        side, clearance = _classify_position(position)
+        sides.append(side)
 
-        if side == "at":
+        if side in {"at", "straddle"}:
+            if active_side is not None and run_confirmed:
+                confirmed_side = active_side
             consecutive = 0
             candidate_start_pos = None
             candidate_max_distance = 0.0
@@ -200,15 +244,13 @@ def _evaluate_level(
             active_side = side
             candidate_start_pos = position
             consecutive = 1
-            candidate_max_distance = abs(close_value - level_price)
+            candidate_max_distance = clearance
             run_emitted = False
             run_confirmed = False
             current_run_prior_confirmed_side = confirmed_side
         else:
             consecutive += 1
-            candidate_max_distance = max(
-                candidate_max_distance, abs(close_value - level_price)
-            )
+            candidate_max_distance = max(candidate_max_distance, clearance)
 
         breakout_start_pos = candidate_start_pos
 
@@ -242,9 +284,8 @@ def _evaluate_level(
             )
             continue
 
-        prev_close = float(closes.iloc[prev_position])
-        prev_side = _classify_side(prev_close)
-        if prev_side == active_side:
+        prev_side = sides[prev_position]
+        if prev_side == active_side or prev_side not in {"above", "below"}:
             # Never transitioned across the level, ignore this run.
             continue
 
