@@ -357,37 +357,36 @@ export const IndicatorSection = ({ chartId }) => {
         </div>
       )}
 
-      <button
-        onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
-      >
-        {/* plus icon preserved */}
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-        Create Indicator
-      </button>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <button
+          onClick={() => openEditModal()}
+          className="flex w-full flex-col items-center rounded-lg bg-neutral-900 px-4 py-3 text-neutral-400 shadow-lg transition-colors hover:text-neutral-100 sm:w-auto"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="mb-2 size-6">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+          </svg>
+          Create Indicator
+        </button>
+
+        <div className="flex flex-col gap-2 text-xs text-slate-400 sm:items-end">
+          <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
+          <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-200">
+            <input
+              type="checkbox"
+              className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+              checked={showEnabledOnly}
+              onChange={(event) => setShowEnabledOnly(event.target.checked)}
+            />
+            <span className="font-medium text-slate-200">Show enabled only</span>
+          </label>
+        </div>
+      </div>
 
       {/* List of indicators */}
-      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
+      <div className="relative overflow-visible rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
         <div className={`space-y-4 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-300">
-            <span className="font-medium text-slate-200">Indicators</span>
-            <button
-              type="button"
-              onClick={() => setShowEnabledOnly((prev) => !prev)}
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 transition ${
-                showEnabledOnly
-                  ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
-                  : 'border-white/10 bg-white/5 text-slate-200 hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100'
-              }`}
-            >
-              <span className={`h-2 w-2 rounded-full ${showEnabledOnly ? 'bg-emerald-300' : 'bg-slate-400'}`} aria-hidden="true" />
-              {showEnabledOnly ? 'Showing enabled only' : 'Show enabled only'}
-            </button>
-          </div>
-
+          <div className="text-[11px] uppercase tracking-[0.32em] text-slate-500">Indicators</div>
           {filteredIndicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id

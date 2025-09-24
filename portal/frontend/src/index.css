@@ -7,7 +7,7 @@ body {
 }
 
 body {
-  background-image: radial-gradient(circle at top, rgba(99, 102, 155, 0.18) 0%, rgba(20, 23, 31, 1) 55%);
+  background-image: radial-gradient(circle at top, rgba(56, 189, 248, 0.14) 0%, rgba(20, 23, 31, 1) 55%);
   background-attachment: fixed;
   color: #f8fafc;
 }
