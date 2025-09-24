@@ -73,7 +73,9 @@ export default function IndicatorCard({
   const copyParams = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(indicator?.params ?? {}, null, 2));
-    } catch {}
+    } catch {
+      // clipboard unavailable
+    }
   };
 
   return (

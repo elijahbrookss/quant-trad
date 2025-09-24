@@ -12,6 +12,7 @@ import LoadingOverlay from '../LoadingOverlay.jsx';
 import SymbolPresets from './SymbolPresets.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
+import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -64,6 +65,65 @@ export const ChartComponent = ({ chartId }) => {
   ]);
   const [dataLoading, setDataLoading] = useState(false);
   const [rangeWarning, setRangeWarning] = useState(null);
+  const [connectionNotice, setConnectionNotice] = useState(null);
+
+  const connection = useConnectionMonitor({ name: 'QuantLab API' });
+  const {
+    status: connectionStatus,
+    message: connectionMessage,
+    lastHeartbeat,
+    markAttempt,
+    markSuccess,
+    markError,
+  } = connection;
+
+  const statusDescriptor = useMemo(() => {
+    const base = {
+      label: 'Standby',
+      tone: 'text-slate-300',
+      badge: 'border-slate-800/80 bg-slate-900/60 text-slate-200',
+    };
+
+    if (connectionStatus === 'online') {
+      return {
+        label: 'Online',
+        tone: 'text-emerald-200',
+        badge: 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200',
+      };
+    }
+
+    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') {
+      return {
+        label: 'Syncing',
+        tone: 'text-amber-200',
+        badge: 'border-amber-400/40 bg-amber-500/10 text-amber-200',
+      };
+    }
+
+    if (connectionStatus === 'error') {
+      return {
+        label: 'Alert',
+        tone: 'text-rose-200',
+        badge: 'border-rose-500/40 bg-rose-500/10 text-rose-200',
+      };
+    }
+
+    return base;
+  }, [connectionStatus]);
+
+  const heartbeatLabel = useMemo(() => {
+    if (!lastHeartbeat) return 'Awaiting heartbeat';
+    try {
+      return `Last check ${new Intl.DateTimeFormat(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(lastHeartbeat)}`;
+    } catch {
+      return 'Heartbeat received';
+    }
+  }, [lastHeartbeat]);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -77,12 +137,6 @@ export const ChartComponent = ({ chartId }) => {
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
-
-  // Derive ISO once per range change.
-  const [startISO, endISO] = useMemo(() => {
-    const [s, e] = dateRange || [];
-    return [s?.toISOString(), e?.toISOString()];
-  }, [dateRange?.[0]?.getTime(), dateRange?.[1]?.getTime()]);
 
   // Create chart once.
   useEffect(() => {
@@ -121,12 +175,18 @@ export const ChartComponent = ({ chartId }) => {
 
     info('chart_created');
 
+    const overlayHandles = overlayHandlesRef.current;
+
     return () => {
       try {
-        overlayHandlesRef.current?.priceLines?.forEach(h => {
-          try { seriesRef.current?.removePriceLine(h); } catch {}
+        overlayHandles?.priceLines?.forEach(h => {
+          try {
+            seriesRef.current?.removePriceLine(h);
+          } catch {
+            // ignore failures when price line already removed
+          }
         });
-        overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
+        overlayHandles?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
         pvMgrRef.current = null;
         chartRef.current?.remove();
@@ -137,7 +197,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData, symbol, interval, dateRange]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -178,32 +238,60 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    if (connectionStatus === 'error') {
+      setConnectionNotice(connectionMessage);
+    } else {
+      setConnectionNotice(null);
+    }
+  }, [connectionStatus, connectionMessage]);
+
+  useEffect(() => {
+    updateChart?.(chartId, {
+      connectionStatus,
+      connectionMessage,
+    });
+  }, [chartId, connectionStatus, connectionMessage, updateChart]);
+
   useEffect(() => () => {
     if (timeframeWarningRef.current) {
       clearTimeout(timeframeWarningRef.current);
     }
   }, []);
 
-  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
-  // Data loader.
-  const loadChartData = useCallback(async () => {
+  const applySymbol = (sym) => {
+    setSymbol(sym);
+    setPalOpen(false);
+    handleApply({ symbol: sym });
+  };
+
+  const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
+    const effectiveSymbol = targetSymbol ?? symbol;
+    const effectiveInterval = targetInterval ?? interval;
+    const effectiveRange = targetRange ?? dateRange;
+    const [startDate, endDate] = effectiveRange || [];
+    const startISO = startDate?.toISOString();
+    const endISO = endDate?.toISOString();
+
     try {
       setDataLoading(true);
-      if (!symbol || !interval || !startISO || !endISO) {
-        warn('chart_load_missing_inputs', { symbol, interval, startISO, endISO });
+      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
+        warn('chart_load_missing_inputs', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
         return;
       }
 
-      info('candles_fetch_start', { symbol, interval, startISO, endISO });
+      markAttempt();
+      info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
       const resp = await fetchCandleData({
-        symbol,
-        timeframe: interval,
+        symbol: effectiveSymbol,
+        timeframe: effectiveInterval,
         start: startISO,
         end: endISO,
       });
 
       if (!Array.isArray(resp) || resp.length === 0) {
-        warn('no data', { symbol, interval });
+        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
+        markSuccess();
         return;
       }
 
@@ -222,12 +310,8 @@ export const ChartComponent = ({ chartId }) => {
         return;
       }
 
-      // seriesRef.current.setData(data);
-      // chartRef.current?.timeScale().fitContent();
-      
       seriesRef.current.setData(data);
 
-      // Remember last bar for real-time updates.
       lastBarRef.current = data.at(-1);
 
       if (data.length > 1) {
@@ -247,15 +331,14 @@ export const ChartComponent = ({ chartId }) => {
         lastSeriesTime: lastBarRef.current?.time,
         barSpacing: barSpacingRef.current,
       });
-      // move view to the loaded window; add small padding for context
       const first = data[0]?.time;
-      const last  = data.at(-1)?.time;
+      const last = data.at(-1)?.time;
       if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
         const span = Math.max(1, last - first);
-        const pad  = Math.max(1, Math.floor(span * 0.05));
+        const pad = Math.max(1, Math.floor(span * 0.05));
         chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
       } else {
-        chartRef.current?.timeScale().scrollToRealTime(); // fallback to latest
+        chartRef.current?.timeScale().scrollToRealTime();
       }
 
       info('candles_fetch_success', {
@@ -263,12 +346,21 @@ export const ChartComponent = ({ chartId }) => {
         first: data[0]?.time,
         last: data.at(-1)?.time,
       });
+
+      markSuccess();
+      updateChart?.(chartId, {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        dateRange: effectiveRange,
+        lastUpdatedAt: new Date().toISOString(),
+      });
     } catch (e) {
+      markError(e);
       error('candles_fetch_failed', e);
     } finally {
       setDataLoading(false);
     }
-  }, [symbol, interval, startISO, endISO, info, warn, error]);
+  }, [symbol, interval, dateRange, info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
 
 
   // Overlay refs and syncer.
@@ -286,7 +378,11 @@ export const ChartComponent = ({ chartId }) => {
 
     // 1) Clear existing price lines.
     overlayHandlesRef.current.priceLines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h); } catch {}
+      try {
+        seriesRef.current.removePriceLine(h);
+      } catch {
+        // ignore if price line already cleared
+      }
     });
     overlayHandlesRef.current.priceLines = [];
 
@@ -471,15 +567,18 @@ export const ChartComponent = ({ chartId }) => {
   useEffect(() => {
     if (!chartState) return;
     syncOverlays(chartState.overlays || []);
-  }, [chartState?.overlays, syncOverlays]);
+  }, [chartState, syncOverlays]);
 
   // Apply handler.
-  const handleApply = useCallback(() => {
-    const [start, end] = dateRange || [];
+  const handleApply = useCallback((overrides = {}) => {
+    const nextSymbol = overrides.symbol ?? symbol;
+    const nextInterval = overrides.interval ?? interval;
+    const nextRange = overrides.dateRange ?? dateRange;
+    const [start, end] = nextRange || [];
     const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
     const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
     if (windowMs > maxWindowMs) {
-      warn('apply_blocked_range', { chartId, symbol, interval, windowMs });
+      warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
       setRangeWarning('Please choose a window of 90 days or less before applying.');
       if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
       timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
@@ -487,12 +586,12 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     setRangeWarning(null);
-    info('apply', { chartId, symbol, interval, dateRange });
+    info('apply', { chartId, symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
     syncOverlays([]); // clear overlays on apply
-    updateChart?.(chartId, { symbol, interval, dateRange });
-    loadChartData();
+    updateChart?.(chartId, { symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
+    loadChartData({ targetSymbol: nextSymbol, targetInterval: nextInterval, targetRange: nextRange });
     bumpRefresh?.(chartId);
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn, syncOverlays]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -504,77 +603,92 @@ export const ChartComponent = ({ chartId }) => {
   }
 
   return (
-    <>
-
-      <div className="space-y-3 mb-4">
-        {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            <span className="text-lg">⚠️</span>
-            <span className="font-medium">{rangeWarning}</span>
+    <div className="space-y-5">
+      {connectionNotice && (
+        <div className="flex items-center gap-2 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
+          <span className="text-lg">⚠️</span>
+          <div>
+            <p className="font-semibold">Connection issue</p>
+            <p className="text-xs text-rose-100/80">{connectionNotice}</p>
           </div>
-        )}
+        </div>
+      )}
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
-              <TimeframeSelect selected={interval} onChange={setInterval} />
-              <SymbolInput value={symbol} onChange={setSymbol} />
-              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+      {rangeWarning && (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 shadow-lg shadow-amber-900/40">
+          <span className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
+        </div>
+      )}
+
+      <div className="rounded-2xl border border-white/10 bg-[#111114]/70 p-5 shadow-[0_40px_80px_-60px_rgba(0,0,0,0.9)]">
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
+            <TimeframeSelect selected={interval} onChange={setInterval} />
+            <SymbolInput value={symbol} onChange={setSymbol} />
+            <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+          </div>
+
+          <div className="flex flex-col items-start gap-3 sm:items-end">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.35em] ${statusDescriptor.badge}`}>
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  connectionStatus === 'online'
+                    ? 'bg-emerald-400 shadow-[0_0_10px] shadow-emerald-400/80'
+                    : connectionStatus === 'error'
+                      ? 'bg-rose-400 shadow-[0_0_10px] shadow-rose-500/70'
+                      : connectionStatus === 'connecting' || connectionStatus === 'recovering'
+                        ? 'bg-amber-300 shadow-[0_0_10px] shadow-amber-400/70'
+                        : 'bg-slate-500'
+                }`}
+              />
+              <span className={`${statusDescriptor.tone}`}>{statusDescriptor.label}</span>
             </div>
-            <div className="flex items-center gap-2 self-start">
-              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
+            <p className="text-xs text-slate-400">
+              {connectionStatus === 'error' ? connectionMessage : heartbeatLabel}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
               <button
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-                onClick={handleApply}
+                className="inline-flex items-center gap-2 rounded-full border border-purple-500/40 bg-purple-500/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.3em] text-purple-200 transition hover:bg-purple-500/20"
+                onClick={() => setPalOpen(true)}
+                type="button"
+                title="Open symbol palette (/ shortcut)"
+              >
+                <span>Open Presets</span>
+                <kbd className="rounded border border-purple-400/40 bg-purple-500/10 px-1 text-[10px] text-purple-200">/</kbd>
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-full border border-purple-400/60 bg-purple-500/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-purple-100 transition hover:bg-purple-500/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-400"
+                onClick={() => handleApply()}
                 type="button"
                 title="Fetch latest data"
                 aria-label="Fetch latest data"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="h-5 w-5"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
-                  />
-                </svg>
+                Refresh
               </button>
             </div>
           </div>
         </div>
-      </div>
 
-      <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-          <button
-            type="button"
-            onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
-            title="Open symbol presets (/)"
-          >
-            Presets
-          </button>
-
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
+        <div className="mt-5 rounded-2xl border border-white/5 bg-black/30 px-4 py-4">
+          <SymbolPresets selected={symbol} onPick={applySymbol} />
         </div>
       </div>
-    </>
+
+      <div className="relative h-[560px] overflow-hidden rounded-3xl border border-white/10 bg-[#050507]/80 shadow-[0_50px_90px_-65px_rgba(0,0,0,0.9)]">
+        <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
+
+        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+        <HotkeyHint />
+        <LoadingOverlay
+          show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
+          message={
+            chartState?.signalsLoading ? 'Generating signals…'
+            : chartState?.overlayLoading ? 'Loading overlays…'
+            : 'Loading chart…'
+          }
+        />
+      </div>
+    </div>
   )
 };
