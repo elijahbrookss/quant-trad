@@ -16,6 +16,7 @@ const IndicatorModal = IndicatorModalV2; // for now, swap in new version under o
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
 import { createLogger } from '../utils/logger.js';
+import LoadingOverlay from './LoadingOverlay.jsx';
 
 
 // Gold, Maroon, Orange, Purple, Lime, Gray
@@ -350,16 +351,6 @@ export const IndicatorSection = ({ chartId }) => {
         </div>
       )}
 
-      {isLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-300">
-          <svg className="size-4 animate-spin text-blue-300" viewBox="0 0 24 24" role="status" aria-hidden="true">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-          </svg>
-          Loading indicators…
-        </div>
-      )}
-
       <button
         onClick={() => openEditModal()}
         className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
@@ -372,7 +363,9 @@ export const IndicatorSection = ({ chartId }) => {
       </button>
 
       {/* List of indicators */}
-      <div className="space-y-1">
+      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
+        <LoadingOverlay show={isLoading} message="Loading indicators…" />
+        <div className={`space-y-1 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
           {indicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
@@ -394,10 +387,11 @@ export const IndicatorSection = ({ chartId }) => {
           })}
 
           {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
               No indicators yet. Create one to get started.
             </div>
           )}
+        </div>
       </div>
 
       <IndicatorModal

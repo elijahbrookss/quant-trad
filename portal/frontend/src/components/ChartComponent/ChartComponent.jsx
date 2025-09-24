@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
+import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
+import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent';
 import { options, seriesOptions } from './ChartOptions';
@@ -9,9 +10,9 @@ import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
 import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
 import LoadingOverlay from '../LoadingOverlay.jsx';
-import SymbolPresets from './SymbolPresets.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
+import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -64,6 +65,40 @@ export const ChartComponent = ({ chartId }) => {
   ]);
   const [dataLoading, setDataLoading] = useState(false);
   const [rangeWarning, setRangeWarning] = useState(null);
+  const [connectionNotice, setConnectionNotice] = useState(null);
+
+  const connection = useConnectionMonitor({ name: 'QuantLab API' });
+  const {
+    status: connectionStatus,
+    message: connectionMessage,
+    markAttempt,
+    markSuccess,
+    markError,
+  } = connection;
+
+  const statusStyles = useMemo(() => {
+    if (connectionStatus === 'online') {
+      return {
+        text: 'text-emerald-200',
+      };
+    }
+
+    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') {
+      return {
+        text: 'text-amber-200',
+      };
+    }
+
+    if (connectionStatus === 'error') {
+      return {
+        text: 'text-rose-200',
+      };
+    }
+
+    return {
+      text: 'text-slate-300',
+    };
+  }, [connectionStatus]);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -78,11 +113,102 @@ export const ChartComponent = ({ chartId }) => {
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
 
-  // Derive ISO once per range change.
-  const [startISO, endISO] = useMemo(() => {
-    const [s, e] = dateRange || [];
-    return [s?.toISOString(), e?.toISOString()];
-  }, [dateRange?.[0]?.getTime(), dateRange?.[1]?.getTime()]);
+  const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
+    const effectiveSymbol = targetSymbol ?? symbol;
+    const effectiveInterval = targetInterval ?? interval;
+    const effectiveRange = targetRange ?? dateRange;
+    const [startDate, endDate] = effectiveRange || [];
+    const startISO = startDate?.toISOString();
+    const endISO = endDate?.toISOString();
+
+    try {
+      setDataLoading(true);
+      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
+        warn('chart_load_missing_inputs', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+        return;
+      }
+
+      markAttempt();
+      info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+      const resp = await fetchCandleData({
+        symbol: effectiveSymbol,
+        timeframe: effectiveInterval,
+        start: startISO,
+        end: endISO,
+      });
+
+      if (!Array.isArray(resp) || resp.length === 0) {
+        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
+        markSuccess();
+        return;
+      }
+
+      const data = resp
+        .filter(c => c && typeof c.time === 'number')
+        .map(c => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+
+      if (!seriesRef.current) {
+        warn('series missing');
+        return;
+      }
+
+      seriesRef.current.setData(data);
+
+      lastBarRef.current = data.at(-1);
+
+      if (data.length > 1) {
+        let minStep = Infinity;
+        for (let i = 1; i < data.length; i += 1) {
+          const step = data[i].time - data[i - 1].time;
+          if (Number.isFinite(step) && step > 0 && step < minStep) {
+            minStep = step;
+          }
+        }
+        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
+      } else {
+        barSpacingRef.current = null;
+      }
+
+      pvMgrRef.current?.updateVABlockContext({
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
+      const first = data[0]?.time;
+      const last = data.at(-1)?.time;
+      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+        const span = Math.max(1, last - first);
+        const pad = Math.max(1, Math.floor(span * 0.05));
+        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
+      } else {
+        chartRef.current?.timeScale().scrollToRealTime();
+      }
+
+      info('candles_fetch_success', {
+        points: data.length,
+        first: data[0]?.time,
+        last: data.at(-1)?.time,
+      });
+
+      markSuccess();
+      updateChart?.(chartId, {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        dateRange: effectiveRange,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      markError(e);
+      error('candles_fetch_failed', e);
+    } finally {
+      setDataLoading(false);
+    }
+  }, [symbol, interval, dateRange, info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
 
   // Create chart once.
   useEffect(() => {
@@ -99,8 +225,8 @@ export const ChartComponent = ({ chartId }) => {
     const series = chartRef.current.addSeries(CandlestickSeries, {
       ...seriesOptions,
       priceScaleId: 'right',
-    })
-    seriesRef.current = series
+    });
+    seriesRef.current = series;
 
     // Create pane view manager.
     pvMgrRef.current = new PaneViewManager(chartRef.current);
@@ -121,12 +247,18 @@ export const ChartComponent = ({ chartId }) => {
 
     info('chart_created');
 
+    const overlayHandles = overlayHandlesRef.current;
+
     return () => {
       try {
-        overlayHandlesRef.current?.priceLines?.forEach(h => {
-          try { seriesRef.current?.removePriceLine(h); } catch {}
+        overlayHandles?.priceLines?.forEach(h => {
+          try {
+            seriesRef.current?.removePriceLine(h);
+          } catch {
+            // ignore failures when price line already removed
+          }
         });
-        overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
+        overlayHandles?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
         pvMgrRef.current = null;
         chartRef.current?.remove();
@@ -137,7 +269,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData, symbol, interval, dateRange]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -178,98 +310,32 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    if (connectionStatus === 'error') {
+      setConnectionNotice(connectionMessage);
+    } else {
+      setConnectionNotice(null);
+    }
+  }, [connectionStatus, connectionMessage]);
+
+  useEffect(() => {
+    updateChart?.(chartId, {
+      connectionStatus,
+      connectionMessage,
+    });
+  }, [chartId, connectionStatus, connectionMessage, updateChart]);
+
   useEffect(() => () => {
     if (timeframeWarningRef.current) {
       clearTimeout(timeframeWarningRef.current);
     }
   }, []);
 
-  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
-  // Data loader.
-  const loadChartData = useCallback(async () => {
-    try {
-      setDataLoading(true);
-      if (!symbol || !interval || !startISO || !endISO) {
-        warn('chart_load_missing_inputs', { symbol, interval, startISO, endISO });
-        return;
-      }
-
-      info('candles_fetch_start', { symbol, interval, startISO, endISO });
-      const resp = await fetchCandleData({
-        symbol,
-        timeframe: interval,
-        start: startISO,
-        end: endISO,
-      });
-
-      if (!Array.isArray(resp) || resp.length === 0) {
-        warn('no data', { symbol, interval });
-        return;
-      }
-
-      const data = resp
-        .filter(c => c && typeof c.time === 'number')
-        .map(c => ({
-          time: c.time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }));
-
-      if (!seriesRef.current) {
-        warn('series missing');
-        return;
-      }
-
-      // seriesRef.current.setData(data);
-      // chartRef.current?.timeScale().fitContent();
-      
-      seriesRef.current.setData(data);
-
-      // Remember last bar for real-time updates.
-      lastBarRef.current = data.at(-1);
-
-      if (data.length > 1) {
-        let minStep = Infinity;
-        for (let i = 1; i < data.length; i += 1) {
-          const step = data[i].time - data[i - 1].time;
-          if (Number.isFinite(step) && step > 0 && step < minStep) {
-            minStep = step;
-          }
-        }
-        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
-      } else {
-        barSpacingRef.current = null;
-      }
-
-      pvMgrRef.current?.updateVABlockContext({
-        lastSeriesTime: lastBarRef.current?.time,
-        barSpacing: barSpacingRef.current,
-      });
-      // move view to the loaded window; add small padding for context
-      const first = data[0]?.time;
-      const last  = data.at(-1)?.time;
-      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
-        const span = Math.max(1, last - first);
-        const pad  = Math.max(1, Math.floor(span * 0.05));
-        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
-      } else {
-        chartRef.current?.timeScale().scrollToRealTime(); // fallback to latest
-      }
-
-      info('candles_fetch_success', {
-        points: data.length,
-        first: data[0]?.time,
-        last: data.at(-1)?.time,
-      });
-    } catch (e) {
-      error('candles_fetch_failed', e);
-    } finally {
-      setDataLoading(false);
-    }
-  }, [symbol, interval, startISO, endISO, info, warn, error]);
-
+  const applySymbol = (sym) => {
+    setSymbol(sym);
+    setPalOpen(false);
+    handleApply({ symbol: sym });
+  };
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
@@ -286,7 +352,11 @@ export const ChartComponent = ({ chartId }) => {
 
     // 1) Clear existing price lines.
     overlayHandlesRef.current.priceLines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h); } catch {}
+      try {
+        seriesRef.current.removePriceLine(h);
+      } catch {
+        // ignore if price line already cleared
+      }
     });
     overlayHandlesRef.current.priceLines = [];
 
@@ -471,15 +541,18 @@ export const ChartComponent = ({ chartId }) => {
   useEffect(() => {
     if (!chartState) return;
     syncOverlays(chartState.overlays || []);
-  }, [chartState?.overlays, syncOverlays]);
+  }, [chartState, syncOverlays]);
 
   // Apply handler.
-  const handleApply = useCallback(() => {
-    const [start, end] = dateRange || [];
+  const handleApply = useCallback((overrides = {}) => {
+    const nextSymbol = overrides.symbol ?? symbol;
+    const nextInterval = overrides.interval ?? interval;
+    const nextRange = overrides.dateRange ?? dateRange;
+    const [start, end] = nextRange || [];
     const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
     const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
     if (windowMs > maxWindowMs) {
-      warn('apply_blocked_range', { chartId, symbol, interval, windowMs });
+      warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
       setRangeWarning('Please choose a window of 90 days or less before applying.');
       if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
       timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
@@ -487,12 +560,12 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     setRangeWarning(null);
-    info('apply', { chartId, symbol, interval, dateRange });
+    info('apply', { chartId, symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
     syncOverlays([]); // clear overlays on apply
-    updateChart?.(chartId, { symbol, interval, dateRange });
-    loadChartData();
+    updateChart?.(chartId, { symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
+    loadChartData({ targetSymbol: nextSymbol, targetInterval: nextInterval, targetRange: nextRange });
     bumpRefresh?.(chartId);
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn, syncOverlays]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -503,78 +576,67 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
+  const loaderActive = useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading);
+  const loaderMessage = chartState?.signalsLoading ? 'Generating signals…'
+    : chartState?.overlayLoading ? 'Loading overlays…'
+      : 'Loading chart…';
+
+  const statusTextClass = statusStyles.text ?? 'text-slate-300';
+
   return (
-    <>
-
-      <div className="space-y-3 mb-4">
-        {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            <span className="text-lg">⚠️</span>
-            <span className="font-medium">{rangeWarning}</span>
+    <div className="space-y-5">
+      {connectionNotice && (
+        <div className="flex items-start gap-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
+          <span className="mt-0.5 text-lg">⚠️</span>
+          <div>
+            <p className="font-semibold tracking-tight">Connection issue</p>
+            <p className="text-xs text-rose-100/80">{connectionNotice}</p>
           </div>
-        )}
+        </div>
+      )}
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
-              <TimeframeSelect selected={interval} onChange={setInterval} />
-              <SymbolInput value={symbol} onChange={setSymbol} />
+      {rangeWarning && (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 shadow-lg shadow-amber-900/30">
+          <span className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
+        </div>
+      )}
+
+      <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-6 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
+        <div className="flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end md:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <TimeframeSelect selected={interval} onChange={setInterval} />
+            <SymbolInput value={symbol} onChange={setSymbol} />
+            <div className="flex items-end gap-2">
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
-            </div>
-            <div className="flex items-center gap-2 self-start">
-              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
               <button
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-                onClick={handleApply}
                 type="button"
-                title="Fetch latest data"
-                aria-label="Fetch latest data"
+                onClick={() => handleApply()}
+                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-purple-400/40 bg-purple-500/10 text-purple-100 transition hover:border-purple-300/60 hover:bg-purple-500/20 hover:text-purple-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-400"
+                aria-label="Reload chart data"
+                title="Reload chart data"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="h-5 w-5"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
-                  />
-                </svg>
+                <RotateCcw className="size-4" />
               </button>
             </div>
           </div>
-        </div>
-      </div>
 
-      <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-          <button
-            type="button"
-            onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
-            title="Open symbol presets (/)"
-          >
-            Presets
-          </button>
+          {connectionStatus === 'error' && connectionMessage ? (
+            <p className={`text-xs ${statusTextClass} max-w-xs text-right`}>{connectionMessage}</p>
+          ) : null}
+        </div>
+
+        <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-[#222430] to-[#151720]">
+          <div className="pointer-events-none absolute right-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
+            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
+          </div>
+          <div ref={chartContainerRef} className="h-full w-full" />
 
           <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
           <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
+          <LoadingOverlay show={loaderActive} message={loaderMessage} />
         </div>
       </div>
-    </>
+    </div>
   )
 };
