@@ -1,8 +1,10 @@
-import { useEffect, useMemo } from 'react'
-import { ChartStateProvider, useChartValue } from './contexts/ChartStateContext'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
 import { TabManager } from './components/TabManager'
 import { createLogger } from './utils/logger.js'
+import { RefreshCw } from 'lucide-react'
+import { pingApi } from './adapters/health.adapter.js'
 
 const sections = [
   { id: 'quantlab', label: 'QuantLab', description: 'Strategy workbench for indicators, charts, and overlays.' },
@@ -11,8 +13,14 @@ const sections = [
 
 function ApiStatusPill({ chartId }) {
   const chart = useChartValue(chartId) || {}
-  const status = chart.connectionStatus || 'idle'
-  const label = status === 'online' ? 'Online' : status === 'error' ? 'Alert' : status === 'connecting' ? 'Syncing' : 'Standby'
+  const status = chart.healthStatus || chart.connectionStatus || 'idle'
+  const label = status === 'online'
+    ? 'Online'
+    : status === 'error'
+      ? 'Alert'
+      : status === 'connecting' || status === 'recovering'
+        ? 'Checking'
+        : 'Standby'
   const tone = status === 'online'
     ? 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
     : status === 'error'
@@ -33,7 +41,7 @@ function SectionHeading({ title, description, kicker }) {
   return (
     <div className="space-y-3">
       {kicker ? (
-        <span className="text-[11px] uppercase tracking-[0.35em] text-purple-300/80">{kicker}</span>
+        <span className="text-[11px] uppercase tracking-[0.35em] text-sky-300/80">{kicker}</span>
       ) : null}
       <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
       <p className="max-w-2xl text-sm text-slate-400">{description}</p>
@@ -42,31 +50,96 @@ function SectionHeading({ title, description, kicker }) {
 }
 
 function AppShell({ chartId }) {
-  const { info } = useMemo(() => createLogger('App', { chartId }), [chartId])
+  const { info, error: logError } = useMemo(() => createLogger('App', { chartId }), [chartId])
+  const { updateChart } = useChartState()
+  const [checkingHealth, setCheckingHealth] = useState(false)
+  const healthErrorRef = useRef(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
     info('app_mounted')
   }, [info])
 
   const chart = useChartValue(chartId) || {}
-  const lastUpdatedLabel = useMemo(() => {
-    const iso = chart?.lastUpdatedAt
-    if (!iso) return 'Awaiting first load'
+  const lastHealthCheckLabel = useMemo(() => {
+    if (checkingHealth && !chart?.lastHealthCheckAt) return 'Checking API…'
+    if (!chart?.lastHealthCheckAt) return 'Awaiting health check'
+    if (checkingHealth) return 'Checking API…'
     try {
-      const parsed = new Date(iso)
-      return `Last check ${new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(parsed)}`
+      const parsed = new Date(chart.lastHealthCheckAt)
+      const formatted = new Intl.DateTimeFormat(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(parsed)
+      const prefix = chart.healthStatus === 'error' ? 'Last check failed' : 'Last check'
+      return `${prefix} ${formatted}`
     } catch {
-      return `Last check ${new Date(iso).toLocaleTimeString()}`
+      const prefix = chart.healthStatus === 'error' ? 'Last check failed' : 'Last check'
+      return `${prefix} ${new Date(chart.lastHealthCheckAt).toLocaleTimeString()}`
     }
-  }, [chart?.lastUpdatedAt])
+  }, [chart?.lastHealthCheckAt, chart?.healthStatus, checkingHealth])
+
+  const runHealthCheck = useCallback(async () => {
+    if (!mountedRef.current) return
+    setCheckingHealth(true)
+    updateChart(chartId, {
+      healthStatus: 'connecting',
+      healthMessage: 'Pinging API…',
+    })
+
+    try {
+      const payload = await pingApi()
+      const nowIso = new Date().toISOString()
+      if (!mountedRef.current) return
+      healthErrorRef.current = null
+      updateChart(chartId, {
+        healthStatus: 'online',
+        healthMessage: payload?.status === 'ok' ? 'API responded normally.' : 'API reachable.',
+        lastHealthCheckAt: nowIso,
+      })
+    } catch (err) {
+      const nowIso = new Date().toISOString()
+      if (!mountedRef.current) return
+      const message = err?.message || 'Unable to reach API'
+      healthErrorRef.current = message
+      logError('api_health_check_failed', err)
+      updateChart(chartId, {
+        healthStatus: 'error',
+        healthMessage: message,
+        lastHealthCheckAt: nowIso,
+      })
+    } finally {
+      if (mountedRef.current) {
+        setCheckingHealth(false)
+      }
+    }
+  }, [chartId, updateChart, logError])
+
+  useEffect(() => {
+    mountedRef.current = true
+    runHealthCheck()
+    const id = setInterval(() => {
+      runHealthCheck()
+    }, 60000)
+    return () => {
+      mountedRef.current = false
+      clearInterval(id)
+    }
+  }, [runHealthCheck])
+
+  const healthMessage = chart.healthStatus === 'error'
+    ? (chart.healthMessage || healthErrorRef.current)
+    : null
 
   return (
-    <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_rgba(99,102,155,0.18)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
+    <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
         <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 backdrop-blur">
           <div className="mx-auto flex max-w-7xl flex-col gap-5 px-6 py-6 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-3 text-lg font-semibold text-slate-100">
-                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-purple-500/20 text-purple-200">QT</span>
+                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-500/15 text-sky-200">QT</span>
                 <span>QuantTrad Portal</span>
               </div>
               <p className="text-sm text-slate-400">QuantLab • Ops Command • Insight Reports</p>
@@ -76,7 +149,7 @@ function AppShell({ chartId }) {
                 <a
                   key={section.id}
                   href={`#${section.id}`}
-                  className="rounded-full border border-white/5 bg-white/5 px-4 py-2 transition hover:border-purple-500/40 hover:bg-purple-500/15 hover:text-purple-100"
+                  className="rounded-full border border-white/5 bg-white/5 px-4 py-2 transition hover:border-sky-500/40 hover:bg-sky-500/15 hover:text-sky-100"
                 >
                   {section.label}
                 </a>
@@ -92,9 +165,23 @@ function AppShell({ chartId }) {
                 title="QuantLab"
                 description="Visualize price action, overlays, and execution signals in a focused, minimal environment."
               />
-              <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300 sm:flex-row sm:items-center sm:gap-4">
-                <ApiStatusPill chartId={chartId} />
-                <span className="text-[11px] tracking-[0.25em] text-slate-400">{lastUpdatedLabel}</span>
+              <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300 sm:items-end">
+                <div className="flex items-center gap-3">
+                  <ApiStatusPill chartId={chartId} />
+                  <button
+                    type="button"
+                    onClick={runHealthCheck}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-sky-400/40 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-500/20 disabled:opacity-60"
+                    aria-label="Check API health"
+                    disabled={checkingHealth}
+                  >
+                    <RefreshCw className="size-4" />
+                  </button>
+                </div>
+                <span className="text-[11px] tracking-[0.25em] text-slate-400">{lastHealthCheckLabel}</span>
+                {healthMessage ? (
+                  <span className="text-[11px] text-rose-300/80">{healthMessage}</span>
+                ) : null}
               </div>
             </div>
             <div className="space-y-10">
@@ -132,13 +219,13 @@ function AppShell({ chartId }) {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-4 rounded-3xl border border-purple-500/25 bg-purple-500/10 p-6">
-                <h3 className="text-lg font-semibold text-purple-100">Trade walkthroughs</h3>
-                <p className="text-sm text-purple-100/80">Replay every order with contextual overlays. Capture indicator states, signal weights, and execution metadata.</p>
-                <div className="rounded-2xl border border-purple-400/30 bg-purple-500/15 p-4 text-xs text-purple-100/80">
+              <div className="flex flex-col gap-4 rounded-3xl border border-sky-500/30 bg-sky-500/10 p-6">
+                <h3 className="text-lg font-semibold text-sky-100">Trade walkthroughs</h3>
+                <p className="text-sm text-sky-100/80">Replay every order with contextual overlays. Capture indicator states, signal weights, and execution metadata.</p>
+                <div className="rounded-2xl border border-sky-400/30 bg-sky-500/15 p-4 text-xs text-sky-100/80">
                   Future UX includes: scrubbable timelines, indicator snapshots, and risk commentary sidebars for each decision point.
                 </div>
-                <ul className="space-y-2 text-sm text-purple-100/80">
+                <ul className="space-y-2 text-sm text-sky-100/80">
                   <li>• Align QuantLab overlays with executed trades.</li>
                   <li>• Annotate decisions for compliance + research sharing.</li>
                   <li>• Integrate PnL, slippage, and volatility context.</li>
@@ -156,7 +243,7 @@ function AppShell({ chartId }) {
                 href="https://github.com/elijahbrookss/quant-trad"
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
               >
                 GitHub
               </a>
@@ -164,7 +251,7 @@ function AppShell({ chartId }) {
                 href="https://quad-trad.gitbook.io/docs/"
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
               >
                 Documentation
               </a>

@@ -97,10 +97,10 @@ export default function IndicatorCard({
       <div className="min-w-0 flex-1 space-y-3">
         <div className="flex items-start gap-3">
           <span
-            className="mt-1 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
+            className="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
             aria-hidden="true"
           >
-            <span className="h-3.5 w-3.5 rounded-full border border-white/20" style={{ backgroundColor: color }} />
+            <span className="h-3 w-3 rounded-full border border-white/20" style={{ backgroundColor: color }} />
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -108,10 +108,9 @@ export default function IndicatorCard({
                 {indicator?.name}
               </div>
             </div>
-            <div className="mt-2 inline-flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.32em] text-slate-400">
-              <span className="h-px w-6 bg-gradient-to-r from-purple-500/40 via-purple-400/20 to-transparent" aria-hidden="true" />
+            <p className="mt-1 inline-flex rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.28em] text-slate-300">
               {typeLabel}
-            </div>
+            </p>
           </div>
         </div>
 
@@ -122,18 +121,18 @@ export default function IndicatorCard({
                 key={key}
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${
                   isAdvanced
-                    ? 'border-purple-400/30 bg-purple-500/10 text-purple-100/90'
+                    ? 'border-sky-400/30 bg-sky-500/10 text-sky-100/90'
                     : 'border-white/10 bg-white/5 text-slate-200'
                 }`}
               >
-                <span className={isAdvanced ? 'text-purple-200/80' : 'text-slate-400'}>{key}</span>
+                <span className={isAdvanced ? 'text-sky-200/80' : 'text-slate-400'}>{key}</span>
                 <span>= {formatVal(value)}</span>
               </span>
             ))}
 
             {hiddenCount > 0 && !showAllParams && (
               <button
-                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
                 onClick={() => setShowAllParams(true)}
               >
                 +{hiddenCount} more
@@ -144,7 +143,7 @@ export default function IndicatorCard({
 
         {showAllParams && paramsList.length > 5 && (
           <button
-            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-purple-100 hover:underline"
+            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-sky-100 hover:underline"
             onClick={() => setShowAllParams(false)}
           >
             Show less
@@ -156,7 +155,7 @@ export default function IndicatorCard({
         <Switch
           checked={!!indicator?.enabled}
           onChange={() => onToggle?.(indicator.id)}
-          className={`${indicator?.enabled ? 'bg-purple-500/80' : 'bg-slate-600/70'} relative inline-flex h-6 w-11 cursor-pointer items-center rounded-full transition`}
+          className={`${indicator?.enabled ? 'bg-sky-500/80' : 'bg-slate-600/70'} relative inline-flex h-6 w-11 cursor-pointer items-center rounded-full transition`}
         >
           <span className={`${indicator?.enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
         </Switch>
@@ -189,7 +188,7 @@ export default function IndicatorCard({
             <>
               <PopoverButton
                 onClick={() => setConfirmingDelete(false)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-purple-400/40 hover:bg-purple-500/20 hover:text-purple-100"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-sky-400/40 hover:bg-sky-500/20 hover:text-sky-100"
                 title="Indicator settings"
               >
                 <MoreHorizontal className="size-4" />
@@ -211,7 +210,7 @@ export default function IndicatorCard({
                         {colorSwatches.map((c) => (
                           <button
                             key={c}
-                            className="h-5 w-5 rounded-sm border border-white/20 transition hover:border-purple-300/60 focus:outline-none focus:ring-2 focus:ring-purple-300/40"
+                            className="h-5 w-5 rounded-sm border border-white/20 transition hover:border-sky-300/60 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
                             style={{ backgroundColor: c }}
                             onClick={() => {
                               onSelectColor?.(indicator.id, c)
@@ -231,7 +230,7 @@ export default function IndicatorCard({
                           setConfirmingDelete(false)
                           close()
                         }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-purple-400/30 hover:bg-purple-500/10"
+                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-sky-400/30 hover:bg-sky-500/10"
                       >
                         <span>Edit parameters</span>
                         <span className="text-[10px] uppercase tracking-[0.3em] text-slate-500">E</span>
@@ -243,7 +242,7 @@ export default function IndicatorCard({
                           setConfirmingDelete(false)
                           close()
                         }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-purple-400/30 hover:bg-purple-500/10"
+                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-sky-400/30 hover:bg-sky-500/10"
                       >
                         <span className="inline-flex items-center gap-2"><Copy className="size-4" /> Copy params JSON</span>
                       </button>

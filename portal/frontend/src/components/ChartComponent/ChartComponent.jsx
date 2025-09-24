@@ -583,6 +583,22 @@ export const ChartComponent = ({ chartId }) => {
 
   const statusTextClass = statusStyles.text ?? 'text-slate-300';
 
+  const lastRefreshCopy = useMemo(() => {
+    if (dataLoading) return 'Refreshing data…';
+    const iso = chartState?.lastUpdatedAt;
+    if (!iso) return 'No data fetched yet.';
+    try {
+      return `Last refreshed ${new Intl.DateTimeFormat(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(new Date(iso))}`;
+    } catch {
+      return `Last refreshed ${new Date(iso).toLocaleTimeString()}`;
+    }
+  }, [chartState?.lastUpdatedAt, dataLoading]);
+
   return (
     <div className="space-y-5">
       {connectionNotice && (
@@ -612,7 +628,7 @@ export const ChartComponent = ({ chartId }) => {
               <button
                 type="button"
                 onClick={() => handleApply()}
-                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-purple-400/40 bg-purple-500/10 text-purple-100 transition hover:border-purple-300/60 hover:bg-purple-500/20 hover:text-purple-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-400"
+                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-sky-400/40 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-500/20 hover:text-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
                 aria-label="Reload chart data"
                 title="Reload chart data"
               >
@@ -620,9 +636,12 @@ export const ChartComponent = ({ chartId }) => {
               </button>
             </div>
           </div>
+        </div>
 
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-slate-400">{lastRefreshCopy}</p>
           {connectionStatus === 'error' && connectionMessage ? (
-            <p className={`text-xs ${statusTextClass} max-w-xs text-right`}>{connectionMessage}</p>
+            <p className={`text-xs ${statusTextClass} sm:text-right`}>{connectionMessage}</p>
           ) : null}
         </div>
 
