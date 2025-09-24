@@ -3,6 +3,10 @@ import React, { Fragment, useMemo, useState } from "react";
 import { Switch, Popover, PopoverButton, PopoverPanel, Transition } from "@headlessui/react";
 import { MoreHorizontal, Copy } from "lucide-react";
 
+const HIDE_KEYS = new Set(["symbol", "interval", "start", "end", "debug"]);
+const isAdvancedKey = (key) =>
+  key.startsWith("ransac_") || key.includes("dedupe") || key.includes("max_windows") || key.includes("min_inliers");
+
 /**
  * IndicatorCard
  *
@@ -35,30 +39,29 @@ export default function IndicatorCard({
   isGeneratingSignals = false,
   disableSignalAction = false,
 }) {
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAllParams, setShowAllParams] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
-  // Heuristics for which params to hide or mark advanced
-  const HIDE_KEYS = new Set(["symbol", "interval", "start", "end", "debug"]);
-  const isAdvanced = (k) =>
-    k.startsWith("ransac_") || k.includes("dedupe") || k.includes("max_windows") || k.includes("min_inliers");
-
-  // Essentials first, advanced folded
-  const { essentials, advanced } = useMemo(() => {
+  const paramsList = useMemo(() => {
     const entries = Object.entries(indicator?.params || {})
       .filter(([k, v]) => !HIDE_KEYS.has(k) && v !== undefined && v !== null && String(v) !== "");
 
-    const ess = [];
-    const adv = [];
-    for (const [k, v] of entries) {
-      (isAdvanced(k) ? adv : ess).push([k, v]);
+    const essentials = [];
+    const advanced = [];
+
+    for (const [key, value] of entries) {
+      const payload = { key, value, isAdvanced: isAdvancedKey(key) };
+      (payload.isAdvanced ? advanced : essentials).push(payload);
     }
 
-    // keep essentials stable by name
-    ess.sort((a, b) => a[0].localeCompare(b[0]));
-    adv.sort((a, b) => a[0].localeCompare(b[0]));
-    return { essentials: ess, advanced: adv };
+    essentials.sort((a, b) => a.key.localeCompare(b.key));
+    advanced.sort((a, b) => a.key.localeCompare(b.key));
+
+    return [...essentials, ...advanced];
   }, [indicator?.params]);
+
+  const visibleParams = showAllParams ? paramsList : paramsList.slice(0, 5);
+  const hiddenCount = Math.max(paramsList.length - visibleParams.length, 0);
 
   const formatVal = (v) => {
     if (Array.isArray(v)) return v.join(",");
@@ -80,59 +83,72 @@ export default function IndicatorCard({
   };
 
   const typeLabel = useMemo(() => {
-    const raw = indicator?.type
-    if (!raw) return 'Custom'
+    const raw = indicator?.type;
+    if (!raw) return "Custom";
     return raw
       .split(/[_-]+/)
       .filter(Boolean)
       .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
-      .join(' ')
-  }, [indicator?.type])
+      .join(" ");
+  }, [indicator?.type]);
 
   return (
     <div className="flex items-start justify-between gap-4 rounded-2xl border border-white/10 bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)]">
-      <div className="min-w-0 flex-1 space-y-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="truncate text-sm font-semibold text-slate-100" title={indicator?.name}>{indicator?.name}</div>
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.3em] text-slate-400">
-            {typeLabel}
+      <div className="min-w-0 flex-1 space-y-3">
+        <div className="flex items-start gap-3">
+          <span
+            className="mt-1 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
+            aria-hidden="true"
+          >
+            <span className="h-3.5 w-3.5 rounded-full border border-white/20" style={{ backgroundColor: color }} />
           </span>
-          <span className="flex h-2 w-2 rounded-full border border-white/20" style={{ backgroundColor: color }} aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
+                {indicator?.name}
+              </div>
+            </div>
+            <div className="mt-2 inline-flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.32em] text-slate-400">
+              <span className="h-px w-6 bg-gradient-to-r from-purple-500/40 via-purple-400/20 to-transparent" aria-hidden="true" />
+              {typeLabel}
+            </div>
+          </div>
         </div>
 
-        <div className="flex flex-wrap gap-1 text-xs text-slate-300">
-          {essentials.map(([k, v]) => (
-            <span key={k} className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5">
-              <span className="text-slate-400">{k}</span>
-              <span>={formatVal(v)}</span>
-            </span>
-          ))}
-
-          {advanced.length > 0 && !showAdvanced && (
-            <button
-              className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-xs text-purple-200 transition hover:border-purple-400/40 hover:bg-purple-500/20"
-              onClick={() => setShowAdvanced(true)}
-            >
-              +{advanced.length} more
-            </button>
-          )}
-        </div>
-
-        {showAdvanced && (
-          <div className="mt-1 flex flex-wrap gap-1 text-xs text-slate-300">
-            {advanced.map(([k, v]) => (
-              <span key={k} className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-[#1a1d27] px-2 py-0.5">
-                <span className="text-slate-400">{k}</span>
-                <span>={formatVal(v)}</span>
+        {visibleParams.length > 0 && (
+          <div className="flex flex-wrap gap-1 text-xs text-slate-300">
+            {visibleParams.map(({ key, value, isAdvanced }) => (
+              <span
+                key={key}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${
+                  isAdvanced
+                    ? 'border-purple-400/30 bg-purple-500/10 text-purple-100/90'
+                    : 'border-white/10 bg-white/5 text-slate-200'
+                }`}
+              >
+                <span className={isAdvanced ? 'text-purple-200/80' : 'text-slate-400'}>{key}</span>
+                <span>= {formatVal(value)}</span>
               </span>
             ))}
-            <button
-              className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-[#1a1d27] px-2 py-0.5 text-xs text-slate-300 transition hover:border-white/20 hover:bg-[#202333]"
-              onClick={() => setShowAdvanced(false)}
-            >
-              Show less
-            </button>
+
+            {hiddenCount > 0 && !showAllParams && (
+              <button
+                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+                onClick={() => setShowAllParams(true)}
+              >
+                +{hiddenCount} more
+              </button>
+            )}
           </div>
+        )}
+
+        {showAllParams && paramsList.length > 5 && (
+          <button
+            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-purple-100 hover:underline"
+            onClick={() => setShowAllParams(false)}
+          >
+            Show less
+          </button>
         )}
       </div>
 

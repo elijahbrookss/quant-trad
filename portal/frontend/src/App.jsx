@@ -106,7 +106,6 @@ function AppShell({ chartId }) {
                     <h3 className="text-lg font-semibold text-slate-100">Indicator &amp; Signal Console</h3>
                     <p className="text-xs text-slate-400">Configure overlays today and plan strategies, signals, and presets tomorrow.</p>
                   </div>
-                  <span className="rounded-full border border-purple-400/30 bg-purple-500/15 px-3 py-1 text-[11px] uppercase tracking-[0.3em] text-purple-200">QuantLab linked</span>
                 </header>
                 <div className="pt-4">
                   <TabManager chartId={chartId} />
@@ -150,9 +149,26 @@ function AppShell({ chartId }) {
         </main>
 
         <footer className="border-t border-white/5 bg-[#181b25]/80 py-8">
-          <div className="mx-auto flex max-w-7xl flex-col gap-3 px-6 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
             <p>QuantTrad Portal — unified intelligence for research, ops, and reporting.</p>
-            <p>Accent palette: graphite foundations with violet highlights.</p>
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
+              <a
+                href="https://github.com/elijahbrookss/quant-trad"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+              >
+                GitHub
+              </a>
+              <a
+                href="https://quad-trad.gitbook.io/docs/"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100"
+              >
+                Documentation
+              </a>
+            </div>
           </div>
         </footer>
     </div>
