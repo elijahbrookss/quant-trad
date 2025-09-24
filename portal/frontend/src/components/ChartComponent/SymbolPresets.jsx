@@ -11,8 +11,8 @@ export default function SymbolPresets({ selected, onPick }) {
       className={[
         'px-3 py-1 rounded-full text-xs transition-colors border',
         active
-          ? 'border-purple-400/60 bg-purple-500/30 text-purple-100 shadow-[0_0_18px_rgba(168,85,247,0.25)]'
-          : 'border-white/10 bg-white/5 text-slate-300 hover:bg-purple-500/10 hover:text-purple-100',
+          ? 'border-sky-400/60 bg-sky-500/20 text-sky-100 shadow-[0_0_18px_rgba(56,189,248,0.3)]'
+          : 'border-white/10 bg-white/5 text-slate-300 hover:border-sky-400/40 hover:bg-sky-500/10 hover:text-sky-100',
       ].join(' ')}
       title={`Load ${label}`}
     >

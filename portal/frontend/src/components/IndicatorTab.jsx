@@ -376,7 +376,7 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {/* List of indicators */}
-      <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/80 shadow-inner shadow-black/30">
+      <section className="relative rounded-2xl border border-white/10 bg-[#0d0d11]/80 shadow-inner shadow-black/30">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
         <div
           className={`flex flex-col gap-6 p-6 transition ${
@@ -394,7 +394,7 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-lg bg-sky-500/90 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-sky-500/20 transition hover:bg-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+                className="inline-flex items-center gap-2 rounded-full border border-sky-400/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 shadow-[0_12px_32px_-18px_rgba(56,189,248,0.55)] transition hover:border-sky-300/60 hover:bg-sky-500/30 hover:text-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
               >
                 <Plus className="size-4" aria-hidden="true" />
                 Create indicator
@@ -402,10 +402,10 @@ export const IndicatorSection = ({ chartId }) => {
             </div>
           </header>
 
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-wrap items-center gap-3 text-xs">
+          <div className="flex flex-col gap-3 rounded-xl border border-white/5 bg-white/5 p-3 text-xs md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
-              <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-medium text-slate-200">
+              <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
                 <input
                   type="checkbox"
                   className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
@@ -415,7 +415,7 @@ export const IndicatorSection = ({ chartId }) => {
                 Show enabled only
               </label>
             </div>
-            <p className="text-xs text-slate-500">{indicatorSummary}</p>
+            <p className="text-xs text-slate-400">{indicatorSummary}</p>
           </div>
 
           <div className="space-y-4">

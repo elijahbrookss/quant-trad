@@ -12,6 +12,13 @@ body {
   color: #f8fafc;
 }
 
+#root {
+  min-height: 100%;
+  background-color: #14171f;
+  background-image: radial-gradient(circle at top, rgba(56, 189, 248, 0.14) 0%, rgba(20, 23, 31, 1) 55%);
+  background-attachment: fixed;
+}
+
 #tv-attr-logo {
   display: none !important;
 }
