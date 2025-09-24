@@ -2,3 +2,8 @@
 #tv-attr-logo {
   display: none !important;
 }
+
+body {
+  background-color: #121317;
+  color: rgb(226 232 240 / 0.92);
+}

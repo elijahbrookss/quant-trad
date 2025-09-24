@@ -12,6 +12,7 @@ import LoadingOverlay from '../LoadingOverlay.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
 import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
+import { RotateCw } from 'lucide-react';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -45,21 +46,6 @@ const deriveTimeScaleOptions = (rawInterval) => {
   return base;
 };
 
-const formatClock = (value) => {
-  if (!value) return null;
-  try {
-    const date = value instanceof Date ? value : new Date(value);
-    return new Intl.DateTimeFormat(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    }).format(date);
-  } catch {
-    return null;
-  }
-};
-
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
@@ -73,7 +59,6 @@ export const ChartComponent = ({ chartId }) => {
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
   const [palOpen, setPalOpen] = useState(false);
-  const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
@@ -91,42 +76,27 @@ export const ChartComponent = ({ chartId }) => {
     markError,
   } = connection;
 
-  const statusLabel = useMemo(() => {
-    if (connectionStatus === 'online') return 'Online';
-    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') return 'Syncing';
-    if (connectionStatus === 'error') return 'Alert';
-    return 'Standby';
-  }, [connectionStatus]);
-
   const statusStyles = useMemo(() => {
     if (connectionStatus === 'online') {
       return {
         text: 'text-emerald-200',
-        pill: 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200',
-        dot: 'bg-emerald-300',
       };
     }
 
     if (connectionStatus === 'connecting' || connectionStatus === 'recovering') {
       return {
         text: 'text-amber-200',
-        pill: 'border-amber-400/40 bg-amber-500/10 text-amber-200',
-        dot: 'bg-amber-300',
       };
     }
 
     if (connectionStatus === 'error') {
       return {
         text: 'text-rose-200',
-        pill: 'border-rose-500/40 bg-rose-500/10 text-rose-200',
-        dot: 'bg-rose-300',
       };
     }
 
     return {
       text: 'text-slate-300',
-      pill: 'border-slate-600/60 bg-slate-900/70 text-slate-200',
-      dot: 'bg-slate-400',
     };
   }, [connectionStatus]);
 
@@ -158,7 +128,6 @@ export const ChartComponent = ({ chartId }) => {
         return;
       }
 
-      setLastRefreshAt(new Date());
       markAttempt();
       info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
       const resp = await fetchCandleData({
@@ -613,8 +582,6 @@ export const ChartComponent = ({ chartId }) => {
       : 'Loading chart…';
 
   const statusTextClass = statusStyles.text;
-  const statusPillClass = statusStyles.pill;
-  const statusDotClass = statusStyles.dot;
 
   return (
     <div className="space-y-5">
@@ -635,39 +602,37 @@ export const ChartComponent = ({ chartId }) => {
         </div>
       )}
 
-      <div className="rounded-3xl border border-white/10 bg-[#0c0c11]/90 p-6 shadow-[0_60px_140px_-80px_rgba(0,0,0,1)]">
-        <div className="flex flex-col gap-6 lg:flex-row lg:flex-wrap lg:items-end lg:justify-between">
+      <div className="rounded-3xl border border-white/10 bg-[#181920]/95 p-6 shadow-[0_60px_140px_-80px_rgba(0,0,0,0.9)]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end lg:justify-between">
           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
             <TimeframeSelect selected={interval} onChange={setInterval} />
             <SymbolInput value={symbol} onChange={setSymbol} />
-            <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+            <div className="flex items-center gap-2">
+              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+              <button
+                type="button"
+                onClick={() => handleApply()}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-purple-500/40 bg-purple-500/15 text-purple-200 transition hover:border-purple-400 hover:bg-purple-500/20 hover:text-purple-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-400"
+                aria-label="Refresh data"
+              >
+                <RotateCw className="size-5" />
+              </button>
+            </div>
           </div>
 
-          <div className="flex flex-col items-start gap-3 sm:items-end">
-            <button
-              className="inline-flex items-center gap-2 rounded-full border border-[#4c2c70] bg-[#281635] px-6 py-2 text-xs font-semibold uppercase tracking-[0.32em] text-purple-200 transition hover:border-[#654191] hover:bg-[#321d42] hover:text-purple-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6a45a0]"
-              onClick={() => handleApply()}
-              type="button"
-            >
-              Load data
-            </button>
-            <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.32em] ${statusPillClass}`}>
-              <span className={`h-2 w-2 rounded-full ${statusDotClass}`} />
-              QuantLab API · {statusLabel}
-            </span>
-            {connectionStatus === 'error' && connectionMessage ? (
-              <p className={`text-xs ${statusTextClass}`}>{connectionMessage}</p>
-            ) : null}
-            <p className="text-xs text-slate-500">
-              {lastRefreshAt ? `Last check ${formatClock(lastRefreshAt)}` : 'Click Load data to pull the latest candles.'}
-            </p>
-            <p className="text-xs text-slate-600">
-              Press <kbd className="rounded border border-slate-700 bg-slate-900 px-1 text-[10px] text-slate-300">/</kbd> to open presets.
-            </p>
-          </div>
+          <p className="text-[11px] uppercase tracking-[0.32em] text-slate-500 md:hidden">
+            Press <kbd className="rounded border border-slate-700 bg-slate-900 px-1 text-[10px] text-slate-300">/</kbd> for presets
+          </p>
+
+          {connectionStatus === 'error' && connectionMessage ? (
+            <p className={`text-xs ${statusTextClass}`}>{connectionMessage}</p>
+          ) : null}
         </div>
 
-        <div className="relative mt-8 h-[700px] overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-[#101019] to-[#08080d]">
+        <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-[#1b1c24] to-[#10121a]">
+          <div className="pointer-events-none absolute right-5 top-5 hidden text-xs uppercase tracking-[0.32em] text-slate-400 md:block">
+            Press <kbd className="rounded border border-slate-700 bg-slate-900 px-1 text-[10px] text-slate-300">/</kbd> for presets
+          </div>
           <div ref={chartContainerRef} className="h-full w-full" />
 
           <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />

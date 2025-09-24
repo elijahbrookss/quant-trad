@@ -353,19 +353,20 @@ export const IndicatorSection = ({ chartId }) => {
 
       <button
         onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
+        className="group flex w-full flex-col items-center gap-2 rounded-2xl border border-dashed border-white/10 bg-[#1a1b22]/60 px-4 py-6 text-sm text-slate-400 transition hover:border-purple-400/40 hover:bg-[#23242d]/80 hover:text-slate-100"
       >
         {/* plus icon preserved */}
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-8 rounded-full border border-purple-400/30 bg-purple-500/10 p-1 text-purple-200 transition group-hover:border-purple-300/60 group-hover:bg-purple-500/20">
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
         </svg>
-        Create Indicator
+        <span className="font-semibold tracking-wide">Create Indicator</span>
+        <span className="text-xs text-slate-500 group-hover:text-slate-300">Draft overlays, signals, or custom panes.</span>
       </button>
 
       {/* List of indicators */}
-      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
+      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#171820]/80 p-5 shadow-[inset_0_30px_80px_-60px_rgba(0,0,0,0.8)]">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
-        <div className={`space-y-1 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
+        <div className={`grid gap-4 transition md:grid-cols-2 ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
           {indicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
@@ -387,7 +388,7 @@ export const IndicatorSection = ({ chartId }) => {
           })}
 
           {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            <div className="col-span-full rounded-2xl border border-dashed border-white/10 bg-white/5 px-6 py-10 text-center text-sm text-slate-400">
               No indicators yet. Create one to get started.
             </div>
           )}

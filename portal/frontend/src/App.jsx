@@ -29,15 +29,54 @@ function ApiStatusPill({ chartId }) {
   )
 }
 
-function SectionHeading({ title, description, kicker }) {
+function SectionHeading({ title, description, kicker, actions }) {
   return (
-    <div className="space-y-3">
-      {kicker ? (
-        <span className="text-[11px] uppercase tracking-[0.35em] text-purple-300/80">{kicker}</span>
-      ) : null}
-      <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
-      <p className="max-w-2xl text-sm text-slate-400">{description}</p>
+    <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+      <div className="space-y-3">
+        {kicker ? (
+          <span className="text-[11px] uppercase tracking-[0.35em] text-purple-300/80">{kicker}</span>
+        ) : null}
+        <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
+        <p className="max-w-2xl text-sm text-slate-400">{description}</p>
+      </div>
+      {actions ? <div className="flex shrink-0 flex-col items-start gap-3 text-xs text-slate-400 sm:items-end">{actions}</div> : null}
     </div>
+  )
+}
+
+function QuantLabMeta({ chartId }) {
+  const chart = useChartValue(chartId) || {}
+  const status = chart.connectionStatus || 'idle'
+  const lastUpdated = chart.lastUpdatedAt ? new Date(chart.lastUpdatedAt) : null
+
+  const label = status === 'online' ? 'Online' : status === 'error' ? 'Alert' : status === 'connecting' ? 'Syncing' : 'Standby'
+  const tone = status === 'online'
+    ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/40'
+    : status === 'error'
+      ? 'bg-rose-500/15 text-rose-200 border-rose-500/40'
+      : status === 'connecting' || status === 'recovering'
+        ? 'bg-amber-500/15 text-amber-200 border-amber-500/40'
+        : 'bg-slate-700/40 text-slate-200 border-slate-600/50'
+
+  const timestamp = lastUpdated
+    ? new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(lastUpdated)
+    : null
+
+  return (
+    <>
+      <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.32em] ${tone}`}>
+        <span className="h-2 w-2 rounded-full bg-current" />
+        QuantLab API · {label}
+      </span>
+      <p className="text-xs text-slate-500">
+        {timestamp ? `Last refresh ${timestamp}` : 'Waiting for first refresh'}
+      </p>
+    </>
   )
 }
 
@@ -51,8 +90,8 @@ export default function App() {
 
   return (
     <ChartStateProvider>
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#1b1b1d_0%,_#0d0d10_45%,_#060608_100%)] text-slate-100">
-        <header className="sticky top-0 z-30 border-b border-white/5 bg-[#0d0d10]/90 backdrop-blur">
+      <div className="min-h-screen bg-[#121317] text-slate-100">
+        <header className="sticky top-0 z-30 border-b border-white/5 bg-[#14151b]/95 backdrop-blur">
           <div className="mx-auto flex max-w-7xl flex-col gap-5 px-6 py-6 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-3 text-lg font-semibold text-slate-100">
@@ -81,17 +120,18 @@ export default function App() {
             <SectionHeading
               title="QuantLab"
               description="Visualize price action, overlays, and execution signals in a focused, minimal environment."
+              actions={<QuantLabMeta chartId={chartId} />}
             />
             <div className="space-y-10">
               <ChartComponent chartId={chartId} />
 
-              <section className="rounded-3xl border border-white/5 bg-black/40 p-6 shadow-[0_30px_80px_-60px_rgba(0,0,0,0.85)]">
+              <section className="rounded-3xl border border-white/10 bg-[#181920]/85 p-6 shadow-[0_40px_120px_-80px_rgba(0,0,0,0.85)]">
                 <header className="flex flex-col gap-3 border-b border-white/5 pb-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="space-y-1">
                     <h3 className="text-lg font-semibold text-slate-100">Indicator &amp; Signal Console</h3>
                     <p className="text-xs text-slate-400">Configure overlays today and plan strategies, signals, and presets tomorrow.</p>
                   </div>
-                  <span className="rounded-full border border-purple-500/30 bg-purple-900/40 px-3 py-1 text-[11px] uppercase tracking-[0.3em] text-purple-200">QuantLab linked</span>
+                  <span className="rounded-full border border-purple-400/40 bg-purple-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.3em] text-purple-200">QuantLab linked</span>
                 </header>
                 <div className="pt-4">
                   <TabManager chartId={chartId} />

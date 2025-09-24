@@ -35,8 +35,8 @@ export const TabManager = ({ chartId }) => {
               onClick={() => handleTabClick(id)}
               className={`rounded-full border px-4 py-2 transition ${
                 isActive
-                  ? 'border-purple-400/60 bg-purple-500/20 text-purple-100 shadow-[0_10px_30px_-15px_rgba(168,85,247,0.6)]'
-                  : 'border-white/10 bg-white/5 text-slate-400 hover:border-purple-400/30 hover:bg-purple-500/10 hover:text-purple-100'
+                  ? 'border-purple-400/60 bg-purple-500/20 text-purple-100 shadow-[0_18px_45px_-28px_rgba(124,58,237,0.8)]'
+                  : 'border-white/10 bg-white/5 text-slate-400 hover:border-purple-400/30 hover:bg-purple-500/15 hover:text-purple-100'
               }`}
             >
               <span>{id}</span>
@@ -45,7 +45,7 @@ export const TabManager = ({ chartId }) => {
         })}
       </div>
 
-      <div className="rounded-2xl border border-white/5 bg-[#0d0d11]/70 p-6">
+      <div className="rounded-3xl border border-white/10 bg-[#191a22]/85 p-6 shadow-[0_40px_120px_-80px_rgba(0,0,0,0.85)]">
         {tabs.map(({ id, blurb }) => (
           <p
             key={id}
