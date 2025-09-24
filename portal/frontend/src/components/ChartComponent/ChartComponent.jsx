@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2 } from 'lucide-react';
 import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent';
@@ -75,9 +73,7 @@ export const ChartComponent = ({ chartId }) => {
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
   const [palOpen, setPalOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
-  const [portalTarget, setPortalTarget] = useState(null);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
@@ -102,39 +98,37 @@ export const ChartComponent = ({ chartId }) => {
     return 'Standby';
   }, [connectionStatus]);
 
-  const statusTone = useMemo(() => {
-    if (connectionStatus === 'online') return 'text-emerald-200';
-    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') return 'text-amber-200';
-    if (connectionStatus === 'error') return 'text-rose-200';
-    return 'text-slate-300';
+  const statusStyles = useMemo(() => {
+    if (connectionStatus === 'online') {
+      return {
+        text: 'text-emerald-200',
+        pill: 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200',
+        dot: 'bg-emerald-300',
+      };
+    }
+
+    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') {
+      return {
+        text: 'text-amber-200',
+        pill: 'border-amber-400/40 bg-amber-500/10 text-amber-200',
+        dot: 'bg-amber-300',
+      };
+    }
+
+    if (connectionStatus === 'error') {
+      return {
+        text: 'text-rose-200',
+        pill: 'border-rose-500/40 bg-rose-500/10 text-rose-200',
+        dot: 'bg-rose-300',
+      };
+    }
+
+    return {
+      text: 'text-slate-300',
+      pill: 'border-slate-600/60 bg-slate-900/70 text-slate-200',
+      dot: 'bg-slate-400',
+    };
   }, [connectionStatus]);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    setPortalTarget(document.body);
-  }, []);
-
-  useEffect(() => {
-    if (!isFullscreen) return undefined;
-    if (typeof document === 'undefined') return undefined;
-
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        setIsFullscreen(false);
-      }
-    };
-
-    const { body } = document;
-    const prevOverflow = body.style.overflow;
-    body.style.overflow = 'hidden';
-
-    document.addEventListener('keydown', onKeyDown);
-
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      body.style.overflow = prevOverflow;
-    };
-  }, [isFullscreen]);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -618,75 +612,9 @@ export const ChartComponent = ({ chartId }) => {
     : chartState?.overlayLoading ? 'Loading overlays…'
       : 'Loading chart…';
 
-  const chartCard = (
-    <div
-      className={`${
-        isFullscreen
-          ? 'fixed inset-6 z-[60] flex flex-col gap-6 rounded-3xl border border-white/10 bg-[#050507]/95 p-6 shadow-[0_80px_140px_-70px_rgba(0,0,0,1)]'
-          : 'rounded-3xl border border-white/10 bg-[#050507]/80 p-6 shadow-[0_60px_120px_-70px_rgba(0,0,0,0.95)]'
-      }`}
-    >
-      <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end lg:justify-between">
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-          <TimeframeSelect selected={interval} onChange={setInterval} />
-          <SymbolInput value={symbol} onChange={setSymbol} />
-          <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
-        </div>
-
-        <div className="flex flex-col items-start gap-2 sm:items-end">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className="inline-flex items-center gap-2 rounded-full border border-purple-400/60 bg-purple-500/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-purple-100 transition hover:bg-purple-500/30 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-400"
-              onClick={() => handleApply()}
-              type="button"
-            >
-              Load data
-            </button>
-            <button
-              className="inline-flex items-center gap-2 rounded-full border border-slate-600/60 bg-slate-900/70 px-3 py-2 text-xs font-medium uppercase tracking-[0.3em] text-slate-200 transition hover:border-purple-400/50 hover:bg-purple-500/10 hover:text-purple-100"
-              onClick={() => setIsFullscreen((prev) => !prev)}
-              type="button"
-            >
-              {isFullscreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
-              <span>{isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}</span>
-            </button>
-          </div>
-          <p className="text-xs text-slate-500">
-            Connection <span className={`font-semibold ${statusTone}`}>{statusLabel}</span>
-            {connectionStatus === 'error' && connectionMessage ? ` — ${connectionMessage}` : ''}
-          </p>
-          <p className="text-xs text-slate-500">
-            {lastRefreshAt ? `Last check ${formatClock(lastRefreshAt)}` : 'Click Load data to pull the latest candles.'}
-          </p>
-          <p className="text-xs text-slate-600">
-            Press <kbd className="rounded border border-slate-700 bg-slate-900 px-1 text-[10px] text-slate-300">/</kbd> to open presets.
-          </p>
-        </div>
-      </div>
-
-      <div className={`relative mt-6 ${isFullscreen ? 'flex-1 min-h-[60vh]' : 'h-[680px]'}`}>
-        <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-
-        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-        <HotkeyHint />
-        <LoadingOverlay show={loaderActive} message={loaderMessage} />
-      </div>
-    </div>
-  );
-
-  const shouldRenderInline = !isFullscreen || !portalTarget;
-  const placeholder = isFullscreen && portalTarget
-    ? <div className="h-[700px]" aria-hidden="true" />
-    : null;
-  const fullscreenLayer = isFullscreen && portalTarget
-    ? createPortal(
-        <>
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm" />
-          {chartCard}
-        </>,
-        portalTarget,
-      )
-    : null;
+  const statusTextClass = statusStyles.text;
+  const statusPillClass = statusStyles.pill;
+  const statusDotClass = statusStyles.dot;
 
   return (
     <div className="space-y-5">
@@ -707,9 +635,46 @@ export const ChartComponent = ({ chartId }) => {
         </div>
       )}
 
-      {shouldRenderInline && chartCard}
-      {placeholder}
-      {fullscreenLayer}
+      <div className="rounded-3xl border border-white/10 bg-[#0c0c11]/90 p-6 shadow-[0_60px_140px_-80px_rgba(0,0,0,1)]">
+        <div className="flex flex-col gap-6 lg:flex-row lg:flex-wrap lg:items-end lg:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <TimeframeSelect selected={interval} onChange={setInterval} />
+            <SymbolInput value={symbol} onChange={setSymbol} />
+            <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+          </div>
+
+          <div className="flex flex-col items-start gap-3 sm:items-end">
+            <button
+              className="inline-flex items-center gap-2 rounded-full border border-[#4c2c70] bg-[#281635] px-6 py-2 text-xs font-semibold uppercase tracking-[0.32em] text-purple-200 transition hover:border-[#654191] hover:bg-[#321d42] hover:text-purple-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6a45a0]"
+              onClick={() => handleApply()}
+              type="button"
+            >
+              Load data
+            </button>
+            <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.32em] ${statusPillClass}`}>
+              <span className={`h-2 w-2 rounded-full ${statusDotClass}`} />
+              QuantLab API · {statusLabel}
+            </span>
+            {connectionStatus === 'error' && connectionMessage ? (
+              <p className={`text-xs ${statusTextClass}`}>{connectionMessage}</p>
+            ) : null}
+            <p className="text-xs text-slate-500">
+              {lastRefreshAt ? `Last check ${formatClock(lastRefreshAt)}` : 'Click Load data to pull the latest candles.'}
+            </p>
+            <p className="text-xs text-slate-600">
+              Press <kbd className="rounded border border-slate-700 bg-slate-900 px-1 text-[10px] text-slate-300">/</kbd> to open presets.
+            </p>
+          </div>
+        </div>
+
+        <div className="relative mt-8 h-[700px] overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-b from-[#101019] to-[#08080d]">
+          <div ref={chartContainerRef} className="h-full w-full" />
+
+          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+          <HotkeyHint />
+          <LoadingOverlay show={loaderActive} message={loaderMessage} />
+        </div>
+      </div>
     </div>
   )
 };
