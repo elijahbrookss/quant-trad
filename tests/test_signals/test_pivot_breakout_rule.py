@@ -247,6 +247,37 @@ def test_pivot_breakout_rule_requires_full_candles_for_confirmation():
     assert breakout["bars_closed_beyond_level"] == 2
 
 
+def test_pivot_breakout_rule_allows_straddle_between_confirmation_and_breakout():
+    rows = [
+        (99.2, 99.6, 98.6, 99.1),
+        (99.0, 99.4, 98.4, 98.9),
+        (99.4, 100.6, 98.8, 99.7),  # straddle with wick above the level
+        (100.1, 100.9, 99.2, 100.0),  # straddle that resets the run
+        (100.8, 101.4, 100.3, 101.1),
+        (101.2, 101.8, 100.6, 101.5),
+    ]
+    df = _build_dataframe_from_ohlc(rows)
+    level = _build_level(100.0, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert len(results) == 1
+    breakout = results[0]
+
+    assert breakout["breakout_start"] == df.index[4].to_pydatetime()
+    assert breakout["time"] == df.index[5].to_pydatetime()
+    assert breakout["breakout_direction"] == "above"
+    assert breakout["direction"] == "resistance"
+
+
 def test_pivot_breakout_rule_requires_prior_confirmation_for_breakout_label():
     # Price only spends one bar below the level before breaking above and failing.
     closes = [103, 105, 103, 102, 101]
