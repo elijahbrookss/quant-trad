@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
-import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
+import { TimeframeSelect } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent';
 import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
@@ -165,7 +165,7 @@ export const ChartComponent = ({ chartId }) => {
     return () => ro.disconnect();
   }, [debug]);
 
-  useEffect(() => {
+  useEffect(() => { 
     const onKey = (e) => {
       if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const el = e.target;
@@ -178,13 +178,19 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    const openPalette = () => setPalOpen(true);
+    window.addEventListener('qt-open-symbol-palette', openPalette);
+    return () => window.removeEventListener('qt-open-symbol-palette', openPalette);
+  }, []);
+
   useEffect(() => () => {
     if (timeframeWarningRef.current) {
       clearTimeout(timeframeWarningRef.current);
     }
   }, []);
 
-  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
+  const applySymbol = (sym) => { setSymbol(sym); setPalOpen(false); handleApply(); };
   // Data loader.
   const loadChartData = useCallback(async () => {
     try {
@@ -503,78 +509,107 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
+  const surfaceClass = 'rounded-3xl border border-neutral-800 bg-neutral-950/80 px-6 py-6 shadow-[0_24px_60px_-40px_rgba(0,0,0,0.9)] backdrop-blur';
+
   return (
-    <>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h2 className="text-2xl font-semibold text-neutral-100">Market snapshot</h2>
+        <p className="max-w-2xl text-sm text-neutral-400">
+          Adjust the timeframe, symbol, and window to plan your next move.
+        </p>
+      </div>
 
-      <div className="space-y-3 mb-4">
-        {rangeWarning && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            <span className="text-lg">⚠️</span>
-            <span className="font-medium">{rangeWarning}</span>
-          </div>
-        )}
+      {rangeWarning && (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-500/40 bg-amber-500/15 px-4 py-3 text-sm text-amber-200">
+          <span aria-hidden className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
+        </div>
+      )}
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="flex flex-col gap-4 lg:flex-row lg:flex-wrap lg:items-end">
+      <div className={surfaceClass}>
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end">
               <TimeframeSelect selected={interval} onChange={setInterval} />
-              <SymbolInput value={symbol} onChange={setSymbol} />
+              <div className="flex min-w-[10rem] flex-col gap-2">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Symbol</span>
+                <button
+                  type="button"
+                  onClick={() => setPalOpen(true)}
+                  className="inline-flex w-full items-center justify-between rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm font-semibold text-neutral-200 transition hover:border-neutral-500 hover:text-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
+                >
+                  <span className="uppercase tracking-wide">{symbol}</span>
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.5}
+                    className="h-4 w-4 text-neutral-500"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487 19.5 7.125M4.5 19.5l2.569-.428a2 2 0 0 0 1.093-.554L19.5 7.125a1.875 1.875 0 1 0-2.652-2.652L5.51 16.366a2 2 0 0 0-.554 1.093L4.5 19.5Z" />
+                  </svg>
+                </button>
+              </div>
               <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
             </div>
-            <div className="flex items-center gap-2 self-start">
-              <span className="text-xs uppercase tracking-[0.35em] text-slate-400">Refresh</span>
-              <button
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-sky-400/70 bg-sky-500/30 text-sky-50 transition hover:bg-sky-500/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-                onClick={handleApply}
-                type="button"
-                title="Fetch latest data"
-                aria-label="Fetch latest data"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.5}
-                  className="h-5 w-5"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
-                  />
-                </svg>
-              </button>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="text-left text-xs text-neutral-500">
+              <div className="font-semibold uppercase tracking-[0.24em] text-neutral-400">Refresh</div>
+              <div className="text-neutral-400">Apply your latest settings</div>
             </div>
+            <button
+              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-neutral-700 bg-neutral-900 text-neutral-300 shadow-sm transition hover:border-neutral-500 hover:text-neutral-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-500"
+              onClick={handleApply}
+              type="button"
+              title="Fetch latest data"
+              aria-label="Fetch latest data"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.5}
+                className="h-5 w-5"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4.5 12a7.5 7.5 0 0 1 12.618-5.303M19.5 12a7.5 7.5 0 0 1-12.618 5.303M8.25 8.25h-3v-3M15.75 15.75h3v3"
+                />
+              </svg>
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="flex space-x-4">
-        <div className="relative flex-1 h-[560px] overflow-hidden rounded-2xl border border-neutral-900 bg-neutral-950/80">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-          <button
-            type="button"
-            onClick={() => setPalOpen(true)}
-            className="absolute left-4 top-4 inline-flex h-9 items-center justify-center rounded-md border border-neutral-800 bg-neutral-950/90 px-3 text-sm font-medium text-neutral-200 hover:bg-neutral-900"
-            title="Open symbol presets (/)"
-          >
-            Presets
-          </button>
+      <div className={`${surfaceClass} relative h-[560px] overflow-hidden px-0 py-0`}>
+        <div ref={chartContainerRef} className="h-full w-full rounded-[28px] bg-neutral-950" />
+        <button
+          type="button"
+          onClick={() => setPalOpen(true)}
+          className="group absolute left-6 top-6 inline-flex items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-neutral-300 shadow-sm transition hover:border-neutral-500 hover:text-neutral-100"
+          title="Open symbol presets (/)"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-neutral-500 transition group-hover:bg-neutral-200" />
+          Presets
+        </button>
 
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
-        </div>
+        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+        <HotkeyHint />
+        {/* overlay */}
+        <LoadingOverlay
+          show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
+          message={
+            chartState?.signalsLoading ? 'Generating signals…'
+            : chartState?.overlayLoading ? 'Loading overlays…'
+            : 'Loading chart…'
+          }
+        />
       </div>
-    </>
+    </div>
   )
 };

@@ -103,6 +103,24 @@ export default function IndicatorModalV2({
     return keys;
   }, [typeMeta]);
 
+  useEffect(() => {
+    setParams((prev) => {
+      if (!prev || !intListKeys.size) return prev;
+      let changed = false;
+      const next = { ...prev };
+      intListKeys.forEach((key) => {
+        if (!(key in prev)) return;
+        const current = prev[key];
+        const display = typeof current === "string" ? current : listToString(current);
+        if (display !== current) {
+          next[key] = display;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [intListKeys]);
+
   // 1) Load list of available types when opening
   useEffect(() => {
     if (!isOpen) return;
@@ -248,10 +266,9 @@ export default function IndicatorModalV2({
             inputMode="numeric"
             pattern="^[0-9\\s,;]*$"
             className="w-full rounded-lg border border-neutral-700/70 bg-neutral-900/60 px-3 py-2 text-sm focus:border-indigo-500/70 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-            value={listToString(val)}
+            value={typeof val === "string" ? val : listToString(val)}
             placeholder="e.g., 5, 10, 20"
             onChange={(e) => setParams((p) => ({ ...p, [key]: e.target.value }))}
-            onBlur={(e) => setParams((p) => ({ ...p, [key]: toIntList(e.target.value) }))}
           />
         ) : enumVals?.length ? (
           <select
@@ -300,10 +317,20 @@ export default function IndicatorModalV2({
     );
   };
 
+  const buildSubmitParams = () => {
+    const base = { ...params };
+    intListKeys.forEach((key) => {
+      if (base[key] !== undefined) {
+        base[key] = toIntList(base[key]);
+      }
+    });
+    return base;
+  };
+
   const handleSubmit = () => {
     if (!typeId) return setMetaErr("Please select a type.");
     if (!name.trim()) return setMetaErr("Please enter a name.");
-    onSave({ id: initial?.id, type: typeId, name, params });
+    onSave({ id: initial?.id, type: typeId, name, params: buildSubmitParams() });
   };
 
   const resetToDefaults = () => {
@@ -315,7 +342,7 @@ export default function IndicatorModalV2({
 
   const copyParams = async () => {
     try {
-      await navigator.clipboard.writeText(JSON.stringify(params, null, 2));
+      await navigator.clipboard.writeText(JSON.stringify(buildSubmitParams(), null, 2));
     } catch (e) {
       logger.error("copy_params_failed", e);
     }
@@ -345,9 +372,6 @@ export default function IndicatorModalV2({
             <DialogTitle className="text-lg font-semibold">
               {initial?.id ? "Edit Indicator" : "Create Indicator"}
             </DialogTitle>
-            <p className="mt-1 text-sm text-neutral-400">
-              Configure signal logic quickly with grouped essentials and one-click tools.
-            </p>
           </div>
 
           <div className="flex flex-col gap-6 px-6 py-6 lg:flex-row">

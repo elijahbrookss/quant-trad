@@ -3,7 +3,7 @@ import { createLogger } from '../utils/logger.js';
 const signalsLogger = createLogger('IndicatorSignals');
 
 export const hexToRgba = (hex, a = 0.18) => {
-  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
+  if (!hex || !hex.startsWith('#')) return `rgba(148,163,184,${a})`;
   const v = hex.slice(1);
   const n = v.length === 3
     ? v.split('').map(c => parseInt(c + c, 16))
@@ -25,10 +25,25 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
       : ov.payload.markers;
 
+    const bubbles = Array.isArray(ov.payload.bubbles)
+      ? ov.payload.bubbles.map(bubble => {
+          if (!bubble) return bubble;
+          const accentColor = bubble.accentColor ?? color;
+          const backgroundColor = bubble.backgroundColor ?? hexToRgba(color, 0.14);
+          const textColor = bubble.textColor ?? '#1f2937';
+          return {
+            ...bubble,
+            accentColor,
+            backgroundColor,
+            textColor,
+          };
+        })
+      : ov.payload.bubbles;
+
     const boxes = Array.isArray(ov.payload.boxes)
       ? ov.payload.boxes.map(b => {
           if (!b) return b;
-          return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
+          return { ...b, color: hexToRgba(color, 0.12), border: { color: hexToRgba(color, 0.45), width: 1 } };
         })
       : ov.payload.boxes;
 
@@ -50,6 +65,7 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
         price_lines,
         markers,
         boxes,
+        bubbles,
         segments,
         polylines,
       },

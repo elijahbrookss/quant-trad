@@ -52,7 +52,7 @@ const normalizeParams = (params) => {
 };
 
 // Manages the list of indicators and syncs enabled ones to the chart context
-export const IndicatorSection = ({ chartId }) => {
+export const IndicatorSection = ({ chartId, filterEnabledOnly = false, onStatsChange }) => {
   const [indicators, setIndicators] = useState([])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -281,10 +281,54 @@ export const IndicatorSection = ({ chartId }) => {
   const handleDelete = async (id) => {
     try {
       await deleteIndicator(id)
-      setIndicators(prev => prev.filter(i => i.id !== id))
+      setIndicators(prev => {
+        const next = prev.filter(i => i.id !== id)
+        queueMicrotask(() => { void refreshEnabledOverlays(next); })
+        return next
+      })
+      setIndColors(prev => {
+        if (!(id in prev)) return prev
+        const { [id]: _removed, ...rest } = prev
+        return rest
+      })
     } catch (e) {
       setError(e.message)
       logError('indicator_delete_failed', e)
+    }
+  }
+
+  const handleClone = async (id) => {
+    const original = indicators.find((ind) => ind.id === id)
+    if (!original) return
+
+    try {
+      const baseName = original.name || original.type || 'Indicator'
+      const taken = new Set(indicators.map((ind) => ind.name))
+      let attempt = 1
+      let candidate = `${baseName} copy`
+      while (taken.has(candidate)) {
+        attempt += 1
+        candidate = `${baseName} copy ${attempt}`
+      }
+
+      const clonePayload = {
+        type: original.type,
+        params: { ...original.params },
+        name: candidate,
+      }
+
+      const created = await createIndicator(clonePayload)
+      setIndicators(prev => {
+        const next = [...prev, created]
+        queueMicrotask(() => { void refreshEnabledOverlays(next); })
+        return next
+      })
+      if (indColors[original.id]) {
+        setIndColors(prev => ({ ...prev, [created.id]: prev[original.id] || indColors[original.id] }))
+      }
+    } catch (e) {
+      setError(e.message)
+      logError('indicator_clone_failed', e)
     }
   }
 
@@ -326,23 +370,31 @@ export const IndicatorSection = ({ chartId }) => {
     setIndColors(prev => ({ ...prev, [indicatorId]: color }));
   };
 
-  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
-
   const isSignalsLoading = !!chartState?.signalsLoading
   const signalsLoadingFor = chartState?.signalsLoadingFor
+  const visibleIndicators = filterEnabledOnly ? indicators.filter(ind => ind.enabled) : indicators
+
+  useEffect(() => {
+    onStatsChange?.({
+      total: indicators.length,
+      enabled: indicators.filter(ind => ind.enabled).length,
+    })
+  }, [indicators, onStatsChange])
+
+  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
     <div className="space-y-6">
       {error && (
-        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+        <div className="relative rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
           <div className="pr-6">
-            <p className="font-medium text-red-200">Request failed</p>
-            <p className="mt-1 text-red-100">{error}</p>
+            <p className="font-medium text-rose-100">Request failed</p>
+            <p className="mt-1 text-rose-200">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            className="absolute right-3 top-3 text-rose-300 transition hover:text-rose-100"
             aria-label="Dismiss error"
           >
             <X className="size-4" />
@@ -351,8 +403,8 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {isLoading && (
-        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm text-neutral-300">
-          <svg className="size-4 animate-spin text-blue-300" viewBox="0 0 24 24" role="status" aria-hidden="true">
+        <div className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-400">
+          <svg className="size-4 animate-spin text-neutral-500" viewBox="0 0 24 24" role="status" aria-hidden="true">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
           </svg>
@@ -362,7 +414,7 @@ export const IndicatorSection = ({ chartId }) => {
 
       <button
         onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
+        className="flex w-full cursor-pointer flex-col items-center rounded-lg border border-dashed border-neutral-800 bg-neutral-950/60 px-4 py-3 text-neutral-400 shadow-sm transition hover:border-neutral-600 hover:text-neutral-100"
       >
         {/* plus icon preserved */}
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
@@ -373,7 +425,7 @@ export const IndicatorSection = ({ chartId }) => {
 
       {/* List of indicators */}
       <div className="space-y-1">
-          {indicators.map(indicator => {
+          {visibleIndicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
             return (
@@ -384,6 +436,7 @@ export const IndicatorSection = ({ chartId }) => {
                 onToggle={toggleEnable}
                 onEdit={openEditModal}
                 onDelete={handleDelete}
+                onClone={handleClone}
                 onGenerateSignals={generateSignals}
                 onSelectColor={handleSelectColor}
                 colorSwatches={COLOR_SWATCHES}
@@ -394,8 +447,14 @@ export const IndicatorSection = ({ chartId }) => {
           })}
 
           {!isLoading && indicators.length === 0 && (
-            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-950/60 px-4 py-6 text-center text-sm text-neutral-500">
               No indicators yet. Create one to get started.
+            </div>
+          )}
+
+          {!isLoading && indicators.length > 0 && visibleIndicators.length === 0 && (
+            <div className="rounded-lg border border-neutral-800 bg-neutral-950/60 px-4 py-6 text-center text-sm text-neutral-500">
+              All active indicators are shown. Disable the filter to see archived ones.
             </div>
           )}
       </div>
