@@ -60,6 +60,7 @@ export const IndicatorSection = ({ chartId }) => {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
   const [indColors, setIndColors] = useState({});
+  const [showEnabledOnly, setShowEnabledOnly] = useState(false);
 
 
   const { updateChart, getChart } = useChartState()
@@ -327,10 +328,15 @@ export const IndicatorSection = ({ chartId }) => {
     setIndColors(prev => ({ ...prev, [indicatorId]: color }));
   };
 
-  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
-
   const isSignalsLoading = !!chartState?.signalsLoading
   const signalsLoadingFor = chartState?.signalsLoadingFor
+
+  const filteredIndicators = useMemo(
+    () => (showEnabledOnly ? indicators.filter((ind) => ind?.enabled) : indicators),
+    [showEnabledOnly, indicators]
+  );
+
+  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
     <div className="space-y-6">
@@ -365,8 +371,24 @@ export const IndicatorSection = ({ chartId }) => {
       {/* List of indicators */}
       <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d11]/70 p-4 shadow-inner shadow-black/30">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
-        <div className={`space-y-1 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
-          {indicators.map(indicator => {
+        <div className={`space-y-4 transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-300">
+            <span className="font-medium text-slate-200">Indicators</span>
+            <button
+              type="button"
+              onClick={() => setShowEnabledOnly((prev) => !prev)}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 transition ${
+                showEnabledOnly
+                  ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-200'
+                  : 'border-white/10 bg-white/5 text-slate-200 hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100'
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${showEnabledOnly ? 'bg-emerald-300' : 'bg-slate-400'}`} aria-hidden="true" />
+              {showEnabledOnly ? 'Showing enabled only' : 'Show enabled only'}
+            </button>
+          </div>
+
+          {filteredIndicators.map(indicator => {
             const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
             const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
             return (
@@ -386,9 +408,11 @@ export const IndicatorSection = ({ chartId }) => {
             )
           })}
 
-          {!isLoading && indicators.length === 0 && (
+          {!isLoading && filteredIndicators.length === 0 && (
             <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
-              No indicators yet. Create one to get started.
+              {showEnabledOnly
+                ? 'No enabled indicators yet. Toggle the filter to view all indicators.'
+                : 'No indicators yet. Create one to get started.'}
             </div>
           )}
         </div>
