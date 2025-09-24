@@ -199,3 +199,22 @@ def test_pivot_breakout_rule_accelerates_confirmation_on_large_move():
     assert breakout["bars_closed_beyond_level"] == 1
     assert breakout["accelerated_confirmation"] is True
     assert breakout["time"] == df.index[1].to_pydatetime()
+
+
+def test_pivot_breakout_rule_requires_prior_confirmation_for_breakout_label():
+    # Price only spends one bar below the level before breaking above and failing.
+    closes = [103, 105, 103, 102, 101]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert results == []

@@ -176,6 +176,9 @@ def _evaluate_level(
     candidate_max_distance = 0.0
     active_side: Optional[str] = None
     run_emitted = False
+    run_confirmed = False
+    confirmed_side: Optional[str] = None
+    current_run_prior_confirmed_side: Optional[str] = None
     results: List[Dict[str, Any]] = []
     for position, (index, close_value_obj) in enumerate(closes.items()):
         close_value = float(close_value_obj)
@@ -187,14 +190,20 @@ def _evaluate_level(
             candidate_max_distance = 0.0
             active_side = None
             run_emitted = False
+            run_confirmed = False
+            current_run_prior_confirmed_side = None
             continue
 
         if active_side != side:
+            if active_side is not None and run_confirmed:
+                confirmed_side = active_side
             active_side = side
             candidate_start_pos = position
             consecutive = 1
             candidate_max_distance = abs(close_value - level_price)
             run_emitted = False
+            run_confirmed = False
+            current_run_prior_confirmed_side = confirmed_side
         else:
             consecutive += 1
             candidate_max_distance = max(
@@ -215,6 +224,10 @@ def _evaluate_level(
                 if candidate_max_distance >= threshold:
                     ready = True
                     accelerated = True
+
+        if ready and not run_confirmed:
+            run_confirmed = True
+            confirmed_side = active_side
 
         if not ready:
             continue
@@ -243,7 +256,21 @@ def _evaluate_level(
         breakout_end_idx = index
         last_bar = df.loc[breakout_end_idx]
 
-        detected_level_kind = "resistance" if active_side == "above" else "support"
+        prior_confirmed_side = current_run_prior_confirmed_side
+        if prior_confirmed_side == "above" and active_side == "below":
+            detected_level_kind: Optional[str] = "support"
+        elif prior_confirmed_side == "below" and active_side == "above":
+            detected_level_kind = "resistance"
+        else:
+            log.debug(
+                "pivotbrk | level_skip | level=%s | reason=unconfirmed_prior_state | "
+                "prior_side=%s | active_side=%s",
+                level_id,
+                prior_confirmed_side,
+                active_side,
+            )
+            run_emitted = True
+            continue
 
         meta: Dict[str, Any] = {
             "level_kind": detected_level_kind,
@@ -259,6 +286,7 @@ def _evaluate_level(
             "trigger_close": float(last_bar["close"]),
             "trigger_time": _to_datetime(breakout_end_idx),
             "accelerated_confirmation": accelerated,
+            "prior_confirmed_side": prior_confirmed_side,
         }
 
         for column in ("open", "high", "low", "volume"):
