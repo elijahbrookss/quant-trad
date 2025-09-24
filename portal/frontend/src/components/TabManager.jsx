@@ -35,8 +35,8 @@ export const TabManager = ({ chartId }) => {
               onClick={() => handleTabClick(id)}
               className={`rounded-full border px-4 py-2 transition ${
                 isActive
-                  ? 'border-purple-400/60 bg-purple-500/25 text-purple-100 shadow-[0_12px_32px_-18px_rgba(168,85,247,0.55)]'
-                  : 'border-white/10 bg-white/5 text-slate-300 hover:border-purple-400/40 hover:bg-purple-500/15 hover:text-purple-100'
+                  ? 'border-sky-400/70 bg-sky-500/25 text-sky-100 shadow-[0_12px_32px_-18px_rgba(56,189,248,0.55)]'
+                  : 'border-white/10 bg-white/5 text-slate-300 hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100'
               }`}
             >
               <span>{id}</span>
@@ -67,8 +67,8 @@ export const TabManager = ({ chartId }) => {
               Design the routing for future signal engines. Define which indicators feed each signal, throttle policies, and notification targets.
             </p>
             <div className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4 text-purple-100/80">
-                <h4 className="text-sm font-semibold text-purple-200">Live routing</h4>
+              <div className="rounded-2xl border border-sky-400/30 bg-sky-500/10 p-4 text-sky-100/85">
+                <h4 className="text-sm font-semibold text-sky-100">Live routing</h4>
                 <p className="mt-2 text-xs">Map signals to webhooks, Discord channels, or automation web services. Future UI will surface connection health inline.</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-slate-300">
@@ -89,9 +89,9 @@ export const TabManager = ({ chartId }) => {
                 <h4 className="text-sm font-semibold text-slate-100">Playbook composer</h4>
                 <p className="mt-2 text-xs text-slate-400">Chain signals, filters, and risk gates. Save variants for different market regimes.</p>
               </div>
-              <div className="rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4">
-                <h4 className="text-sm font-semibold text-purple-200">Execution sync</h4>
-                <p className="mt-2 text-xs text-purple-100/80">Push strategies directly into the DevOps control plane for containerized rollout and monitoring.</p>
+              <div className="rounded-2xl border border-sky-400/30 bg-sky-500/10 p-4 text-sky-100/85">
+                <h4 className="text-sm font-semibold text-sky-100">Execution sync</h4>
+                <p className="mt-2 text-xs">Push strategies directly into the DevOps control plane for containerized rollout and monitoring.</p>
               </div>
             </div>
           </div>

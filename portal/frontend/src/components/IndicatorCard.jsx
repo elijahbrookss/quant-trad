@@ -97,18 +97,16 @@ export default function IndicatorCard({
       <div className="min-w-0 flex-1 space-y-3">
         <div className="flex items-start gap-3">
           <span
-            className="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
+            className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
             aria-hidden="true"
           >
-            <span className="h-3 w-3 rounded-full border border-white/20" style={{ backgroundColor: color }} />
+            <span className="h-2.5 w-2.5 rounded-full border border-white/25" style={{ backgroundColor: color }} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
-                {indicator?.name}
-              </div>
+            <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
+              {indicator?.name}
             </div>
-            <p className="mt-1 inline-flex rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.28em] text-slate-300">
+            <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-sky-200/80">
               {typeLabel}
             </p>
           </div>
