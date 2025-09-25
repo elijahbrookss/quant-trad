@@ -748,7 +748,7 @@ def pivot_signals_to_overlays(
                 "meta": meta_label,
                 "accentColor": color,
                 "backgroundColor": _rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
-                "textColor": _readable_text_color(color),
+                "textColor": "#ffffff",
                 "direction": metadata.get("breakout_direction"),
                 "subtype": "bubble",
             }

@@ -25,6 +25,8 @@ const COLOR_SWATCHES = [
   '#3b82f6', '#10b981', '#ec4899', '#14b8a6', '#eab308', '#f43f5e'
 ];
 
+const DEFAULT_INDICATOR_COLOR = '#60a5fa';
+
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
   if (typeof v === 'string') {
@@ -70,6 +72,27 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
+
+  useEffect(() => {
+    if (!Array.isArray(indicators)) {
+      setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+    const next = {};
+    for (const indicator of indicators) {
+      if (!indicator?.id) continue;
+      const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
+      next[indicator.id] = raw ? indicator.color : DEFAULT_INDICATOR_COLOR;
+    }
+    setIndColors((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => prev[key] === next[key])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [indicators]);
 
   useEffect(() => {
     debug('indicator_chart_state_snapshot', {
@@ -257,7 +280,13 @@ export const IndicatorSection = ({ chartId }) => {
       let result;
       let indicatorId = meta.id;
       if (meta.id) {
-        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
+        const existing = indicators.find((i) => i.id === meta.id);
+        result = await updateIndicator(meta.id, {
+          type: meta.type,
+          params,
+          name: meta.name,
+          color: existing?.color ?? null,
+        });
         indicatorId = result?.id ?? meta.id;
         setIndicators((prev) => {
           const next = prev.map((i) => (i.id === result.id ? result : i));
@@ -355,8 +384,55 @@ export const IndicatorSection = ({ chartId }) => {
     setError(null)
   }
 
-  const handleSelectColor = (indicatorId, color) => {
-    setIndColors(prev => ({ ...prev, [indicatorId]: color }));
+  const handleSelectColor = async (indicatorId, color) => {
+    const indicator = indicators.find((ind) => ind.id === indicatorId);
+    if (!indicator) return;
+
+    const normalizedColor = typeof color === 'string' && color.trim()
+      ? color
+      : DEFAULT_INDICATOR_COLOR;
+
+    setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
+
+    const optimisticIndicators = indicators.map((ind) =>
+      ind.id === indicatorId ? { ...ind, color: color ?? null } : ind,
+    );
+    setIndicators(optimisticIndicators);
+    updateChart(chartId, { indicators: optimisticIndicators });
+
+    try {
+      const updated = await updateIndicator(indicatorId, {
+        type: indicator.type,
+        name: indicator.name,
+        params: indicator.params,
+        color,
+      });
+      if (updated) {
+        setIndicators((prev) => {
+          const next = prev.map((ind) => (ind.id === indicatorId ? updated : ind));
+          updateChart(chartId, { indicators: next });
+          return next;
+        });
+        setIndColors((prev) => ({
+          ...prev,
+          [indicatorId]: updated.color?.trim() ? updated.color : DEFAULT_INDICATOR_COLOR,
+        }));
+      }
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_color_update_failed', e);
+      setIndColors((prev) => ({
+        ...prev,
+        [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
+      }));
+      setIndicators((prev) => {
+        const next = prev.map((ind) => (
+          ind.id === indicatorId ? { ...ind, color: indicator.color ?? null } : ind
+        ));
+        updateChart(chartId, { indicators: next });
+        return next;
+      });
+    }
   };
 
   const isSignalsLoading = !!chartState?.signalsLoading
@@ -457,7 +533,7 @@ export const IndicatorSection = ({ chartId }) => {
                 <IndicatorCard
                   key={indicator.id}
                   indicator={indicator}
-                  color={indColors[indicator.id] || '#60a5fa'}
+                  color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
                   onToggle={toggleEnable}
                   onEdit={openEditModal}
                   onDelete={handleDelete}

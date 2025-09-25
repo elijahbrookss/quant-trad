@@ -38,6 +38,21 @@ register_pivot_indicator()
 # In-memory registry: id -> {"meta": <pydantic-like dict>, "instance": <object>}
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
 
+
+def _normalize_color(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
+    if "color" not in meta:
+        meta["color"] = None
+    return meta
+
 def _extract_ctor_params(inst) -> Dict[str, Any]:
     """Reflectively capture constructor params currently set on the instance."""
     sig = inspect.signature(inst.__class__.__init__)
@@ -110,21 +125,28 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
 
     return details
 
+
 def list_instances_meta() -> List[Dict[str, Any]]:
-    return [entry["meta"] for entry in _REGISTRY.values()]
+    return [_ensure_color(entry["meta"]) for entry in _REGISTRY.values()]
+
 
 def get_instance_meta(inst_id: str) -> Dict[str, Any]:
     entry = _REGISTRY.get(inst_id)
     if not entry:
         raise KeyError("Indicator not found")
-    return entry["meta"]
+    return _ensure_color(entry["meta"])
 
 def delete_instance(inst_id: str) -> None:
     if inst_id not in _REGISTRY:
         raise KeyError("Indicator not found")
     del _REGISTRY[inst_id]
 
-def create_instance(type_str: str, name: Optional[str], params: Dict[str, Any]) -> Dict[str, Any]:
+def create_instance(
+    type_str: str,
+    name: Optional[str],
+    params: Dict[str, Any],
+    color: Optional[str] = None,
+) -> Dict[str, Any]:
     Cls = _INDICATOR_MAP.get(type_str)
     if not Cls:
         raise ValueError(f"Unknown indicator type: {type_str}")
@@ -155,10 +177,20 @@ def create_instance(type_str: str, name: Optional[str], params: Dict[str, Any]) 
         "enabled": True,
         "name": name or type_str.replace("_", " ").title(),
     }
+    meta["color"] = _normalize_color(color)
+    _ensure_color(meta)
     _REGISTRY[inst_id] = {"meta": meta, "instance": inst}
     return meta
 
-def update_instance(inst_id: str, type_str: str, params: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
+def update_instance(
+    inst_id: str,
+    type_str: str,
+    params: Dict[str, Any],
+    name: Optional[str],
+    *,
+    color: Optional[str] = None,
+    color_provided: bool = False,
+) -> Dict[str, Any]:
     entry = _REGISTRY.get(inst_id)
     if not entry:
         raise KeyError("Indicator not found")
@@ -192,10 +224,13 @@ def update_instance(inst_id: str, type_str: str, params: Dict[str, Any], name: O
 
     captured = _extract_ctor_params(new_inst)
     entry["instance"] = new_inst
-    entry["meta"]["params"] = captured
+    meta = _ensure_color(entry["meta"])
+    meta["params"] = captured
     if name:
-        entry["meta"]["name"] = name
-    return entry["meta"]
+        meta["name"] = name
+    if color_provided:
+        meta["color"] = _normalize_color(color)
+    return meta
 
 def overlays_for_instance(
     inst_id: str,

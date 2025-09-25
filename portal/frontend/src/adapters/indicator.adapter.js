@@ -55,26 +55,34 @@ export async function fetchIndicatorType(id) {
     return handleResponse(res)
 }
 
-export async function createIndicator({ type, name, params }) {
+export async function createIndicator({ type, name, params, color }) {
   adapterLogger.debug('create_indicator_request', {
     type,
     hasName: Boolean(name),
     paramKeys: Object.keys(params || {}),
   })
+  const body = { type, name, params }
+  if (color !== undefined) {
+    body.color = color
+  }
   const res = await fetch(`${BASE}/api/indicators/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, name, params }),
+    body: JSON.stringify(body),
     mode: 'cors',
   })
   return handleResponse(res)
 }
 
-export async function updateIndicator(id, { type, name, params }) {
+export async function updateIndicator(id, { type, name, params, color }) {
+  const body = { type, name, params }
+  if (color !== undefined) {
+    body.color = color
+  }
   const res = await fetch(`${BASE}/api/indicators/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, name, params }),
+    body: JSON.stringify(body),
     mode: 'cors',
   })
   return handleResponse(res)
