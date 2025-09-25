@@ -506,11 +506,11 @@ export default function IndicatorModalV2({
                   )}
 
                   {availableSignalRules.length > 0 && (
-                    <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-4">
+                    <div className="rounded-xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-05)] p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <h4 className="text-sm font-semibold text-sky-100">Signal rules</h4>
-                          <p className="text-xs text-sky-200/80">
+                          <h4 className="text-sm font-semibold text-[color:var(--accent-text-strong)]">Signal rules</h4>
+                          <p className="text-xs text-[color:var(--accent-text-soft-alpha)]">
                             Choose which detections run when generating signals for this indicator.
                           </p>
                         </div>
@@ -518,7 +518,7 @@ export default function IndicatorModalV2({
                           <button
                             type="button"
                             onClick={selectAllSignalRules}
-                            className="rounded-full border border-sky-400/40 bg-sky-500/10 px-3 py-1 text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-500/20"
+                            className="rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] px-3 py-1 text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)]"
                           >
                             Select all
                           </button>
@@ -540,8 +540,8 @@ export default function IndicatorModalV2({
                               key={rule.id}
                               className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-sm transition ${
                                 checked
-                                  ? "border-sky-400/60 bg-sky-500/15 text-sky-100"
-                                  : "border-white/10 bg-[#12141d] text-slate-200 hover:border-sky-400/40 hover:text-sky-100"
+                                  ? "border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)]"
+                                  : "border-white/10 bg-[#12141d] text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]"
                               }`}
                             >
                               <div className="space-y-1">
@@ -553,7 +553,7 @@ export default function IndicatorModalV2({
                               <Switch
                                 checked={checked}
                                 onChange={() => toggleSignalRule(rule.id)}
-                                className={`${checked ? "bg-sky-400/80" : "bg-slate-600/70"} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                                className={`${checked ? "bg-[color:var(--accent-alpha-80)]" : "bg-slate-600/70"} relative inline-flex h-6 w-11 items-center rounded-full transition`}
                               >
                                 <span className={`${checked ? "translate-x-6" : "translate-x-1"} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
                               </Switch>
@@ -563,7 +563,7 @@ export default function IndicatorModalV2({
                       </div>
 
                       {availableSignalRules.length > 0 && (
-                        <p className="mt-3 text-xs text-sky-200/70">
+                        <p className="mt-3 text-xs text-[color:var(--accent-text-muted)]">
                           {allRulesSelected
                             ? "All signal rules are enabled."
                             : selectedSignalRules.length === 0

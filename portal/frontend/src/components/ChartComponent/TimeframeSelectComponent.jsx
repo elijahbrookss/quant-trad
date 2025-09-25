@@ -45,7 +45,7 @@ export function TimeframeSelect({ selected, onChange }) {
           onClick={toggle}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:border-sky-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+          className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold text-slate-100 transition hover:border-[color:var(--accent-alpha-40)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
         >
           <span>{(activeOption?.label || activeOption?.value || '').toUpperCase()}</span>
           <svg
@@ -73,7 +73,7 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-sky-500/20 text-sky-100 ring-1 ring-sky-400/70' : 'text-slate-200 hover:bg-sky-500/10 hover:text-sky-100'}`}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]' : 'text-slate-200 hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]'}`}
                   >
                     {option.label}
                   </button>
@@ -89,7 +89,7 @@ export function TimeframeSelect({ selected, onChange }) {
                     key={option.value}
                     type="button"
                     onClick={() => handleSelect(option.value)}
-                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${isActive ? 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-400/60' : 'text-slate-200 hover:bg-indigo-500/10 hover:text-indigo-100'}`}
+                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-400/60' : 'text-slate-200 hover:bg-indigo-500/10 hover:text-indigo-100'}`}
                   >
                     <span className="font-medium">{option.label}</span>
                     <span className="text-xs uppercase tracking-[0.25em] text-slate-400">{option.value}</span>
@@ -121,7 +121,7 @@ export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
           spellCheck={false}
           autoCapitalize="characters"
           autoComplete="off"
-          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500/50"
+          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-1 focus:ring-[color:var(--accent-ring)]"
           value={value}
           onChange={(e) => onChange(e.target.value.toUpperCase())}
           placeholder={placeholder}

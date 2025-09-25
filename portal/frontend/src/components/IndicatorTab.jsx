@@ -501,7 +501,7 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-sky-400/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 shadow-[0_12px_32px_-18px_rgba(56,189,248,0.55)] transition hover:border-sky-300/60 hover:bg-sky-500/30 hover:text-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
               >
                 <Plus className="size-4" aria-hidden="true" />
                 Create indicator
@@ -515,7 +515,7 @@ export const IndicatorSection = ({ chartId }) => {
               <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
                 <input
                   type="checkbox"
-                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                   checked={showEnabledOnly}
                   onChange={(event) => setShowEnabledOnly(event.target.checked)}
                 />
