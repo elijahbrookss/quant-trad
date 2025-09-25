@@ -26,6 +26,16 @@ const COLOR_SWATCHES = [
 ];
 
 const DEFAULT_INDICATOR_COLOR = '#60a5fa';
+const INDICATOR_PAGE_SIZE = 6;
+
+const formatIndicatorType = (type) => {
+  if (!type) return 'Custom';
+  return type
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ');
+};
 
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
@@ -63,6 +73,9 @@ export const IndicatorSection = ({ chartId }) => {
   const [error, setError] = useState(null)
   const [indColors, setIndColors] = useState({});
   const [showEnabledOnly, setShowEnabledOnly] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
 
 
   const { updateChart, getChart } = useChartState()
@@ -389,13 +402,21 @@ export const IndicatorSection = ({ chartId }) => {
     if (!indicator) return;
 
     const normalizedColor = typeof color === 'string' && color.trim()
-      ? color
+      ? color.trim()
       : DEFAULT_INDICATOR_COLOR;
+
+    const patchedParams = {
+      ...indicator.params,
+      symbol: indicator.params?.symbol ?? chartState?.symbol ?? undefined,
+      interval: indicator.params?.interval ?? chartState?.interval ?? undefined,
+      start: indicator.params?.start ?? startISO ?? undefined,
+      end: indicator.params?.end ?? endISO ?? undefined,
+    };
 
     setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
 
     const optimisticIndicators = indicators.map((ind) =>
-      ind.id === indicatorId ? { ...ind, color: color ?? null } : ind,
+      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null, params: patchedParams } : ind,
     );
     setIndicators(optimisticIndicators);
     updateChart(chartId, { indicators: optimisticIndicators });
@@ -404,8 +425,8 @@ export const IndicatorSection = ({ chartId }) => {
       const updated = await updateIndicator(indicatorId, {
         type: indicator.type,
         name: indicator.name,
-        params: indicator.params,
-        color,
+        params: patchedParams,
+        color: normalizedColor,
       });
       if (updated) {
         setIndicators((prev) => {
@@ -421,27 +442,56 @@ export const IndicatorSection = ({ chartId }) => {
     } catch (e) {
       setError(e.message);
       logError('indicator_color_update_failed', e);
-      setIndColors((prev) => ({
-        ...prev,
-        [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
-      }));
-      setIndicators((prev) => {
-        const next = prev.map((ind) => (
-          ind.id === indicatorId ? { ...ind, color: indicator.color ?? null } : ind
-        ));
-        updateChart(chartId, { indicators: next });
-        return next;
-      });
+        setIndColors((prev) => ({
+          ...prev,
+          [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
+        }));
+        setIndicators((prev) => {
+          const next = prev.map((ind) => (
+            ind.id === indicatorId
+              ? {
+                ...ind,
+                color: indicator.color ?? null,
+                params: indicator.params ?? ind.params,
+              }
+              : ind
+          ));
+          updateChart(chartId, { indicators: next });
+          return next;
+        });
     }
   };
 
   const isSignalsLoading = !!chartState?.signalsLoading
   const signalsLoadingFor = chartState?.signalsLoadingFor
 
-  const filteredIndicators = useMemo(
-    () => (showEnabledOnly ? indicators.filter((ind) => ind?.enabled) : indicators),
-    [showEnabledOnly, indicators]
-  );
+  const typeOptions = useMemo(() => {
+    const unique = new Set();
+    indicators.forEach((indicator) => {
+      if (indicator?.type) unique.add(indicator.type);
+    });
+    return Array.from(unique).sort();
+  }, [indicators]);
+
+  const trimmedSearchQuery = searchQuery.trim();
+
+  const filteredIndicators = useMemo(() => {
+    const base = showEnabledOnly ? indicators.filter((ind) => ind?.enabled) : indicators;
+
+    const byType = typeFilter === 'all'
+      ? base
+      : base.filter((indicator) => (indicator?.type ?? '') === typeFilter);
+
+    const query = trimmedSearchQuery.toLowerCase();
+    if (!query) return byType;
+
+    return byType.filter((indicator) => {
+      const name = (indicator?.name ?? '').toLowerCase();
+      const type = (indicator?.type ?? '').toLowerCase();
+      const paramsString = JSON.stringify(indicator?.params ?? {}).toLowerCase();
+      return name.includes(query) || type.includes(query) || paramsString.includes(query);
+    });
+  }, [indicators, showEnabledOnly, trimmedSearchQuery, typeFilter]);
 
   const enabledCount = useMemo(
     () => indicators.filter((indicator) => indicator?.enabled).length,
@@ -450,16 +500,57 @@ export const IndicatorSection = ({ chartId }) => {
 
   const totalCount = indicators.length;
   const filteredCount = filteredIndicators.length;
+  const totalPages = filteredCount ? Math.ceil(filteredCount / INDICATOR_PAGE_SIZE) : 1;
+  const pageStartIndex = (currentPage - 1) * INDICATOR_PAGE_SIZE;
+  const paginatedIndicators = filteredIndicators.slice(
+    pageStartIndex,
+    pageStartIndex + INDICATOR_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [trimmedSearchQuery, typeFilter, showEnabledOnly]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages || 1);
+    }
+  }, [currentPage, totalPages]);
 
   const indicatorSummary = useMemo(() => {
     if (!totalCount) return 'No indicators created yet.';
-    if (showEnabledOnly) {
-      return enabledCount
-        ? `${enabledCount} enabled ${enabledCount === 1 ? 'indicator' : 'indicators'} visible`
-        : 'No enabled indicators found.';
+    if (!filteredCount) {
+      if (showEnabledOnly && enabledCount === 0) return 'No enabled indicators found.';
+      return 'No indicators match your filters yet.';
     }
-    return `Showing ${filteredCount} of ${totalCount} indicators`;
-  }, [enabledCount, filteredCount, showEnabledOnly, totalCount]);
+
+    const pageStart = pageStartIndex + 1;
+    const pageEnd = Math.min(pageStartIndex + INDICATOR_PAGE_SIZE, filteredCount);
+    const pageSummary = `${pageStart}-${pageEnd} of ${filteredCount} matching ${filteredCount === 1 ? 'indicator' : 'indicators'}`;
+
+    if (!showEnabledOnly && !trimmedSearchQuery && (typeFilter === 'all' || typeFilter === '')) {
+      if (filteredCount === totalCount) return `${pageSummary} (out of ${totalCount} total)`;
+      return `${pageSummary} (from ${totalCount} total)`;
+    }
+
+    return pageSummary;
+  }, [
+    totalCount,
+    filteredCount,
+    showEnabledOnly,
+    enabledCount,
+    pageStartIndex,
+    trimmedSearchQuery,
+    typeFilter,
+  ]);
+
+  const noIndicatorsMessage = useMemo(() => {
+    if (!totalCount) return 'No indicators yet. Create one to get started.';
+    if (showEnabledOnly && !trimmedSearchQuery && (typeFilter === 'all' || typeFilter === '')) {
+      return 'No enabled indicators yet. Toggle the filter to view all indicators.';
+    }
+    return 'No indicators match your filters yet. Try adjusting the filters or search terms.';
+  }, [totalCount, showEnabledOnly, trimmedSearchQuery, typeFilter]);
 
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
@@ -510,7 +601,7 @@ export const IndicatorSection = ({ chartId }) => {
           </header>
 
           <div className="flex flex-col gap-3 rounded-xl border border-white/5 bg-white/5 p-3 text-xs md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-1 flex-wrap items-center gap-3">
               <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
               <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
                 <input
@@ -521,12 +612,39 @@ export const IndicatorSection = ({ chartId }) => {
                 />
                 Show enabled only
               </label>
+
+              <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Type</span>
+                <select
+                  value={typeFilter}
+                  onChange={(event) => setTypeFilter(event.target.value)}
+                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                >
+                  <option value="all">All types</option>
+                  {typeOptions.map((type) => (
+                    <option key={type} value={type}>
+                      {formatIndicatorType(type)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex min-w-[12rem] flex-1 items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200 md:max-w-xs">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Search</span>
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Name, type, or param"
+                  className="w-full bg-transparent text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none"
+                />
+              </div>
             </div>
             <p className="text-xs text-slate-400">{indicatorSummary}</p>
           </div>
 
           <div className="space-y-4">
-            {filteredIndicators.map(indicator => {
+            {paginatedIndicators.map(indicator => {
               const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
               const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
               return (
@@ -546,14 +664,67 @@ export const IndicatorSection = ({ chartId }) => {
               )
             })}
 
-            {!isLoading && filteredIndicators.length === 0 && (
+            {!isLoading && paginatedIndicators.length === 0 && (
               <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
-                {showEnabledOnly
-                  ? 'No enabled indicators yet. Toggle the filter to view all indicators.'
-                  : 'No indicators yet. Create one to get started.'}
+                {noIndicatorsMessage}
               </div>
             )}
           </div>
+
+          {filteredCount > INDICATOR_PAGE_SIZE && (
+            <nav className="flex flex-col gap-2 rounded-lg border border-white/10 bg-[#11131b] px-4 py-3 text-xs text-slate-300 md:flex-row md:items-center md:justify-between" aria-label="Indicator pagination">
+              <span>
+                Page {currentPage} of {totalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={currentPage === 1}
+                  className={`rounded-full border px-3 py-1 transition ${
+                    currentPage === 1
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                  }`}
+                >
+                  Previous
+                </button>
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: totalPages }).map((_, index) => {
+                    const pageNumber = index + 1;
+                    const isActive = pageNumber === currentPage;
+                    return (
+                      <button
+                        key={pageNumber}
+                        type="button"
+                        onClick={() => setCurrentPage(pageNumber)}
+                        className={`size-8 rounded-full border text-xs font-medium transition ${
+                          isActive
+                            ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
+                            : 'border-white/10 text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                        }`}
+                        aria-current={isActive ? 'page' : undefined}
+                      >
+                        {pageNumber}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                  disabled={currentPage === totalPages}
+                  className={`rounded-full border px-3 py-1 transition ${
+                    currentPage === totalPages
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                  }`}
+                >
+                  Next
+                </button>
+              </div>
+            </nav>
+          )}
         </div>
       </section>
 
