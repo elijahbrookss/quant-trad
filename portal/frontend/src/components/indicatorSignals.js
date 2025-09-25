@@ -109,6 +109,11 @@ export async function runSignalGeneration({
       config.pivot_breakout_confirmation_bars = confirmationBars;
     }
 
+    const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id];
+    if (Array.isArray(enabledRules) && enabledRules.length) {
+      config.enabled_rules = enabledRules;
+    }
+
     scopedLogger.debug('signal_generation_request', { config });
 
     const response = await signalsAdapter(indicator.id, {

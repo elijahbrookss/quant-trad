@@ -3,8 +3,34 @@
 > vite
 
 
-  VITE v7.0.5  ready in 434 ms
+  VITE v7.0.5  ready in 1277 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
-7:25:17 PM [vite] (client) hmr update /src/components/ChartComponent/ChartComponent.jsx, /src/index.css
+3:41:04 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:41:05 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:41:05 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:41:49 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:41:49 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:41:49 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:42:07 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:42:07 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:42:07 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:42:36 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:42:36 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:42:36 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:47:38 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:47:39 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:47:39 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:48:00 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:48:00 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:48:00 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:48:29 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:48:30 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:48:30 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:49:29 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:49:30 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:49:30 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx
+3:49:34 AM [vite] (client) hmr update /src/contexts/AccentColorContext.jsx, /src/index.css
+3:49:34 AM [vite] (client) hmr invalidate /src/contexts/AccentColorContext.jsx Could not Fast Refresh ("setGlobalAccentColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+3:49:34 AM [vite] (client) page reload src/contexts/AccentColorContext.jsx

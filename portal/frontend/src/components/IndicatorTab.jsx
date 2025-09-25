@@ -25,6 +25,8 @@ const COLOR_SWATCHES = [
   '#3b82f6', '#10b981', '#ec4899', '#14b8a6', '#eab308', '#f43f5e'
 ];
 
+const DEFAULT_INDICATOR_COLOR = '#60a5fa';
+
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
   if (typeof v === 'string') {
@@ -70,6 +72,27 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
+
+  useEffect(() => {
+    if (!Array.isArray(indicators)) {
+      setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+    const next = {};
+    for (const indicator of indicators) {
+      if (!indicator?.id) continue;
+      const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
+      next[indicator.id] = raw ? indicator.color : DEFAULT_INDICATOR_COLOR;
+    }
+    setIndColors((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => prev[key] === next[key])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [indicators]);
 
   useEffect(() => {
     debug('indicator_chart_state_snapshot', {
@@ -239,7 +262,6 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       const core = normalizeParams(meta.params);
 
-      // light validation for lookbacks
       if ('lookbacks' in core) {
         if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
           setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
@@ -256,8 +278,16 @@ export const IndicatorSection = ({ chartId }) => {
       };
 
       let result;
+      let indicatorId = meta.id;
       if (meta.id) {
-        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
+        const existing = indicators.find((i) => i.id === meta.id);
+        result = await updateIndicator(meta.id, {
+          type: meta.type,
+          params,
+          name: meta.name,
+          color: existing?.color ?? null,
+        });
+        indicatorId = result?.id ?? meta.id;
         setIndicators((prev) => {
           const next = prev.map((i) => (i.id === result.id ? result : i));
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
@@ -265,11 +295,27 @@ export const IndicatorSection = ({ chartId }) => {
         });
       } else {
         result = await createIndicator({ type: meta.type, params, name: meta.name });
+        indicatorId = result?.id ?? null;
         setIndicators((prev) => {
           const next = [...prev, result];
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
+      }
+
+      if (indicatorId) {
+        const ruleSelection = Array.isArray(meta.signalRules) ? meta.signalRules : null;
+        const currentConfig = getChart(chartId)?.signalsConfig || {};
+        const currentEnabled = currentConfig.enabledRules || {};
+        const nextEnabled = { ...currentEnabled };
+        if (ruleSelection && ruleSelection.length) {
+          nextEnabled[indicatorId] = ruleSelection;
+        }
+        const nextSignalsConfig = {
+          ...currentConfig,
+          enabledRules: nextEnabled,
+        };
+        updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
       setModalOpen(false);
@@ -284,6 +330,15 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
+      const currentConfig = getChart(chartId)?.signalsConfig
+      const enabledRules = currentConfig?.enabledRules
+      if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
+        const nextEnabled = { ...enabledRules }
+        delete nextEnabled[id]
+        updateChart(chartId, {
+          signalsConfig: { ...currentConfig, enabledRules: nextEnabled },
+        })
+      }
     } catch (e) {
       setError(e.message)
       logError('indicator_delete_failed', e)
@@ -319,13 +374,65 @@ export const IndicatorSection = ({ chartId }) => {
 
 
   const openEditModal = (indicator = null) => {
-    setEditing(indicator)
+    if (indicator) {
+      const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id] || []
+      setEditing({ ...indicator, signalRules: [...enabledRules] })
+    } else {
+      setEditing(null)
+    }
     setModalOpen(true)
     setError(null)
   }
 
-  const handleSelectColor = (indicatorId, color) => {
-    setIndColors(prev => ({ ...prev, [indicatorId]: color }));
+  const handleSelectColor = async (indicatorId, color) => {
+    const indicator = indicators.find((ind) => ind.id === indicatorId);
+    if (!indicator) return;
+
+    const normalizedColor = typeof color === 'string' && color.trim()
+      ? color
+      : DEFAULT_INDICATOR_COLOR;
+
+    setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
+
+    const optimisticIndicators = indicators.map((ind) =>
+      ind.id === indicatorId ? { ...ind, color: color ?? null } : ind,
+    );
+    setIndicators(optimisticIndicators);
+    updateChart(chartId, { indicators: optimisticIndicators });
+
+    try {
+      const updated = await updateIndicator(indicatorId, {
+        type: indicator.type,
+        name: indicator.name,
+        params: indicator.params,
+        color,
+      });
+      if (updated) {
+        setIndicators((prev) => {
+          const next = prev.map((ind) => (ind.id === indicatorId ? updated : ind));
+          updateChart(chartId, { indicators: next });
+          return next;
+        });
+        setIndColors((prev) => ({
+          ...prev,
+          [indicatorId]: updated.color?.trim() ? updated.color : DEFAULT_INDICATOR_COLOR,
+        }));
+      }
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_color_update_failed', e);
+      setIndColors((prev) => ({
+        ...prev,
+        [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
+      }));
+      setIndicators((prev) => {
+        const next = prev.map((ind) => (
+          ind.id === indicatorId ? { ...ind, color: indicator.color ?? null } : ind
+        ));
+        updateChart(chartId, { indicators: next });
+        return next;
+      });
+    }
   };
 
   const isSignalsLoading = !!chartState?.signalsLoading
@@ -394,7 +501,7 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-sky-400/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 shadow-[0_12px_32px_-18px_rgba(56,189,248,0.55)] transition hover:border-sky-300/60 hover:bg-sky-500/30 hover:text-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
               >
                 <Plus className="size-4" aria-hidden="true" />
                 Create indicator
@@ -408,7 +515,7 @@ export const IndicatorSection = ({ chartId }) => {
               <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
                 <input
                   type="checkbox"
-                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-sky-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                   checked={showEnabledOnly}
                   onChange={(event) => setShowEnabledOnly(event.target.checked)}
                 />
@@ -426,7 +533,7 @@ export const IndicatorSection = ({ chartId }) => {
                 <IndicatorCard
                   key={indicator.id}
                   indicator={indicator}
-                  color={indColors[indicator.id] || '#60a5fa'}
+                  color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
                   onToggle={toggleEnable}
                   onEdit={openEditModal}
                   onDelete={handleDelete}

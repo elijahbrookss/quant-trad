@@ -655,7 +655,7 @@ export const ChartComponent = ({ chartId }) => {
               <button
                 type="button"
                 onClick={() => handleApply()}
-                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-sky-400/40 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-500/20 hover:text-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 aria-label="Reload chart data"
                 title="Reload chart data"
               >

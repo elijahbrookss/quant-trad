@@ -106,7 +106,7 @@ export default function IndicatorCard({
             <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
               {indicator?.name}
             </div>
-            <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-sky-200/80">
+            <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-[color:var(--accent-text-soft-alpha)]">
               {typeLabel}
             </p>
           </div>
@@ -119,18 +119,18 @@ export default function IndicatorCard({
                 key={key}
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${
                   isAdvanced
-                    ? 'border-sky-400/30 bg-sky-500/10 text-sky-100/90'
+                  ? 'border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong-alpha)]'
                     : 'border-white/10 bg-white/5 text-slate-200'
                 }`}
               >
-                <span className={isAdvanced ? 'text-sky-200/80' : 'text-slate-400'}>{key}</span>
+                <span className={isAdvanced ? 'text-[color:var(--accent-text-soft-alpha)]' : 'text-slate-400'}>{key}</span>
                 <span>= {formatVal(value)}</span>
               </span>
             ))}
 
             {hiddenCount > 0 && !showAllParams && (
               <button
-                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
+                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
                 onClick={() => setShowAllParams(true)}
               >
                 +{hiddenCount} more
@@ -141,7 +141,7 @@ export default function IndicatorCard({
 
         {showAllParams && paramsList.length > 5 && (
           <button
-            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-sky-100 hover:underline"
+            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-[color:var(--accent-text-strong)] hover:underline"
             onClick={() => setShowAllParams(false)}
           >
             Show less
@@ -153,7 +153,7 @@ export default function IndicatorCard({
         <Switch
           checked={!!indicator?.enabled}
           onChange={() => onToggle?.(indicator.id)}
-          className={`${indicator?.enabled ? 'bg-sky-500/80' : 'bg-slate-600/70'} relative inline-flex h-6 w-11 cursor-pointer items-center rounded-full transition`}
+          className={`${indicator?.enabled ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/70'} relative inline-flex h-6 w-11 cursor-pointer items-center rounded-full transition`}
         >
           <span className={`${indicator?.enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
         </Switch>
@@ -186,7 +186,7 @@ export default function IndicatorCard({
             <>
               <PopoverButton
                 onClick={() => setConfirmingDelete(false)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-sky-400/40 hover:bg-sky-500/20 hover:text-sky-100"
+                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-strong)]"
                 title="Indicator settings"
               >
                 <MoreHorizontal className="size-4" />
@@ -208,7 +208,7 @@ export default function IndicatorCard({
                         {colorSwatches.map((c) => (
                           <button
                             key={c}
-                            className="h-5 w-5 rounded-sm border border-white/20 transition hover:border-sky-300/60 focus:outline-none focus:ring-2 focus:ring-sky-300/40"
+                            className="h-5 w-5 rounded-sm border border-white/20 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-outline-soft)]"
                             style={{ backgroundColor: c }}
                             onClick={() => {
                               onSelectColor?.(indicator.id, c)
@@ -228,7 +228,7 @@ export default function IndicatorCard({
                           setConfirmingDelete(false)
                           close()
                         }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-sky-400/30 hover:bg-sky-500/10"
+                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]"
                       >
                         <span>Edit parameters</span>
                         <span className="text-[10px] uppercase tracking-[0.3em] text-slate-500">E</span>
@@ -240,7 +240,7 @@ export default function IndicatorCard({
                           setConfirmingDelete(false)
                           close()
                         }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-sky-400/30 hover:bg-sky-500/10"
+                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]"
                       >
                         <span className="inline-flex items-center gap-2"><Copy className="size-4" /> Copy params JSON</span>
                       </button>

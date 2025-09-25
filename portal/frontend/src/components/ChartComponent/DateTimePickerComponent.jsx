@@ -43,7 +43,7 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
           />
         </div>
 
@@ -67,7 +67,7 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
           />
         </div>
       </div>
