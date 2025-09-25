@@ -391,6 +391,11 @@ def pivot_breakout_rule(
     mode = str(context.get("mode", "backtest")).lower()
 
     results: List[Dict[str, Any]] = []
+    # prepare breakout cache for downstream rules (e.g. retest)
+    try:
+        context["pivot_breakouts"] = []  # type: ignore[index]
+    except TypeError:
+        pass
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
@@ -409,6 +414,8 @@ def pivot_breakout_rule(
         for meta in metas:
             breakout_time = meta.get("trigger_time", df.index[-1])
             detected_direction = meta.get("level_kind", getattr(level, "kind", None))
+            meta.setdefault("trigger_bar_index", position)
+            meta.setdefault("trigger_index_label", breakout_end_idx)
             results.append(
                 {
                     "type": "breakout",
@@ -421,8 +428,172 @@ def pivot_breakout_rule(
             )
             log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
 
+    if results:
+        cached_breakouts = context.get("pivot_breakouts")
+        if isinstance(cached_breakouts, list):
+            cached_breakouts.extend(results)
+
     log.debug("%s | run_complete | signals=%d", run_id, len(results))
     return results
+
+
+def _resolve_breakout_bar_index(meta: Mapping[str, Any], df: pd.DataFrame) -> Optional[int]:
+    explicit = meta.get("trigger_bar_index")
+    if isinstance(explicit, int) and 0 <= explicit < len(df):
+        return explicit
+
+    label = meta.get("trigger_index_label") or meta.get("trigger_time")
+    if label is None:
+        return None
+
+    try:
+        ts = pd.Timestamp(label)
+    except Exception:
+        return None
+
+    try:
+        return int(df.index.get_loc(ts))
+    except KeyError:
+        try:
+            idx = df.index.get_indexer([ts], method="nearest")
+            return int(idx[0]) if idx.size else None
+        except Exception:
+            return None
+
+
+def _detect_retest(
+    df: pd.DataFrame,
+    breakout_meta: Mapping[str, Any],
+    *,
+    tolerance_pct: float,
+    max_bars: int,
+    min_bars: int,
+    mode: str,
+) -> Optional[Dict[str, Any]]:
+    level_price = breakout_meta.get("level_price")
+    breakout_direction = breakout_meta.get("breakout_direction")
+    if level_price is None or breakout_direction not in {"above", "below"}:
+        return None
+
+    start_idx = _resolve_breakout_bar_index(breakout_meta, df)
+    if start_idx is None:
+        return None
+
+    look_start = start_idx + max(min_bars, 1)
+    if look_start >= len(df):
+        return None
+
+    look_end = min(len(df) - 1, look_start + max_bars)
+    if look_start > look_end:
+        return None
+
+    tolerance = max(abs(float(level_price)) * float(max(tolerance_pct, 0.0)), 0.0)
+    simulate_current_only = mode in {"sim", "live"}
+
+    for idx in range(look_start, look_end + 1):
+        candle = df.iloc[idx]
+        high = float(candle.get("high", candle.get("close")))
+        low = float(candle.get("low", candle.get("close")))
+        close = float(candle.get("close"))
+
+        if breakout_direction == "above":
+            touched = low <= float(level_price) + tolerance
+            invalidated = close < float(level_price) - tolerance
+        else:
+            touched = high >= float(level_price) - tolerance
+            invalidated = close > float(level_price) + tolerance
+
+        if not touched:
+            continue
+
+        if simulate_current_only and idx != len(df) - 1:
+            continue
+
+        if invalidated:
+            continue
+
+        ts = df.index[idx]
+        bars_since = idx - start_idx
+        return {
+            "type": "retest",
+            "symbol": breakout_meta.get("symbol"),
+            "time": _to_datetime(ts),
+            "source": breakout_meta.get("source"),
+            "level_price": float(level_price),
+            "breakout_time": breakout_meta.get("trigger_time"),
+            "breakout_direction": breakout_direction,
+            "level_kind": breakout_meta.get("level_kind"),
+            "retest_role": "support" if breakout_direction == "above" else "resistance",
+            "bars_since_breakout": bars_since,
+            "retest_close": close,
+            "retest_high": high,
+            "retest_low": low,
+            "level_timeframe": breakout_meta.get("level_timeframe"),
+            "level_lookback": breakout_meta.get("level_lookback"),
+        }
+
+    return None
+
+
+def pivot_retest_rule(context: Mapping[str, Any], _: Any = None) -> List[Dict[str, Any]]:
+    indicator = context.get("indicator")
+    if not isinstance(indicator, PivotLevelIndicator):
+        return []
+
+    df = context.get("df")
+    if df is None or df.empty:
+        return []
+
+    breakouts = context.get("pivot_breakouts")
+    if not isinstance(breakouts, list) or not breakouts:
+        return []
+
+    mode = str(context.get("mode", "backtest")).lower()
+    try:
+        tolerance_pct = float(context.get("pivot_retest_tolerance_pct", 0.0015))
+    except (TypeError, ValueError):
+        tolerance_pct = 0.0015
+    try:
+        max_bars = int(context.get("pivot_retest_max_bars", 20))
+    except (TypeError, ValueError):
+        max_bars = 20
+    try:
+        min_bars = int(context.get("pivot_retest_min_bars", 1))
+    except (TypeError, ValueError):
+        min_bars = 1
+
+    max_bars = max(max_bars, 1)
+    min_bars = max(min_bars, 1)
+
+    results: List[Dict[str, Any]] = []
+    for breakout_meta in breakouts:
+        if not isinstance(breakout_meta, Mapping):
+            continue
+        retest = _detect_retest(
+            df,
+            breakout_meta,
+            tolerance_pct=tolerance_pct,
+            max_bars=max_bars,
+            min_bars=min_bars,
+            mode=mode,
+        )
+        if retest is not None:
+            results.append(retest)
+
+    return results
+
+
+pivot_breakout_rule.signal_id = "pivot_breakout"
+pivot_breakout_rule.signal_label = "Breakout"
+pivot_breakout_rule.signal_description = (
+    "Detects when price closes beyond a pivot-derived level with confirmation."
+)
+
+pivot_retest_rule.signal_id = "pivot_retest"
+pivot_retest_rule.signal_label = "Retest"
+pivot_retest_rule.signal_description = (
+    "Labels the first pullback to a freshly broken pivot level while it holds."
+)
 
 
 def _to_unix_seconds(value: Any) -> Optional[int]:
@@ -449,6 +620,11 @@ _BREAKOUT_COLORS = {
 _LEVEL_ROLE_COLORS = {
     "resistance": "#ef4444",  # match indicator resistance color
     "support": "#22c55e",  # match indicator support color
+}
+
+_RETEST_COLORS = {
+    "support": "#0ea5e9",  # sky blue
+    "resistance": "#f97316",  # amber
 }
 
 
@@ -514,6 +690,41 @@ def pivot_signals_to_overlays(
         if level_price is None:
             continue
 
+        marker_time = _to_unix_seconds(signal.time)
+        if signal.type == "retest":
+            retest_role = str(metadata.get("retest_role", "retest")).lower()
+            color = _RETEST_COLORS.get(retest_role, "#38bdf8")
+            anchor_price = float(metadata.get("retest_close", level_price))
+            bars_since = metadata.get("bars_since_breakout")
+            if bars_since is not None:
+                detail = f"Retest after {int(bars_since)} bars at {float(level_price):.2f}"
+            else:
+                detail = f"Retest near {float(level_price):.2f}"
+
+            tf = metadata.get("level_timeframe")
+            lookback = metadata.get("level_lookback")
+            meta_label = None
+            if tf and lookback:
+                meta_label = f"TF {tf} · LB {lookback}"
+            elif tf:
+                meta_label = f"TF {tf}"
+            elif lookback:
+                meta_label = f"LB {lookback}"
+            bubble_payload = {
+                "time": marker_time,
+                "price": anchor_price,
+                "label": "Retest",
+                "detail": detail,
+                "meta": meta_label,
+                "accentColor": color,
+                "backgroundColor": _rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
+                "textColor": _readable_text_color(color),
+                "direction": metadata.get("breakout_direction"),
+                "subtype": "bubble",
+            }
+            bubbles.append(bubble_payload)
+            continue
+
         breakout_direction = metadata.get("breakout_direction")
 
         raw_level_kind = str(metadata.get("level_kind", "pivot"))
@@ -522,7 +733,6 @@ def pivot_signals_to_overlays(
         if color is None:
             color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")  # gray fallback
 
-        marker_time = _to_unix_seconds(signal.time)
         level_kind = raw_level_kind.capitalize()
         if level_kind == "Resistance":
             marker_label = "Resistance breakout"
@@ -564,7 +774,7 @@ def pivot_signals_to_overlays(
         else:
             bubble_price = anchor_price + base_offset
 
-        bubble_payload: Dict[str, Any] = {
+        bubble_payload = {
             "time": marker_time,
             "price": bubble_price,
             "label": marker_label,
@@ -611,19 +821,27 @@ def register_pivot_indicator(force: bool = False) -> None:
     from signals.engine.signal_generator import register_indicator_rules
 
     try:
+        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
         register_indicator_rules(
             PivotLevelIndicator.NAME,
-            rules=[pivot_breakout_rule],
+            rules=desired_rules,
             overlay_adapter=pivot_signals_to_overlays,
         )
     except ValueError:
+        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
         if force:
-            # Re-register by clearing and setting explicitly.
             signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
-                rules=(pivot_breakout_rule,),
+                rules=desired_rules,
                 overlay_adapter=pivot_signals_to_overlays,
             )
-        # otherwise keep existing registration
+        else:
+            registration = signal_generator._REGISTRY.get(PivotLevelIndicator.NAME)
+            if registration is not None:
+                if tuple(registration.rules) != desired_rules or registration.overlay_adapter is None:
+                    signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
+                        rules=desired_rules,
+                        overlay_adapter=pivot_signals_to_overlays,
+                    )
 
 
 register_pivot_indicator()
@@ -632,6 +850,7 @@ register_pivot_indicator()
 __all__ = [
     "PivotBreakoutConfig",
     "pivot_breakout_rule",
+    "pivot_retest_rule",
     "pivot_signals_to_overlays",
     "register_pivot_indicator",
 ]

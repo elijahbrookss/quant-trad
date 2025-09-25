@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
 from signals.base import BaseSignal
 
@@ -33,7 +33,7 @@ class IndicatorRegistration:
 
 
 _REGISTRY: MutableMapping[str, IndicatorRegistration] = {}
-_RESERVED_CONFIG_KEYS = {"rule_payloads"}
+_RESERVED_CONFIG_KEYS = {"rule_payloads", "enabled_rules"}
 _TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
 
 def _df_summary(df: "DataFrame") -> Mapping[str, Any]:
@@ -97,6 +97,62 @@ def _normalise_indicator_type(indicator: Union[str, Any]) -> str:
     if isinstance(indicator, str):
         return indicator
     return getattr(indicator, "NAME", indicator.__class__.__name__)
+
+
+def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
+    """Return a tuple of identifiers that can reference a rule."""
+
+    identifiers: List[str] = []
+
+    explicit = getattr(rule, "signal_id", None)
+    if explicit:
+        identifiers.append(str(explicit))
+
+    label = getattr(rule, "signal_label", None)
+    if label:
+        identifiers.append(str(label))
+
+    name = getattr(rule, "__name__", None)
+    if name:
+        identifiers.append(str(name))
+
+    # Final fallback to repr to ensure at least one identifier
+    if not identifiers:
+        identifiers.append(repr(rule))
+
+    # Normalise identifiers for comparisons (case-insensitive)
+    normalised = tuple({ident.lower(): ident for ident in identifiers}.values())
+    return normalised if normalised else (repr(rule),)
+
+
+def _filter_enabled_rules(
+    rules: Sequence[RuleCallable],
+    enabled_rules: Optional[Iterable[Any]],
+    indicator_type: str,
+) -> Sequence[RuleCallable]:
+    if not enabled_rules:
+        return rules
+
+    desired: Set[str] = {str(rule_id).lower() for rule_id in enabled_rules if rule_id is not None}
+    if not desired:
+        return rules
+
+    filtered: List[RuleCallable] = []
+    for rule in rules:
+        identifiers = {ident.lower() for ident in _rule_identifiers(rule)}
+        if identifiers & desired:
+            filtered.append(rule)
+
+    if not filtered:
+        logger.warning(
+            "No matching enabled rules for indicator '%s'. Requested=%s available=%s",
+            indicator_type,
+            sorted(desired),
+            [tuple(_rule_identifiers(rule))[0] for rule in rules],
+        )
+        return rules
+
+    return tuple(filtered)
 
 
 def _resolve_payloads(config: Mapping[str, Any]) -> List[Any]:
@@ -177,9 +233,12 @@ def run_indicator_rules(
         logger.debug("Context keys=%s", sorted(ctx_preview.keys()))
         logger.debug("Context preview=\n%s", pformat(ctx_preview))
 
+    enabled_rules = config.get("enabled_rules")
+    active_rules = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
+
     signals: List[BaseSignal] = []
-    total_rules = len(registration.rules)
-    for r_idx, rule in enumerate(registration.rules):
+    total_rules = len(active_rules)
+    for r_idx, rule in enumerate(active_rules):
         rule_name = getattr(rule, "__name__", repr(rule))
         t_rule_start = time.perf_counter()
         logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
@@ -285,8 +344,31 @@ def build_signal_overlays(
 
 
 
+def describe_indicator_rules(indicator_type: str) -> List[Mapping[str, Any]]:
+    """Return friendly metadata about registered rules for an indicator."""
+
+    registration = _REGISTRY.get(indicator_type)
+    if registration is None:
+        return []
+
+    descriptions: List[Mapping[str, Any]] = []
+    for rule in registration.rules:
+        identifiers = _rule_identifiers(rule)
+        rule_id = identifiers[0]
+        label = getattr(rule, "signal_label", None) or rule_id.replace("_", " ").title()
+        description = getattr(rule, "signal_description", None)
+        descriptions.append({
+            "id": rule_id,
+            "label": label,
+            "description": description,
+        })
+
+    return descriptions
+
+
 __all__ = [
     "register_indicator_rules",
     "run_indicator_rules",
     "build_signal_overlays",
+    "describe_indicator_rules",
 ]

@@ -17,6 +17,7 @@ from indicators.trendline import TrendlineIndicator
 from indicators.market_profile import MarketProfileIndicator
 from signals.engine.signal_generator import (
     build_signal_overlays,
+    describe_indicator_rules,
     run_indicator_rules,
 )
 from signals.rules.pivot import register_pivot_indicator
@@ -95,13 +96,19 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
             required.append(name)
         else:
             defaults[name] = param.default
-    return {
+    details = {
         "id": type_id,
         "name": getattr(Cls, "NAME", type_id),
         "required_params": required,
         "default_params": defaults,
         "field_types": field_types,
     }
+
+    rule_meta = describe_indicator_rules(getattr(Cls, "NAME", type_id))
+    if rule_meta:
+        details["signal_rules"] = rule_meta
+
+    return details
 
 def list_instances_meta() -> List[Dict[str, Any]]:
     return [entry["meta"] for entry in _REGISTRY.values()]
@@ -321,6 +328,11 @@ def generate_signals_for_instance(
     rule_config: Dict[str, Any] = dict(config or {})
     rule_config.setdefault("pivot_breakout_confirmation_bars", 3)
     rule_config.setdefault("symbol", sym)
+
+    enabled_rules = rule_config.get("enabled_rules")
+    if enabled_rules is not None and not enabled_rules:
+        # drop empty lists so downstream defaults apply
+        rule_config.pop("enabled_rules")
 
     logger.info(
         "event=indicator_signal_execute indicator=%s name=%s symbol=%s interval=%s start=%s end=%s config=%s",
