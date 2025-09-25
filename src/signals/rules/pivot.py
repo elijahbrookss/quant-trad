@@ -446,6 +446,11 @@ _BREAKOUT_COLORS = {
     "below": "#dc2626",  # red
 }
 
+_LEVEL_ROLE_COLORS = {
+    "resistance": "#ef4444",  # match indicator resistance color
+    "support": "#22c55e",  # match indicator support color
+}
+
 
 def _hex_to_rgb(color: str) -> Optional[Tuple[int, int, int]]:
     """Return RGB tuple for a hex color string."""
@@ -510,10 +515,15 @@ def pivot_signals_to_overlays(
             continue
 
         breakout_direction = metadata.get("breakout_direction")
-        color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")  # gray fallback
+
+        raw_level_kind = str(metadata.get("level_kind", "pivot"))
+        level_kind_key = raw_level_kind.lower()
+        color = _LEVEL_ROLE_COLORS.get(level_kind_key)
+        if color is None:
+            color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")  # gray fallback
 
         marker_time = _to_unix_seconds(signal.time)
-        level_kind = str(metadata.get("level_kind", "pivot")).capitalize()
+        level_kind = raw_level_kind.capitalize()
         if level_kind == "Resistance":
             marker_label = "Resistance breakout"
         elif level_kind == "Support":
