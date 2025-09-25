@@ -46,6 +46,24 @@ const deriveTimeScaleOptions = (rawInterval) => {
   return base;
 };
 
+const toRgba = (hex, alpha = 0.12) => {
+  if (typeof hex !== 'string') return null;
+  const trimmed = hex.trim().replace('#', '');
+  if (!(trimmed.length === 3 || trimmed.length === 6)) return null;
+
+  const expand = (value) => value.split('').map((c) => c + c).join('');
+  const normalized = trimmed.length === 3 ? expand(trimmed) : trimmed;
+
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+
+  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+
+  const clampedAlpha = Math.min(Math.max(alpha, 0), 1);
+  return `rgba(${r},${g},${b},${clampedAlpha})`;
+};
+
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
@@ -422,10 +440,19 @@ export const ChartComponent = ({ chartId }) => {
       markers.push(...norm.markers);
 
       if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
-        signalBubbles.push(...norm.bubbles.map(b => ({
-          ...b,
-          accentColor: b.accentColor ?? color,
-        })));
+        if (color) {
+          signalBubbles.push(...norm.bubbles.map(b => {
+            const accentColor = color;
+            const backgroundColor = b.backgroundColor ?? toRgba(accentColor, 0.16) ?? undefined;
+            return {
+              ...b,
+              accentColor,
+              backgroundColor,
+            };
+          }));
+        } else {
+          signalBubbles.push(...norm.bubbles);
+        }
       }
 
       // 3c) Touch points.
