@@ -320,6 +320,8 @@ def _evaluate_level(
             "trigger_time": _to_datetime(breakout_end_idx),
             "accelerated_confirmation": accelerated,
             "prior_confirmed_side": prior_confirmed_side,
+            "trigger_bar_index": position,
+            "trigger_index_label": breakout_end_idx,
         }
 
         for column in ("open", "high", "low", "volume"):
@@ -430,8 +432,6 @@ def pivot_breakout_rule(
         for meta in metas:
             breakout_time = meta.get("trigger_time", df.index[-1])
             detected_direction = meta.get("level_kind", getattr(level, "kind", None))
-            meta.setdefault("trigger_bar_index", position)
-            meta.setdefault("trigger_index_label", breakout_end_idx)
             results.append(
                 {
                     "type": "breakout",
