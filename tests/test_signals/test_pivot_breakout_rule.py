@@ -3,7 +3,9 @@ import pytest
 pd = pytest.importorskip("pandas")
 
 from indicators.pivot_level import Level
+from signals.base import BaseSignal
 from signals.rules import PivotBreakoutConfig, pivot_breakout_rule
+from signals.rules.pivot import pivot_signals_to_overlays
 
 
 class DummyPivotIndicator:
@@ -12,6 +14,26 @@ class DummyPivotIndicator:
     def __init__(self, levels, symbol="TEST"):
         self.levels = levels
         self.symbol = symbol
+
+
+def _as_signals(results):
+    signals = []
+    for result in results:
+        metadata = {
+            key: value
+            for key, value in result.items()
+            if key not in {"type", "symbol", "time", "confidence"}
+        }
+        signals.append(
+            BaseSignal(
+                type=result["type"],
+                symbol=result["symbol"],
+                time=result["time"],
+                confidence=result.get("confidence", 1.0),
+                metadata=metadata,
+            )
+        )
+    return signals
 
 
 def _build_dataframe(closes):
@@ -295,3 +317,48 @@ def test_pivot_breakout_rule_requires_prior_confirmation_for_breakout_label():
     results = pivot_breakout_rule(context)
 
     assert results == []
+
+
+def test_pivot_breakout_overlay_bubble_uses_resistance_color():
+    df = _build_dataframe([100, 101, 102, 105, 106])
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+    signals = _as_signals(results)
+    overlays = pivot_signals_to_overlays(signals, df)
+
+    assert overlays
+    bubbles = overlays[0]["payload"]["bubbles"]
+    assert len(bubbles) == 1
+    assert bubbles[0]["accentColor"] == "#ef4444"
+
+
+def test_pivot_breakout_overlay_bubble_uses_support_color_after_flip():
+    closes = [99, 103, 105, 106, 102, 101, 99]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+    signals = _as_signals(results)
+    overlays = pivot_signals_to_overlays(signals, df)
+
+    assert overlays
+    bubbles = overlays[0]["payload"]["bubbles"]
+    support_bubble = next(b for b in bubbles if b["label"] == "Support breakdown")
+    assert support_bubble["accentColor"] == "#22c55e"
