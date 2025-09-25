@@ -14,7 +14,10 @@ function createSignalsAdapter(response) {
       end: END,
       interval: '1h',
       symbol: 'ES',
-      config: { pivot_breakout_confirmation_bars: 2 },
+      config: {
+        pivot_breakout_confirmation_bars: 2,
+        enabled_rules: ['pivot_breakout', 'pivot_retest'],
+      },
     });
     return response;
   };
@@ -29,7 +32,12 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
   const chartState = {
     symbol: 'ES',
     interval: '1h',
-    signalsConfig: { pivotBreakoutConfirmationBars: 2 },
+    signalsConfig: {
+      pivotBreakoutConfirmationBars: 2,
+      enabledRules: {
+        'ind-1': ['pivot_breakout', 'pivot_retest'],
+      },
+    },
   };
 
   const indColors = { 'ind-1': '#facc15' };
@@ -88,8 +96,8 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
 
   assert.equal(success, true);
   assert.equal(errorMsg, null);
-  assert.deepEqual(updateCalls[0], { signalsLoading: true });
-  assert.deepEqual(updateCalls.at(-1), { signalsLoading: false });
+  assert.deepEqual(updateCalls[0], { signalsLoading: true, signalsLoadingFor: 'ind-1' });
+  assert.deepEqual(updateCalls.at(-1), { signalsLoading: false, signalsLoadingFor: null });
 
   const overlayPatch = updateCalls.find(call => Object.prototype.hasOwnProperty.call(call, 'overlays'));
   assert.ok(overlayPatch, 'expected overlays patch to be emitted');

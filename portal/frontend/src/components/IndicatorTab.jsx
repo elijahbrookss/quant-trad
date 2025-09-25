@@ -239,7 +239,6 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       const core = normalizeParams(meta.params);
 
-      // light validation for lookbacks
       if ('lookbacks' in core) {
         if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
           setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
@@ -256,8 +255,10 @@ export const IndicatorSection = ({ chartId }) => {
       };
 
       let result;
+      let indicatorId = meta.id;
       if (meta.id) {
         result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
+        indicatorId = result?.id ?? meta.id;
         setIndicators((prev) => {
           const next = prev.map((i) => (i.id === result.id ? result : i));
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
@@ -265,11 +266,27 @@ export const IndicatorSection = ({ chartId }) => {
         });
       } else {
         result = await createIndicator({ type: meta.type, params, name: meta.name });
+        indicatorId = result?.id ?? null;
         setIndicators((prev) => {
           const next = [...prev, result];
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
           return next;
         });
+      }
+
+      if (indicatorId) {
+        const ruleSelection = Array.isArray(meta.signalRules) ? meta.signalRules : null;
+        const currentConfig = getChart(chartId)?.signalsConfig || {};
+        const currentEnabled = currentConfig.enabledRules || {};
+        const nextEnabled = { ...currentEnabled };
+        if (ruleSelection && ruleSelection.length) {
+          nextEnabled[indicatorId] = ruleSelection;
+        }
+        const nextSignalsConfig = {
+          ...currentConfig,
+          enabledRules: nextEnabled,
+        };
+        updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
       setModalOpen(false);
@@ -284,6 +301,15 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
+      const currentConfig = getChart(chartId)?.signalsConfig
+      const enabledRules = currentConfig?.enabledRules
+      if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
+        const nextEnabled = { ...enabledRules }
+        delete nextEnabled[id]
+        updateChart(chartId, {
+          signalsConfig: { ...currentConfig, enabledRules: nextEnabled },
+        })
+      }
     } catch (e) {
       setError(e.message)
       logError('indicator_delete_failed', e)
@@ -319,7 +345,12 @@ export const IndicatorSection = ({ chartId }) => {
 
 
   const openEditModal = (indicator = null) => {
-    setEditing(indicator)
+    if (indicator) {
+      const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id] || []
+      setEditing({ ...indicator, signalRules: [...enabledRules] })
+    } else {
+      setEditing(null)
+    }
     setModalOpen(true)
     setError(null)
   }
