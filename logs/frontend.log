@@ -3,7 +3,8 @@
 > vite
 
 
-  VITE v7.0.5  ready in 585 ms
+  VITE v7.0.5  ready in 434 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
+7:25:17 PM [vite] (client) hmr update /src/components/ChartComponent/ChartComponent.jsx, /src/index.css
