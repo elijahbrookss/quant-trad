@@ -592,10 +592,10 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
               >
                 <Plus className="size-4" aria-hidden="true" />
-                Create indicator
+                Add indicator
               </button>
             </div>
           </header>
@@ -606,7 +606,7 @@ export const IndicatorSection = ({ chartId }) => {
               <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
                 <input
                   type="checkbox"
-                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                   checked={showEnabledOnly}
                   onChange={(event) => setShowEnabledOnly(event.target.checked)}
                 />
