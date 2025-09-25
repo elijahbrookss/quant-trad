@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -33,6 +33,13 @@ class PivotBreakoutConfig:
 log = logging.getLogger("PivotBreakoutRule")
 
 _DEFAULT_CONFIG = PivotBreakoutConfig()
+_PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
+
+
+def _maybe_mutable_context(context: Mapping[str, Any]) -> Optional[MutableMapping[str, Any]]:
+    if isinstance(context, MutableMapping):
+        return context
+    return None
 
 
 def _summarise_level(level: Level) -> str:
@@ -391,11 +398,20 @@ def pivot_breakout_rule(
     mode = str(context.get("mode", "backtest")).lower()
 
     results: List[Dict[str, Any]] = []
-    # prepare breakout cache for downstream rules (e.g. retest)
-    try:
-        context["pivot_breakouts"] = []  # type: ignore[index]
-    except TypeError:
-        pass
+    mutable_context = _maybe_mutable_context(context)
+    breakout_cache: Optional[List[Dict[str, Any]]] = None
+    if mutable_context is not None:
+        cached = mutable_context.get("pivot_breakouts")
+        if isinstance(cached, list):
+            cached.clear()
+            breakout_cache = cached
+        else:
+            breakout_cache = []
+            mutable_context["pivot_breakouts"] = breakout_cache
+        mutable_context[_PIVOT_BREAKOUT_READY_FLAG] = False
+    else:
+        breakout_cache = []
+
     for level in levels:
         level_id = _summarise_level(level)
         log.debug("%s | level_eval | level=%s", run_id, level_id)
@@ -428,12 +444,12 @@ def pivot_breakout_rule(
             )
             log.debug("%s | level_eval_complete | level=%s | breakout=True", run_id, level_id)
 
-    if results:
-        cached_breakouts = context.get("pivot_breakouts")
-        if isinstance(cached_breakouts, list):
-            cached_breakouts.extend(results)
+    if breakout_cache is not None and results:
+        breakout_cache.extend(results)
 
     log.debug("%s | run_complete | signals=%d", run_id, len(results))
+    if mutable_context is not None:
+        mutable_context[_PIVOT_BREAKOUT_READY_FLAG] = True
     return results
 
 
@@ -535,7 +551,7 @@ def _detect_retest(
     return None
 
 
-def pivot_retest_rule(context: Mapping[str, Any], _: Any = None) -> List[Dict[str, Any]]:
+def pivot_retest_rule(context: Mapping[str, Any], payload: Any = None) -> List[Dict[str, Any]]:
     indicator = context.get("indicator")
     if not isinstance(indicator, PivotLevelIndicator):
         return []
@@ -544,8 +560,20 @@ def pivot_retest_rule(context: Mapping[str, Any], _: Any = None) -> List[Dict[st
     if df is None or df.empty:
         return []
 
+    mutable_context = _maybe_mutable_context(context)
     breakouts = context.get("pivot_breakouts")
+
+    if not context.get(_PIVOT_BREAKOUT_READY_FLAG):
+        if not isinstance(breakouts, list):
+            breakouts = []
+            if mutable_context is not None:
+                mutable_context["pivot_breakouts"] = breakouts
+        pivot_breakout_rule(context, payload)
+        breakouts = context.get("pivot_breakouts")
+
     if not isinstance(breakouts, list) or not breakouts:
+        if mutable_context is not None:
+            mutable_context[_PIVOT_BREAKOUT_READY_FLAG] = True
         return []
 
     mode = str(context.get("mode", "backtest")).lower()
@@ -580,6 +608,8 @@ def pivot_retest_rule(context: Mapping[str, Any], _: Any = None) -> List[Dict[st
         if retest is not None:
             results.append(retest)
 
+    if mutable_context is not None:
+        mutable_context[_PIVOT_BREAKOUT_READY_FLAG] = True
     return results
 
 
@@ -854,4 +884,3 @@ __all__ = [
     "pivot_signals_to_overlays",
     "register_pivot_indicator",
 ]
-
