@@ -41,7 +41,7 @@ function SectionHeading({ title, description, kicker }) {
   return (
     <div className="space-y-3">
       {kicker ? (
-        <span className="text-[11px] uppercase tracking-[0.35em] text-sky-300/80">{kicker}</span>
+        <span className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">{kicker}</span>
       ) : null}
       <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
       <p className="max-w-2xl text-sm text-slate-400">{description}</p>
@@ -134,12 +134,12 @@ function AppShell({ chartId }) {
     : null
 
   return (
-    <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
+    <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
         <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 backdrop-blur">
           <div className="mx-auto flex max-w-7xl flex-col gap-5 px-6 py-6 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-3 text-lg font-semibold text-slate-100">
-                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-500/15 text-sky-200">QT</span>
+                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-soft)]">QT</span>
                 <span>QuantTrad Portal</span>
               </div>
               <p className="text-sm text-slate-400">QuantLab • Ops Command • Insight Reports</p>
@@ -149,7 +149,7 @@ function AppShell({ chartId }) {
                 <a
                   key={section.id}
                   href={`#${section.id}`}
-                  className="rounded-full border border-white/5 bg-white/5 px-4 py-2 transition hover:border-sky-500/40 hover:bg-sky-500/15 hover:text-sky-100"
+                  className="rounded-full border border-white/5 bg-white/5 px-4 py-2 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
                 >
                   {section.label}
                 </a>
@@ -171,7 +171,7 @@ function AppShell({ chartId }) {
                   <button
                     type="button"
                     onClick={runHealthCheck}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-sky-400/40 bg-sky-500/10 text-sky-100 transition hover:border-sky-300/60 hover:bg-sky-500/20 disabled:opacity-60"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
                     aria-label="Check API health"
                     disabled={checkingHealth}
                   >
@@ -219,13 +219,13 @@ function AppShell({ chartId }) {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-4 rounded-3xl border border-sky-500/30 bg-sky-500/10 p-6">
-                <h3 className="text-lg font-semibold text-sky-100">Trade walkthroughs</h3>
-                <p className="text-sm text-sky-100/80">Replay every order with contextual overlays. Capture indicator states, signal weights, and execution metadata.</p>
-                <div className="rounded-2xl border border-sky-400/30 bg-sky-500/15 p-4 text-xs text-sky-100/80">
+              <div className="flex flex-col gap-4 rounded-3xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-6">
+                <h3 className="text-lg font-semibold text-[color:var(--accent-text-strong)]">Trade walkthroughs</h3>
+                <p className="text-sm text-[color:var(--accent-text-strong-alpha)]">Replay every order with contextual overlays. Capture indicator states, signal weights, and execution metadata.</p>
+                <div className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-15)] p-4 text-xs text-[color:var(--accent-text-strong-alpha)]">
                   Future UX includes: scrubbable timelines, indicator snapshots, and risk commentary sidebars for each decision point.
                 </div>
-                <ul className="space-y-2 text-sm text-sky-100/80">
+                <ul className="space-y-2 text-sm text-[color:var(--accent-text-strong-alpha)]">
                   <li>• Align QuantLab overlays with executed trades.</li>
                   <li>• Annotate decisions for compliance + research sharing.</li>
                   <li>• Integrate PnL, slippage, and volatility context.</li>
@@ -243,7 +243,7 @@ function AppShell({ chartId }) {
                 href="https://github.com/elijahbrookss/quant-trad"
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
               >
                 GitHub
               </a>
@@ -251,7 +251,7 @@ function AppShell({ chartId }) {
                 href="https://quad-trad.gitbook.io/docs/"
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-sky-400/40 hover:bg-sky-500/15 hover:text-sky-100"
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
               >
                 Documentation
               </a>

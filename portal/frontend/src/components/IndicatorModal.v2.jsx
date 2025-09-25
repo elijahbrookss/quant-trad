@@ -1,5 +1,5 @@
 // src/components/IndicatorModal.v2.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog, DialogPanel, DialogTitle, Switch } from "@headlessui/react";
 import {
   Braces,
@@ -41,6 +41,9 @@ export default function IndicatorModalV2({
   const [name, setName] = useState(initial?.name || "");
   const [params, setParams] = useState(initial?.params || {});
   const [metaErr, setMetaErr] = useState(null);
+  const [availableSignalRules, setAvailableSignalRules] = useState([]);
+  const [selectedSignalRules, setSelectedSignalRules] = useState([]);
+  const initialSignalRulesRef = useRef(null);
 
   const logger = useMemo(
     () => createLogger("IndicatorModal", { indicatorId: initial?.id ?? null }),
@@ -123,6 +126,10 @@ export default function IndicatorModalV2({
       setName("");
       setParams({});
     }
+    setAvailableSignalRules([]);
+    const initialRules = initial?.signalRules ? [...initial.signalRules] : [];
+    initialSignalRulesRef.current = initialRules.length ? initialRules : null;
+    setSelectedSignalRules(initialRules);
     setTypeMeta({
       required_params: [],
       default_params: {},
@@ -141,6 +148,18 @@ export default function IndicatorModalV2({
     fetchIndicatorType(typeId)
       .then((meta) => {
         setTypeMeta(meta);
+        const rules = Array.isArray(meta.signal_rules) ? meta.signal_rules : [];
+        setAvailableSignalRules(rules);
+        const seeded = initialSignalRulesRef.current;
+        let nextSelection = Array.isArray(seeded) ? seeded.filter((id) => rules.some((rule) => rule.id === id)) : null;
+        if (nextSelection && !nextSelection.length) {
+          nextSelection = null;
+        }
+        if (!nextSelection || !nextSelection.length) {
+          nextSelection = rules.map((rule) => rule.id);
+        }
+        setSelectedSignalRules(nextSelection);
+        initialSignalRulesRef.current = null;
         if (!initial) {
           const seed = {};
           (meta.required_params || []).forEach((key) => {
@@ -165,6 +184,12 @@ export default function IndicatorModalV2({
     setAdvancedOpen(false);
     setRawOpen(false);
   }, [isOpen, typeId]);
+
+  useEffect(() => {
+    if (metaErr === "Please enable at least one signal rule." && selectedSignalRules.length > 0) {
+      setMetaErr(null);
+    }
+  }, [metaErr, selectedSignalRules.length]);
 
   // Heuristics for grouping: Essential vs Advanced
   const basicHints = useMemo(() => new Set([
@@ -303,7 +328,10 @@ export default function IndicatorModalV2({
   const handleSubmit = () => {
     if (!typeId) return setMetaErr("Please select a type.");
     if (!name.trim()) return setMetaErr("Please enter a name.");
-    onSave({ id: initial?.id, type: typeId, name, params });
+    if (availableSignalRules.length > 0 && selectedSignalRules.length === 0) {
+      return setMetaErr("Please enable at least one signal rule.");
+    }
+    onSave({ id: initial?.id, type: typeId, name, params, signalRules: selectedSignalRules });
   };
 
   const resetToDefaults = () => {
@@ -320,6 +348,31 @@ export default function IndicatorModalV2({
       logger.error("copy_params_failed", e);
     }
   };
+
+  const toggleSignalRule = (ruleId) => {
+    setSelectedSignalRules((prev) => {
+      const next = new Set(prev);
+      if (next.has(ruleId)) {
+        next.delete(ruleId);
+      } else {
+        next.add(ruleId);
+      }
+      return availableSignalRules
+        .map((rule) => rule.id)
+        .filter((id) => next.has(id));
+    });
+  };
+
+  const selectAllSignalRules = () => {
+    setSelectedSignalRules(availableSignalRules.map((rule) => rule.id));
+  };
+
+  const clearSignalRules = () => {
+    setSelectedSignalRules([]);
+  };
+
+  const allRulesSelected =
+    availableSignalRules.length > 0 && selectedSignalRules.length === availableSignalRules.length;
 
   // layout helpers
   const Section = ({ title, keys }) => {
@@ -447,6 +500,75 @@ export default function IndicatorModalV2({
                       ) : (
                         <p className="mt-3 text-xs text-neutral-400">
                           Keep noise out of your workflow until you need to fine tune.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {availableSignalRules.length > 0 && (
+                    <div className="rounded-xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-05)] p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h4 className="text-sm font-semibold text-[color:var(--accent-text-strong)]">Signal rules</h4>
+                          <p className="text-xs text-[color:var(--accent-text-soft-alpha)]">
+                            Choose which detections run when generating signals for this indicator.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs">
+                          <button
+                            type="button"
+                            onClick={selectAllSignalRules}
+                            className="rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] px-3 py-1 text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)]"
+                          >
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            onClick={clearSignalRules}
+                            className="rounded-full border border-slate-500/40 bg-slate-800/40 px-3 py-1 text-slate-200 transition hover:border-slate-400/60 hover:bg-slate-800/70"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 space-y-3">
+                        {availableSignalRules.map((rule) => {
+                          const checked = selectedSignalRules.includes(rule.id);
+                          return (
+                            <label
+                              key={rule.id}
+                              className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-sm transition ${
+                                checked
+                                  ? "border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)]"
+                                  : "border-white/10 bg-[#12141d] text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]"
+                              }`}
+                            >
+                              <div className="space-y-1">
+                                <span className="font-medium">{rule.label || rule.id}</span>
+                                {rule.description && (
+                                  <p className="text-xs text-slate-300/80">{rule.description}</p>
+                                )}
+                              </div>
+                              <Switch
+                                checked={checked}
+                                onChange={() => toggleSignalRule(rule.id)}
+                                className={`${checked ? "bg-[color:var(--accent-alpha-80)]" : "bg-slate-600/70"} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                              >
+                                <span className={`${checked ? "translate-x-6" : "translate-x-1"} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+                              </Switch>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      {availableSignalRules.length > 0 && (
+                        <p className="mt-3 text-xs text-[color:var(--accent-text-muted)]">
+                          {allRulesSelected
+                            ? "All signal rules are enabled."
+                            : selectedSignalRules.length === 0
+                              ? "No signal rules selected. Signals will not be generated."
+                              : `${selectedSignalRules.length} of ${availableSignalRules.length} rules enabled.`}
                         </p>
                       )}
                     </div>

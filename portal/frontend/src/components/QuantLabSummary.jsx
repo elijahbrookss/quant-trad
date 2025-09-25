@@ -62,7 +62,7 @@ export function QuantLabSummary({ chartId }) {
   return (
     <div className="flex flex-col gap-6 rounded-3xl border border-white/5 bg-black/30 p-6 shadow-[0_30px_70px_-50px_rgba(0,0,0,0.8)] sm:flex-row sm:items-center sm:justify-between">
       <div className="space-y-2">
-        <span className="text-[11px] uppercase tracking-[0.35em] text-sky-300/70">QuantLab status</span>
+        <span className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">QuantLab status</span>
         <p className="max-w-xl text-sm text-slate-400">Monitoring backend connectivity and recent refresh activity for the research canvas.</p>
       </div>
       <div className="flex flex-col items-start gap-2 sm:items-end">

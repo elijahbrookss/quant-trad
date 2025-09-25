@@ -1,5 +1,36 @@
 @import "tailwindcss";
 
+:root {
+  --accent-rgb: 56 189 248;
+  --accent-base: rgb(56, 189, 248);
+  --accent-alpha-05: rgba(56, 189, 248, 0.05);
+  --accent-alpha-10: rgba(56, 189, 248, 0.1);
+  --accent-alpha-15: rgba(56, 189, 248, 0.15);
+  --accent-alpha-20: rgba(56, 189, 248, 0.2);
+  --accent-alpha-25: rgba(56, 189, 248, 0.25);
+  --accent-alpha-30: rgba(56, 189, 248, 0.3);
+  --accent-alpha-40: rgba(56, 189, 248, 0.4);
+  --accent-alpha-60: rgba(56, 189, 248, 0.6);
+  --accent-alpha-70: rgba(56, 189, 248, 0.7);
+  --accent-alpha-80: rgba(56, 189, 248, 0.8);
+  --accent-alpha-85: rgba(56, 189, 248, 0.85);
+  --accent-alpha-90: rgba(56, 189, 248, 0.9);
+  --accent-text-strong: rgb(205, 239, 253);
+  --accent-text-strong-alpha: rgba(205, 239, 253, 0.9);
+  --accent-text-soft: rgb(175, 229, 252);
+  --accent-text-soft-alpha: rgba(175, 229, 252, 0.85);
+  --accent-text-muted: rgba(165, 225, 252, 0.7);
+  --accent-text-kicker: rgba(136, 215, 251, 0.8);
+  --accent-text-bright: rgb(225, 245, 254);
+  --accent-outline: rgba(175, 229, 252, 0.7);
+  --accent-outline-soft: rgba(175, 229, 252, 0.45);
+  --accent-ring: rgba(56, 189, 248, 0.45);
+  --accent-ring-strong: rgba(56, 189, 248, 0.7);
+  --accent-shadow-soft: rgba(56, 189, 248, 0.3);
+  --accent-shadow-strong: rgba(56, 189, 248, 0.55);
+  --accent-gradient-spot: rgba(56, 189, 248, 0.14);
+}
+
 html,
 body {
   background-color: #14171f;
@@ -7,7 +38,7 @@ body {
 }
 
 body {
-  background-image: radial-gradient(circle at top, rgba(56, 189, 248, 0.14) 0%, rgba(20, 23, 31, 1) 55%);
+  background-image: radial-gradient(circle at top, var(--accent-gradient-spot) 0%, rgba(20, 23, 31, 1) 55%);
   background-attachment: fixed;
   color: #f8fafc;
 }
@@ -15,7 +46,7 @@ body {
 #root {
   min-height: 100%;
   background-color: #14171f;
-  background-image: radial-gradient(circle at top, rgba(56, 189, 248, 0.14) 0%, rgba(20, 23, 31, 1) 55%);
+  background-image: radial-gradient(circle at top, var(--accent-gradient-spot) 0%, rgba(20, 23, 31, 1) 55%);
   background-attachment: fixed;
 }
 

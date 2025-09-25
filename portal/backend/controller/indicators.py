@@ -20,6 +20,7 @@ class IndicatorInstanceIn(BaseModel):
     type: str
     name: Optional[str] = None
     params: Dict[str, Any]  # must include symbol/start/end/interval on create
+    color: Optional[str] = None
 
 class IndicatorInstanceOut(BaseModel):
     id: str
@@ -27,6 +28,7 @@ class IndicatorInstanceOut(BaseModel):
     name: str
     params: Dict[str, Any]
     enabled: bool
+    color: Optional[str] = None
 
 class OverlayRequest(BaseModel):
     start: str
@@ -49,7 +51,7 @@ async def list_instances():
 @router.post("/", response_model=IndicatorInstanceOut, status_code=201)
 async def create(body: IndicatorInstanceIn):
     try:
-        return create_instance(body.type, body.name, dict(body.params))
+        return create_instance(body.type, body.name, dict(body.params), body.color)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:
@@ -58,7 +60,15 @@ async def create(body: IndicatorInstanceIn):
 @router.put("/{inst_id}", response_model=IndicatorInstanceOut)
 async def update(inst_id: str, body: IndicatorInstanceIn):
     try:
-        return update_instance(inst_id, body.type, dict(body.params), body.name)
+        color_provided = "color" in body.__fields_set__
+        return update_instance(
+            inst_id,
+            body.type,
+            dict(body.params),
+            body.name,
+            color=body.color,
+            color_provided=color_provided,
+        )
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except ValueError as e:
