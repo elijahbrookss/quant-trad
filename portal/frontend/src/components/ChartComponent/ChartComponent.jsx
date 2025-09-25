@@ -443,7 +443,7 @@ export const ChartComponent = ({ chartId }) => {
         if (color) {
           signalBubbles.push(...norm.bubbles.map(b => {
             const accentColor = color;
-            const backgroundColor = b.backgroundColor ?? toRgba(accentColor, 0.16) ?? undefined;
+            const backgroundColor = toRgba(accentColor, 0.16) ?? undefined;
             return {
               ...b,
               accentColor,
