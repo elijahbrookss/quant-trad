@@ -2,7 +2,7 @@ from typing import List, Dict, Optional
 import logging
 
 import pandas as pd
-from indicators.market_profile import breakout_rule, MarketProfileIndicator
+from indicators.market_profile import MarketProfileIndicator
 from mplfinance.plotting import make_addplot
 
 from signals.base import BaseSignal
@@ -10,6 +10,10 @@ from signals.engine.signal_generator import (
     build_signal_overlays,
     register_indicator_rules,
     run_indicator_rules,
+)
+from signals.rules.market_profile import (
+    market_profile_breakout_rule,
+    market_profile_retest_rule,
 )
 
 logger = logging.getLogger("MarketProfileSignalGenerator")
@@ -117,6 +121,6 @@ def _market_profile_overlay_adapter(
 
 register_indicator_rules(
     MarketProfileIndicator.NAME,
-    rules=[breakout_rule],
+    rules=[market_profile_breakout_rule, market_profile_retest_rule],
     overlay_adapter=_market_profile_overlay_adapter,
 )

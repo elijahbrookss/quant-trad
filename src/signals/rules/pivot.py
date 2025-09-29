@@ -11,6 +11,7 @@ import pandas as pd
 
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
+from signals.rules.patterns import assign_rule_metadata
 
 
 @dataclass(frozen=True)
@@ -613,16 +614,22 @@ def pivot_retest_rule(context: Mapping[str, Any], payload: Any = None) -> List[D
     return results
 
 
-pivot_breakout_rule.signal_id = "pivot_breakout"
-pivot_breakout_rule.signal_label = "Breakout"
-pivot_breakout_rule.signal_description = (
-    "Detects when price closes beyond a pivot-derived level with confirmation."
+assign_rule_metadata(
+    pivot_breakout_rule,
+    rule_id="pivot_breakout",
+    label="Breakout",
+    description=(
+        "Detects when price closes beyond a pivot-derived level with confirmation."
+    ),
 )
 
-pivot_retest_rule.signal_id = "pivot_retest"
-pivot_retest_rule.signal_label = "Retest"
-pivot_retest_rule.signal_description = (
-    "Labels the first pullback to a freshly broken pivot level while it holds."
+assign_rule_metadata(
+    pivot_retest_rule,
+    rule_id="pivot_retest",
+    label="Retest",
+    description=(
+        "Labels the first pullback to a freshly broken pivot level while it holds."
+    ),
 )
 
 
@@ -835,52 +842,9 @@ def pivot_signals_to_overlays(
     ]
 
 
-def register_pivot_indicator(force: bool = False) -> None:
-    """Ensure the pivot breakout rule and overlays are registered with the engine."""
-
-    try:
-        from signals.engine import signal_generator
-    except ImportError:  # pragma: no cover - defensive guard
-        return
-
-    if not force and PivotLevelIndicator.NAME in signal_generator._REGISTRY:
-        registration = signal_generator._REGISTRY[PivotLevelIndicator.NAME]
-        if registration.overlay_adapter is not None:
-            return
-
-    from signals.engine.signal_generator import register_indicator_rules
-
-    try:
-        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
-        register_indicator_rules(
-            PivotLevelIndicator.NAME,
-            rules=desired_rules,
-            overlay_adapter=pivot_signals_to_overlays,
-        )
-    except ValueError:
-        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
-        if force:
-            signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
-                rules=desired_rules,
-                overlay_adapter=pivot_signals_to_overlays,
-            )
-        else:
-            registration = signal_generator._REGISTRY.get(PivotLevelIndicator.NAME)
-            if registration is not None:
-                if tuple(registration.rules) != desired_rules or registration.overlay_adapter is None:
-                    signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
-                        rules=desired_rules,
-                        overlay_adapter=pivot_signals_to_overlays,
-                    )
-
-
-register_pivot_indicator()
-
-
 __all__ = [
     "PivotBreakoutConfig",
     "pivot_breakout_rule",
     "pivot_retest_rule",
     "pivot_signals_to_overlays",
-    "register_pivot_indicator",
 ]

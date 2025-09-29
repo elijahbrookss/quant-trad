@@ -20,7 +20,10 @@ from signals.engine.signal_generator import (
     describe_indicator_rules,
     run_indicator_rules,
 )
-from signals.rules.pivot import register_pivot_indicator
+from signals.engine import pivot_level_generator  # noqa: F401
+from signals.engine import market_profile_generator  # noqa: F401
+
+pivot_level_generator.ensure_registration()
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +36,6 @@ _INDICATOR_MAP = {
 }
 
 # Ensure default signal rules are registered for built-in indicators
-register_pivot_indicator()
-
 # In-memory registry: id -> {"meta": <pydantic-like dict>, "instance": <object>}
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
 

@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 from signals.base import BaseSignal
 from signals.engine.signal_generator import build_signal_overlays
-from signals.rules.pivot import pivot_signals_to_overlays, register_pivot_indicator
+from signals.rules.pivot import pivot_signals_to_overlays
+from signals.engine import pivot_level_generator  # noqa: F401
 
 
 def _make_df():
@@ -53,7 +54,7 @@ def test_pivot_signals_to_overlays_builds_colored_payload():
 
 
 def test_build_signal_overlays_uses_pivot_adapter():
-    register_pivot_indicator(force=True)
+    pivot_level_generator.ensure_registration(force=True)
     df = _make_df()
     signal = _make_signal("above", 110.0)
 
