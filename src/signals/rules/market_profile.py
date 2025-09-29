@@ -71,6 +71,9 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     if not isinstance(indicator, MarketProfileIndicator):
         return []
 
+    if not isinstance(value_area, Mapping):
+        return []
+
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
     if df is None or df.empty or "close" not in df.columns:
         return []
@@ -274,6 +277,9 @@ def _detect_value_area_retest(
 def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping[str, Any]) -> List[Dict[str, Any]]:
     indicator = context.get("indicator")
     if not isinstance(indicator, MarketProfileIndicator):
+        return []
+
+    if not isinstance(value_area, Mapping):
         return []
 
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
