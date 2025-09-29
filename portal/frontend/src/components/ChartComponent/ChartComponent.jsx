@@ -127,14 +127,29 @@ export const ChartComponent = ({ chartId }) => {
   const lastBarRef = useRef(null);
   const barSpacingRef = useRef(null);
   const timeframeWarningRef = useRef(null);
+  const symbolRef = useRef(symbol);
+  const intervalRef = useRef(interval);
+  const dateRangeRef = useRef(dateRange);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
 
+  useEffect(() => {
+    symbolRef.current = symbol;
+  }, [symbol]);
+
+  useEffect(() => {
+    intervalRef.current = interval;
+  }, [interval]);
+
+  useEffect(() => {
+    dateRangeRef.current = dateRange;
+  }, [dateRange]);
+
   const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
-    const effectiveSymbol = targetSymbol ?? symbol;
-    const effectiveInterval = targetInterval ?? interval;
-    const effectiveRange = targetRange ?? dateRange;
+    const effectiveSymbol = targetSymbol ?? symbolRef.current;
+    const effectiveInterval = targetInterval ?? intervalRef.current;
+    const effectiveRange = targetRange ?? dateRangeRef.current;
     const [startDate, endDate] = effectiveRange || [];
     const startISO = startDate?.toISOString();
     const endISO = endDate?.toISOString();
@@ -226,18 +241,22 @@ export const ChartComponent = ({ chartId }) => {
     } finally {
       setDataLoading(false);
     }
-  }, [symbol, interval, dateRange, info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
+  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
 
   // Create chart once.
   useEffect(() => {
     const el = chartContainerRef.current;
     if (!el || chartRef.current) return;
 
+    const initialInterval = intervalRef.current;
+    const initialSymbol = symbolRef.current;
+    const initialRange = dateRangeRef.current;
+
     chartRef.current = createChart(el, {
       ...options,
       width: el.clientWidth,
       height: el.clientHeight || 400,
-      timeScale: deriveTimeScaleOptions(interval),
+      timeScale: deriveTimeScaleOptions(initialInterval),
     });
 
     const series = chartRef.current.addSeries(CandlestickSeries, {
@@ -258,7 +277,7 @@ export const ChartComponent = ({ chartId }) => {
     loadChartData();
 
     if (!seededRef.current) {
-      updateChart?.(chartId, { symbol, interval, dateRange });
+      updateChart?.(chartId, { symbol: initialSymbol, interval: initialInterval, dateRange: initialRange });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;
     }
@@ -287,7 +306,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData, symbol, interval, dateRange]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -352,7 +371,6 @@ export const ChartComponent = ({ chartId }) => {
   const applySymbol = (sym) => {
     setSymbol(sym);
     setPalOpen(false);
-    handleApply({ symbol: sym });
   };
 
   // Overlay refs and syncer.

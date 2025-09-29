@@ -28,6 +28,26 @@ const COLOR_SWATCHES = [
 const DEFAULT_INDICATOR_COLOR = '#60a5fa';
 const INDICATOR_PAGE_SIZE = 6;
 
+const buildColorMap = (list = []) => {
+  if (!Array.isArray(list)) return {};
+  return list.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc;
+    const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
+    acc[indicator.id] = raw || DEFAULT_INDICATOR_COLOR;
+    return acc;
+  }, {});
+};
+
+const shallowEqualMap = (a = {}, b = {}) => {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+};
+
 const formatIndicatorType = (type) => {
   if (!type) return 'Custom';
   return type
@@ -91,20 +111,8 @@ export const IndicatorSection = ({ chartId }) => {
       setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
       return;
     }
-    const next = {};
-    for (const indicator of indicators) {
-      if (!indicator?.id) continue;
-      const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
-      next[indicator.id] = raw ? indicator.color : DEFAULT_INDICATOR_COLOR;
-    }
-    setIndColors((prev) => {
-      const prevKeys = Object.keys(prev);
-      const nextKeys = Object.keys(next);
-      if (prevKeys.length === nextKeys.length && prevKeys.every((key) => prev[key] === next[key])) {
-        return prev;
-      }
-      return next;
-    });
+    const next = buildColorMap(indicators);
+    setIndColors((prev) => (shallowEqualMap(prev, next) ? prev : next));
   }, [indicators]);
 
   useEffect(() => {
@@ -261,7 +269,10 @@ export const IndicatorSection = ({ chartId }) => {
     );
 
     const overlaysPayload = results.filter(Boolean);
-    const colored = applyIndicatorColors(overlaysPayload, indColors);
+    const nextColorMap = buildColorMap(merged);
+    setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
+
+    const colored = applyIndicatorColors(overlaysPayload, nextColorMap);
     updateChart(chartId, { overlays: colored, overlayLoading: false });
     info('overlay_refresh_complete', {
       overlays: colored.length,
@@ -442,23 +453,23 @@ export const IndicatorSection = ({ chartId }) => {
     } catch (e) {
       setError(e.message);
       logError('indicator_color_update_failed', e);
-        setIndColors((prev) => ({
-          ...prev,
-          [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
-        }));
-        setIndicators((prev) => {
-          const next = prev.map((ind) => (
-            ind.id === indicatorId
-              ? {
+      setIndColors((prev) => ({
+        ...prev,
+        [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
+      }));
+      setIndicators((prev) => {
+        const next = prev.map((ind) => (
+          ind.id === indicatorId
+            ? {
                 ...ind,
                 color: indicator.color ?? null,
                 params: indicator.params ?? ind.params,
               }
-              : ind
-          ));
-          updateChart(chartId, { indicators: next });
-          return next;
-        });
+            : ind
+        ));
+        updateChart(chartId, { indicators: next });
+        return next;
+      });
     }
   };
 
@@ -532,7 +543,6 @@ export const IndicatorSection = ({ chartId }) => {
       if (filteredCount === totalCount) return `${pageSummary} (out of ${totalCount} total)`;
       return `${pageSummary} (from ${totalCount} total)`;
     }
-
     return pageSummary;
   }, [
     totalCount,
