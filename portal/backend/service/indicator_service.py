@@ -22,6 +22,7 @@ from signals.engine.signal_generator import (
 )
 from signals.engine import pivot_level_generator  # noqa: F401
 from signals.engine import market_profile_generator  # noqa: F401
+from signals.engine.market_profile_generator import build_value_area_payloads
 
 pivot_level_generator.ensure_registration()
 
@@ -364,6 +365,18 @@ def generate_signals_for_instance(
     rule_config: Dict[str, Any] = dict(config or {})
     rule_config.setdefault("pivot_breakout_confirmation_bars", 3)
     rule_config.setdefault("symbol", sym)
+
+    if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:
+        rule_config.setdefault("market_profile_use_merged_value_areas", True)
+        payloads = build_value_area_payloads(
+            inst,
+            df,
+            interval=interval,
+            use_merged=rule_config.get("market_profile_use_merged_value_areas"),
+            merge_threshold=rule_config.get("market_profile_merge_threshold"),
+            min_merge_sessions=rule_config.get("market_profile_merge_min_sessions"),
+        )
+        rule_config["rule_payloads"] = payloads
 
     enabled_rules = rule_config.get("enabled_rules")
     if enabled_rules is not None and not enabled_rules:

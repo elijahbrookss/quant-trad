@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence, Mapping, Any
 import logging
 
 import pandas as pd
@@ -19,6 +19,63 @@ from signals.rules.market_profile import (
 logger = logging.getLogger("MarketProfileSignalGenerator")
 
 
+def _clone_indicator_for_runtime(
+    indicator: MarketProfileIndicator,
+    df: pd.DataFrame,
+    *,
+    interval: Optional[str] = None,
+) -> Optional[MarketProfileIndicator]:
+    """Create a lightweight indicator instance for signal evaluation."""
+
+    if df is None or df.empty:
+        return None
+
+    try:
+        runtime = MarketProfileIndicator(
+            df=df.copy(),
+            bin_size=getattr(indicator, "bin_size", 0.1),
+            mode=getattr(indicator, "mode", "tpo"),
+            interval=interval or getattr(indicator, "interval", "30m"),
+        )
+    except Exception:
+        logger.exception("Failed to initialise MarketProfileIndicator for signal payloads")
+        return None
+
+    return runtime
+
+
+def build_value_area_payloads(
+    indicator: MarketProfileIndicator,
+    df: pd.DataFrame,
+    *,
+    interval: Optional[str] = None,
+    use_merged: Optional[bool] = None,
+    merge_threshold: Optional[float] = None,
+    min_merge_sessions: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Derive value area payloads for market profile signal rules."""
+
+    runtime = _clone_indicator_for_runtime(indicator, df, interval=interval)
+    if runtime is None:
+        return []
+
+    use_merged = True if use_merged is None else bool(use_merged)
+
+    if use_merged:
+        threshold = 0.6 if merge_threshold is None else float(merge_threshold)
+        min_merge = 2 if min_merge_sessions is None else int(min_merge_sessions)
+        value_areas = runtime.merge_value_areas(threshold=threshold, min_merge=min_merge)
+    else:
+        value_areas = runtime.daily_profiles
+
+    payloads: List[Dict[str, Any]] = []
+    for area in value_areas or []:
+        if isinstance(area, Mapping) and area.get("VAH") is not None and area.get("VAL") is not None:
+            payloads.append(dict(area))
+
+    return payloads
+
+
 class MarketProfileSignalGenerator:
     def __init__(self, indicator: MarketProfileIndicator, symbol: Optional[str] = None):
         self.indicator = indicator
@@ -27,16 +84,31 @@ class MarketProfileSignalGenerator:
     def generate_signals(
         self,
         df: pd.DataFrame,
-        value_areas: List[Dict]
+        value_areas: Optional[Sequence[Mapping[str, Any]]] = None,
+        **config: Any,
     ) -> List[BaseSignal]:
         """Run registered Market Profile rules and convert outputs into signals."""
         if self.symbol is None:
             raise ValueError("MarketProfileSignalGenerator requires a symbol for rule execution")
+
+        payloads = (
+            list(value_areas)
+            if value_areas is not None
+            else build_value_area_payloads(
+                self.indicator,
+                df,
+                interval=getattr(self.indicator, "interval", None),
+                use_merged=config.get("market_profile_use_merged_value_areas"),
+                merge_threshold=config.get("market_profile_merge_threshold"),
+                min_merge_sessions=config.get("market_profile_merge_min_sessions"),
+            )
+        )
         return run_indicator_rules(
             self.indicator,
             df,
-            rule_payloads=value_areas,
+            rule_payloads=payloads,
             symbol=self.symbol,
+            **config,
         )
 
     @staticmethod
@@ -58,9 +130,13 @@ class MarketProfileSignalGenerator:
 def _market_profile_overlay_adapter(
     signals: List[BaseSignal],
     plot_df: pd.DataFrame,
+    *,
     n: int = 3,
     offset: float = 0.2,
+    **kwargs: Any,
 ) -> List[Dict]:
+    n = int(kwargs.get("market_profile_overlay_half_width", n))
+    offset = float(kwargs.get("market_profile_overlay_offset", offset))
     overlays = []
     logger.info("Converting %d signals to line overlays", len(signals))
 
