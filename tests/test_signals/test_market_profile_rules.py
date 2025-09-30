@@ -5,6 +5,7 @@ pd = pytest.importorskip("pandas")
 from indicators.market_profile import MarketProfileIndicator
 from signals.rules.market_profile import (
     _value_area_breakout_evaluator,
+    _detect_value_area_retest,
     market_profile_breakout_rule,
     market_profile_retest_rule,
     _BREAKOUT_CACHE_KEY,
@@ -245,3 +246,40 @@ def test_retest_rule_ignores_distant_closes():
 
     retests = market_profile_retest_rule(context, value_area)
     assert retests == []
+
+
+def test_detect_value_area_retest_respects_value_area_start_index():
+    index = pd.date_range("2025-03-01 09:30", periods=6, freq="15min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [106.2, 106.3, 106.6, 106.9, 107.2, 107.05],
+            "high": [106.4, 106.5, 106.8, 107.1, 107.6, 107.3],
+            "low": [106.0, 106.1, 106.4, 106.8, 107.0, 107.02],
+            "close": [106.3, 106.4, 106.7, 107.0, 107.45, 107.15],
+        },
+        index=index,
+    )
+
+    breakout_meta = {
+        "level_price": 107.2,
+        "breakout_direction": "above",
+        "trigger_bar_index": 4,
+        "trigger_time": index[4].to_pydatetime(),
+        "trigger_index_label": index[4],
+        "value_area_start_index": 2,
+        "value_area_start": index[2].to_pydatetime(),
+        "value_area_id": "session-123",
+    }
+
+    retest = _detect_value_area_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=10,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert retest is not None, "Expected a retest within the scoped window"
+    assert retest["bars_since_breakout"] == 1
+    assert retest["time"] == index[5].to_pydatetime()
