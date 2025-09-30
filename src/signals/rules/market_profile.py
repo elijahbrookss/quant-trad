@@ -537,6 +537,28 @@ def _detect_value_area_retest(
         return None
 
     look_start = start_idx + max(min_bars, 1)
+    df_index = df.index
+
+    value_area_start = breakout_meta.get("value_area_start")
+    if value_area_start is not None:
+        try:
+            va_start_ts = pd.Timestamp(value_area_start)
+            df_tz = getattr(df_index, "tz", None)
+            if getattr(va_start_ts, "tzinfo", None) is None and df_tz is not None:
+                va_start_ts = va_start_ts.tz_localize(df_tz)  # type: ignore[arg-type]
+            elif df_tz is not None:
+                va_start_ts = va_start_ts.tz_convert(df_tz)  # type: ignore[arg-type]
+
+            va_positions = df_index.get_indexer([va_start_ts], method="nearest")
+            if va_positions.size:
+                look_start = max(look_start, int(va_positions[0]))
+        except Exception:
+            log.debug(
+                "mp_retest | warn | reason=value_area_start_unresolved | session=%s | start=%s",
+                breakout_meta.get("value_area_id"),
+                value_area_start,
+            )
+
     if look_start >= len(df):
         log.debug(
             "mp_retest | skip | reason=retest_window_oob | session=%s | start_idx=%s | look_start=%s | bars=%s",
@@ -562,14 +584,15 @@ def _detect_value_area_retest(
     lows: np.ndarray = price_arrays["low"]
     index = price_arrays["index"]
 
-    tolerance = abs(float(level_price)) * max(tolerance_pct, 0.0)
+    level_price_float = float(level_price)
+    tolerance = abs(level_price_float) * max(tolerance_pct, 0.0)
     simulate_current_only = mode in {"sim", "live"}
 
     log.debug(
         "mp_retest | evaluating | session=%s | direction=%s | level=%.5f | tolerance_pct=%.5f | tolerance=%.5f | window=[%s,%s] | mode=%s",
         breakout_meta.get("value_area_id"),
         direction,
-        float(level_price),
+        level_price_float,
         tolerance_pct,
         tolerance,
         look_start,
@@ -586,11 +609,11 @@ def _detect_value_area_retest(
         low = _safe_array_value(lows, idx, close)
 
         if direction == "above":
-            touched = low <= float(level_price) + tolerance
-            invalidated = close < float(level_price) - tolerance
+            touched = low <= level_price_float + tolerance
+            invalidated = close < level_price_float - tolerance
         else:
-            touched = high >= float(level_price) - tolerance
-            invalidated = close > float(level_price) + tolerance
+            touched = high >= level_price_float - tolerance
+            invalidated = close > level_price_float + tolerance
 
         if not touched:
             log.debug(
@@ -600,7 +623,7 @@ def _detect_value_area_retest(
                 high,
                 low,
                 close,
-                float(level_price),
+                level_price_float,
                 tolerance,
             )
             continue
@@ -620,7 +643,19 @@ def _detect_value_area_retest(
                 breakout_meta.get("value_area_id"),
                 idx,
                 close,
-                float(level_price),
+                level_price_float,
+                tolerance,
+            )
+            continue
+
+        close_gap = abs(close - level_price_float)
+        if close_gap > tolerance:
+            log.debug(
+                "mp_retest | continue | reason=close_distance | session=%s | idx=%d | close=%.5f | level=%.5f | tolerance=%.5f",
+                breakout_meta.get("value_area_id"),
+                idx,
+                close,
+                level_price_float,
                 tolerance,
             )
             continue
@@ -642,7 +677,7 @@ def _detect_value_area_retest(
             "symbol": breakout_meta.get("symbol"),
             "time": ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
             "source": breakout_meta.get("source"),
-            "level_price": float(level_price),
+            "level_price": level_price_float,
             "breakout_time": breakout_meta.get("trigger_time"),
             "breakout_direction": direction,
             "level_type": breakout_meta.get("level_type"),
