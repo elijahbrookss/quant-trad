@@ -11,6 +11,12 @@ import pandas as pd
 
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
+from signals.rules.breakout import (
+    BreakoutRunState,
+    mark_breakout_emitted,
+    reset_breakout_state,
+    update_breakout_state,
+)
 from signals.rules.patterns import assign_rule_metadata
 
 
@@ -220,12 +226,7 @@ def _evaluate_level(
     last_idx_position = len(closes) - 1
     simulate_current_only = mode in {"sim", "live"}
 
-    consecutive = 0
-    candidate_start_pos: Optional[int] = None
-    candidate_max_distance = 0.0
-    active_side: Optional[str] = None
-    run_emitted = False
-    run_confirmed = False
+    state = BreakoutRunState()
     confirmed_side: Optional[str] = None
     current_run_prior_confirmed_side: Optional[str] = None
     results: List[Dict[str, Any]] = []
@@ -235,51 +236,33 @@ def _evaluate_level(
         sides.append(side)
 
         if side in {"at", "straddle"}:
-            if active_side is not None and run_confirmed:
-                confirmed_side = active_side
-            consecutive = 0
-            candidate_start_pos = None
-            candidate_max_distance = 0.0
-            active_side = None
-            run_emitted = False
-            run_confirmed = False
+            if state.active_side is not None and state.run_confirmed:
+                confirmed_side = state.active_side
+            reset_breakout_state(state)
             current_run_prior_confirmed_side = None
             continue
 
-        if active_side != side:
-            if active_side is not None and run_confirmed:
-                confirmed_side = active_side
-            active_side = side
-            candidate_start_pos = position
-            consecutive = 1
-            candidate_max_distance = clearance
-            run_emitted = False
-            run_confirmed = False
+        if state.active_side is not None and state.active_side != side and state.run_confirmed:
+            confirmed_side = state.active_side
+
+        if state.active_side != side:
             current_run_prior_confirmed_side = confirmed_side
-        else:
-            consecutive += 1
-            candidate_max_distance = max(candidate_max_distance, clearance)
 
-        breakout_start_pos = candidate_start_pos
+        result = update_breakout_state(
+            state,
+            side=side if side in {"above", "below"} else None,
+            clearance=clearance,
+            position=position,
+            level_price=level_price,
+            config=config,
+        )
 
-        if breakout_start_pos is None or run_emitted:
-            continue
+        if result.just_confirmed and result.active_side is not None:
+            confirmed_side = result.active_side
 
-        accelerated = False
-        ready = consecutive >= confirmation_bars
-        if not ready:
-            bars_since_start = position - breakout_start_pos + 1
-            threshold = abs(level_price) * early_distance_pct
-            if threshold > 0 and bars_since_start <= early_window:
-                if candidate_max_distance >= threshold:
-                    ready = True
-                    accelerated = True
+        breakout_start_pos = result.start_position
 
-        if ready and not run_confirmed:
-            run_confirmed = True
-            confirmed_side = active_side
-
-        if not ready:
+        if breakout_start_pos is None or not result.ready:
             continue
 
         if simulate_current_only and position != last_idx_position:
@@ -291,6 +274,7 @@ def _evaluate_level(
         last_bar = df.loc[breakout_end_idx]
 
         prior_confirmed_side = current_run_prior_confirmed_side
+        active_side = result.active_side
         if prior_confirmed_side == "above" and active_side == "below":
             detected_level_kind: Optional[str] = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
@@ -303,7 +287,7 @@ def _evaluate_level(
                 prior_confirmed_side,
                 active_side,
             )
-            run_emitted = True
+            mark_breakout_emitted(state)
             continue
 
         meta: Dict[str, Any] = {
@@ -312,14 +296,14 @@ def _evaluate_level(
             "level_price": level_price,
             "breakout_direction": active_side,
             "confirmation_bars_required": confirmation_bars,
-            "bars_closed_beyond_level": consecutive,
+            "bars_closed_beyond_level": result.consecutive,
             "breakout_start": _to_datetime(breakout_start_idx),
             "level_lookback": getattr(level, "lookback", None),
             "level_timeframe": getattr(level, "timeframe", None),
             "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
             "trigger_close": float(last_bar["close"]),
             "trigger_time": _to_datetime(breakout_end_idx),
-            "accelerated_confirmation": accelerated,
+            "accelerated_confirmation": result.accelerated,
             "prior_confirmed_side": prior_confirmed_side,
             "trigger_bar_index": position,
             "trigger_index_label": breakout_end_idx,
@@ -337,7 +321,7 @@ def _evaluate_level(
         )
 
         results.append(meta)
-        run_emitted = True
+        mark_breakout_emitted(state)
 
     if not results:
         log.debug(
