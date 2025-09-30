@@ -293,16 +293,6 @@ def _rgba_from_hex(color: str, alpha: float) -> Optional[str]:
     return f"rgba({r},{g},{b},{a:.2f})"
 
 
-def _readable_text_color(color: str) -> str:
-    rgb = _hex_to_rgb(color)
-    if rgb is None:
-        return "#0f172a"
-
-    r, g, b = rgb
-    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-    return "#0f172a" if luminance > 0.55 else "#f8fafc"
-
-
 def _resolve_level_price(metadata: Mapping[str, Any]) -> Optional[float]:
     price = _finite_float(metadata.get("level_price"))
     if price is not None:
@@ -390,7 +380,7 @@ def _market_profile_overlay_adapter(
                     "meta": meta_label,
                     "accentColor": color,
                     "backgroundColor": _rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
-                    "textColor": _readable_text_color(color),
+                    "textColor": "#ffffff",
                     "direction": direction,
                     "subtype": "bubble",
                 }
@@ -449,7 +439,7 @@ def _market_profile_overlay_adapter(
                 "meta": meta_text,
                 "accentColor": color,
                 "backgroundColor": _rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
-                "textColor": _readable_text_color(color),
+                "textColor": "#ffffff",
                 "direction": breakout_direction or metadata.get("direction"),
                 "subtype": "bubble",
             }
