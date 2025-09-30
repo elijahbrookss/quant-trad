@@ -210,3 +210,38 @@ def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_v
 
     bars_since = sorted(retest["bars_since_breakout"] for retest in retests)
     assert bars_since == [1, 1]
+
+
+def test_retest_rule_ignores_distant_closes():
+    index = pd.date_range("2025-02-01 09:30", periods=6, freq="30min", tz="UTC")
+    data = {
+        "open": [9.6, 9.8, 10.2, 10.9, 11.4, 11.6],
+        "high": [9.9, 10.1, 10.7, 11.2, 11.5, 11.7],
+        "low": [9.4, 9.7, 10.1, 10.8, 9.99, 11.1],
+        "close": [9.7, 10.0, 10.6, 11.1, 11.3, 11.6],
+        "volume": [800, 820, 840, 860, 880, 900],
+    }
+    df = pd.DataFrame(data, index=index)
+    indicator = MarketProfileIndicator(df)
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+        "market_profile_breakout_confirmation_bars": 1,
+    }
+
+    value_area = {
+        "start": index[0] - pd.Timedelta(days=1),
+        "end": index[-1],
+        "VAH": 10.0,
+        "VAL": 8.5,
+        "POC": 9.2,
+    }
+
+    breakouts = market_profile_breakout_rule(context, value_area)
+    assert breakouts, "Expected breakout meta for retest evaluation"
+
+    retests = market_profile_retest_rule(context, value_area)
+    assert retests == []
