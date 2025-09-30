@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional, Sequence, Mapping, Any
 import logging
+import math
 
 import pandas as pd
 from indicators.market_profile import MarketProfileIndicator
@@ -17,6 +18,36 @@ from signals.rules.market_profile import (
 )
 
 logger = logging.getLogger("MarketProfileSignalGenerator")
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    """Return a finite float representation of ``value`` or ``None``."""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+
+    return numeric
+
+
+def _serialise_value(value: Any) -> Any:
+    """Convert pandas/numpy scalar values into JSON serialisable types."""
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:
+            return value
+
+    return value
 
 
 def _clone_indicator_for_runtime(
@@ -136,7 +167,8 @@ def _market_profile_overlay_adapter(
     **kwargs: Any,
 ) -> List[Dict]:
     n = int(kwargs.get("market_profile_overlay_half_width", n))
-    offset = float(kwargs.get("market_profile_overlay_offset", offset))
+    offset_candidate = _finite_float(kwargs.get("market_profile_overlay_offset", offset))
+    offset = offset if offset_candidate is None else offset_candidate
     overlays = []
     logger.info("Converting %d signals to line overlays", len(signals))
 
@@ -151,11 +183,12 @@ def _market_profile_overlay_adapter(
             ts = plot_df.index[nearest_idx]
 
         direction = sig.metadata.get("direction")
-        base_y = (
+        base_raw = (
             sig.metadata.get("VAH")
             if sig.metadata.get("level_type") == "VAH"
             else sig.metadata.get("VAL")
         )
+        base_y = _finite_float(base_raw)
 
         if base_y is None or direction not in {"up", "down"}:
             logger.warning("Signal %d missing direction or price level", idx)
@@ -168,8 +201,9 @@ def _market_profile_overlay_adapter(
         end_idx = min(len(plot_df.index) - 1, center_idx + n)
 
         short_index = plot_df.index[start_idx:end_idx + 1]
-        line_series = pd.Series(index=plot_df.index, dtype=float)
-        line_series.loc[short_index] = y
+        line_values: List[Optional[float]] = [None] * len(plot_df.index)
+        for position in range(start_idx, end_idx + 1):
+            line_values[position] = float(y)
 
         logger.debug(
             "Signal %d [%s] line from %s to %s at level %.2f",
@@ -177,13 +211,32 @@ def _market_profile_overlay_adapter(
         )
 
         ap = make_addplot(
-            line_series,
+            pd.Series(line_values, index=plot_df.index),
             color="green" if direction == "up" else "red",
             linestyle="-",
             width=1.0,
         )
 
+        ap_data = ap.get("data")
+        if isinstance(ap_data, pd.Series):
+            cleaned = [
+                None if pd.isna(value) else float(value)
+                for value in ap_data.tolist()
+            ]
+            ap["data"] = cleaned
+
+        ap_index = ap.get("index")
+        if isinstance(ap_index, pd.Index):
+            ap["index"] = [_serialise_value(value) for value in ap_index.tolist()]
+
+        for key, value in list(ap.items()):
+            if isinstance(value, (pd.Series, pd.Index)):
+                continue
+            ap[key] = _serialise_value(value)
+
         ap["zorder"] = 6
+
+        ap.setdefault("label", f"Breakout {direction.capitalize()} {idx}")
 
         overlays.append({
             "kind": "addplot",
