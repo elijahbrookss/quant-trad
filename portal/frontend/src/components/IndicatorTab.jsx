@@ -628,7 +628,7 @@ export const IndicatorSection = ({ chartId }) => {
                 <select
                   value={typeFilter}
                   onChange={(event) => setTypeFilter(event.target.value)}
-                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 >
                   <option value="all">All types</option>
                   {typeOptions.map((type) => (
