@@ -295,8 +295,9 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged: bool = True,
         merge_threshold: float = 0.60,
         min_merge: int = 3,
-        include_touches: bool = True, 
-        time_fmt="business_day"
+        include_touches: bool = True,
+        time_fmt="business_day",
+        extend_boxes_to_chart_end: bool = True,
     ) -> Dict[str, Any]:
         """
         Return overlays in your portal's expected shape:
@@ -307,6 +308,7 @@ class MarketProfileIndicator(BaseIndicator):
         Notes:
         • 'time' is when the line starts; renderer should extend to the right.
         • Color will be recolored uniformly per-indicator on the client.
+        • Value-area boxes extend to the chart end unless extend_boxes_to_chart_end=False.
         """
         if plot_df is None or plot_df.empty:
             return {"price_lines": [], "markers": []}
@@ -365,10 +367,17 @@ class MarketProfileIndicator(BaseIndicator):
             # start_iso = _ts_iso(start_ts)
             start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
             
-            # Boxes span from start to chart end
-            end_ts = pd.to_datetime(prof.get("end") or prof.get("end_date") or chart_end, utc=True)
-            if end_ts > chart_end:
+            if extend_boxes_to_chart_end:
                 end_ts = chart_end
+            else:
+                end_ts = pd.to_datetime(
+                    prof.get("end") or prof.get("end_date") or chart_end,
+                    utc=True,
+                )
+                if end_ts > chart_end:
+                    end_ts = chart_end
+            if end_ts < start_ts:
+                end_ts = start_ts
 
             out_boxes.append({
                 "x1": _to_unix_s(start_ts),   # epoch seconds

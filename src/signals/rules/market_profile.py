@@ -424,7 +424,7 @@ def _detect_value_area_retest(
     slice_start = 0
     value_area_start_index = breakout_meta.get("value_area_start_index")
     if isinstance(value_area_start_index, int):
-        slice_start = max(0, min(value_area_start_index, start_idx))
+        slice_start = max(0, value_area_start_index)
     else:
         value_area_start = breakout_meta.get("value_area_start")
         if value_area_start is not None:
@@ -438,7 +438,7 @@ def _detect_value_area_retest(
                         va_start_ts = va_start_ts.tz_convert(tz)  # type: ignore[arg-type]
                 positions = df.index.get_indexer([va_start_ts], method="nearest")
                 if positions.size and positions[0] >= 0:
-                    slice_start = max(0, min(int(positions[0]), start_idx))
+                    slice_start = max(0, int(positions[0]))
             except Exception:
                 log.debug(
                     "mp_retest | warn | reason=value_area_start_unresolved | session=%s | start=%s",
@@ -447,6 +447,17 @@ def _detect_value_area_retest(
                 )
 
     df_scope = df.iloc[slice_start:]
+    breakout_scope = breakout_meta
+    if slice_start > 0 and not df_scope.empty:
+        breakout_scope = dict(breakout_meta)
+        for key in ("trigger_bar_index", "breakout_start_bar_index"):
+            idx_val = breakout_scope.get(key)
+            if isinstance(idx_val, int):
+                adjusted = idx_val - slice_start
+                if adjusted < 0:
+                    breakout_scope.pop(key, None)
+                else:
+                    breakout_scope[key] = adjusted
     if df_scope.empty:
         log.debug(
             "mp_retest | skip | reason=scope_empty | session=%s | slice_start=%s",
@@ -457,7 +468,7 @@ def _detect_value_area_retest(
 
     result = _pivot_detect_retest(
         df_scope,
-        breakout_meta,
+        breakout_scope,
         tolerance_pct=tolerance_pct,
         max_bars=max_bars,
         min_bars=min_bars,
