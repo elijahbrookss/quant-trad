@@ -222,6 +222,37 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         value_area.get("end_date"), tz
     )
 
+    chart_end_ts: Optional[pd.Timestamp] = None
+    if len(df.index):
+        try:
+            chart_end_ts = pd.Timestamp(df.index.max())
+            if tz is not None:
+                if chart_end_ts.tzinfo is None:
+                    chart_end_ts = chart_end_ts.tz_localize(tz)  # type: ignore[arg-type]
+                else:
+                    chart_end_ts = chart_end_ts.tz_convert(tz)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - defensive
+            chart_end_ts = None
+
+    extend_override = context.get("market_profile_extend_value_area_to_chart_end")
+    if extend_override is None:
+        extend_to_chart_end = bool(getattr(indicator, "extend_value_area_to_chart_end", True))
+    elif isinstance(extend_override, str):
+        extend_to_chart_end = extend_override.strip().lower() not in {"false", "0", "no", "off"}
+    else:
+        extend_to_chart_end = bool(extend_override)
+
+    if extend_to_chart_end and chart_end_ts is not None:
+        end_ts = chart_end_ts
+    elif end_ts is None and chart_end_ts is not None:
+        end_ts = chart_end_ts
+
+    if end_ts is not None and chart_end_ts is not None and end_ts > chart_end_ts:
+        end_ts = chart_end_ts
+
+    if end_ts is not None and start_ts is not None and end_ts < start_ts:
+        end_ts = start_ts
+
     try:
         min_age_hours = float(context.get("market_profile_breakout_min_age_hours", 24.0))
     except (TypeError, ValueError):
@@ -424,7 +455,7 @@ def _detect_value_area_retest(
     slice_start = 0
     value_area_start_index = breakout_meta.get("value_area_start_index")
     if isinstance(value_area_start_index, int):
-        slice_start = max(0, min(value_area_start_index, start_idx))
+        slice_start = max(0, value_area_start_index)
     else:
         value_area_start = breakout_meta.get("value_area_start")
         if value_area_start is not None:
@@ -438,7 +469,7 @@ def _detect_value_area_retest(
                         va_start_ts = va_start_ts.tz_convert(tz)  # type: ignore[arg-type]
                 positions = df.index.get_indexer([va_start_ts], method="nearest")
                 if positions.size and positions[0] >= 0:
-                    slice_start = max(0, min(int(positions[0]), start_idx))
+                    slice_start = max(0, int(positions[0]))
             except Exception:
                 log.debug(
                     "mp_retest | warn | reason=value_area_start_unresolved | session=%s | start=%s",
@@ -446,7 +477,60 @@ def _detect_value_area_retest(
                     value_area_start,
                 )
 
-    df_scope = df.iloc[slice_start:]
+    slice_end = len(df)
+    value_area_end_index = breakout_meta.get("value_area_end_index")
+    if isinstance(value_area_end_index, int):
+        slice_end = min(len(df), max(0, value_area_end_index + 1))
+    else:
+        value_area_end = breakout_meta.get("value_area_end")
+        if value_area_end is not None:
+            try:
+                tz = getattr(df.index, "tz", None)
+                va_end_ts = pd.Timestamp(value_area_end)
+                if tz is not None:
+                    if va_end_ts.tzinfo is None:
+                        va_end_ts = va_end_ts.tz_localize(tz)  # type: ignore[arg-type]
+                    else:
+                        va_end_ts = va_end_ts.tz_convert(tz)  # type: ignore[arg-type]
+                positions = df.index.get_indexer([va_end_ts], method="nearest")
+                if positions.size and positions[0] >= 0:
+                    slice_end = min(len(df), int(positions[0]) + 1)
+            except Exception:
+                log.debug(
+                    "mp_retest | warn | reason=value_area_end_unresolved | session=%s | end=%s",
+                    breakout_meta.get("value_area_id"),
+                    value_area_end,
+                )
+
+    if slice_end <= slice_start:
+        log.debug(
+            "mp_retest | skip | reason=invalid_scope | session=%s | slice_start=%s | slice_end=%s",
+            breakout_meta.get("value_area_id"),
+            slice_start,
+            slice_end,
+        )
+        return None
+
+    df_scope = df.iloc[slice_start:slice_end]
+    breakout_scope = breakout_meta
+    if slice_start > 0 and not df_scope.empty:
+        breakout_scope = dict(breakout_meta)
+        for key in ("trigger_bar_index", "breakout_start_bar_index"):
+            idx_val = breakout_scope.get(key)
+            if isinstance(idx_val, int):
+                adjusted = idx_val - slice_start
+                if adjusted < 0 or adjusted >= len(df_scope):
+                    breakout_scope.pop(key, None)
+                else:
+                    breakout_scope[key] = adjusted
+    elif slice_end < len(df) and not df_scope.empty:
+        breakout_scope = dict(breakout_meta)
+
+    if breakout_scope is not breakout_meta and not df_scope.empty:
+        for key in ("trigger_bar_index", "breakout_start_bar_index"):
+            idx_val = breakout_scope.get(key)
+            if isinstance(idx_val, int) and idx_val >= len(df_scope):
+                breakout_scope.pop(key, None)
     if df_scope.empty:
         log.debug(
             "mp_retest | skip | reason=scope_empty | session=%s | slice_start=%s",
@@ -457,7 +541,7 @@ def _detect_value_area_retest(
 
     result = _pivot_detect_retest(
         df_scope,
-        breakout_meta,
+        breakout_scope,
         tolerance_pct=tolerance_pct,
         max_bars=max_bars,
         min_bars=min_bars,
