@@ -36,6 +36,8 @@ export default function IndicatorCard({
   onDelete,
   onGenerateSignals,
   onSelectColor,
+  marketProfileConfig = null,
+  onUpdateMarketProfileConfig,
   isGeneratingSignals = false,
   disableSignalAction = false,
 }) {
@@ -91,6 +93,35 @@ export default function IndicatorCard({
       .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
       .join(" ");
   }, [indicator?.type]);
+
+  const mpConfig = useMemo(() => ({
+    useMerged: marketProfileConfig?.useMerged ?? true,
+    mergeThreshold: marketProfileConfig?.mergeThreshold ?? 0.6,
+  }), [marketProfileConfig?.useMerged, marketProfileConfig?.mergeThreshold]);
+
+  const clampedThreshold = (() => {
+    const raw = Number.isFinite(mpConfig.mergeThreshold) ? mpConfig.mergeThreshold : 0.6;
+    return Math.min(Math.max(raw, 0), 1);
+  })();
+
+  const mergePct = Math.round(clampedThreshold * 100);
+
+  const handleToggleMerged = (next) => {
+    if (typeof onUpdateMarketProfileConfig !== "function") return;
+    const payload = { useMerged: next };
+    if (next && marketProfileConfig?.mergeThreshold == null) {
+      payload.mergeThreshold = 0.6;
+    }
+    onUpdateMarketProfileConfig(payload);
+  };
+
+  const handleThresholdChange = (event) => {
+    if (typeof onUpdateMarketProfileConfig !== "function") return;
+    const raw = Number(event?.target?.value);
+    if (Number.isNaN(raw)) return;
+    const clamped = Math.min(Math.max(raw, 0), 100);
+    onUpdateMarketProfileConfig({ mergeThreshold: clamped / 100 });
+  };
 
   return (
     <div className="flex items-start justify-between gap-4 rounded-2xl border border-white/10 bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)]">
@@ -219,10 +250,55 @@ export default function IndicatorCard({
                           />
                         ))}
                       </div>
-                    </div>
+                  </div>
 
-                    <div className="grid gap-2 text-xs">
-                      <button
+                  {indicator?.type === "market_profile" && (
+                    <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200">
+                            Market profile signals
+                          </p>
+                          <p className="text-[11px] text-emerald-100/80">
+                            Control merged value areas used for signal payloads.
+                          </p>
+                        </div>
+                        <Switch
+                          checked={!!mpConfig.useMerged}
+                          onChange={handleToggleMerged}
+                          className={`${mpConfig.useMerged ? "bg-emerald-400/80" : "bg-emerald-900/50"} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                        >
+                          <span className={`${mpConfig.useMerged ? "translate-x-6" : "translate-x-1"} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+                        </Switch>
+                      </div>
+
+                      <div className="mt-4 space-y-2">
+                        <label className="flex items-center justify-between text-[11px] uppercase tracking-[0.18em] text-emerald-200/80">
+                          Overlap requirement
+                          <span className="rounded-full border border-emerald-400/40 px-2 py-0.5 text-[10px] font-semibold text-emerald-100/90">
+                            {mergePct}%
+                          </span>
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={mergePct}
+                          onChange={handleThresholdChange}
+                          disabled={!mpConfig.useMerged}
+                          className="w-full accent-emerald-300 disabled:opacity-40"
+                          aria-label="Merged profile overlap percentage"
+                        />
+                        <p className="text-[11px] text-emerald-100/70">
+                          Higher percentages require more shared value-area depth before sessions merge.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid gap-2 text-xs">
+                    <button
                         onClick={() => {
                           onEdit?.(indicator)
                           setConfirmingDelete(false)
