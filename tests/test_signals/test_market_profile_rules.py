@@ -77,6 +77,11 @@ def test_breakout_evaluator_detects_multiple_events(sample_context, sample_value
     assert second["confirmation_bars_required"] == 1
     assert not second["accelerated_confirmation"]
 
+    chart_end = sample_market_profile_df.index[-1].to_pydatetime()
+    for meta in metas:
+        assert meta["value_area_end"] == chart_end
+        assert meta["value_area_end_index"] == len(sample_market_profile_df) - 1
+
 
 def test_breakout_evaluator_respects_confirmation_setting(sample_context, sample_value_area, sample_market_profile_df):
     sample_context["market_profile_breakout_confirmation_bars"] = 2
@@ -136,6 +141,65 @@ def test_breakout_evaluator_flags_accelerated_confirmation(sample_value_area):
     assert meta["trigger_bar_index"] == 3
     assert meta["bars_closed_beyond_level"] == 2
     assert meta["accelerated_confirmation"]
+
+
+def test_breakout_evaluator_extends_value_area_end_to_chart_close(sample_market_profile_df):
+    indicator = MarketProfileIndicator(sample_market_profile_df)
+    context = {
+        "indicator": indicator,
+        "df": sample_market_profile_df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+    }
+
+    truncated_end = sample_market_profile_df.index[3]
+    value_area = {
+        "start": sample_market_profile_df.index[0],
+        "end": truncated_end,
+        "VAH": 102.0,
+        "VAL": 98.0,
+        "POC": 100.0,
+    }
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+    assert metas, "Expected breakout metadata"
+    expected_end = sample_market_profile_df.index[-1].to_pydatetime()
+    expected_index = len(sample_market_profile_df) - 1
+    for meta in metas:
+        assert meta["value_area_end"] == expected_end
+        assert meta["value_area_end_index"] == expected_index
+
+
+def test_breakout_evaluator_respects_indicator_extend_flag(sample_market_profile_df):
+    indicator = MarketProfileIndicator(
+        sample_market_profile_df,
+        extend_value_area_to_chart_end=False,
+    )
+    context = {
+        "indicator": indicator,
+        "df": sample_market_profile_df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+    }
+
+    truncated_end = sample_market_profile_df.index[3]
+    value_area = {
+        "start": sample_market_profile_df.index[0],
+        "end": truncated_end,
+        "VAH": 102.0,
+        "VAL": 98.0,
+        "POC": 100.0,
+    }
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+    assert metas, "Expected breakout metadata"
+    expected_end = truncated_end.to_pydatetime()
+    expected_index = 3
+    for meta in metas:
+        assert meta["value_area_end"] == expected_end
+        assert meta["value_area_end_index"] == expected_index
 
 
 def test_breakout_evaluator_live_mode_only_reports_latest(sample_value_area):
@@ -283,3 +347,40 @@ def test_detect_value_area_retest_respects_value_area_start_index():
     assert retest is not None, "Expected a retest within the scoped window"
     assert retest["bars_since_breakout"] == 1
     assert retest["time"] == index[5].to_pydatetime()
+
+
+def test_detect_value_area_retest_respects_value_area_end_index():
+    index = pd.date_range("2025-03-02 09:30", periods=7, freq="15min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [206.2, 206.3, 206.6, 206.9, 207.4, 207.0, 207.1],
+            "high": [206.4, 206.5, 206.9, 207.2, 207.7, 207.3, 207.2],
+            "low": [206.0, 206.1, 206.4, 206.8, 207.1, 206.7, 206.9],
+            "close": [206.3, 206.4, 206.8, 207.05, 207.4, 207.05, 207.15],
+        },
+        index=index,
+    )
+
+    breakout_meta = {
+        "level_price": 207.2,
+        "breakout_direction": "above",
+        "trigger_bar_index": 4,
+        "trigger_time": index[4].to_pydatetime(),
+        "trigger_index_label": index[4],
+        "value_area_start_index": 1,
+        "value_area_start": index[1].to_pydatetime(),
+        "value_area_end_index": 4,
+        "value_area_end": index[4].to_pydatetime(),
+        "value_area_id": "session-456",
+    }
+
+    retest = _detect_value_area_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=10,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert retest is None
