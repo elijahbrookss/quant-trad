@@ -4,7 +4,6 @@ import math
 
 import pandas as pd
 from indicators.market_profile import MarketProfileIndicator
-from mplfinance.plotting import make_addplot
 
 from signals.base import BaseSignal
 from signals.engine.signal_generator import (
@@ -32,22 +31,6 @@ def _finite_float(value: Any) -> Optional[float]:
         return None
 
     return numeric
-
-
-def _serialise_value(value: Any) -> Any:
-    """Convert pandas/numpy scalar values into JSON serialisable types."""
-
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            return item()
-        except Exception:
-            return value
-
-    return value
 
 
 def _clone_indicator_for_runtime(
@@ -158,6 +141,44 @@ class MarketProfileSignalGenerator:
         )
 
 
+def _to_epoch_seconds(value: Any) -> Optional[int]:
+    """Best-effort conversion of timestamps into epoch seconds."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int,)):
+        return int(value)
+
+    if isinstance(value, (float,)):
+        numeric = float(value)
+        return int(numeric) if math.isfinite(numeric) else None
+
+    if isinstance(value, pd.Timestamp):
+        try:
+            ts = value.tz_convert("UTC") if value.tzinfo else value.tz_localize("UTC")
+        except (TypeError, ValueError):
+            ts = value.tz_localize("UTC", nonexistent="NaT", ambiguous="NaT") if value.tzinfo is None else value
+        if pd.isna(ts):
+            return None
+        return int(ts.value // 10**9)
+
+    try:
+        candidate = pd.Timestamp(value)
+    except Exception:
+        return None
+
+    if pd.isna(candidate):
+        return None
+
+    if candidate.tzinfo is None:
+        candidate = candidate.tz_localize("UTC")
+    else:
+        candidate = candidate.tz_convert("UTC")
+
+    return int(candidate.value // 10**9)
+
+
 def _market_profile_overlay_adapter(
     signals: List[BaseSignal],
     plot_df: pd.DataFrame,
@@ -169,7 +190,7 @@ def _market_profile_overlay_adapter(
     n = int(kwargs.get("market_profile_overlay_half_width", n))
     offset_candidate = _finite_float(kwargs.get("market_profile_overlay_offset", offset))
     offset = offset if offset_candidate is None else offset_candidate
-    overlays = []
+    segments: List[Dict[str, Any]] = []
     logger.info("Converting %d signals to line overlays", len(signals))
 
     for idx, sig in enumerate(signals):
@@ -200,52 +221,61 @@ def _market_profile_overlay_adapter(
         start_idx = max(0, center_idx - n)
         end_idx = min(len(plot_df.index) - 1, center_idx + n)
 
-        short_index = plot_df.index[start_idx:end_idx + 1]
-        line_values: List[Optional[float]] = [None] * len(plot_df.index)
-        for position in range(start_idx, end_idx + 1):
-            line_values[position] = float(y)
+        start_ts = plot_df.index[start_idx]
+        end_ts = plot_df.index[end_idx]
+        start_time = _to_epoch_seconds(start_ts)
+        end_time = _to_epoch_seconds(end_ts)
+
+        if start_time is None or end_time is None:
+            logger.debug(
+                "Signal %d [%s] skipped due to invalid time conversion (start=%s end=%s)",
+                idx,
+                direction,
+                start_ts,
+                end_ts,
+            )
+            continue
 
         logger.debug(
-            "Signal %d [%s] line from %s to %s at level %.2f",
-            idx, direction, short_index[0], short_index[-1], y
+            "Signal %d [%s] segment from %s to %s at level %.2f",
+            idx,
+            direction,
+            start_ts,
+            end_ts,
+            y,
         )
 
-        ap = make_addplot(
-            pd.Series(line_values, index=plot_df.index),
-            color="green" if direction == "up" else "red",
-            linestyle="-",
-            width=1.0,
+        segments.append(
+            {
+                "x1": start_time,
+                "y1": float(y),
+                "x2": end_time,
+                "y2": float(y),
+                "color": "#16a34a" if direction == "up" else "#dc2626",
+                "lineWidth": 2,
+                "lineStyle": 0,
+            }
         )
 
-        ap_data = ap.get("data")
-        if isinstance(ap_data, pd.Series):
-            cleaned = [
-                None if pd.isna(value) else float(value)
-                for value in ap_data.tolist()
-            ]
-            ap["data"] = cleaned
+    if not segments:
+        logger.info("Converted 0 signals to overlays")
+        return []
 
-        ap_index = ap.get("index")
-        if isinstance(ap_index, pd.Index):
-            ap["index"] = [_serialise_value(value) for value in ap_index.tolist()]
+    logger.info("Converted %d signals to overlays", len(segments))
+    payload = {
+        "price_lines": [],
+        "markers": [],
+        "boxes": [],
+        "segments": segments,
+        "polylines": [],
+    }
 
-        for key, value in list(ap.items()):
-            if isinstance(value, (pd.Series, pd.Index)):
-                continue
-            ap[key] = _serialise_value(value)
-
-        ap["zorder"] = 6
-
-        ap.setdefault("label", f"Breakout {direction.capitalize()} {idx}")
-
-        overlays.append({
-            "kind": "addplot",
-            "plot": ap,
-            "label": f"Breakout {direction.capitalize()} {idx}"
-        })
-
-    logger.info("Converted %d signals to overlays", len(overlays))
-    return overlays
+    return [
+        {
+            "type": MarketProfileIndicator.NAME,
+            "payload": payload,
+        }
+    ]
 
 
 register_indicator_rules(
