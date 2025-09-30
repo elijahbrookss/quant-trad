@@ -1,0 +1,114 @@
+import pytest
+
+pd = pytest.importorskip("pandas")
+
+from indicators.market_profile import MarketProfileIndicator
+from signals.rules.market_profile import (
+    _value_area_breakout_evaluator,
+    market_profile_breakout_rule,
+    market_profile_retest_rule,
+    _BREAKOUT_CACHE_KEY,
+)
+
+
+@pytest.fixture
+def sample_market_profile_df():
+    index = pd.date_range("2025-01-01 09:30", periods=7, freq="15min", tz="UTC")
+    data = {
+        "open": [100.0, 100.2, 100.8, 101.4, 100.8, 100.4, 98.9],
+        "high": [100.5, 100.9, 101.8, 102.0, 101.0, 100.6, 99.2],
+        "low": [99.8, 100.0, 100.6, 100.9, 100.1, 98.4, 98.5],
+        "close": [100.1, 100.7, 101.6, 101.2, 100.6, 98.6, 98.9],
+        "volume": [1000, 1100, 1200, 1300, 1250, 1400, 1450],
+    }
+    return pd.DataFrame(data, index=index)
+
+
+@pytest.fixture
+def sample_value_area(sample_market_profile_df):
+    start = sample_market_profile_df.index[0] - pd.Timedelta(days=2)
+    end = sample_market_profile_df.index[-1]
+    return {
+        "start": start,
+        "end": end,
+        "VAH": 101.0,
+        "VAL": 99.0,
+        "POC": 100.0,
+    }
+
+
+@pytest.fixture
+def sample_context(sample_market_profile_df):
+    indicator = MarketProfileIndicator(sample_market_profile_df)
+    return {
+        "indicator": indicator,
+        "df": sample_market_profile_df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+    }
+
+
+def test_breakout_evaluator_detects_multiple_events(sample_context, sample_value_area, sample_market_profile_df):
+    metas = _value_area_breakout_evaluator(sample_context, sample_value_area)
+    assert len(metas) == 2
+
+    metas = sorted(metas, key=lambda meta: meta["trigger_bar_index"])
+
+    first = metas[0]
+    second = metas[1]
+
+    assert first["breakout_direction"] == "above"
+    assert first["trigger_bar_index"] == 2
+    assert first["trigger_time"] == sample_market_profile_df.index[2].to_pydatetime()
+    assert first["prev_close"] == pytest.approx(sample_market_profile_df.iloc[1]["close"])
+    assert first["trigger_open"] == pytest.approx(sample_market_profile_df.iloc[2]["open"])
+
+    assert second["breakout_direction"] == "below"
+    assert second["trigger_bar_index"] == 5
+    assert second["trigger_time"] == sample_market_profile_df.index[5].to_pydatetime()
+    assert second["trigger_close"] == pytest.approx(sample_market_profile_df.iloc[5]["close"])
+
+
+def test_breakout_evaluator_live_mode_only_reports_latest(sample_value_area):
+    index = pd.date_range("2025-01-02 09:30", periods=3, freq="15min", tz="UTC")
+    data = {
+        "open": [100.0, 100.4, 101.2],
+        "high": [100.4, 101.0, 101.6],
+        "low": [99.8, 100.1, 100.9],
+        "close": [100.1, 100.9, 101.4],
+        "volume": [900, 950, 980],
+    }
+    df = pd.DataFrame(data, index=index)
+    indicator = MarketProfileIndicator(df)
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": "TEST",
+        "mode": "live",
+        "market_profile_breakout_min_age_hours": 0,
+    }
+
+    value_area = dict(sample_value_area)
+    value_area.update({"start": index[0] - pd.Timedelta(days=2), "end": index[-1]})
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+    assert len(metas) == 1
+    meta = metas[0]
+    assert meta["trigger_bar_index"] == len(df) - 1
+    assert meta["breakout_direction"] == "above"
+
+
+def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_value_area):
+    breakouts = market_profile_breakout_rule(sample_context, sample_value_area)
+    assert len(breakouts) == 2
+    assert len(sample_context[_BREAKOUT_CACHE_KEY]) == 2
+
+    retests = market_profile_retest_rule(sample_context, sample_value_area)
+    assert len(retests) == 2
+
+    directions = {retest["retest_role"] for retest in retests}
+    assert directions == {"support", "resistance"}
+
+    bars_since = sorted(retest["bars_since_breakout"] for retest in retests)
+    assert bars_since == [1, 1]
