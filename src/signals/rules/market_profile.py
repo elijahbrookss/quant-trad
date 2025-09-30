@@ -39,18 +39,6 @@ def _as_timestamp(value: Any, tz: Optional[str]) -> Optional[pd.Timestamp]:
     return ts
 
 
-def _latest_bar(df: pd.DataFrame) -> Optional[pd.Series]:
-    if df is None or df.empty:
-        return None
-    return df.iloc[-1]
-
-
-def _previous_bar(df: pd.DataFrame) -> Optional[pd.Series]:
-    if df is None or len(df) < 2:
-        return None
-    return df.iloc[-2]
-
-
 def _value_area_identifier(value_area: Mapping[str, Any]) -> Optional[str]:
     start = value_area.get("start") or value_area.get("start_date")
     if start is None:
@@ -69,36 +57,37 @@ def _compute_confidence(distance_pct: float) -> float:
 def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mapping[str, Any]) -> List[Dict[str, Any]]:
     indicator = context.get("indicator")
     if not isinstance(indicator, MarketProfileIndicator):
+        log.debug("mp_brk | skip | reason=invalid_indicator | indicator=%s", type(indicator))
         return []
 
     if not isinstance(value_area, Mapping):
+        log.debug("mp_brk | skip | reason=invalid_value_area_payload | payload_type=%s", type(value_area))
         return []
 
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
     if df is None or df.empty or "close" not in df.columns:
+        log.debug(
+            "mp_brk | skip | reason=no_price_data | has_df=%s | columns=%s",
+            df is not None,
+            list(df.columns) if isinstance(df, pd.DataFrame) else None,
+        )
         return []
 
-    current_bar = _latest_bar(df)
-    previous_bar = _previous_bar(df)
-    if current_bar is None or previous_bar is None:
+    if len(df) < 2:
+        log.debug("mp_brk | skip | reason=insufficient_bars | bars=%s", len(df))
         return []
 
-    vah = value_area.get("VAH")
-    val = value_area.get("VAL")
-    if vah is None or val is None:
+    try:
+        vah = float(value_area.get("VAH"))
+        val = float(value_area.get("VAL"))
+    except (TypeError, ValueError):
+        log.debug("mp_brk | skip | reason=invalid_value_area_bounds | value_area=%s", value_area)
         return []
 
-    vah = float(vah)
-    val = float(val)
-    prev_close = float(previous_bar.get("close"))
-    curr_close = float(current_bar.get("close"))
-
-    inside_value_area = val <= prev_close <= vah
-    if not inside_value_area:
-        return []
+    mode = str(context.get("mode", "backtest")).lower()
+    restrict_to_last = mode in {"live", "sim"}
 
     tz = getattr(df.index, "tz", None)
-    current_ts = pd.Timestamp(df.index[-1])
     start_ts = _as_timestamp(value_area.get("start"), tz) or _as_timestamp(
         value_area.get("start_date"), tz
     )
@@ -106,72 +95,166 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         value_area.get("end_date"), tz
     )
 
-    min_age_hours = float(context.get("market_profile_breakout_min_age_hours", 24.0))
-    if start_ts is not None:
-        min_age = pd.Timedelta(hours=max(min_age_hours, 0.0))
-        if current_ts - start_ts < min_age:
+    try:
+        min_age_hours = float(context.get("market_profile_breakout_min_age_hours", 24.0))
+    except (TypeError, ValueError):
+        min_age_hours = 24.0
+    min_age = pd.Timedelta(hours=max(min_age_hours, 0.0))
+
+    session_id = _value_area_identifier(value_area)
+    log.debug(
+        "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s",
+        session_id,
+        mode,
+        len(df),
+        vah,
+        val,
+        min_age,
+    )
+
+    value_area_range = float(vah - val)
+    value_area_mid = float((vah + val) / 2.0)
+    breakouts: List[Dict[str, Any]] = []
+
+    for idx in range(1, len(df)):
+        if restrict_to_last and idx != len(df) - 1:
+            continue
+
+        prev_bar = df.iloc[idx - 1]
+        current_bar = df.iloc[idx]
+
+        try:
+            prev_close = float(prev_bar.get("close"))
+            curr_close = float(current_bar.get("close"))
+        except (TypeError, ValueError):
             log.debug(
-                "mp_brk | skip | reason=value_area_too_young | start=%s | age=%s | min_age=%s",
+                "mp_brk | skip_bar | reason=invalid_close | session=%s | idx=%d | prev_close=%s | curr_close=%s",
+                session_id,
+                idx,
+                prev_bar.get("close"),
+                current_bar.get("close"),
+            )
+            continue
+
+        if pd.isna(prev_close) or pd.isna(curr_close):
+            log.debug(
+                "mp_brk | skip_bar | reason=nan_close | session=%s | idx=%d | prev_close=%s | curr_close=%s",
+                session_id,
+                idx,
+                prev_close,
+                curr_close,
+            )
+            continue
+
+        prev_inside = val <= prev_close <= vah
+        if not prev_inside:
+            log.debug(
+                "mp_brk | skip_bar | reason=prev_outside | session=%s | idx=%d | prev_close=%.5f | vah=%.5f | val=%.5f",
+                session_id,
+                idx,
+                prev_close,
+                vah,
+                val,
+            )
+            continue
+
+        ts = pd.Timestamp(df.index[idx])
+        if start_ts is not None and ts - start_ts < min_age:
+            log.debug(
+                "mp_brk | skip_bar | reason=value_area_too_young | session=%s | idx=%d | start=%s | bar_time=%s | age=%s | min_age=%s",
+                session_id,
+                idx,
                 start_ts,
-                current_ts - start_ts,
+                ts,
+                ts - start_ts,
                 min_age,
             )
-            return []
+            continue
 
-    value_area_range = float(vah - val) if vah is not None and val is not None else None
-    session_id = _value_area_identifier(value_area)
+        def _build_meta(level_price: float, direction: str, level_type: str) -> Dict[str, Any]:
+            clearance = curr_close - level_price
+            distance_pct = clearance / level_price
+            if direction == "below":
+                clearance = level_price - curr_close
+                distance_pct = clearance / level_price
 
-    metas: List[Dict[str, Any]] = []
+            confidence = _compute_confidence(distance_pct)
+            trigger_time = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
 
-    def _base_meta(level_price: float, direction: str, level_type: str) -> Dict[str, Any]:
-        distance_pct = (curr_close - level_price) / level_price
-        clearance = curr_close - level_price
-        if direction == "below":
-            distance_pct = (level_price - curr_close) / level_price
-            clearance = level_price - curr_close
+            meta: Dict[str, Any] = {
+                "source": "MarketProfile",
+                "symbol": context.get("symbol"),
+                "time": trigger_time,
+                "level_type": level_type,
+                "value_area_start": start_ts.to_pydatetime() if start_ts is not None else None,
+                "value_area_end": end_ts.to_pydatetime() if end_ts is not None else None,
+                "value_area_id": session_id,
+                "value_area_range": value_area_range,
+                "value_area_mid": value_area_mid,
+                "level_price": float(level_price),
+                "breakout_direction": "above" if direction == "above" else "below",
+                "direction": "up" if direction == "above" else "down",
+                "trigger_time": trigger_time,
+                "trigger_close": curr_close,
+                "trigger_open": float(current_bar.get("open", curr_close)),
+                "trigger_high": float(current_bar.get("high", curr_close)),
+                "trigger_low": float(current_bar.get("low", curr_close)),
+                "trigger_volume": float(current_bar.get("volume", 0.0)),
+                "prev_close": prev_close,
+                "VAH": float(vah),
+                "VAL": float(val),
+                "POC": value_area.get("POC"),
+                "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
+                "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
+                "distance_pct": round(distance_pct, 5),
+                "breakout_clearance": round(clearance, 5),
+                "trigger_bar_index": idx,
+                "trigger_index_label": ts,
+                "confidence": confidence,
+            }
+            return meta
 
-        confidence = _compute_confidence(distance_pct)
+        detected = False
+        if curr_close > vah:
+            breakouts.append(_build_meta(vah, "above", "VAH"))
+            detected = True
+            log.debug(
+                "mp_brk | detected | direction=above | session=%s | idx=%d | prev_close=%.5f | curr_close=%.5f | vah=%.5f | val=%.5f",
+                session_id,
+                idx,
+                prev_close,
+                curr_close,
+                vah,
+                val,
+            )
 
-        meta: Dict[str, Any] = {
-            "source": "MarketProfile",
-            "symbol": context.get("symbol"),
-            "time": current_ts.to_pydatetime(),
-            "level_type": level_type,
-            "value_area_start": start_ts.to_pydatetime() if start_ts is not None else None,
-            "value_area_end": end_ts.to_pydatetime() if end_ts is not None else None,
-            "value_area_id": session_id,
-            "value_area_range": value_area_range,
-            "value_area_mid": float((vah + val) / 2.0),
-            "level_price": float(level_price),
-            "breakout_direction": "above" if direction == "above" else "below",
-            "direction": "up" if direction == "above" else "down",
-            "trigger_time": current_ts.to_pydatetime(),
-            "trigger_close": curr_close,
-            "trigger_open": float(current_bar.get("open", curr_close)),
-            "trigger_high": float(current_bar.get("high", curr_close)),
-            "trigger_low": float(current_bar.get("low", curr_close)),
-            "trigger_volume": float(current_bar.get("volume", 0.0)),
-            "prev_close": prev_close,
-            "VAH": float(vah),
-            "VAL": float(val),
-            "POC": value_area.get("POC"),
-            "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
-            "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
-            "distance_pct": round(distance_pct, 5),
-            "breakout_clearance": round(clearance, 5),
-            "trigger_bar_index": len(df) - 1,
-            "trigger_index_label": current_ts,
-            "confidence": confidence,
-        }
-        return meta
+        if curr_close < val:
+            breakouts.append(_build_meta(val, "below", "VAL"))
+            detected = True
+            log.debug(
+                "mp_brk | detected | direction=below | session=%s | idx=%d | prev_close=%.5f | curr_close=%.5f | vah=%.5f | val=%.5f",
+                session_id,
+                idx,
+                prev_close,
+                curr_close,
+                vah,
+                val,
+            )
 
-    if curr_close > vah:
-        metas.append(_base_meta(vah, "above", "VAH"))
+        if detected and restrict_to_last:
+            break
 
-    if curr_close < val:
-        metas.append(_base_meta(val, "below", "VAL"))
+    if breakouts:
+        log.debug(
+            "mp_brk | complete | session=%s | detected=%d | mode=%s",
+            session_id,
+            len(breakouts),
+            mode,
+        )
+    else:
+        log.debug("mp_brk | complete | session=%s | detected=0 | mode=%s", session_id, mode)
 
-    return metas
+    return breakouts
 
 
 def _resolve_breakout_bar_index(meta: Mapping[str, Any], df: pd.DataFrame) -> Optional[int]:
@@ -210,22 +293,57 @@ def _detect_value_area_retest(
     level_price = breakout_meta.get("level_price")
     direction = breakout_meta.get("breakout_direction")
     if level_price is None or direction not in {"above", "below"}:
+        log.debug(
+            "mp_retest | skip | reason=invalid_breakout_meta | level_price=%s | direction=%s",
+            level_price,
+            direction,
+        )
         return None
 
     start_idx = _resolve_breakout_bar_index(breakout_meta, df)
     if start_idx is None:
+        log.debug(
+            "mp_retest | skip | reason=start_index_unresolved | breakout_time=%s | session=%s",
+            breakout_meta.get("trigger_time"),
+            breakout_meta.get("value_area_id"),
+        )
         return None
 
     look_start = start_idx + max(min_bars, 1)
     if look_start >= len(df):
+        log.debug(
+            "mp_retest | skip | reason=retest_window_oob | session=%s | start_idx=%s | look_start=%s | bars=%s",
+            breakout_meta.get("value_area_id"),
+            start_idx,
+            look_start,
+            len(df),
+        )
         return None
 
     look_end = min(len(df) - 1, look_start + max(max_bars, 1))
     if look_start > look_end:
+        log.debug(
+            "mp_retest | skip | reason=invalid_window | session=%s | look_start=%s | look_end=%s",
+            breakout_meta.get("value_area_id"),
+            look_start,
+            look_end,
+        )
         return None
 
     tolerance = abs(float(level_price)) * max(tolerance_pct, 0.0)
     simulate_current_only = mode in {"sim", "live"}
+
+    log.debug(
+        "mp_retest | evaluating | session=%s | direction=%s | level=%.5f | tolerance_pct=%.5f | tolerance=%.5f | window=[%s,%s] | mode=%s",
+        breakout_meta.get("value_area_id"),
+        direction,
+        float(level_price),
+        tolerance_pct,
+        tolerance,
+        look_start,
+        look_end,
+        mode,
+    )
 
     for idx in range(look_start, look_end + 1):
         candle = df.iloc[idx]
@@ -241,16 +359,50 @@ def _detect_value_area_retest(
             invalidated = close > float(level_price) + tolerance
 
         if not touched:
+            log.debug(
+                "mp_retest | continue | reason=not_touched | session=%s | idx=%d | high=%.5f | low=%.5f | close=%.5f | level=%.5f | tolerance=%.5f",
+                breakout_meta.get("value_area_id"),
+                idx,
+                high,
+                low,
+                close,
+                float(level_price),
+                tolerance,
+            )
             continue
 
         if simulate_current_only and idx != len(df) - 1:
+            log.debug(
+                "mp_retest | continue | reason=mode_restrict | session=%s | idx=%d | mode=%s",
+                breakout_meta.get("value_area_id"),
+                idx,
+                mode,
+            )
             continue
 
         if invalidated:
+            log.debug(
+                "mp_retest | continue | reason=invalidated | session=%s | idx=%d | close=%.5f | level=%.5f | tolerance=%.5f",
+                breakout_meta.get("value_area_id"),
+                idx,
+                close,
+                float(level_price),
+                tolerance,
+            )
             continue
 
         ts = df.index[idx]
         bars_since = idx - start_idx
+        log.debug(
+            "mp_retest | detected | session=%s | idx=%d | breakout_idx=%d | bars_since=%d | close=%.5f | high=%.5f | low=%.5f",
+            breakout_meta.get("value_area_id"),
+            idx,
+            start_idx,
+            bars_since,
+            close,
+            high,
+            low,
+        )
         return {
             "type": "retest",
             "symbol": breakout_meta.get("symbol"),
@@ -277,13 +429,22 @@ def _detect_value_area_retest(
 def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping[str, Any]) -> List[Dict[str, Any]]:
     indicator = context.get("indicator")
     if not isinstance(indicator, MarketProfileIndicator):
+        log.debug(
+            "mp_retest | skip | reason=invalid_indicator | indicator=%s",
+            type(indicator),
+        )
         return []
 
     if not isinstance(value_area, Mapping):
+        log.debug(
+            "mp_retest | skip | reason=invalid_value_area_payload | payload_type=%s",
+            type(value_area),
+        )
         return []
 
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
     if df is None or df.empty:
+        log.debug("mp_retest | skip | reason=no_price_data | has_df=%s", df is not None)
         return []
 
     mutable_context = maybe_mutable_context(context)
@@ -294,6 +455,7 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
             mutable_context[_BREAKOUT_CACHE_KEY] = list(breakouts)
 
     if not breakouts:
+        log.debug("mp_retest | skip | reason=empty_breakout_cache")
         return []
 
     mode = str(context.get("mode", "backtest")).lower()
@@ -319,6 +481,11 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
         if not isinstance(breakout_meta, Mapping):
             continue
         if target_session and breakout_meta.get("value_area_id") != target_session:
+            log.debug(
+                "mp_retest | continue | reason=session_mismatch | target=%s | breakout_session=%s",
+                target_session,
+                breakout_meta.get("value_area_id"),
+            )
             continue
         retest = _detect_value_area_retest(
             df,
@@ -337,6 +504,11 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
             retest.setdefault("POC", breakout_meta.get("POC"))
             results.append(retest)
 
+    log.debug(
+        "mp_retest | complete | session=%s | detected=%d",
+        target_session,
+        len(results),
+    )
     return results
 
 
@@ -385,6 +557,11 @@ def market_profile_breakout_rule(context: Mapping[str, Any], payload: Any) -> Li
     if mutable is not None:
         mutable[_BREAKOUT_READY_FLAG] = True
 
+    cache_size = None
+    if mutable and isinstance(mutable.get(_BREAKOUT_CACHE_KEY), list):
+        cache_size = len(mutable[_BREAKOUT_CACHE_KEY])
+
+    log.debug("mp_brk_rule | emitted=%d | cache_size=%s", len(results), cache_size)
     return results
 
 
@@ -402,6 +579,7 @@ def market_profile_retest_rule(context: Mapping[str, Any], payload: Any) -> List
     if mutable is not None:
         mutable[_BREAKOUT_READY_FLAG] = True
 
+    log.debug("mp_retest_rule | emitted=%d", len(results))
     return results
 
 
