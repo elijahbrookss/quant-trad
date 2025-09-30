@@ -114,6 +114,20 @@ export async function runSignalGeneration({
       config.enabled_rules = enabledRules;
     }
 
+    const marketProfileConfig = chartState?.signalsConfig?.marketProfile?.[indicator.id];
+    if (marketProfileConfig && typeof marketProfileConfig === 'object') {
+      if (marketProfileConfig.useMerged !== undefined) {
+        config.market_profile_use_merged_value_areas = Boolean(marketProfileConfig.useMerged);
+      }
+      if (marketProfileConfig.mergeThreshold !== undefined && marketProfileConfig.mergeThreshold !== null) {
+        const threshold = Number(marketProfileConfig.mergeThreshold);
+        if (Number.isFinite(threshold)) {
+          const clamped = Math.min(Math.max(threshold, 0), 1);
+          config.market_profile_merge_threshold = clamped;
+        }
+      }
+    }
+
     scopedLogger.debug('signal_generation_request', { config });
 
     const response = await signalsAdapter(indicator.id, {

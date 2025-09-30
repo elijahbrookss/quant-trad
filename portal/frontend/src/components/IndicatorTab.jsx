@@ -105,6 +105,7 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
+  const marketProfileSignals = chartState?.signalsConfig?.marketProfile || {}
 
   useEffect(() => {
     if (!Array.isArray(indicators)) {
@@ -355,13 +356,40 @@ export const IndicatorSection = ({ chartId }) => {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
       const currentConfig = getChart(chartId)?.signalsConfig
-      const enabledRules = currentConfig?.enabledRules
-      if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
-        const nextEnabled = { ...enabledRules }
-        delete nextEnabled[id]
-        updateChart(chartId, {
-          signalsConfig: { ...currentConfig, enabledRules: nextEnabled },
-        })
+      if (currentConfig && typeof currentConfig === 'object') {
+        const nextConfig = { ...currentConfig }
+        let changed = false
+
+        const enabledRules = currentConfig.enabledRules
+        if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
+          const nextEnabled = { ...enabledRules }
+          delete nextEnabled[id]
+          if (Object.keys(nextEnabled).length > 0) {
+            nextConfig.enabledRules = nextEnabled
+          } else {
+            delete nextConfig.enabledRules
+          }
+          changed = true
+        }
+
+        const mpConfig = currentConfig.marketProfile
+        if (mpConfig && Object.prototype.hasOwnProperty.call(mpConfig, id)) {
+          const nextMarketProfile = { ...mpConfig }
+          delete nextMarketProfile[id]
+          if (Object.keys(nextMarketProfile).length > 0) {
+            nextConfig.marketProfile = nextMarketProfile
+          } else {
+            delete nextConfig.marketProfile
+          }
+          changed = true
+        }
+
+        if (changed) {
+          const remainingKeys = Object.keys(nextConfig)
+          updateChart(chartId, {
+            signalsConfig: remainingKeys.length > 0 ? nextConfig : null,
+          })
+        }
       }
     } catch (e) {
       setError(e.message)
@@ -376,6 +404,40 @@ export const IndicatorSection = ({ chartId }) => {
       queueMicrotask(() => { void refreshEnabledOverlays(next); }); // microtask prevents state timing issues
       return next;
     });
+  };
+
+  const updateMarketProfileSignalsConfig = (indicatorId, patch = {}) => {
+    if (!indicatorId || typeof patch !== 'object') return;
+    const currentChart = getChart(chartId) || {};
+    const currentConfig = currentChart?.signalsConfig || {};
+    const currentMarketProfile = currentConfig?.marketProfile || {};
+    const existing = currentMarketProfile[indicatorId] || {};
+    const nextEntry = { ...existing, ...patch };
+
+    const cleaned = Object.fromEntries(
+      Object.entries(nextEntry).filter(([, value]) => value !== undefined && value !== null && !Number.isNaN(value)),
+    );
+
+    if (shallowEqualMap(existing, cleaned)) {
+      return;
+    }
+
+    const nextMarketProfile = { ...currentMarketProfile };
+    if (Object.keys(cleaned).length === 0) {
+      delete nextMarketProfile[indicatorId];
+    } else {
+      nextMarketProfile[indicatorId] = cleaned;
+    }
+
+    const nextSignalsConfig = { ...currentConfig };
+    if (Object.keys(nextMarketProfile).length === 0) {
+      delete nextSignalsConfig.marketProfile;
+    } else {
+      nextSignalsConfig.marketProfile = nextMarketProfile;
+    }
+
+    const nextKeys = Object.keys(nextSignalsConfig);
+    updateChart(chartId, { signalsConfig: nextKeys.length ? nextSignalsConfig : null });
   };
 
 
@@ -668,6 +730,8 @@ export const IndicatorSection = ({ chartId }) => {
                   onGenerateSignals={generateSignals}
                   onSelectColor={handleSelectColor}
                   colorSwatches={COLOR_SWATCHES}
+                  marketProfileConfig={marketProfileSignals[indicator.id] || null}
+                  onUpdateMarketProfileConfig={(patch) => updateMarketProfileSignalsConfig(indicator.id, patch)}
                   isGeneratingSignals={isGenerating}
                   disableSignalAction={disableSignals}
                 />
