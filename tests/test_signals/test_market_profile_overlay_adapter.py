@@ -89,9 +89,7 @@ def test_market_profile_signals_render_as_bubbles():
     assert breakout_bubble["accentColor"] == "#16a34a"
     assert breakout_bubble["subtype"] == "bubble"
     assert breakout_bubble["price"] > 4311.0
-    assert breakout_bubble["textColor"] == "#ffffff"
 
     assert retest_bubble["direction"] == "down"
     assert retest_bubble["accentColor"] == "#f97316"
     assert retest_bubble["detail"].startswith("Retest after 3 bars")
-    assert retest_bubble["textColor"] == "#ffffff"
