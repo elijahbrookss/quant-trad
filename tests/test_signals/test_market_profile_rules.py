@@ -46,6 +46,7 @@ def sample_context(sample_market_profile_df):
         "symbol": "TEST",
         "mode": "backtest",
         "market_profile_breakout_min_age_hours": 0,
+        "market_profile_breakout_confirmation_bars": 1,
     }
 
 
@@ -63,11 +64,77 @@ def test_breakout_evaluator_detects_multiple_events(sample_context, sample_value
     assert first["trigger_time"] == sample_market_profile_df.index[2].to_pydatetime()
     assert first["prev_close"] == pytest.approx(sample_market_profile_df.iloc[1]["close"])
     assert first["trigger_open"] == pytest.approx(sample_market_profile_df.iloc[2]["open"])
+    assert first["bars_closed_beyond_level"] == 1
+    assert first["confirmation_bars_required"] == 1
+    assert not first["accelerated_confirmation"]
 
     assert second["breakout_direction"] == "below"
     assert second["trigger_bar_index"] == 5
     assert second["trigger_time"] == sample_market_profile_df.index[5].to_pydatetime()
     assert second["trigger_close"] == pytest.approx(sample_market_profile_df.iloc[5]["close"])
+    assert second["bars_closed_beyond_level"] == 1
+    assert second["confirmation_bars_required"] == 1
+    assert not second["accelerated_confirmation"]
+
+
+def test_breakout_evaluator_respects_confirmation_setting(sample_context, sample_value_area, sample_market_profile_df):
+    sample_context["market_profile_breakout_confirmation_bars"] = 2
+
+    metas = _value_area_breakout_evaluator(sample_context, sample_value_area)
+    assert len(metas) == 2
+
+    metas = sorted(metas, key=lambda meta: meta["trigger_bar_index"])
+    above, below = metas
+
+    assert above["breakout_direction"] == "above"
+    assert above["trigger_bar_index"] == 3
+    assert above["bars_closed_beyond_level"] == 2
+    assert above["confirmation_bars_required"] == 2
+    assert not above["accelerated_confirmation"]
+    assert above["breakout_start_bar_index"] == 2
+    assert above["breakout_start_index_label"] == sample_market_profile_df.index[2]
+
+    assert below["breakout_direction"] == "below"
+    assert below["trigger_bar_index"] == 6
+    assert below["bars_closed_beyond_level"] == 2
+    assert below["confirmation_bars_required"] == 2
+    assert not below["accelerated_confirmation"]
+    assert below["breakout_start_bar_index"] == 5
+    assert below["breakout_start_index_label"] == sample_market_profile_df.index[5]
+
+
+def test_breakout_evaluator_flags_accelerated_confirmation(sample_value_area):
+    index = pd.date_range("2025-01-03 09:30", periods=5, freq="15min", tz="UTC")
+    data = {
+        "open": [100.0, 100.4, 101.2, 101.5, 101.7],
+        "high": [100.4, 100.8, 101.8, 102.0, 102.2],
+        "low": [99.8, 100.1, 101.0, 101.2, 101.4],
+        "close": [100.1, 100.6, 101.6, 101.9, 101.8],
+        "volume": [900, 950, 980, 990, 995],
+    }
+    df = pd.DataFrame(data, index=index)
+    indicator = MarketProfileIndicator(df)
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+        "market_profile_breakout_confirmation_bars": 3,
+        "market_profile_breakout_early_window": 2,
+        "market_profile_breakout_early_distance_pct": 0.001,
+    }
+
+    value_area = dict(sample_value_area)
+    value_area.update({"VAH": 101.0, "VAL": 99.0, "start": index[0] - pd.Timedelta(days=2), "end": index[-1]})
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+    assert len(metas) == 1
+    meta = metas[0]
+    assert meta["breakout_direction"] == "above"
+    assert meta["trigger_bar_index"] == 3
+    assert meta["bars_closed_beyond_level"] == 2
+    assert meta["accelerated_confirmation"]
 
 
 def test_breakout_evaluator_live_mode_only_reports_latest(sample_value_area):
@@ -97,6 +164,37 @@ def test_breakout_evaluator_live_mode_only_reports_latest(sample_value_area):
     meta = metas[0]
     assert meta["trigger_bar_index"] == len(df) - 1
     assert meta["breakout_direction"] == "above"
+
+
+def test_breakout_evaluator_live_mode_honours_confirmation(sample_value_area):
+    index = pd.date_range("2025-01-04 09:30", periods=4, freq="15min", tz="UTC")
+    data = {
+        "open": [100.0, 100.3, 101.1, 101.4],
+        "high": [100.4, 100.9, 101.5, 101.9],
+        "low": [99.8, 100.0, 100.9, 101.1],
+        "close": [100.1, 100.8, 101.4, 101.6],
+        "volume": [800, 820, 840, 860],
+    }
+    df = pd.DataFrame(data, index=index)
+    indicator = MarketProfileIndicator(df)
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": "TEST",
+        "mode": "live",
+        "market_profile_breakout_min_age_hours": 0,
+        "market_profile_breakout_confirmation_bars": 2,
+    }
+
+    value_area = dict(sample_value_area)
+    value_area.update({"start": index[0] - pd.Timedelta(days=2), "end": index[-1]})
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+    assert len(metas) == 1
+    meta = metas[0]
+    assert meta["trigger_bar_index"] == len(df) - 1
+    assert meta["bars_closed_beyond_level"] == 2
+    assert meta["confirmation_bars_required"] == 2
 
 
 def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_value_area):

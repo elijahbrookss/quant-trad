@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
+from signals.rules.breakout import (
+    BreakoutRunState,
+    mark_breakout_emitted,
+    reset_breakout_state,
+    update_breakout_state,
+)
 from signals.rules.patterns import (
     SignalPattern,
     assign_rule_metadata,
@@ -20,6 +27,26 @@ log = logging.getLogger("MarketProfileRules")
 _BREAKOUT_CACHE_KEY = "market_profile_breakouts"
 _BREAKOUT_CACHE_INITIALISED = "_market_profile_breakouts_initialised"
 _BREAKOUT_READY_FLAG = "_market_profile_breakouts_ready"
+
+
+@dataclass(frozen=True)
+class MarketProfileBreakoutConfig:
+    """Configuration for Market Profile breakout confirmations."""
+
+    confirmation_bars: int = 1
+    early_confirmation_window: int = 3
+    early_confirmation_distance_pct: float = 0.01
+
+    def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
+        if self.confirmation_bars < 1:
+            raise ValueError("confirmation_bars must be >= 1")
+        if self.early_confirmation_window < 1:
+            raise ValueError("early_confirmation_window must be >= 1")
+        if self.early_confirmation_distance_pct < 0:
+            raise ValueError("early_confirmation_distance_pct must be >= 0")
+
+
+_DEFAULT_BREAKOUT_CONFIG = MarketProfileBreakoutConfig()
 
 
 def _as_timestamp(value: Any, tz: Optional[str]) -> Optional[pd.Timestamp]:
@@ -52,6 +79,57 @@ def _value_area_identifier(value_area: Mapping[str, Any]) -> Optional[str]:
 def _compute_confidence(distance_pct: float) -> float:
     scaled = abs(distance_pct) * 5.0
     return max(0.1, min(scaled, 1.0))
+
+
+def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakoutConfig:
+    confirmation = context.get(
+        "market_profile_breakout_confirmation_bars",
+        _DEFAULT_BREAKOUT_CONFIG.confirmation_bars,
+    )
+    try:
+        confirmation = int(confirmation)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
+    if confirmation < 1:
+        confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
+
+    early_window = context.get(
+        "market_profile_breakout_early_window",
+        _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window,
+    )
+    try:
+        early_window = int(early_window)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_window = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window
+    if early_window < 1:
+        early_window = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window
+
+    early_pct = context.get(
+        "market_profile_breakout_early_distance_pct",
+        _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct,
+    )
+    try:
+        early_pct = float(early_pct)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        early_pct = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct
+    if early_pct < 0:
+        early_pct = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct
+
+    resolved = MarketProfileBreakoutConfig(
+        confirmation_bars=confirmation,
+        early_confirmation_window=early_window,
+        early_confirmation_distance_pct=early_pct,
+    )
+    log.debug(
+        (
+            "mp_brk | config_resolved | confirmation_bars=%d | early_window=%d "
+            "| early_pct=%.5f"
+        ),
+        resolved.confirmation_bars,
+        resolved.early_confirmation_window,
+        resolved.early_confirmation_distance_pct,
+    )
+    return resolved
 
 
 def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -102,24 +180,28 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     min_age = pd.Timedelta(hours=max(min_age_hours, 0.0))
 
     session_id = _value_area_identifier(value_area)
+    config = _resolve_breakout_config(context)
+
     log.debug(
-        "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s",
+        "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s | confirmation=%d",
         session_id,
         mode,
         len(df),
         vah,
         val,
         min_age,
+        config.confirmation_bars,
     )
 
     value_area_range = float(vah - val)
     value_area_mid = float((vah + val) / 2.0)
     breakouts: List[Dict[str, Any]] = []
+    simulate_current_only = restrict_to_last
+    vah_state = BreakoutRunState()
+    val_state = BreakoutRunState()
+    last_index = len(df) - 1
 
     for idx in range(1, len(df)):
-        if restrict_to_last and idx != len(df) - 1:
-            continue
-
         prev_bar = df.iloc[idx - 1]
         current_bar = df.iloc[idx]
 
@@ -146,18 +228,6 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             )
             continue
 
-        prev_inside = val <= prev_close <= vah
-        if not prev_inside:
-            log.debug(
-                "mp_brk | skip_bar | reason=prev_outside | session=%s | idx=%d | prev_close=%.5f | vah=%.5f | val=%.5f",
-                session_id,
-                idx,
-                prev_close,
-                vah,
-                val,
-            )
-            continue
-
         ts = pd.Timestamp(df.index[idx])
         if start_ts is not None and ts - start_ts < min_age:
             log.debug(
@@ -170,6 +240,8 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 min_age,
             )
             continue
+
+        prev_inside = val <= prev_close <= vah
 
         def _build_meta(level_price: float, direction: str, level_type: str) -> Dict[str, Any]:
             clearance = curr_close - level_price
@@ -214,35 +286,98 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             }
             return meta
 
-        detected = False
         if curr_close > vah:
-            breakouts.append(_build_meta(vah, "above", "VAH"))
-            detected = True
-            log.debug(
-                "mp_brk | detected | direction=above | session=%s | idx=%d | prev_close=%.5f | curr_close=%.5f | vah=%.5f | val=%.5f",
-                session_id,
-                idx,
-                prev_close,
-                curr_close,
-                vah,
-                val,
-            )
+            if prev_inside or vah_state.active_side == "above":
+                result = update_breakout_state(
+                    vah_state,
+                    side="above",
+                    clearance=curr_close - vah,
+                    position=idx,
+                    level_price=vah,
+                    config=config,
+                )
+                if result.ready:
+                    if not (simulate_current_only and idx != last_index):
+                        meta = _build_meta(vah, "above", "VAH")
+                        meta.update(
+                            {
+                                "confirmation_bars_required": config.confirmation_bars,
+                                "bars_closed_beyond_level": result.consecutive,
+                                "accelerated_confirmation": result.accelerated,
+                            }
+                        )
+                        if result.start_position is not None:
+                            meta["breakout_start_bar_index"] = result.start_position
+                            try:
+                                meta["breakout_start_index_label"] = df.index[result.start_position]
+                            except Exception:  # pragma: no cover - defensive
+                                pass
+
+                        breakouts.append(meta)
+                        mark_breakout_emitted(vah_state)
+                        log.debug(
+                            (
+                                "mp_brk | detected | direction=above | session=%s | idx=%d "
+                                "| bars=%d | accelerated=%s"
+                            ),
+                            session_id,
+                            idx,
+                            result.consecutive,
+                            result.accelerated,
+                        )
+                        if restrict_to_last:
+                            break
+            else:
+                reset_breakout_state(vah_state)
+        else:
+            if vah_state.active_side is not None:
+                reset_breakout_state(vah_state)
 
         if curr_close < val:
-            breakouts.append(_build_meta(val, "below", "VAL"))
-            detected = True
-            log.debug(
-                "mp_brk | detected | direction=below | session=%s | idx=%d | prev_close=%.5f | curr_close=%.5f | vah=%.5f | val=%.5f",
-                session_id,
-                idx,
-                prev_close,
-                curr_close,
-                vah,
-                val,
-            )
+            if prev_inside or val_state.active_side == "below":
+                result = update_breakout_state(
+                    val_state,
+                    side="below",
+                    clearance=val - curr_close,
+                    position=idx,
+                    level_price=val,
+                    config=config,
+                )
+                if result.ready and not (simulate_current_only and idx != last_index):
+                    meta = _build_meta(val, "below", "VAL")
+                    meta.update(
+                        {
+                            "confirmation_bars_required": config.confirmation_bars,
+                            "bars_closed_beyond_level": result.consecutive,
+                            "accelerated_confirmation": result.accelerated,
+                        }
+                    )
+                    if result.start_position is not None:
+                        meta["breakout_start_bar_index"] = result.start_position
+                        try:
+                            meta["breakout_start_index_label"] = df.index[result.start_position]
+                        except Exception:  # pragma: no cover - defensive
+                            pass
 
-        if detected and restrict_to_last:
-            break
+                    breakouts.append(meta)
+                    mark_breakout_emitted(val_state)
+                    log.debug(
+                        (
+                            "mp_brk | detected | direction=below | session=%s | idx=%d "
+                            "| bars=%d | accelerated=%s"
+                        ),
+                        session_id,
+                        idx,
+                        result.consecutive,
+                        result.accelerated,
+                    )
+                    if restrict_to_last:
+                        break
+            else:
+                reset_breakout_state(val_state)
+        else:
+            if val_state.active_side is not None:
+                reset_breakout_state(val_state)
 
     if breakouts:
         log.debug(
