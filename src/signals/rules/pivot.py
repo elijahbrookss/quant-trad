@@ -157,8 +157,7 @@ def _evaluate_level(
     confirmation_bars: int,
     *,
     mode: str = "backtest",
-    early_window: int,
-    early_distance_pct: float,
+    config: PivotBreakoutConfig,
 ) -> List[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
@@ -407,8 +406,7 @@ def pivot_breakout_rule(
             level,
             confirmation_bars,
             mode=mode,
-            early_window=config.early_confirmation_window,
-            early_distance_pct=config.early_confirmation_distance_pct,
+            config=config,
         )
         if not metas:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
