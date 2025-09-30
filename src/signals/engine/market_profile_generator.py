@@ -178,6 +178,81 @@ def _to_epoch_seconds(value: Any) -> Optional[int]:
 
     return int(candidate.value // 10**9)
 
+_BREAKOUT_COLORS = {
+    "above": "#16a34a",  # green
+    "below": "#dc2626",  # red
+}
+
+_RETEST_COLORS = {
+    "support": "#0ea5e9",  # sky blue
+    "resistance": "#f97316",  # amber
+}
+
+
+def _hex_to_rgb(color: str) -> Optional[Tuple[int, int, int]]:
+    if not isinstance(color, str):
+        return None
+
+    value = color.strip().lstrip("#")
+    if len(value) != 6:
+        return None
+
+    try:
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+    except ValueError:
+        return None
+
+    return r, g, b
+
+
+def _rgba_from_hex(color: str, alpha: float) -> Optional[str]:
+    rgb = _hex_to_rgb(color)
+    if rgb is None:
+        return None
+
+    r, g, b = rgb
+    a = min(max(alpha, 0.0), 1.0)
+    return f"rgba({r},{g},{b},{a:.2f})"
+
+
+def _resolve_level_price(metadata: Mapping[str, Any]) -> Optional[float]:
+    price = _finite_float(metadata.get("level_price"))
+    if price is not None:
+        return price
+
+    level_type = str(metadata.get("level_type", "")).upper()
+    if level_type == "VAH":
+        return _finite_float(metadata.get("VAH"))
+    if level_type == "VAL":
+        return _finite_float(metadata.get("VAL"))
+
+    for key in ("VAH", "VAL"):
+        price = _finite_float(metadata.get(key))
+        if price is not None:
+            return price
+
+    return None
+
+
+def _level_label(metadata: Mapping[str, Any]) -> str:
+    level_type = str(metadata.get("level_type", "")).strip().upper()
+    if level_type in {"VAH", "VAL"}:
+        return level_type
+    if level_type:
+        return level_type.title()
+    return "Value Area"
+
+
+def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
+    confidence = _finite_float(metadata.get("confidence"))
+    if confidence is None:
+        return None
+
+    percent = max(0, min(100, round(confidence * 100)))
+    return f"Confidence {percent}%"
+
 
 _BREAKOUT_COLORS = {
     "above": "#16a34a",  # green
