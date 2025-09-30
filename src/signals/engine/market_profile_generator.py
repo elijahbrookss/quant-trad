@@ -178,7 +178,6 @@ def _to_epoch_seconds(value: Any) -> Optional[int]:
 
     return int(candidate.value // 10**9)
 
-
 _BREAKOUT_COLORS = {
     "above": "#16a34a",  # green
     "below": "#dc2626",  # red
@@ -262,7 +261,6 @@ def _market_profile_overlay_adapter(
 ) -> List[Dict[str, Any]]:
     logger.info("Converting %d signals to bubble overlays", len(signals))
     bubbles: List[Dict[str, Any]] = []
-
     for idx, sig in enumerate(signals):
         metadata = sig.metadata or {}
         if metadata.get("source") != "MarketProfile":
