@@ -364,6 +364,7 @@ def generate_signals_for_instance(
 
     rule_config: Dict[str, Any] = dict(config or {})
     rule_config.setdefault("pivot_breakout_confirmation_bars", 3)
+    rule_config.setdefault("market_profile_breakout_confirmation_bars", 1)
     rule_config.setdefault("symbol", sym)
 
     if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:
