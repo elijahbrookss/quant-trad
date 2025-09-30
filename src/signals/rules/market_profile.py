@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
+import numpy as np
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
@@ -27,6 +29,7 @@ log = logging.getLogger("MarketProfileRules")
 _BREAKOUT_CACHE_KEY = "market_profile_breakouts"
 _BREAKOUT_CACHE_INITIALISED = "_market_profile_breakouts_initialised"
 _BREAKOUT_READY_FLAG = "_market_profile_breakouts_ready"
+_PRICE_ARRAY_CACHE_KEY = "_market_profile_price_arrays"
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,83 @@ def _value_area_identifier(value_area: Mapping[str, Any]) -> Optional[str]:
 def _compute_confidence(distance_pct: float) -> float:
     scaled = abs(distance_pct) * 5.0
     return max(0.1, min(scaled, 1.0))
+
+
+def _clean_numeric(value: Any, default: Optional[float] = None) -> Optional[float]:
+    """Return a float if the value is finite, otherwise ``default``."""
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if math.isnan(numeric) or math.isinf(numeric):
+        return default
+
+    return numeric
+
+
+def _safe_array_value(array: Optional[np.ndarray], index: int, default: float) -> float:
+    """Fetch a value from ``array`` guarding against NaNs and missing data."""
+
+    if array is None or index >= len(array):
+        return default
+
+    value = array[index]
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if math.isnan(numeric) or math.isinf(numeric):
+        return default
+
+    return numeric
+
+
+def _resolve_price_arrays(
+    context: Mapping[str, Any], df: pd.DataFrame
+) -> Optional[Dict[str, Any]]:
+    """Extract numpy arrays for OHLCV data with simple caching."""
+
+    if df is None or df.empty or "close" not in df.columns:
+        return None
+
+    mutable = maybe_mutable_context(context)
+    cached: Optional[Dict[str, Any]] = None
+    if mutable is not None:
+        existing = mutable.get(_PRICE_ARRAY_CACHE_KEY)
+        if isinstance(existing, dict) and existing.get("df_id") == id(df):
+            cached = existing
+
+    if cached is not None:
+        return cached
+
+    close_series = pd.to_numeric(df["close"], errors="coerce")
+    closes = close_series.to_numpy(dtype=float, copy=False)
+    if closes.size == 0:
+        return None
+
+    def _column_to_array(column: str, *, default: float = np.nan) -> np.ndarray:
+        if column in df.columns:
+            series = pd.to_numeric(df[column], errors="coerce")
+            return series.to_numpy(dtype=float, copy=False)
+        return np.full_like(closes, float(default))
+
+    arrays: Dict[str, Any] = {
+        "df_id": id(df),
+        "index": df.index,
+        "close": closes,
+        "open": _column_to_array("open"),
+        "high": _column_to_array("high"),
+        "low": _column_to_array("low"),
+        "volume": _column_to_array("volume", default=0.0),
+    }
+
+    if mutable is not None:
+        mutable[_PRICE_ARRAY_CACHE_KEY] = arrays
+
+    return arrays
 
 
 def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakoutConfig:
@@ -155,10 +235,9 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         log.debug("mp_brk | skip | reason=insufficient_bars | bars=%s", len(df))
         return []
 
-    try:
-        vah = float(value_area.get("VAH"))
-        val = float(value_area.get("VAL"))
-    except (TypeError, ValueError):
+    vah = _clean_numeric(value_area.get("VAH"))
+    val = _clean_numeric(value_area.get("VAL"))
+    if vah is None or val is None:
         log.debug("mp_brk | skip | reason=invalid_value_area_bounds | value_area=%s", value_area)
         return []
 
@@ -182,6 +261,18 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     session_id = _value_area_identifier(value_area)
     config = _resolve_breakout_config(context)
 
+    price_arrays = _resolve_price_arrays(context, df)
+    if price_arrays is None:
+        log.debug("mp_brk | skip | reason=no_price_cache | session=%s", session_id)
+        return []
+
+    closes: np.ndarray = price_arrays["close"]
+    opens: np.ndarray = price_arrays["open"]
+    highs: np.ndarray = price_arrays["high"]
+    lows: np.ndarray = price_arrays["low"]
+    volumes: np.ndarray = price_arrays["volume"]
+    index = price_arrays["index"]
+
     log.debug(
         "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s | confirmation=%d",
         session_id,
@@ -199,26 +290,19 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     simulate_current_only = restrict_to_last
     vah_state = BreakoutRunState()
     val_state = BreakoutRunState()
-    last_index = len(df) - 1
-
-    for idx in range(1, len(df)):
-        prev_bar = df.iloc[idx - 1]
-        current_bar = df.iloc[idx]
-
+    last_index = len(closes) - 1
+    min_allowed_ts = None
+    if start_ts is not None:
         try:
-            prev_close = float(prev_bar.get("close"))
-            curr_close = float(current_bar.get("close"))
-        except (TypeError, ValueError):
-            log.debug(
-                "mp_brk | skip_bar | reason=invalid_close | session=%s | idx=%d | prev_close=%s | curr_close=%s",
-                session_id,
-                idx,
-                prev_bar.get("close"),
-                current_bar.get("close"),
-            )
-            continue
+            min_allowed_ts = start_ts + min_age
+        except Exception:  # pragma: no cover - defensive
+            min_allowed_ts = None
 
-        if pd.isna(prev_close) or pd.isna(curr_close):
+    for idx in range(1, len(closes)):
+        prev_close = closes[idx - 1]
+        curr_close = closes[idx]
+
+        if not (math.isfinite(prev_close) and math.isfinite(curr_close)):
             log.debug(
                 "mp_brk | skip_bar | reason=nan_close | session=%s | idx=%d | prev_close=%s | curr_close=%s",
                 session_id,
@@ -228,15 +312,15 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             )
             continue
 
-        ts = pd.Timestamp(df.index[idx])
-        if start_ts is not None and ts - start_ts < min_age:
+        ts = pd.Timestamp(index[idx])
+        if min_allowed_ts is not None and ts < min_allowed_ts:
             log.debug(
                 "mp_brk | skip_bar | reason=value_area_too_young | session=%s | idx=%d | start=%s | bar_time=%s | age=%s | min_age=%s",
                 session_id,
                 idx,
                 start_ts,
                 ts,
-                ts - start_ts,
+                ts - start_ts if start_ts is not None else None,
                 min_age,
             )
             continue
@@ -245,13 +329,20 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
 
         def _build_meta(level_price: float, direction: str, level_type: str) -> Dict[str, Any]:
             clearance = curr_close - level_price
-            distance_pct = clearance / level_price
+            level_denominator = abs(level_price) if level_price else 1.0
+            distance_pct = clearance / level_denominator
             if direction == "below":
                 clearance = level_price - curr_close
-                distance_pct = clearance / level_price
+                level_denominator = abs(level_price) if level_price else 1.0
+                distance_pct = clearance / level_denominator
 
             confidence = _compute_confidence(distance_pct)
             trigger_time = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+
+            trigger_open = _safe_array_value(opens, idx, curr_close)
+            trigger_high = _safe_array_value(highs, idx, max(curr_close, trigger_open))
+            trigger_low = _safe_array_value(lows, idx, min(curr_close, trigger_open))
+            trigger_volume = _safe_array_value(volumes, idx, 0.0)
 
             meta: Dict[str, Any] = {
                 "source": "MarketProfile",
@@ -268,14 +359,14 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 "direction": "up" if direction == "above" else "down",
                 "trigger_time": trigger_time,
                 "trigger_close": curr_close,
-                "trigger_open": float(current_bar.get("open", curr_close)),
-                "trigger_high": float(current_bar.get("high", curr_close)),
-                "trigger_low": float(current_bar.get("low", curr_close)),
-                "trigger_volume": float(current_bar.get("volume", 0.0)),
+                "trigger_open": trigger_open,
+                "trigger_high": trigger_high,
+                "trigger_low": trigger_low,
+                "trigger_volume": trigger_volume,
                 "prev_close": prev_close,
                 "VAH": float(vah),
                 "VAL": float(val),
-                "POC": value_area.get("POC"),
+                "POC": _clean_numeric(value_area.get("POC")),
                 "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
                 "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
                 "distance_pct": round(distance_pct, 5),
@@ -420,12 +511,13 @@ def _detect_value_area_retest(
     df: pd.DataFrame,
     breakout_meta: Mapping[str, Any],
     *,
+    price_arrays: Mapping[str, Any],
     tolerance_pct: float,
     max_bars: int,
     min_bars: int,
     mode: str,
 ) -> Optional[Dict[str, Any]]:
-    level_price = breakout_meta.get("level_price")
+    level_price = _clean_numeric(breakout_meta.get("level_price"))
     direction = breakout_meta.get("breakout_direction")
     if level_price is None or direction not in {"above", "below"}:
         log.debug(
@@ -465,6 +557,11 @@ def _detect_value_area_retest(
         )
         return None
 
+    closes: np.ndarray = price_arrays["close"]
+    highs: np.ndarray = price_arrays["high"]
+    lows: np.ndarray = price_arrays["low"]
+    index = price_arrays["index"]
+
     tolerance = abs(float(level_price)) * max(tolerance_pct, 0.0)
     simulate_current_only = mode in {"sim", "live"}
 
@@ -481,10 +578,12 @@ def _detect_value_area_retest(
     )
 
     for idx in range(look_start, look_end + 1):
-        candle = df.iloc[idx]
-        high = float(candle.get("high", candle.get("close")))
-        low = float(candle.get("low", candle.get("close")))
-        close = float(candle.get("close"))
+        close = _safe_array_value(closes, idx, math.nan)
+        if not math.isfinite(close):
+            continue
+
+        high = _safe_array_value(highs, idx, close)
+        low = _safe_array_value(lows, idx, close)
 
         if direction == "above":
             touched = low <= float(level_price) + tolerance
@@ -526,7 +625,7 @@ def _detect_value_area_retest(
             )
             continue
 
-        ts = df.index[idx]
+        ts = index[idx]
         bars_since = idx - start_idx
         log.debug(
             "mp_retest | detected | session=%s | idx=%d | breakout_idx=%d | bars_since=%d | close=%.5f | high=%.5f | low=%.5f",
@@ -595,6 +694,11 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
 
     mode = str(context.get("mode", "backtest")).lower()
 
+    price_arrays = _resolve_price_arrays(context, df)
+    if price_arrays is None:
+        log.debug("mp_retest | skip | reason=no_price_cache")
+        return []
+
     try:
         tolerance_pct = float(context.get("market_profile_retest_tolerance_pct", 0.0015))
     except (TypeError, ValueError):
@@ -625,6 +729,7 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
         retest = _detect_value_area_retest(
             df,
             breakout_meta,
+            price_arrays=price_arrays,
             tolerance_pct=tolerance_pct,
             max_bars=max_bars,
             min_bars=min_bars,
