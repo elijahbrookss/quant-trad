@@ -4,8 +4,10 @@ pd = pytest.importorskip("pandas")
 
 from datetime import datetime
 
+from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import build_signal_overlays
+from signals.engine.market_profile_generator import build_value_area_payloads
 from signals.engine import market_profile_generator  # noqa: F401 ensure adapter registration
 
 
@@ -93,3 +95,25 @@ def test_market_profile_signals_render_as_bubbles():
     assert retest_bubble["direction"] == "down"
     assert retest_bubble["accentColor"] == "#f97316"
     assert retest_bubble["detail"].startswith("Retest after 3 bars")
+
+
+def test_default_min_merge_consistency_between_overlay_and_signal(monkeypatch):
+    df = _make_df()
+    indicator = MarketProfileIndicator(df)
+
+    captured_min_merge = []
+
+    def _capture_merge(self, threshold=None, min_merge=None):
+        captured_min_merge.append(min_merge)
+        return []
+
+    monkeypatch.setattr(MarketProfileIndicator, "merge_value_areas", _capture_merge)
+
+    indicator.to_lightweight(df, use_merged=True)
+    build_value_area_payloads(indicator, df)
+
+    assert captured_min_merge, "Expected merge_value_areas to be invoked"
+    assert all(
+        value == MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS
+        for value in captured_min_merge
+    ), "Default min-merge sessions should match for overlays and signals"

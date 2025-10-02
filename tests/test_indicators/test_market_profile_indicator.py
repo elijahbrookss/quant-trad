@@ -44,7 +44,7 @@ def test_market_profile_indicator_integration_plot():
     assert isinstance(mpi.daily_profiles, list)
     assert mpi.daily_profiles, "Integration: daily_profiles is empty"
 
-    # Merge value areas (default threshold=0.6, min_merge=2)
+    # Merge value areas (default threshold=0.6, min_merge=3)
     merged = mpi.merge_value_areas()
     # merged_profiles may be empty if no consecutive overlaps exist, but daily_profiles must exist
     assert isinstance(merged, list)
