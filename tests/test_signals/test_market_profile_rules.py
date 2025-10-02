@@ -428,3 +428,75 @@ def test_detect_value_area_retest_respects_value_area_end_index():
     )
 
     assert retest is None
+
+
+def test_detect_value_area_retest_waits_for_confirmation_requirement():
+    index = pd.date_range("2025-04-01 09:30", periods=7, freq="30min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [109.2, 109.6, 111.2, 110.8, 110.7, 110.5, 110.3],
+            "high": [109.6, 110.0, 111.8, 111.2, 111.0, 110.8, 110.6],
+            "low": [108.9, 109.4, 110.9, 109.95, 110.4, 110.3, 110.2],
+            "close": [109.5, 110.2, 111.6, 110.6, 110.9, 110.7, 110.5],
+        },
+        index=index,
+    )
+
+    breakout_meta = {
+        "level_price": 110.0,
+        "breakout_direction": "above",
+        "trigger_bar_index": 2,
+        "trigger_time": index[2].to_pydatetime(),
+        "value_area_id": "session-confirm",
+        "value_area_start_index": 0,
+        "value_area_end_index": len(df) - 1,
+        "confirmation_bars_required": 3,
+    }
+
+    retest = _detect_value_area_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=5,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert retest is None
+
+
+def test_detect_value_area_retest_emits_after_confirmation_requirement():
+    index = pd.date_range("2025-04-02 09:30", periods=7, freq="30min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [209.2, 209.6, 211.2, 210.8, 210.7, 210.5, 210.3],
+            "high": [209.6, 210.0, 211.8, 211.2, 211.0, 210.8, 210.6],
+            "low": [208.9, 209.4, 210.9, 209.95, 210.4, 209.98, 210.2],
+            "close": [209.5, 210.2, 211.6, 210.6, 210.9, 210.55, 210.4],
+        },
+        index=index,
+    )
+
+    breakout_meta = {
+        "level_price": 210.0,
+        "breakout_direction": "above",
+        "trigger_bar_index": 2,
+        "trigger_time": index[2].to_pydatetime(),
+        "value_area_id": "session-confirm-2",
+        "value_area_start_index": 0,
+        "value_area_end_index": len(df) - 1,
+        "confirmation_bars_required": 3,
+    }
+
+    retest = _detect_value_area_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=5,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert retest is not None
+    assert retest["bars_since_breakout"] == 3
+    assert retest["confirmation_bars_required"] == 3
