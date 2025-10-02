@@ -110,6 +110,12 @@ export function createSignalBubblePaneView(timeScaleApi) {
         const py = priceToCoordinate(Number(bubble.price));
         if (py == null) continue;
 
+        const canvasX = px * hpr;
+        const offscreenBuffer = 24 * hpr;
+        if (canvasX < -offscreenBuffer || canvasX > widthPx + offscreenBuffer) {
+          continue;
+        }
+
         const accent = bubble.accentColor ?? '#38bdf8';
         const background = bubble.backgroundColor ?? hexToRgba(accent, 0.12) ?? 'rgba(30,41,59,0.78)';
         const textColor = bubble.textColor ?? '#f8fafc';
@@ -141,7 +147,7 @@ export function createSignalBubblePaneView(timeScaleApi) {
 
         const pointerDir = direction === 'above' ? 'down' : 'up';
 
-        let bubbleX = px * hpr - bubbleWidth / 2;
+        let bubbleX = canvasX - bubbleWidth / 2;
         const minX = 12 * hpr;
         const maxX = widthPx - bubbleWidth - 12 * hpr;
         bubbleX = clamp(bubbleX, minX, Math.max(minX, maxX));
