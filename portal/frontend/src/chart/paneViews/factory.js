@@ -27,7 +27,7 @@ export class PaneViewManager {
     if (this.series.has(type)) return;
     let view;
     if (type === PaneViewType.TOUCH)      view = createTouchPaneView(this.ts);
-    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { extendRight: true, hatchOverlap: false, outlineFront: true });
+    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { hatchOverlap: false, outlineFront: true });
     else if (type === PaneViewType.SEGMENT) view = createSegmentPaneView(this.ts);
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
     else if (type === PaneViewType.SIGNAL_BUBBLE) view = createSignalBubblePaneView(this.ts);
@@ -98,54 +98,17 @@ export class PaneViewManager {
     if (!view || !series) return;
 
     const boxes = this.vaBoxState.boxes || [];
-    const { lastSeriesTime, barSpacing } = this.vaBoxState;
+    const { lastSeriesTime } = this.vaBoxState;
 
     view.setBoxes(boxes);
 
     const normalizedLast = toSec(lastSeriesTime);
 
-    const rawTimes = [...new Set(boxes.flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
-      .filter(Number.isFinite)
-      .sort((a,b)=>a-b);
-
-    let smallestStep = Infinity;
-    for (let i = 1; i < rawTimes.length; i++) {
-      const step = rawTimes[i] - rawTimes[i - 1];
-      if (step > 0 && step < smallestStep) smallestStep = step;
-    }
-
-    const fallbackStep = 60; // 1 minute padding if we cannot infer spacing
-    const extensionStep = Number.isFinite(smallestStep) && smallestStep > 0 ? smallestStep : fallbackStep;
-    const inferredSpacing = Number.isFinite(barSpacing) && barSpacing > 0 ? barSpacing : extensionStep;
-
-    const rightEdge = Math.max(
-      ...boxes
-        .map(b => toSec(b.x2))
-        .filter((t) => typeof t === 'number' && Number.isFinite(t)),
-      -Infinity,
-    );
-
-    const baseEdge = Number.isFinite(normalizedLast)
-      ? normalizedLast
-      : (Number.isFinite(rightEdge) ? rightEdge : null);
-
-    const paddedRightEdge = Number.isFinite(baseEdge)
-      ? baseEdge + (Number.isFinite(inferredSpacing) ? inferredSpacing : 0)
-      : null;
-
-    const seriesTimes = [...new Set([
-      ...rawTimes,
-      Number.isFinite(normalizedLast) ? normalizedLast : null,
-      Number.isFinite(paddedRightEdge) ? paddedRightEdge : null,
-    ].filter(Number.isFinite))].sort((a, b) => a - b);
+    const seriesTimes = [...new Set(boxes.flatMap(b => [toSec(b.x1), toSec(b.x2), normalizedLast]))]
+      .filter((t) => typeof t === 'number' && Number.isFinite(t))
+      .sort((a, b) => a - b);
 
     series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
-
-    view.setRightEdgeTime(
-      Number.isFinite(paddedRightEdge)
-        ? paddedRightEdge
-        : (Number.isFinite(baseEdge) ? baseEdge : null)
-    );
   }
   setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
     this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
