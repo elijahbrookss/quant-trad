@@ -52,6 +52,8 @@ class MarketProfileIndicator(BaseIndicator):
         mode: str = "tpo",
         interval: str = "30m",
         extend_value_area_to_chart_end: bool = True,
+        use_merged_value_areas: bool = True,
+        merge_threshold: float = 0.6,
     ):
         super().__init__(df)
         self.bin_size = bin_size
@@ -61,6 +63,8 @@ class MarketProfileIndicator(BaseIndicator):
         self.merged_profiles = []
         self.interval = interval
         self.extend_value_area_to_chart_end = bool(extend_value_area_to_chart_end)
+        self.use_merged_value_areas = bool(use_merged_value_areas)
+        self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
 
     @classmethod
     def from_context(
@@ -71,6 +75,8 @@ class MarketProfileIndicator(BaseIndicator):
         mode: str = "tpo",
         interval: str = "30m",
         extend_value_area_to_chart_end: bool = True,
+        use_merged_value_areas: bool = True,
+        merge_threshold: float = 0.6,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -89,6 +95,8 @@ class MarketProfileIndicator(BaseIndicator):
             mode=mode,
             interval=interval,
             extend_value_area_to_chart_end=extend_value_area_to_chart_end,
+            use_merged_value_areas=use_merged_value_areas,
+            merge_threshold=merge_threshold,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
@@ -164,11 +172,19 @@ class MarketProfileIndicator(BaseIndicator):
         logger.debug("Extracted value area: POC=%.2f, VAH=%.2f, VAL=%.2f, total TPO=%d", poc_price, max(va_prices), min(va_prices), total)
         return {"POC": poc_price, "VAH": max(va_prices), "VAL": min(va_prices)}
 
-    def merge_value_areas(self, threshold: float = 0.6, min_merge: int = 2) -> List[Dict[str, float]]:
+    def merge_value_areas(
+        self,
+        threshold: Optional[float] = None,
+        min_merge: int = 2,
+    ) -> List[Dict[str, float]]:
         """
         Combine consecutive daily profiles whose value areas overlap
         at least `threshold` fraction, requiring at least `min_merge` days.
         """
+        if threshold is None:
+            threshold = getattr(self, "merge_threshold", 0.6)
+        threshold = float(threshold)
+
         merged = []
         profiles = self.daily_profiles
         i, n = 0, len(profiles)
@@ -217,12 +233,19 @@ class MarketProfileIndicator(BaseIndicator):
         logger.info("Completed merging. Total merged profiles: %d", len(merged))
         return merged
 
-    def to_overlays(self, plot_df: pd.DataFrame, use_merged: bool = True) -> Tuple[List, Set[Tuple[str, str]]]:
+    def to_overlays(
+        self,
+        plot_df: pd.DataFrame,
+        use_merged: Optional[bool] = None,
+    ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
         Emit two kinds of overlay specs:
-        • kind="rect" → persistent VAH/VAL zones  
+        • kind="rect" → persistent VAH/VAL zones
         • kind="addplot" → POC horizontal line
         """
+        if use_merged is None:
+            use_merged = getattr(self, "use_merged_value_areas", True)
+
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
             logger.warning("No profiles to generate overlays.")
@@ -314,8 +337,8 @@ class MarketProfileIndicator(BaseIndicator):
     def to_lightweight(
         self,
         plot_df: pd.DataFrame,
-        use_merged: bool = True,
-        merge_threshold: float = 0.60,
+        use_merged: Optional[bool] = None,
+        merge_threshold: Optional[float] = None,
         min_merge: int = 3,
         include_touches: bool = True,
         time_fmt="business_day",
@@ -345,6 +368,12 @@ class MarketProfileIndicator(BaseIndicator):
             extend_boxes_to_chart_end = getattr(self, "extend_value_area_to_chart_end", True)
         else:
             extend_boxes_to_chart_end = bool(extend_boxes_to_chart_end)
+
+        if use_merged is None:
+            use_merged = getattr(self, "use_merged_value_areas", True)
+
+        if merge_threshold is None:
+            merge_threshold = getattr(self, "merge_threshold", 0.6)
 
         if use_merged:
             # compute merged profiles once if needed

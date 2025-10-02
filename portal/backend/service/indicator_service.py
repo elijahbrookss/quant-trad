@@ -368,7 +368,14 @@ def generate_signals_for_instance(
     rule_config.setdefault("symbol", sym)
 
     if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:
-        rule_config.setdefault("market_profile_use_merged_value_areas", True)
+        rule_config.setdefault(
+            "market_profile_use_merged_value_areas",
+            getattr(inst, "use_merged_value_areas", True),
+        )
+        rule_config.setdefault(
+            "market_profile_merge_threshold",
+            getattr(inst, "merge_threshold", 0.6),
+        )
         payloads = build_value_area_payloads(
             inst,
             df,
