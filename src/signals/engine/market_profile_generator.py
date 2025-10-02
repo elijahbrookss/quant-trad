@@ -187,6 +187,20 @@ class MarketProfileSignalGenerator:
             payload_duration = perf_counter() - payload_start
             payload_source = "computed"
 
+        if payloads:
+            logger.info(
+                "Market profile signal payload summaries (%d):",
+                len(payloads),
+            )
+            for idx, payload in enumerate(payloads, start=1):
+                logger.info(
+                    "  [%d] %s",
+                    idx,
+                    MarketProfileIndicator.describe_profile(payload),
+                )
+        else:
+            logger.info("Market profile signal payload summaries: none")
+
         rules_start = perf_counter()
         signals = run_indicator_rules(
             self.indicator,
