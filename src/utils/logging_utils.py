@@ -21,8 +21,12 @@ class LokiHandler(logging.Handler):
         self.internal_logger = logging.getLogger("loki.internal")
         self.internal_logger.setLevel(logging.WARNING)
         self.internal_logger.propagate = False
+        self._disabled = False
 
     def emit(self, record):
+        if self._disabled:
+            return
+
         if record.name.startswith("urllib3") or record.name.startswith("requests"):
             return  # Avoid recursion
 
@@ -44,5 +48,8 @@ class LokiHandler(logging.Handler):
                 self.internal_logger.warning(f"Loki response: {resp.status_code} - {resp.text}")
 
         except Exception as e:
-            self.internal_logger.error(f"[LokiHandler ERROR] {e}", exc_info=True)
+            self.internal_logger.warning(
+                "Disabling Loki logging after transport error: %s", e, exc_info=False
+            )
+            self._disabled = True
 
