@@ -48,6 +48,7 @@ services:
   tsdb:
     profiles: [database]
     image: timescale/timescaledb:2.14.2-pg15
+    hostname: tsdb.quanttrad
     labels:
       loki.job: quanttrad
       loki.service: tsdb
@@ -60,7 +61,9 @@ services:
     volumes:
       - tsdb-data:/var/lib/postgresql/data
     networks:
-      - quanttrad
+      quanttrad:
+        aliases:
+          - tsdb.quanttrad
 
   pgadmin:
     profiles: [database]
