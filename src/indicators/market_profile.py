@@ -50,6 +50,7 @@ class MarketProfileIndicator(BaseIndicator):
     Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
     """
     NAME = "market_profile"
+    DEFAULT_MIN_MERGE_SESSIONS = 3
 
     def __init__(
         self,
@@ -60,6 +61,7 @@ class MarketProfileIndicator(BaseIndicator):
         extend_value_area_to_chart_end: bool = True,
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
+        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
     ):
         super().__init__(df)
         self.bin_size = bin_size
@@ -71,6 +73,7 @@ class MarketProfileIndicator(BaseIndicator):
         self.extend_value_area_to_chart_end = bool(extend_value_area_to_chart_end)
         self.use_merged_value_areas = bool(use_merged_value_areas)
         self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
+        self.min_merge_sessions = int(min_merge_sessions)
 
     @staticmethod
     def describe_profile(profile: Mapping[str, Any]) -> str:
@@ -130,6 +133,7 @@ class MarketProfileIndicator(BaseIndicator):
         extend_value_area_to_chart_end: bool = True,
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
+        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -150,6 +154,7 @@ class MarketProfileIndicator(BaseIndicator):
             extend_value_area_to_chart_end=extend_value_area_to_chart_end,
             use_merged_value_areas=use_merged_value_areas,
             merge_threshold=merge_threshold,
+            min_merge_sessions=min_merge_sessions,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
@@ -228,7 +233,7 @@ class MarketProfileIndicator(BaseIndicator):
     def merge_value_areas(
         self,
         threshold: Optional[float] = None,
-        min_merge: int = 2,
+        min_merge: Optional[int] = None,
     ) -> List[Dict[str, float]]:
         """
         Combine consecutive daily profiles whose value areas overlap
@@ -237,6 +242,15 @@ class MarketProfileIndicator(BaseIndicator):
         if threshold is None:
             threshold = getattr(self, "merge_threshold", 0.6)
         threshold = float(threshold)
+
+        if min_merge is None:
+            min_merge = getattr(
+                self,
+                "min_merge_sessions",
+                getattr(self, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            )
+        else:
+            min_merge = int(min_merge)
 
         merged = []
         profiles = self.daily_profiles
@@ -404,7 +418,7 @@ class MarketProfileIndicator(BaseIndicator):
         plot_df: pd.DataFrame,
         use_merged: Optional[bool] = None,
         merge_threshold: Optional[float] = None,
-        min_merge: int = 3,
+        min_merge: Optional[int] = None,
         include_touches: bool = True,
         time_fmt="business_day",
         extend_boxes_to_chart_end: Optional[bool] = None,
@@ -443,7 +457,16 @@ class MarketProfileIndicator(BaseIndicator):
         if use_merged:
             # compute merged profiles once if needed
             if not getattr(self, "merged_profiles", None):
-                self.merge_value_areas(threshold=merge_threshold, min_merge=min_merge)
+                default_min_merge = getattr(
+                    self,
+                    "min_merge_sessions",
+                    getattr(self, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+                )
+                effective_min_merge = default_min_merge if min_merge is None else int(min_merge)
+                self.merge_value_areas(
+                    threshold=merge_threshold,
+                    min_merge=effective_min_merge,
+                )
             profiles = self.merged_profiles or []
         else:
             profiles = self.daily_profiles or []

@@ -70,6 +70,11 @@ def _clone_indicator_for_runtime(
                 True,
             ),
             merge_threshold=getattr(indicator, "merge_threshold", 0.6),
+            min_merge_sessions=getattr(
+                indicator,
+                "min_merge_sessions",
+                getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            ),
         )
     except Exception:
         logger.exception("Failed to initialise MarketProfileIndicator for signal payloads")
@@ -118,7 +123,12 @@ def build_value_area_payloads(
             if merge_threshold is None
             else float(merge_threshold)
         )
-        min_merge = 2 if min_merge_sessions is None else int(min_merge_sessions)
+        default_min_merge = getattr(
+            runtime,
+            "min_merge_sessions",
+            getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+        )
+        min_merge = default_min_merge if min_merge_sessions is None else int(min_merge_sessions)
         value_areas = runtime.merge_value_areas(threshold=threshold, min_merge=min_merge)
     else:
         value_areas = runtime.daily_profiles
