@@ -29,7 +29,9 @@ services:
       loki.job: quanttrad
       loki.service: backend
     environment:
-      - PYTHONPATH=/app/src:/app
+      PYTHONPATH: /app/src:/app
+      PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
+      OHLC_TABLE: ohlc_raw
     ports:
       - "8000:8000"
     depends_on:
