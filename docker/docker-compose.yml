@@ -28,14 +28,19 @@ services:
     labels:
       loki.job: quanttrad
       loki.service: backend
+    env_file:
+      - ../secrets.env
     environment:
       PYTHONPATH: /app/src:/app
       PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
       OHLC_TABLE: ohlc_raw
+      LOKI_URL: ${LOKI_URL:-http://loki:3100}
     ports:
       - "8000:8000"
     depends_on:
       - tsdb
+    volumes:
+      - ../secrets.env:/app/secrets.env:ro
     networks:
       quanttrad:
         aliases:
@@ -44,6 +49,7 @@ services:
   tsdb:
     profiles: [database]
     image: timescale/timescaledb:2.14.2-pg15
+    hostname: tsdb.quanttrad
     labels:
       loki.job: quanttrad
       loki.service: tsdb
@@ -56,7 +62,9 @@ services:
     volumes:
       - tsdb-data:/var/lib/postgresql/data
     networks:
-      - quanttrad
+      quanttrad:
+        aliases:
+          - tsdb.quanttrad
 
   pgadmin:
     profiles: [database]
