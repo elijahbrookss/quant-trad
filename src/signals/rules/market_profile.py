@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
@@ -293,6 +294,9 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     )
 
     breakouts: List[Dict[str, Any]] = []
+    debug_enabled = log.isEnabledFor(logging.DEBUG)
+    overall_start = time.perf_counter() if debug_enabled else None
+    boundary_summaries: List[str] = []
 
     for level_type, level_price, level_kind in boundaries:
         level = SimpleNamespace(
@@ -303,6 +307,7 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             first_touched=start_ts,
         )
 
+        eval_start = time.perf_counter() if debug_enabled else None
         metas = _pivot_evaluate_level(
             df,
             level,
@@ -310,82 +315,123 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             mode=mode,
             config=config,
         )
+        eval_duration_ms = 0.0
+        if debug_enabled and eval_start is not None:
+            eval_duration_ms = (time.perf_counter() - eval_start) * 1000.0
 
-        if not metas:
-            continue
+        metas_count = len(metas) if metas else 0
 
-        for meta in metas:
-            trigger_ts = _normalise_meta_timestamp(meta.get("trigger_time"), tz)
-            if trigger_ts is None:
-                continue
-
-            if start_ts is not None and trigger_ts < start_ts:
-                continue
-
-            if min_allowed_ts is not None and trigger_ts < min_allowed_ts:
-                continue
-
-            breakout_start_ts = _normalise_meta_timestamp(meta.get("breakout_start"), tz)
-            if breakout_start_ts is not None:
-                if start_ts is not None and breakout_start_ts < start_ts:
-                    continue
-                if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
-                    continue
-
-            enriched = dict(meta)
-
-            direction = str(enriched.get("breakout_direction", "")).lower()
-            trigger_close = float(enriched.get("trigger_close", level_price))
-
-            if direction == "above":
-                clearance = trigger_close - level_price
-                bubble_direction = "up"
-            elif direction == "below":
-                clearance = level_price - trigger_close
-                bubble_direction = "down"
-            else:
-                clearance = 0.0
-                bubble_direction = "up"
-
-            denominator = abs(level_price) if level_price else 1.0
-            distance_pct = clearance / denominator if denominator else 0.0
-
-            enriched.update(
-                {
-                    "source": "MarketProfile",
-                    "time": trigger_ts.to_pydatetime() if hasattr(trigger_ts, "to_pydatetime") else trigger_ts,
-                    "breakout_time": enriched.get("trigger_time"),
-                    "level_type": level_type,
-                    "value_area_id": session_id,
-                    "value_area_start": start_ts.to_pydatetime() if start_ts is not None else None,
-                    "value_area_end": end_ts.to_pydatetime() if end_ts is not None else None,
-                    "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
-                    "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
-                    "value_area_start_index": start_index,
-                    "value_area_end_index": end_index,
-                    "value_area_range": value_area_range,
-                    "value_area_mid": value_area_mid,
-                    "VAH": float(vah),
-                    "VAL": float(val),
-                    "POC": poc,
-                    "direction": bubble_direction,
-                    "breakout_clearance": round(clearance, 5),
-                    "distance_pct": round(distance_pct, 5),
-                    "confidence": _compute_confidence(distance_pct),
-                }
+        if debug_enabled:
+            log.debug(
+                (
+                    "mp_brk | pivot_summary | session=%s | boundary=%s | "
+                    "level_price=%.5f | confirmation=%d | result_count=%d | eval_ms=%.3f"
+                ),
+                session_id,
+                level_type,
+                level_price,
+                config.confirmation_bars,
+                metas_count,
+                eval_duration_ms,
             )
 
-            if symbol is not None:
-                enriched["symbol"] = symbol
+        passed_filters = 0
+        filter_start = time.perf_counter() if debug_enabled else None
 
-            trigger_idx = _resolve_breakout_bar_index(enriched, df)
-            if trigger_idx is not None and trigger_idx > 0:
-                try:
-                    enriched["prev_close"] = float(df.iloc[trigger_idx - 1]["close"])
-                except Exception:  # pragma: no cover - defensive
-                    pass
+        if metas:
+            for meta in metas:
+                trigger_ts = _normalise_meta_timestamp(meta.get("trigger_time"), tz)
+                if trigger_ts is None:
+                    continue
 
-            breakouts.append(enriched)
+                if start_ts is not None and trigger_ts < start_ts:
+                    continue
+
+                if end_ts is not None and trigger_ts > end_ts:
+                    continue
+
+                if min_allowed_ts is not None and trigger_ts < min_allowed_ts:
+                    continue
+
+                breakout_start_ts = _normalise_meta_timestamp(meta.get("breakout_start"), tz)
+                if breakout_start_ts is not None:
+                    if start_ts is not None and breakout_start_ts < start_ts:
+                        continue
+                    if end_ts is not None and breakout_start_ts > end_ts:
+                        continue
+                    if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
+                        continue
+
+                enriched = dict(meta)
+
+                direction = str(enriched.get("breakout_direction", "")).lower()
+                trigger_close = float(enriched.get("trigger_close", level_price))
+
+                if direction == "above":
+                    clearance = trigger_close - level_price
+                    bubble_direction = "up"
+                elif direction == "below":
+                    clearance = level_price - trigger_close
+                    bubble_direction = "down"
+                else:
+                    clearance = 0.0
+                    bubble_direction = "up"
+
+                denominator = abs(level_price) if level_price else 1.0
+                distance_pct = clearance / denominator if denominator else 0.0
+
+                enriched.update(
+                    {
+                        "source": "MarketProfile",
+                        "time": trigger_ts.to_pydatetime() if hasattr(trigger_ts, "to_pydatetime") else trigger_ts,
+                        "breakout_time": enriched.get("trigger_time"),
+                        "level_type": level_type,
+                        "value_area_id": session_id,
+                        "value_area_start": start_ts.to_pydatetime() if start_ts is not None else None,
+                        "value_area_end": end_ts.to_pydatetime() if end_ts is not None else None,
+                        "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
+                        "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
+                        "value_area_start_index": start_index,
+                        "value_area_end_index": end_index,
+                        "value_area_range": value_area_range,
+                        "value_area_mid": value_area_mid,
+                        "VAH": float(vah),
+                        "VAL": float(val),
+                        "POC": poc,
+                        "direction": bubble_direction,
+                        "breakout_clearance": round(clearance, 5),
+                        "distance_pct": round(distance_pct, 5),
+                        "confidence": _compute_confidence(distance_pct),
+                    }
+                )
+
+                if symbol is not None:
+                    enriched["symbol"] = symbol
+
+                trigger_idx = _resolve_breakout_bar_index(enriched, df)
+                if trigger_idx is not None:
+                    if end_index is not None and trigger_idx > end_index:
+                        continue
+                if trigger_idx is not None and trigger_idx > 0:
+                    try:
+                        enriched["prev_close"] = float(df.iloc[trigger_idx - 1]["close"])
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+                breakouts.append(enriched)
+                passed_filters += 1
+
+        filter_duration_ms = 0.0
+        if debug_enabled and filter_start is not None:
+            filter_duration_ms = (time.perf_counter() - filter_start) * 1000.0
+
+        if debug_enabled:
+            boundary_summaries.append(
+                (
+                    f"{level_type}:metas={metas_count}:passed={passed_filters}:"
+                    f"eval_ms={eval_duration_ms:.3f}:filter_ms={filter_duration_ms:.3f}"
+                )
+            )
 
     if breakouts:
         log.debug(
@@ -396,6 +442,18 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         )
     else:
         log.debug("mp_brk | complete | session=%s | detected=0 | mode=%s", session_id, mode)
+
+    if debug_enabled:
+        total_duration_ms = 0.0
+        if overall_start is not None:
+            total_duration_ms = (time.perf_counter() - overall_start) * 1000.0
+        log.debug(
+            "mp_brk | summary | session=%s | mode=%s | boundaries=[%s] | total_ms=%.3f",
+            session_id,
+            mode,
+            "; ".join(boundary_summaries) if boundary_summaries else "",
+            total_duration_ms,
+        )
 
     return breakouts
 

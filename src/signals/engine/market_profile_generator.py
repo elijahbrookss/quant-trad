@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Sequence, Mapping, Any, Tuple
 import logging
 import math
+from time import perf_counter
 
 import pandas as pd
 from indicators.market_profile import MarketProfileIndicator
@@ -17,6 +18,14 @@ from signals.rules.market_profile import (
 )
 
 logger = logging.getLogger("MarketProfileSignalGenerator")
+
+
+def _format_duration(seconds: float) -> str:
+    """Return a compact, human readable duration string."""
+
+    if seconds >= 1:
+        return f"{seconds:.2f}s"
+    return f"{seconds * 1000:.1f}ms"
 
 
 def _finite_float(value: Any) -> Optional[float]:
@@ -50,6 +59,22 @@ def _clone_indicator_for_runtime(
             bin_size=getattr(indicator, "bin_size", 0.1),
             mode=getattr(indicator, "mode", "tpo"),
             interval=interval or getattr(indicator, "interval", "30m"),
+            extend_value_area_to_chart_end=getattr(
+                indicator,
+                "extend_value_area_to_chart_end",
+                True,
+            ),
+            use_merged_value_areas=getattr(
+                indicator,
+                "use_merged_value_areas",
+                True,
+            ),
+            merge_threshold=getattr(indicator, "merge_threshold", 0.6),
+            min_merge_sessions=getattr(
+                indicator,
+                "min_merge_sessions",
+                getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            ),
         )
     except Exception:
         logger.exception("Failed to initialise MarketProfileIndicator for signal payloads")
@@ -69,23 +94,71 @@ def build_value_area_payloads(
 ) -> List[Dict[str, Any]]:
     """Derive value area payloads for market profile signal rules."""
 
-    runtime = _clone_indicator_for_runtime(indicator, df, interval=interval)
-    if runtime is None:
+    symbol = getattr(indicator, "symbol", None)
+
+    if df is None or df.empty:
+        logger.info(
+            "Market profile payloads skipped | symbol=%s | reason=empty-data",
+            symbol,
+        )
         return []
 
-    use_merged = True if use_merged is None else bool(use_merged)
+    start_time = perf_counter()
+    runtime = _clone_indicator_for_runtime(indicator, df, interval=interval)
+    if runtime is None:
+        logger.info(
+            "Market profile payloads skipped | symbol=%s | reason=indicator-init",
+            symbol,
+        )
+        return []
+
+    if use_merged is None:
+        use_merged = getattr(runtime, "use_merged_value_areas", True)
+    else:
+        use_merged = bool(use_merged)
 
     if use_merged:
-        threshold = 0.6 if merge_threshold is None else float(merge_threshold)
-        min_merge = 2 if min_merge_sessions is None else int(min_merge_sessions)
+        threshold = (
+            getattr(runtime, "merge_threshold", 0.6)
+            if merge_threshold is None
+            else float(merge_threshold)
+        )
+        default_min_merge = getattr(
+            runtime,
+            "min_merge_sessions",
+            getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+        )
+        min_merge = default_min_merge if min_merge_sessions is None else int(min_merge_sessions)
         value_areas = runtime.merge_value_areas(threshold=threshold, min_merge=min_merge)
     else:
         value_areas = runtime.daily_profiles
 
     payloads: List[Dict[str, Any]] = []
-    for area in value_areas or []:
+    profile_labels: List[str] = []
+    for idx, area in enumerate(value_areas or []):
         if isinstance(area, Mapping) and area.get("VAH") is not None and area.get("VAL") is not None:
-            payloads.append(dict(area))
+            payload = dict(area)
+            payloads.append(payload)
+            label = _value_area_reference(payload, idx)
+            profile_labels.append(label)
+
+    elapsed = perf_counter() - start_time
+    if profile_labels:
+        preview = ", ".join(profile_labels[:5])
+        if len(profile_labels) > 5:
+            preview = f"{preview}, …"
+        session_summary = f" | sessions={preview}"
+    else:
+        session_summary = ""
+
+    logger.info(
+        "Market profile payloads ready | symbol=%s | profiles=%d | merged=%s | duration=%s%s",
+        symbol,
+        len(payloads),
+        use_merged,
+        _format_duration(elapsed),
+        session_summary,
+    )
 
     return payloads
 
@@ -105,10 +178,15 @@ class MarketProfileSignalGenerator:
         if self.symbol is None:
             raise ValueError("MarketProfileSignalGenerator requires a symbol for rule execution")
 
-        payloads = (
-            list(value_areas)
-            if value_areas is not None
-            else build_value_area_payloads(
+        start_time = perf_counter()
+
+        if value_areas is not None:
+            payloads = list(value_areas)
+            payload_source = "provided"
+            payload_duration = 0.0
+        else:
+            payload_start = perf_counter()
+            payloads = build_value_area_payloads(
                 self.indicator,
                 df,
                 interval=getattr(self.indicator, "interval", None),
@@ -116,14 +194,47 @@ class MarketProfileSignalGenerator:
                 merge_threshold=config.get("market_profile_merge_threshold"),
                 min_merge_sessions=config.get("market_profile_merge_min_sessions"),
             )
-        )
-        return run_indicator_rules(
+            payload_duration = perf_counter() - payload_start
+            payload_source = "computed"
+
+        if payloads:
+            logger.info(
+                "Market profile signal payload summaries (%d):",
+                len(payloads),
+            )
+            for idx, payload in enumerate(payloads, start=1):
+                logger.info(
+                    "  [%d] %s",
+                    idx,
+                    MarketProfileIndicator.describe_profile(payload),
+                )
+        else:
+            logger.info("Market profile signal payload summaries: none")
+
+        rules_start = perf_counter()
+        signals = run_indicator_rules(
             self.indicator,
             df,
             rule_payloads=payloads,
             symbol=self.symbol,
             **config,
         )
+        rules_duration = perf_counter() - rules_start
+        total_duration = perf_counter() - start_time
+
+        logger.info(
+            "Market profile signals | symbol=%s | profiles=%d | signals=%d | payload_source=%s | "
+            "durations[payloads=%s, rules=%s, total=%s]",
+            self.symbol,
+            len(payloads),
+            len(signals),
+            payload_source,
+            "n/a" if payload_source == "provided" else _format_duration(payload_duration),
+            _format_duration(rules_duration),
+            _format_duration(total_duration),
+        )
+
+        return signals
 
     @staticmethod
     def to_overlays(
@@ -330,28 +441,54 @@ def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"Confidence {percent}%"
 
 
+def _value_area_reference(area: Mapping[str, Any], index: int) -> str:
+    """Return a human-readable label for a value area payload."""
+
+    for key in (
+        "session_label",
+        "session",
+        "session_start",
+        "profile_start",
+        "date",
+        "value_area_id",
+    ):
+        value = area.get(key)
+        if value not in (None, ""):
+            return str(value)
+
+    return f"profile-{index + 1}"
+
+
 def _market_profile_overlay_adapter(
     signals: List[BaseSignal],
     plot_df: pd.DataFrame,
     **_: Any,
 ) -> List[Dict[str, Any]]:
-    logger.info("Converting %d signals to bubble overlays", len(signals))
+    start_time = perf_counter()
     bubbles: List[Dict[str, Any]] = []
+    summary = {
+        "total": len(signals),
+        "converted_breakout": 0,
+        "converted_retest": 0,
+        "skipped_source": 0,
+        "skipped_price": 0,
+        "skipped_time": 0,
+    }
 
     for idx, sig in enumerate(signals):
         metadata = sig.metadata or {}
         if metadata.get("source") != "MarketProfile":
-            logger.debug("Skipping signal %d: not from MarketProfile source", idx)
+            summary["skipped_source"] += 1
             continue
 
         level_price = _resolve_level_price(metadata)
         if level_price is None:
-            logger.debug("Skipping signal %d: unresolved level price", idx)
+            summary["skipped_price"] += 1
             continue
 
         marker_time = _to_epoch_seconds(sig.time)
         if marker_time is None:
-            logger.debug("Skipping signal %d: invalid signal time %s", idx, sig.time)
+            summary["skipped_time"] += 1
             continue
 
         level_label = _level_label(metadata)
@@ -385,13 +522,7 @@ def _market_profile_overlay_adapter(
                     "subtype": "bubble",
                 }
             )
-            logger.debug(
-                "Signal %d converted to retest bubble | level=%s | price=%.2f | direction=%s",
-                idx,
-                level_label,
-                float(anchor_price),
-                direction,
-            )
+            summary["converted_retest"] += 1
             continue
 
         breakout_direction = str(metadata.get("breakout_direction", "")).lower()
@@ -444,19 +575,27 @@ def _market_profile_overlay_adapter(
                 "subtype": "bubble",
             }
         )
-        logger.debug(
-            "Signal %d converted to breakout bubble | level=%s | price=%.2f | direction=%s",
-            idx,
-            level_label,
-            bubble_price,
-            breakout_direction,
-        )
+        summary["converted_breakout"] += 1
+
+    duration = perf_counter() - start_time
+    symbol = next((sig.symbol for sig in signals if getattr(sig, "symbol", None)), None)
+
+    logger.info(
+        "Market profile overlays | symbol=%s | total=%d | converted=%d (breakout=%d, retest=%d) | "
+        "skipped[source=%d, price=%d, time=%d] | duration=%s",
+        symbol,
+        summary["total"],
+        len(bubbles),
+        summary["converted_breakout"],
+        summary["converted_retest"],
+        summary["skipped_source"],
+        summary["skipped_price"],
+        summary["skipped_time"],
+        _format_duration(duration),
+    )
 
     if not bubbles:
-        logger.info("Converted 0 signals to overlays")
         return []
-
-    logger.info("Converted %d signals to overlays", len(bubbles))
     payload = {
         "price_lines": [],
         "markers": [],
