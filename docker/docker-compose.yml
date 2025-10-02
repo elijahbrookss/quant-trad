@@ -68,7 +68,7 @@ services:
 
   pgadmin:
     profiles: [database]
-    image: dpage/pgadmin4:8.12
+    image: dpage/pgadmin4:latest
     labels:
       loki.job: quanttrad
       loki.service: pgadmin
@@ -87,7 +87,7 @@ services:
 
   loki:
     profiles: [observability]
-    image: grafana/loki:2.9.8
+    image: grafana/loki:latest
     labels:
       loki.job: quanttrad
       loki.service: loki
@@ -101,7 +101,7 @@ services:
 
   promtail:
     profiles: [observability]
-    image: grafana/promtail:2.9.8
+    image: grafana/promtail:latest
     labels:
       loki.job: quanttrad
       loki.service: promtail
@@ -117,7 +117,7 @@ services:
 
   grafana:
     profiles: [observability]
-    image: grafana/grafana:10.4.6
+    image: grafana/grafana:latest
     labels:
       loki.job: quanttrad
       loki.service: grafana

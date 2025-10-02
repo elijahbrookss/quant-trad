@@ -27,7 +27,7 @@ export class PaneViewManager {
     if (this.series.has(type)) return;
     let view;
     if (type === PaneViewType.TOUCH)      view = createTouchPaneView(this.ts);
-    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { hatchOverlap: false, outlineFront: true });
+    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { hatchOverlap: true, outlineFront: true });
     else if (type === PaneViewType.SEGMENT) view = createSegmentPaneView(this.ts);
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
     else if (type === PaneViewType.SIGNAL_BUBBLE) view = createSignalBubblePaneView(this.ts);
