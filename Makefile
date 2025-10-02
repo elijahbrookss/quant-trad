@@ -164,6 +164,7 @@ stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|dat
 	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_DISPLAY))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d
 	@profiles="$(STACK_PROFILE_WORDS)"; \
+
 		if echo "$$profiles" | grep -qw core; then \
 		        echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
 		fi; \
@@ -188,6 +189,7 @@ stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild
 
 stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
 	@echo "📜 Tailing logs (profiles: $(STACK_PROFILE_DISPLAY))"
+
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) logs -f $(SERVICE)
 
 stack-ps: ## Show status for selected profiles
