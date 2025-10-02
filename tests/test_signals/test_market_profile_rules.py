@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -200,6 +202,21 @@ def test_breakout_evaluator_respects_indicator_extend_flag(sample_market_profile
     for meta in metas:
         assert meta["value_area_end"] == expected_end
         assert meta["value_area_end_index"] == expected_index
+
+
+def test_breakout_evaluator_logs_summary_when_debug_enabled(
+    sample_context, sample_value_area, caplog
+):
+    with caplog.at_level(logging.DEBUG, logger="MarketProfileRules"):
+        _value_area_breakout_evaluator(sample_context, sample_value_area)
+
+    summary_messages = [record.message for record in caplog.records if "mp_brk | summary" in record.message]
+    assert summary_messages, "Expected summary log entry"
+
+    message = summary_messages[-1]
+    assert "boundaries=[" in message
+    assert "VAH:metas=" in message
+    assert "VAL:metas=" in message
 
 
 def test_breakout_evaluator_ignores_triggers_past_value_area_end(sample_market_profile_df):
