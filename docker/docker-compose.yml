@@ -29,7 +29,7 @@ services:
       loki.job: quanttrad
       loki.service: backend
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app/src:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -63,7 +63,7 @@ services:
       loki.job: quanttrad
       loki.service: pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@quanttrad.local
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_LISTEN_ADDRESS: 0.0.0.0
     ports:
