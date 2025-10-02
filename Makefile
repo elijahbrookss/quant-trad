@@ -48,13 +48,8 @@ LOG_DIR     ?= logs
 ## ============================== HELP ==================================== ##
 .PHONY: help
 help: ## Show this help
-	@awk 'BEGIN {FS":.*##"; print "Usage: make <target>\n\nTargets:"} \
+	@awk 'BEGIN {FS=":.*##"; print "Usage: make <target>\n\nTargets:"} \
 	/^[a-zA-Z0-9_.-]+:.*##/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-
-## ============================ ORCHESTRATOR =============================== ##
-.PHONY: dev stop
-dev: venv deps dev-up frontend-start api-up  ## One-shot: venv+deps → infra → API → Frontend
-stop: api-stop frontend-stop dev-down           ## Stop API & Frontend, then infra
 
 ## ============================ BOOTSTRAP ================================= ##
 .PHONY: venv deps deps-dev freeze reset-venv _deps_hash _ensure_python _ensure_dirs
@@ -96,15 +91,28 @@ _ensure_python:
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
 
-## ============================== API ===================================== ##
-.PHONY: api-dev api-up api-start api-stop api-reload api-shell
-api-dev: venv deps ## Ensure venv+deps, then run API (reload)
-	@echo "🚀 API dev server"
-	$(PYTHON) -m uvicorn $(UVICORN_APP) $(UVICORN_OPTS)
+## ============================ LOCAL SETUP ================================ ##
+.PHONY: frontend-install local-setup local-up local-stop local-restart
 
-api-up: ## Run API only (assumes venv+deps)
-	@echo "🚀 API server (no bootstrap)"
-	$(PYTHON) -m uvicorn $(UVICORN_APP) --host 0.0.0.0 --port 8000
+frontend-install: ## Install frontend dependencies (npm install)
+	@[ -f "$(FRONT_DIR)/package.json" ] && { \
+		echo "📦 Installing frontend deps..."; \
+		$(NPM) --prefix $(FRONT_DIR) install; \
+	} || echo "ℹ️ No frontend package.json found at $(FRONT_DIR)"
+
+local-setup: venv deps frontend-install ## Prepare dependencies for a local (non-Docker) dev run
+	@echo "✅ Local dependencies ready"
+
+local-up: local-setup api-start frontend-start ## Start backend & frontend locally without Docker
+	@echo "🚀 Portal running locally (API: http://localhost:8000, Frontend: http://localhost:5173)"
+
+local-stop: api-stop frontend-stop ## Stop locally started backend & frontend
+	@echo "🛑 Local portal processes stopped"
+
+local-restart: local-stop local-up ## Restart locally started backend & frontend
+
+## ============================== API ===================================== ##
+.PHONY: api-start api-stop
 
 api-start: _ensure_dirs ## Start API in background (logs/PID managed)
 	@if pgrep -f "uvicorn.*$(UVICORN_APP)" >/dev/null; then \
@@ -112,7 +120,7 @@ api-start: _ensure_dirs ## Start API in background (logs/PID managed)
 	else \
 		echo "🚀 Starting API (logs: $(LOG_DIR)/api.log)"; \
 		nohup $(PYTHON) -m uvicorn $(UVICORN_APP) $(UVICORN_OPTS) \
-			>$(LOG_DIR)/api.log 2>&1 & echo $$! > $(PID_DIR)/api.pid; \
+		        >$(LOG_DIR)/api.log 2>&1 & echo $$! > $(PID_DIR)/api.pid; \
 		sleep 1; \
 		[ -s $(PID_DIR)/api.pid ] && echo "✅ API PID $$(cat $(PID_DIR)/api.pid)" || echo "⚠️ API PID not recorded"; \
 	fi
@@ -125,13 +133,6 @@ api-stop: ## Stop API (PID file preferred; fallback to pkill)
 	else \
 		pkill -f "uvicorn.*$(UVICORN_APP)" 2>/dev/null || true; \
 	fi
-
-api-reload: ## Touch file to trigger --reload
-	@touch backend/.reload && echo "♻️  Triggered reload"
-
-api-shell: venv ## Project-aware Python shell
-	@$(PYTHON) -q
-
 ## ============================ FRONTEND ================================== ##
 .PHONY: frontend-start frontend-stop
 frontend-start: _ensure_dirs ## Start Vite dev server in background
@@ -154,34 +155,21 @@ frontend-stop: ## Stop Vite dev server
 	fi
 
 ## ============================== DOCKER ================================== ##
-.PHONY: dev-up dev-down dev-logs dev-ps \
-stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild \
-stack-up-all stack-up-core stack-up-database stack-up-observability \
-stack-stop-all stack-stop-core stack-stop-database stack-stop-observability \
-stack-restart-all stack-restart-core stack-restart-database stack-restart-observability \
-compose-up compose-down compose-logs compose-ps compose-core compose-db compose-observability
-
-dev-up: stack-up-all ## Backwards-compatible alias for docker stack startup
-
-dev-down: stack-down-all ## Backwards-compatible alias for docker stack shutdown
-
-dev-logs: stack-logs ## Backwards-compatible alias for docker stack logs
-
-dev-ps: stack-ps ## Backwards-compatible alias for docker stack status
+.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_LIST))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d
 	@profiles="$(STACK_PROFILE_LIST)"; \
-	  if echo "$$profiles" | grep -qw core; then \
-	    echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
-	  fi; \
-	  if echo "$$profiles" | grep -qw database; then \
-	    echo "➡ TimescaleDB tcp://localhost:$(TSDB_PORT) | pgAdmin http://localhost:8080"; \
-	  fi; \
-	  if echo "$$profiles" | grep -qw observability; then \
-	    echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100"; \
-	  fi
+		if echo "$$profiles" | grep -qw core; then \
+		        echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
+		fi; \
+		if echo "$$profiles" | grep -qw database; then \
+		        echo "➡ TimescaleDB tcp://localhost:$(TSDB_PORT) | pgAdmin http://localhost:8080"; \
+		fi; \
+		if echo "$$profiles" | grep -qw observability; then \
+		        echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100"; \
+		fi
 
 stack-stop: ## Stop running services for selected profiles (containers remain)
 	@echo "🛑 Stopping stack (profiles: $(STACK_PROFILE_LIST))"
@@ -208,64 +196,6 @@ stack-build: ## Build images for selected profiles
 stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
 	@$(MAKE) stack-up STACK_PROFILES="$(STACK_PROFILES)"
-
-stack-up-all: ## Start entire stack (all profiles)
-	@$(MAKE) stack-up STACK_PROFILES=all
-
-stack-up-core: ## Start application services (frontend/backend + database)
-	@$(MAKE) stack-up STACK_PROFILES=core
-
-stack-up-database: ## Start database profile only
-	@$(MAKE) stack-up STACK_PROFILES=database
-
-stack-up-observability: ## Start observability tooling only
-	@$(MAKE) stack-up STACK_PROFILES=observability
-
-stack-stop-all: ## Stop every profile without removing containers
-	@$(MAKE) stack-stop STACK_PROFILES=all
-
-stack-stop-core: ## Stop application services (frontend/backend + database)
-	@$(MAKE) stack-stop STACK_PROFILES=core
-
-stack-stop-database: ## Stop database profile only
-	@$(MAKE) stack-stop STACK_PROFILES=database
-
-stack-stop-observability: ## Stop observability tooling only
-	@$(MAKE) stack-stop STACK_PROFILES=observability
-
-stack-restart-all: ## Restart entire stack (all profiles)
-	@$(MAKE) stack-restart STACK_PROFILES=all BUILD=$(BUILD)
-
-stack-restart-core: ## Restart application services (frontend/backend + database)
-	@$(MAKE) stack-restart STACK_PROFILES=core BUILD=$(BUILD)
-
-stack-restart-database: ## Restart database profile only
-	@$(MAKE) stack-restart STACK_PROFILES=database BUILD=$(BUILD)
-
-stack-restart-observability: ## Restart observability tooling only
-	@$(MAKE) stack-restart STACK_PROFILES=observability BUILD=$(BUILD)
-
-# Legacy aliases retained for compatibility
-compose-up: ## Start frontend, backend, database, and observability stacks
-	@$(MAKE) stack-up-all BUILD=$(BUILD)
-
-compose-down: ## Stop all docker stacks
-	@$(MAKE) stack-down STACK_PROFILES=all
-
-compose-logs: ## Tail logs from the active docker stack
-	@$(MAKE) stack-logs STACK_PROFILES=all SERVICE=$(SERVICE)
-
-compose-ps: ## Show status of running docker services
-	@$(MAKE) stack-ps STACK_PROFILES=all
-
-compose-core: ## Start the frontend and backend (database included for dependencies)
-	@$(MAKE) stack-up STACK_PROFILES=core BUILD=$(BUILD)
-
-compose-db: ## Start only the database services
-	@$(MAKE) stack-up STACK_PROFILES=database BUILD=$(BUILD)
-
-compose-observability: ## Start only Grafana, Loki, and Promtail
-	@$(MAKE) stack-up STACK_PROFILES=observability BUILD=$(BUILD)
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean
