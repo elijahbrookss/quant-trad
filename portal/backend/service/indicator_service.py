@@ -205,6 +205,42 @@ def _flatten_breakout_signal(signal: BaseSignal) -> Dict[str, Any]:
     return metadata
 
 
+def _build_market_profile_overlay_indicator(
+    indicator: MarketProfileIndicator,
+    df: pd.DataFrame,
+    *,
+    interval: Optional[str] = None,
+    symbol: Optional[str] = None,
+) -> MarketProfileIndicator:
+    """Create a fresh MarketProfileIndicator aligned with the overlay request window."""
+
+    runtime = MarketProfileIndicator(
+        df=df.copy(),
+        bin_size=getattr(indicator, "bin_size", 0.1),
+        mode=getattr(indicator, "mode", "tpo"),
+        interval=interval or getattr(indicator, "interval", "30m"),
+        extend_value_area_to_chart_end=getattr(
+            indicator,
+            "extend_value_area_to_chart_end",
+            True,
+        ),
+        use_merged_value_areas=getattr(indicator, "use_merged_value_areas", True),
+        merge_threshold=getattr(indicator, "merge_threshold", 0.6),
+        min_merge_sessions=getattr(
+            indicator,
+            "min_merge_sessions",
+            getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+        ),
+    )
+
+    if symbol is None:
+        symbol = getattr(indicator, "symbol", None)
+    if symbol is not None:
+        setattr(runtime, "symbol", symbol)
+
+    return runtime
+
+
 _BREAKOUT_CACHE_SPECS.update(
     {
         PivotLevelIndicator.NAME: BreakoutCacheSpec(
@@ -469,11 +505,40 @@ def overlays_for_instance(
     if df is None or df.empty:
         raise LookupError("No candles available for given window")
 
+    overlay_indicator = inst
+    if isinstance(inst, MarketProfileIndicator) and hasattr(inst, "to_lightweight"):
+        overlay_indicator = _build_market_profile_overlay_indicator(
+            inst,
+            df,
+            interval=interval,
+            symbol=sym,
+        )
+        logger.debug(
+            "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s",
+            inst_id,
+            sym,
+            interval,
+        )
+
     # Expect indicator to expose one of: to_lightweight(df) | to_overlays(df)
-    if hasattr(inst, "to_lightweight"):
-        payload = inst.to_lightweight(df)
-    elif hasattr(inst, "to_overlays"):
-        payload = inst.to_overlays(df)
+    if hasattr(overlay_indicator, "to_lightweight"):
+        payload = overlay_indicator.to_lightweight(
+            df,
+            use_merged=getattr(inst, "use_merged_value_areas", True),
+            merge_threshold=getattr(inst, "merge_threshold", 0.6),
+            min_merge=getattr(
+                inst,
+                "min_merge_sessions",
+                getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            ),
+            extend_boxes_to_chart_end=getattr(
+                inst,
+                "extend_value_area_to_chart_end",
+                True,
+            ),
+        )
+    elif hasattr(overlay_indicator, "to_overlays"):
+        payload = overlay_indicator.to_overlays(df)
     else:
         raise RuntimeError("Indicator does not implement overlay serialization")
 
