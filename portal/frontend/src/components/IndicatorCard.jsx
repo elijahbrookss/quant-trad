@@ -219,10 +219,10 @@ export default function IndicatorCard({
                           />
                         ))}
                       </div>
-                    </div>
+                  </div>
 
-                    <div className="grid gap-2 text-xs">
-                      <button
+                  <div className="grid gap-2 text-xs">
+                    <button
                         onClick={() => {
                           onEdit?.(indicator)
                           setConfirmingDelete(false)
