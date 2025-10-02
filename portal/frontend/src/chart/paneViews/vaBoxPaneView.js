@@ -1,12 +1,9 @@
 export function createVABoxPaneView(timeScaleApi, opts = {}) {
   const {
     hatchOverlap = true,
-    extendRight = true,
     outlineFront = false,
-    rightEdgeMode = 'last-bar',        // 'pane' | 'last-bar'
-  } = opts;  
+  } = opts;
   let boxes = []; // [{ x1, x2, y1, y2, color, border? }]
-  let rightEdgeTimeSec = null;     // set from outside when you know last candle time
 
   const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
   const withAlpha = (rgba, a) =>
@@ -21,15 +18,8 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
       const xLeft = leftCoord != null ? leftCoord * hpr : null;
       let xRight;
       const hasExplicitRight = b?.x2 != null;
-      if (!extendRight || hasExplicitRight) {
-        const rightCoord = timeScaleApi.timeToCoordinate(toSec(hasExplicitRight ? b.x2 : b.x1));
-        xRight = rightCoord != null ? rightCoord * hpr : null;
-      } else if (rightEdgeMode === 'last-bar' && rightEdgeTimeSec != null) {
-        const rightCoord = timeScaleApi.timeToCoordinate(rightEdgeTimeSec);
-        xRight = rightCoord != null ? rightCoord * hpr : null;
-      } else {
-        xRight = mediaWidth; // pane edge
-      }
+      const rightCoord = timeScaleApi.timeToCoordinate(toSec(hasExplicitRight ? b.x2 : b.x1));
+      xRight = rightCoord != null ? rightCoord * hpr : null;
       if (xLeft == null || xRight == null) continue;
 
       const y1 = priceToCoordinate(b.y1) * vpr;
@@ -113,6 +103,5 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     defaultOptions() { return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }; },
     destroy: () => {},
     setBoxes(arr) { boxes = Array.isArray(arr) ? arr : []; },
-    setRightEdgeTime(sec) { rightEdgeTimeSec = Number.isFinite(sec) ? sec : null; },
   };
 }
