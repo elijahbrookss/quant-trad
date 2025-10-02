@@ -14,8 +14,11 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY src /app/src
-COPY portal /app/portal
+COPY src/ /app/src
+COPY portal/ /app/portal
+
+RUN ls -la /app && ls -la /app/src || true
+
 
 EXPOSE 8000
 
