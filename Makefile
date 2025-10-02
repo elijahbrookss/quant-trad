@@ -19,6 +19,8 @@ NPM         ?= npm
 
 COMPOSE_FILE ?= docker/docker-compose.yml
 COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
+COMPOSE_BAKE ?= true
+export COMPOSE_BAKE
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
