@@ -78,11 +78,18 @@ Strategies can register the same indicator multiple times with different configu
 git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
 cd quant-trad
 
+# Copy credentials template and add your Alpaca keys (file stays local)
+cp secrets.env.example secrets.env
+# Then edit secrets.env with ALPACA_API_KEY and ALPACA_SECRET_KEY
+
 # Create dev setup
 make dev
 
 # Start core services (TimescaleDB, pgAdmin, Grafana, Loki)
-make setup 
+make setup
+
+# (Optional) Enable Loki log shipping when running the backend outside Docker Compose
+export LOKI_URL="http://localhost:3100"
 
 # Run tests
 make test            # or: make test-unit / make test-integration
@@ -92,3 +99,11 @@ make db_cli
 
 # Shut down services when done
 make shutdown
+```
+
+### Secrets configuration
+
+- `secrets.env` is ignored by Git but required locally for features that call the Alpaca API.
+- Start by copying `secrets.env.example` to `secrets.env` and populate `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`.
+- When you run `docker compose` the file is bind-mounted into the backend container, so your keys stay on the host machine while remaining available to the app.
+- Docker Compose automatically points the backend at the bundled Loki service via `LOKI_URL=http://loki:3100`. Override or unset this variable if you do not want container logs forwarded to Loki.
