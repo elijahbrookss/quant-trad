@@ -4,10 +4,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY package*.json ./
+COPY portal/frontend/package*.json ./
 RUN npm ci
 
-COPY . .
+COPY portal/frontend/ ./
 RUN npm run build
 
 FROM nginx:1.27-alpine

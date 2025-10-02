@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   frontend:
     profiles: [core]
@@ -31,7 +29,7 @@ services:
       loki.job: quanttrad
       loki.service: backend
     environment:
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app/src:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -52,7 +50,7 @@ services:
       POSTGRES_USER: quanttrad
       POSTGRES_PASSWORD: quanttrad
     ports:
-      - "5432:5432"
+      - "${TSDB_PORT:-15432}:5432"
     volumes:
       - tsdb-data:/var/lib/postgresql/data
     networks:
@@ -65,7 +63,7 @@ services:
       loki.job: quanttrad
       loki.service: pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@quanttrad.local
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_LISTEN_ADDRESS: 0.0.0.0
     ports:

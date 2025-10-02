@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim
+FROM python:3.12.3-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/app/src:${PYTHONPATH}"
 
 WORKDIR /app
 
@@ -13,6 +14,7 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+COPY src /app/src
 COPY portal /app/portal
 
 EXPOSE 8000
