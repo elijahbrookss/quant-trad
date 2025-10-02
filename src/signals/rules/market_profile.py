@@ -30,7 +30,7 @@ _BREAKOUT_READY_FLAG = "_market_profile_breakouts_ready"
 class MarketProfileBreakoutConfig:
     """Configuration for Market Profile breakout confirmations."""
 
-    confirmation_bars: int = 1
+    confirmation_bars: int = 3
     early_confirmation_window: int = 3
     early_confirmation_distance_pct: float = 0.01
 

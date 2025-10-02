@@ -49,11 +49,12 @@ def sample_context(sample_market_profile_df):
         "symbol": "TEST",
         "mode": "backtest",
         "market_profile_breakout_min_age_hours": 0,
-        "market_profile_breakout_confirmation_bars": 1,
     }
 
 
 def test_breakout_evaluator_detects_multiple_events(sample_context, sample_value_area, sample_market_profile_df):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
     metas = _value_area_breakout_evaluator(sample_context, sample_value_area)
     assert len(metas) == 2
 
@@ -307,6 +308,8 @@ def test_breakout_evaluator_live_mode_honours_confirmation(sample_value_area):
 
 
 def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_value_area):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
     breakouts = market_profile_breakout_rule(sample_context, sample_value_area)
     assert len(breakouts) == 2
     assert len(sample_context[_BREAKOUT_CACHE_KEY]) == 2
