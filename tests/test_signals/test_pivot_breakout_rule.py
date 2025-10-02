@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -5,7 +7,7 @@ pd = pytest.importorskip("pandas")
 from indicators.pivot_level import Level
 from signals.base import BaseSignal
 from signals.rules import PivotBreakoutConfig, pivot_breakout_rule
-from signals.rules.pivot import pivot_signals_to_overlays
+from signals.rules.pivot import _detect_retest, pivot_signals_to_overlays
 
 
 class DummyPivotIndicator:
@@ -60,6 +62,29 @@ def _build_dataframe_from_ohlc(rows):
         data["low"].append(float(low))
         data["close"].append(float(close))
         data["volume"].append(1000.0)
+
+    return pd.DataFrame(data, index=index)
+
+
+def _build_touch_dataframe(*, level_price: float, touch_after: Optional[int] = None, final_touch: Optional[int] = None) -> pd.DataFrame:
+    """Construct a dataframe with optional retest touches for confirmation tests."""
+
+    index = pd.date_range("2025-01-01", periods=7, freq="H")
+    base_prices = [level_price - 1.5, level_price - 0.7, level_price + 2.1, level_price + 1.8, level_price + 1.6, level_price + 1.5, level_price + 1.4]
+
+    lows = [price - 0.5 for price in base_prices]
+    if touch_after is not None and 0 <= touch_after < len(lows):
+        lows[touch_after] = level_price - 0.05
+    if final_touch is not None and 0 <= final_touch < len(lows):
+        lows[final_touch] = level_price - 0.02
+
+    data = {
+        "open": [price - 0.2 for price in base_prices],
+        "high": [price + 0.4 for price in base_prices],
+        "low": lows,
+        "close": base_prices,
+        "volume": [1000.0] * len(index),
+    }
 
     return pd.DataFrame(data, index=index)
 
@@ -362,3 +387,53 @@ def test_pivot_breakout_overlay_bubble_uses_support_color_after_flip():
     bubbles = overlays[0]["payload"]["bubbles"]
     support_bubble = next(b for b in bubbles if b["label"] == "Support breakdown")
     assert support_bubble["accentColor"] == "#22c55e"
+
+
+def test_detect_retest_requires_confirmation_bars():
+    level_price = 100.0
+    df = _build_touch_dataframe(level_price=level_price, touch_after=3)
+
+    breakout_meta = {
+        "level_price": level_price,
+        "breakout_direction": "above",
+        "trigger_time": df.index[2].to_pydatetime(),
+        "trigger_bar_index": 2,
+        "confirmation_bars_required": 3,
+    }
+
+    result = _detect_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=5,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert result is None
+
+
+def test_detect_retest_emits_after_confirmation_wait():
+    level_price = 100.0
+    df = _build_touch_dataframe(level_price=level_price, touch_after=3, final_touch=5)
+
+    breakout_meta = {
+        "level_price": level_price,
+        "breakout_direction": "above",
+        "trigger_time": df.index[2].to_pydatetime(),
+        "trigger_bar_index": 2,
+        "confirmation_bars_required": 3,
+    }
+
+    result = _detect_retest(
+        df,
+        breakout_meta,
+        tolerance_pct=0.0015,
+        max_bars=5,
+        min_bars=1,
+        mode="backtest",
+    )
+
+    assert result is not None
+    assert result["bars_since_breakout"] == 3
+    assert result["confirmation_bars_required"] == 3

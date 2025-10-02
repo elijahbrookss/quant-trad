@@ -39,6 +39,8 @@ class PivotBreakoutConfig:
 
 log = logging.getLogger("PivotBreakoutRule")
 
+_DEFAULT_RETEST_CONFIRMATION_BARS = 3
+
 _DEFAULT_CONFIG = PivotBreakoutConfig()
 _PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
 
@@ -478,7 +480,18 @@ def _detect_retest(
     if start_idx is None:
         return None
 
-    look_start = start_idx + max(min_bars, 1)
+    raw_confirmation = breakout_meta.get("confirmation_bars_required")
+    try:
+        confirmation_bars_required = int(raw_confirmation)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        confirmation_bars_required = _DEFAULT_RETEST_CONFIRMATION_BARS
+
+    if confirmation_bars_required < 0:
+        confirmation_bars_required = _DEFAULT_RETEST_CONFIRMATION_BARS
+
+    effective_min_bars = max(min_bars, confirmation_bars_required, 1)
+
+    look_start = start_idx + effective_min_bars
     if look_start >= len(df):
         return None
 
@@ -524,6 +537,7 @@ def _detect_retest(
             "level_kind": breakout_meta.get("level_kind"),
             "retest_role": "support" if breakout_direction == "above" else "resistance",
             "bars_since_breakout": bars_since,
+            "confirmation_bars_required": confirmation_bars_required,
             "retest_close": close,
             "retest_high": high,
             "retest_low": low,
