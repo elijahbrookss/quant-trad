@@ -322,12 +322,17 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             if start_ts is not None and trigger_ts < start_ts:
                 continue
 
+            if end_ts is not None and trigger_ts > end_ts:
+                continue
+
             if min_allowed_ts is not None and trigger_ts < min_allowed_ts:
                 continue
 
             breakout_start_ts = _normalise_meta_timestamp(meta.get("breakout_start"), tz)
             if breakout_start_ts is not None:
                 if start_ts is not None and breakout_start_ts < start_ts:
+                    continue
+                if end_ts is not None and breakout_start_ts > end_ts:
                     continue
                 if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
                     continue
@@ -379,6 +384,9 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 enriched["symbol"] = symbol
 
             trigger_idx = _resolve_breakout_bar_index(enriched, df)
+            if trigger_idx is not None:
+                if end_index is not None and trigger_idx > end_index:
+                    continue
             if trigger_idx is not None and trigger_idx > 0:
                 try:
                     enriched["prev_close"] = float(df.iloc[trigger_idx - 1]["close"])

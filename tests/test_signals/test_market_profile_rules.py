@@ -202,6 +202,33 @@ def test_breakout_evaluator_respects_indicator_extend_flag(sample_market_profile
         assert meta["value_area_end_index"] == expected_index
 
 
+def test_breakout_evaluator_ignores_triggers_past_value_area_end(sample_market_profile_df):
+    indicator = MarketProfileIndicator(
+        sample_market_profile_df,
+        extend_value_area_to_chart_end=False,
+    )
+    context = {
+        "indicator": indicator,
+        "df": sample_market_profile_df,
+        "symbol": "TEST",
+        "mode": "backtest",
+        "market_profile_breakout_min_age_hours": 0,
+    }
+
+    truncated_end = sample_market_profile_df.index[1]
+    value_area = {
+        "start": sample_market_profile_df.index[0],
+        "end": truncated_end,
+        "VAH": 102.0,
+        "VAL": 98.0,
+        "POC": 100.0,
+    }
+
+    metas = _value_area_breakout_evaluator(context, value_area)
+
+    assert metas == []
+
+
 def test_breakout_evaluator_live_mode_only_reports_latest(sample_value_area):
     index = pd.date_range("2025-01-02 09:30", periods=3, freq="15min", tz="UTC")
     data = {
