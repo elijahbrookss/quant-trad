@@ -78,6 +78,10 @@ Strategies can register the same indicator multiple times with different configu
 git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
 cd quant-trad
 
+# Copy credentials template and add your Alpaca keys (file stays local)
+cp secrets.env.example secrets.env
+# Then edit secrets.env with ALPACA_API_KEY and ALPACA_SECRET_KEY
+
 # Create dev setup
 make dev
 
@@ -92,3 +96,10 @@ make db_cli
 
 # Shut down services when done
 make shutdown
+```
+
+### Secrets configuration
+
+- `secrets.env` is ignored by Git but required locally for features that call the Alpaca API.
+- Start by copying `secrets.env.example` to `secrets.env` and populate `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`.
+- When you run `docker compose` the file is bind-mounted into the backend container, so your keys stay on the host machine while remaining available to the app.
