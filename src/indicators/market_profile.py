@@ -1,6 +1,7 @@
+import math
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Set, Any, Optional
+from typing import Dict, List, Tuple, Set, Any, Optional, Mapping
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 from mplfinance.plotting import make_addplot
@@ -13,7 +14,12 @@ from .config import DataContext
 
 def _ts_iso(ts) -> str:
     # Lightweight markers/lines in your app are fine with ISO8601 strings
-    return pd.Timestamp(ts).tz_convert("UTC").isoformat().replace("+00:00", "Z")
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    else:
+        stamp = stamp.tz_convert("UTC")
+    return stamp.isoformat().replace("+00:00", "Z")
 
 def _to_business_day_str(ts):
     return pd.Timestamp(ts).tz_convert("UTC").date().isoformat()
@@ -65,6 +71,53 @@ class MarketProfileIndicator(BaseIndicator):
         self.extend_value_area_to_chart_end = bool(extend_value_area_to_chart_end)
         self.use_merged_value_areas = bool(use_merged_value_areas)
         self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
+
+    @staticmethod
+    def describe_profile(profile: Mapping[str, Any]) -> str:
+        """Return a concise, human readable description for a market profile."""
+
+        def _format_ts(value: Any) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                return _ts_iso(value)
+            except Exception:
+                try:
+                    return pd.Timestamp(value).isoformat()
+                except Exception:
+                    return str(value)
+
+        def _format_price(value: Any) -> str:
+            numeric = None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "n/a"
+
+            if math.isnan(numeric) or math.isinf(numeric):
+                return "n/a"
+            return f"{numeric:.2f}"
+
+        start_ts = profile.get("start") or profile.get("start_date") or profile.get("date")
+        end_ts = profile.get("end") or profile.get("end_date") or start_ts
+
+        val = profile.get("VAL")
+        vah = profile.get("VAH")
+        poc = profile.get("POC")
+
+        session_count = profile.get("session_count") or profile.get("sessions")
+        if not session_count:
+            session_count = profile.get("sessionCount")
+
+        extra_bits = []
+        if session_count:
+            extra_bits.append(f"sessions={session_count}")
+
+        return (
+            f"start={_format_ts(start_ts)} | end={_format_ts(end_ts)} | "
+            f"VAL={_format_price(val)} | VAH={_format_price(vah)} | "
+            f"POC={_format_price(poc)}" + (" | " + ", ".join(extra_bits) if extra_bits else "")
+        )
 
     @classmethod
     def from_context(
@@ -222,7 +275,8 @@ class MarketProfileIndicator(BaseIndicator):
                     "end": end_ts,
                     "VAL": merged_val,
                     "VAH": merged_vah,
-                    "POC": avg_poc
+                    "POC": avg_poc,
+                    "session_count": count,
                 })
                 logger.info("Merged %d profiles: [%s → %s], VAL=%.2f, VAH=%.2f, avg POC=%.2f", count, start_ts, end_ts, merged_val, merged_vah, avg_poc if avg_poc else float('nan'))
             else:
@@ -231,6 +285,17 @@ class MarketProfileIndicator(BaseIndicator):
 
         self.merged_profiles = merged
         logger.info("Completed merging. Total merged profiles: %d", len(merged))
+
+        if profiles:
+            logger.info("Daily market profiles summary (%d):", len(profiles))
+            for idx, prof in enumerate(profiles, start=1):
+                logger.info("  [%d] %s", idx, self.describe_profile(prof))
+
+        if merged:
+            logger.info("Merged market profiles summary (%d):", len(merged))
+            for idx, prof in enumerate(merged, start=1):
+                logger.info("  [%d] %s", idx, self.describe_profile(prof))
+
         return merged
 
     def to_overlays(
