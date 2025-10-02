@@ -105,8 +105,6 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
-  const marketProfileSignals = chartState?.signalsConfig?.marketProfile || {}
-
   useEffect(() => {
     if (!Array.isArray(indicators)) {
       setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
@@ -372,18 +370,6 @@ export const IndicatorSection = ({ chartId }) => {
           changed = true
         }
 
-        const mpConfig = currentConfig.marketProfile
-        if (mpConfig && Object.prototype.hasOwnProperty.call(mpConfig, id)) {
-          const nextMarketProfile = { ...mpConfig }
-          delete nextMarketProfile[id]
-          if (Object.keys(nextMarketProfile).length > 0) {
-            nextConfig.marketProfile = nextMarketProfile
-          } else {
-            delete nextConfig.marketProfile
-          }
-          changed = true
-        }
-
         if (changed) {
           const remainingKeys = Object.keys(nextConfig)
           updateChart(chartId, {
@@ -405,41 +391,6 @@ export const IndicatorSection = ({ chartId }) => {
       return next;
     });
   };
-
-  const updateMarketProfileSignalsConfig = (indicatorId, patch = {}) => {
-    if (!indicatorId || typeof patch !== 'object') return;
-    const currentChart = getChart(chartId) || {};
-    const currentConfig = currentChart?.signalsConfig || {};
-    const currentMarketProfile = currentConfig?.marketProfile || {};
-    const existing = currentMarketProfile[indicatorId] || {};
-    const nextEntry = { ...existing, ...patch };
-
-    const cleaned = Object.fromEntries(
-      Object.entries(nextEntry).filter(([, value]) => value !== undefined && value !== null && !Number.isNaN(value)),
-    );
-
-    if (shallowEqualMap(existing, cleaned)) {
-      return;
-    }
-
-    const nextMarketProfile = { ...currentMarketProfile };
-    if (Object.keys(cleaned).length === 0) {
-      delete nextMarketProfile[indicatorId];
-    } else {
-      nextMarketProfile[indicatorId] = cleaned;
-    }
-
-    const nextSignalsConfig = { ...currentConfig };
-    if (Object.keys(nextMarketProfile).length === 0) {
-      delete nextSignalsConfig.marketProfile;
-    } else {
-      nextSignalsConfig.marketProfile = nextMarketProfile;
-    }
-
-    const nextKeys = Object.keys(nextSignalsConfig);
-    updateChart(chartId, { signalsConfig: nextKeys.length ? nextSignalsConfig : null });
-  };
-
 
   // Regenerate signals (not yet implemented)
   const generateSignals = async (id) => {
@@ -730,8 +681,6 @@ export const IndicatorSection = ({ chartId }) => {
                   onGenerateSignals={generateSignals}
                   onSelectColor={handleSelectColor}
                   colorSwatches={COLOR_SWATCHES}
-                  marketProfileConfig={marketProfileSignals[indicator.id] || null}
-                  onUpdateMarketProfileConfig={(patch) => updateMarketProfileSignalsConfig(indicator.id, patch)}
                   isGeneratingSignals={isGenerating}
                   disableSignalAction={disableSignals}
                 />
