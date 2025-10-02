@@ -25,6 +25,23 @@ export COMPOSE_BAKE
 TSDB_PORT ?= 15432
 export TSDB_PORT
 
+# Docker stack profile helpers
+STACK_PRESET_all           := core,database,observability
+STACK_PRESET_core          := core,database
+STACK_PRESET_database      := database
+STACK_PRESET_observability := observability
+STACK_PROFILES             ?= all
+
+define _resolve_profiles
+$(strip $(foreach item,$(subst ',', ,$(1)),$(if $(STACK_PRESET_$(item)),$(STACK_PRESET_$(item)),$(item))))
+endef
+
+STACK_PROFILE_LIST := $(call _resolve_profiles,$(STACK_PROFILES))
+STACK_PROFILE_ARGS := $(foreach profile,$(sort $(subst ',', ,$(STACK_PROFILE_LIST))),--profile $(profile))
+
+# Allow "make stack-up BUILD=1" to trigger docker compose --build
+STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
+
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
 
@@ -137,41 +154,118 @@ frontend-stop: ## Stop Vite dev server
 	fi
 
 ## ============================== DOCKER ================================== ##
-.PHONY: dev-up dev-down dev-logs dev-ps compose-up compose-down compose-logs compose-ps compose-core compose-db compose-observability
-dev-up: compose-up ## Backwards-compatible alias for docker stack startup
+.PHONY: dev-up dev-down dev-logs dev-ps \
+stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild \
+stack-up-all stack-up-core stack-up-database stack-up-observability \
+stack-stop-all stack-stop-core stack-stop-database stack-stop-observability \
+stack-restart-all stack-restart-core stack-restart-database stack-restart-observability \
+compose-up compose-down compose-logs compose-ps compose-core compose-db compose-observability
 
-dev-down: compose-down ## Backwards-compatible alias for docker stack shutdown
+dev-up: stack-up-all ## Backwards-compatible alias for docker stack startup
 
-dev-logs: compose-logs ## Backwards-compatible alias for docker stack logs
+dev-down: stack-down-all ## Backwards-compatible alias for docker stack shutdown
 
-dev-ps: compose-ps ## Backwards-compatible alias for docker stack status
+dev-logs: stack-logs ## Backwards-compatible alias for docker stack logs
 
+dev-ps: stack-ps ## Backwards-compatible alias for docker stack status
+
+stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
+	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_LIST))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d
+	@profiles="$(STACK_PROFILE_LIST)"; \
+	  if echo "$$profiles" | grep -qw core; then \
+	    echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
+	  fi; \
+	  if echo "$$profiles" | grep -qw database; then \
+	    echo "➡ TimescaleDB tcp://localhost:$(TSDB_PORT) | pgAdmin http://localhost:8080"; \
+	  fi; \
+	  if echo "$$profiles" | grep -qw observability; then \
+	    echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100"; \
+	  fi
+
+stack-stop: ## Stop running services for selected profiles (containers remain)
+	@echo "🛑 Stopping stack (profiles: $(STACK_PROFILE_LIST))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop
+
+stack-down: ## Remove containers for selected profiles
+	@echo "🧹 Removing stack (profiles: $(STACK_PROFILE_LIST))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans
+
+stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
+	@echo "♻️  Restarting stack (profiles: $(STACK_PROFILE_LIST))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d
+
+stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
+	@echo "📜 Tailing logs (profiles: $(STACK_PROFILE_LIST))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) logs -f $(SERVICE)
+
+stack-ps: ## Show status for selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) ps
+
+stack-build: ## Build images for selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build
+
+stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
+	@$(MAKE) stack-up STACK_PROFILES="$(STACK_PROFILES)"
+
+stack-up-all: ## Start entire stack (all profiles)
+	@$(MAKE) stack-up STACK_PROFILES=all
+
+stack-up-core: ## Start application services (frontend/backend + database)
+	@$(MAKE) stack-up STACK_PROFILES=core
+
+stack-up-database: ## Start database profile only
+	@$(MAKE) stack-up STACK_PROFILES=database
+
+stack-up-observability: ## Start observability tooling only
+	@$(MAKE) stack-up STACK_PROFILES=observability
+
+stack-stop-all: ## Stop every profile without removing containers
+	@$(MAKE) stack-stop STACK_PROFILES=all
+
+stack-stop-core: ## Stop application services (frontend/backend + database)
+	@$(MAKE) stack-stop STACK_PROFILES=core
+
+stack-stop-database: ## Stop database profile only
+	@$(MAKE) stack-stop STACK_PROFILES=database
+
+stack-stop-observability: ## Stop observability tooling only
+	@$(MAKE) stack-stop STACK_PROFILES=observability
+
+stack-restart-all: ## Restart entire stack (all profiles)
+	@$(MAKE) stack-restart STACK_PROFILES=all BUILD=$(BUILD)
+
+stack-restart-core: ## Restart application services (frontend/backend + database)
+	@$(MAKE) stack-restart STACK_PROFILES=core BUILD=$(BUILD)
+
+stack-restart-database: ## Restart database profile only
+	@$(MAKE) stack-restart STACK_PROFILES=database BUILD=$(BUILD)
+
+stack-restart-observability: ## Restart observability tooling only
+	@$(MAKE) stack-restart STACK_PROFILES=observability BUILD=$(BUILD)
+
+# Legacy aliases retained for compatibility
 compose-up: ## Start frontend, backend, database, and observability stacks
-	@$(COMPOSE_CMD) \
-		--profile core \
-		--profile database \
-		--profile observability \
-		up -d
-	@echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"
-	@echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100 | pgAdmin http://localhost:8080"
+	@$(MAKE) stack-up-all BUILD=$(BUILD)
 
 compose-down: ## Stop all docker stacks
-	@$(COMPOSE_CMD) down
+	@$(MAKE) stack-down STACK_PROFILES=all
 
 compose-logs: ## Tail logs from the active docker stack
-	@$(COMPOSE_CMD) logs -f
+	@$(MAKE) stack-logs STACK_PROFILES=all SERVICE=$(SERVICE)
 
 compose-ps: ## Show status of running docker services
-	@$(COMPOSE_CMD) ps
+	@$(MAKE) stack-ps STACK_PROFILES=all
 
 compose-core: ## Start the frontend and backend (database included for dependencies)
-	@$(COMPOSE_CMD) --profile core --profile database up -d
+	@$(MAKE) stack-up STACK_PROFILES=core BUILD=$(BUILD)
 
 compose-db: ## Start only the database services
-	@$(COMPOSE_CMD) --profile database up -d
+	@$(MAKE) stack-up STACK_PROFILES=database BUILD=$(BUILD)
 
 compose-observability: ## Start only Grafana, Loki, and Promtail
-	@$(COMPOSE_CMD) --profile observability up -d
+	@$(MAKE) stack-up STACK_PROFILES=observability BUILD=$(BUILD)
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean
