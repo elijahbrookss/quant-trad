@@ -17,8 +17,8 @@ UVICORN_OPTS?= --reload --host 0.0.0.0 --port 8000
 FRONT_DIR   ?= portal/frontend
 NPM         ?= npm
 
-DC_FILE     ?= docker/docker-compose.local.yml
-SERVICES    ?= timescaledb pgadmin grafana loki
+COMPOSE_FILE ?= docker/docker-compose.yml
+COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
@@ -132,21 +132,41 @@ frontend-stop: ## Stop Vite dev server
 	fi
 
 ## ============================== DOCKER ================================== ##
-.PHONY: dev-up dev-down dev-logs dev-ps
-dev-up: ## Start local infra (TimescaleDB, Grafana, Loki, pgAdmin)
-	@docker compose -f $(DC_FILE) up -d $(SERVICES)
-	@echo "⏳ Waiting for TimescaleDB..." && sleep 2
-	@echo "✅ TimescaleDB ready"
-	@echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100 | pgAdmin http://localhost:8080"
+.PHONY: dev-up dev-down dev-logs dev-ps compose-up compose-down compose-logs compose-ps compose-core compose-db compose-observability
+dev-up: compose-up ## Backwards-compatible alias for docker stack startup
 
-dev-down: ## Stop infra
-	@docker compose -f $(DC_FILE) down
+dev-down: compose-down ## Backwards-compatible alias for docker stack shutdown
 
-dev-logs: ## Tail docker logs
-	@docker compose -f $(DC_FILE) logs -f
+dev-logs: compose-logs ## Backwards-compatible alias for docker stack logs
 
-dev-ps: ## Show docker service status
-	@docker compose -f $(DC_FILE) ps
+dev-ps: compose-ps ## Backwards-compatible alias for docker stack status
+
+compose-up: ## Start frontend, backend, database, and observability stacks
+        @$(COMPOSE_CMD) \
+                --profile core \
+                --profile database \
+                --profile observability \
+                up -d
+        @echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"
+        @echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100 | pgAdmin http://localhost:8080"
+
+compose-down: ## Stop all docker stacks
+        @$(COMPOSE_CMD) down
+
+compose-logs: ## Tail logs from the active docker stack
+        @$(COMPOSE_CMD) logs -f
+
+compose-ps: ## Show status of running docker services
+        @$(COMPOSE_CMD) ps
+
+compose-core: ## Start the frontend and backend (database included for dependencies)
+        @$(COMPOSE_CMD) --profile core --profile database up -d
+
+compose-db: ## Start only the database services
+        @$(COMPOSE_CMD) --profile database up -d
+
+compose-observability: ## Start only Grafana, Loki, and Promtail
+        @$(COMPOSE_CMD) --profile observability up -d
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean

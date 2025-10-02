@@ -1,0 +1,138 @@
+version: "3.9"
+
+services:
+  frontend:
+    profiles: [core]
+    build:
+      context: ..
+      dockerfile: portal/frontend/Dockerfile
+    hostname: frontend.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: frontend
+    environment:
+      - VITE_API_BASE_URL=http://backend.quanttrad:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      quanttrad:
+        aliases:
+          - frontend.quanttrad
+
+  backend:
+    profiles: [core]
+    build:
+      context: ..
+      dockerfile: portal/backend/Dockerfile
+    hostname: backend.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: backend
+    environment:
+      - PYTHONPATH=/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - tsdb
+    networks:
+      quanttrad:
+        aliases:
+          - backend.quanttrad
+
+  tsdb:
+    profiles: [database]
+    image: timescale/timescaledb:2.14.2-pg15
+    labels:
+      loki.job: quanttrad
+      loki.service: tsdb
+    environment:
+      POSTGRES_DB: quanttrad
+      POSTGRES_USER: quanttrad
+      POSTGRES_PASSWORD: quanttrad
+    ports:
+      - "5432:5432"
+    volumes:
+      - tsdb-data:/var/lib/postgresql/data
+    networks:
+      - quanttrad
+
+  pgadmin:
+    profiles: [database]
+    image: dpage/pgadmin4:8.12
+    labels:
+      loki.job: quanttrad
+      loki.service: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@quanttrad.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_ADDRESS: 0.0.0.0
+    ports:
+      - "8080:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      - tsdb
+    networks:
+      - quanttrad
+
+  loki:
+    profiles: [observability]
+    image: grafana/loki:2.9.8
+    labels:
+      loki.job: quanttrad
+      loki.service: loki
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+    networks:
+      - quanttrad
+
+  promtail:
+    profiles: [observability]
+    image: grafana/promtail:2.9.8
+    labels:
+      loki.job: quanttrad
+      loki.service: promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    networks:
+      - quanttrad
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:10.4.6
+    labels:
+      loki.job: quanttrad
+      loki.service: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    depends_on:
+      - loki
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - quanttrad
+
+volumes:
+  tsdb-data:
+  pgadmin-data:
+  grafana-data:
+
+networks:
+  quanttrad:
+    driver: bridge
