@@ -50,7 +50,7 @@ services:
       POSTGRES_USER: quanttrad
       POSTGRES_PASSWORD: quanttrad
     ports:
-      - "5432:5432"
+      - "${TSDB_PORT:-15432}:5432"
     volumes:
       - tsdb-data:/var/lib/postgresql/data
     networks:

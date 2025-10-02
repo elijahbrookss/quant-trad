@@ -22,6 +22,9 @@ COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
 COMPOSE_BAKE ?= true
 export COMPOSE_BAKE
 
+TSDB_PORT ?= 15432
+export TSDB_PORT
+
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
 
