@@ -11,6 +11,13 @@ import pandas as pd
 
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
+from signals.rules.breakout import (
+    BreakoutRunState,
+    mark_breakout_emitted,
+    reset_breakout_state,
+    update_breakout_state,
+)
+from signals.rules.patterns import assign_rule_metadata
 
 
 @dataclass(frozen=True)
@@ -31,6 +38,8 @@ class PivotBreakoutConfig:
 
 
 log = logging.getLogger("PivotBreakoutRule")
+
+_DEFAULT_RETEST_CONFIRMATION_BARS = 3
 
 _DEFAULT_CONFIG = PivotBreakoutConfig()
 _PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
@@ -150,8 +159,7 @@ def _evaluate_level(
     confirmation_bars: int,
     *,
     mode: str = "backtest",
-    early_window: int,
-    early_distance_pct: float,
+    config: PivotBreakoutConfig,
 ) -> List[Dict[str, Any]]:
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
@@ -219,12 +227,7 @@ def _evaluate_level(
     last_idx_position = len(closes) - 1
     simulate_current_only = mode in {"sim", "live"}
 
-    consecutive = 0
-    candidate_start_pos: Optional[int] = None
-    candidate_max_distance = 0.0
-    active_side: Optional[str] = None
-    run_emitted = False
-    run_confirmed = False
+    state = BreakoutRunState()
     confirmed_side: Optional[str] = None
     current_run_prior_confirmed_side: Optional[str] = None
     results: List[Dict[str, Any]] = []
@@ -234,51 +237,33 @@ def _evaluate_level(
         sides.append(side)
 
         if side in {"at", "straddle"}:
-            if active_side is not None and run_confirmed:
-                confirmed_side = active_side
-            consecutive = 0
-            candidate_start_pos = None
-            candidate_max_distance = 0.0
-            active_side = None
-            run_emitted = False
-            run_confirmed = False
+            if state.active_side is not None and state.run_confirmed:
+                confirmed_side = state.active_side
+            reset_breakout_state(state)
             current_run_prior_confirmed_side = None
             continue
 
-        if active_side != side:
-            if active_side is not None and run_confirmed:
-                confirmed_side = active_side
-            active_side = side
-            candidate_start_pos = position
-            consecutive = 1
-            candidate_max_distance = clearance
-            run_emitted = False
-            run_confirmed = False
+        if state.active_side is not None and state.active_side != side and state.run_confirmed:
+            confirmed_side = state.active_side
+
+        if state.active_side != side:
             current_run_prior_confirmed_side = confirmed_side
-        else:
-            consecutive += 1
-            candidate_max_distance = max(candidate_max_distance, clearance)
 
-        breakout_start_pos = candidate_start_pos
+        result = update_breakout_state(
+            state,
+            side=side if side in {"above", "below"} else None,
+            clearance=clearance,
+            position=position,
+            level_price=level_price,
+            config=config,
+        )
 
-        if breakout_start_pos is None or run_emitted:
-            continue
+        if result.just_confirmed and result.active_side is not None:
+            confirmed_side = result.active_side
 
-        accelerated = False
-        ready = consecutive >= confirmation_bars
-        if not ready:
-            bars_since_start = position - breakout_start_pos + 1
-            threshold = abs(level_price) * early_distance_pct
-            if threshold > 0 and bars_since_start <= early_window:
-                if candidate_max_distance >= threshold:
-                    ready = True
-                    accelerated = True
+        breakout_start_pos = result.start_position
 
-        if ready and not run_confirmed:
-            run_confirmed = True
-            confirmed_side = active_side
-
-        if not ready:
+        if breakout_start_pos is None or not result.ready:
             continue
 
         if simulate_current_only and position != last_idx_position:
@@ -290,6 +275,7 @@ def _evaluate_level(
         last_bar = df.loc[breakout_end_idx]
 
         prior_confirmed_side = current_run_prior_confirmed_side
+        active_side = result.active_side
         if prior_confirmed_side == "above" and active_side == "below":
             detected_level_kind: Optional[str] = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
@@ -302,7 +288,7 @@ def _evaluate_level(
                 prior_confirmed_side,
                 active_side,
             )
-            run_emitted = True
+            mark_breakout_emitted(state)
             continue
 
         meta: Dict[str, Any] = {
@@ -311,14 +297,14 @@ def _evaluate_level(
             "level_price": level_price,
             "breakout_direction": active_side,
             "confirmation_bars_required": confirmation_bars,
-            "bars_closed_beyond_level": consecutive,
+            "bars_closed_beyond_level": result.consecutive,
             "breakout_start": _to_datetime(breakout_start_idx),
             "level_lookback": getattr(level, "lookback", None),
             "level_timeframe": getattr(level, "timeframe", None),
             "level_first_touched": _to_datetime(getattr(level, "first_touched", None)),
             "trigger_close": float(last_bar["close"]),
             "trigger_time": _to_datetime(breakout_end_idx),
-            "accelerated_confirmation": accelerated,
+            "accelerated_confirmation": result.accelerated,
             "prior_confirmed_side": prior_confirmed_side,
             "trigger_bar_index": position,
             "trigger_index_label": breakout_end_idx,
@@ -336,7 +322,7 @@ def _evaluate_level(
         )
 
         results.append(meta)
-        run_emitted = True
+        mark_breakout_emitted(state)
 
     if not results:
         log.debug(
@@ -422,8 +408,7 @@ def pivot_breakout_rule(
             level,
             confirmation_bars,
             mode=mode,
-            early_window=config.early_confirmation_window,
-            early_distance_pct=config.early_confirmation_distance_pct,
+            config=config,
         )
         if not metas:
             log.debug("%s | level_eval_complete | level=%s | breakout=False", run_id, level_id)
@@ -495,7 +480,18 @@ def _detect_retest(
     if start_idx is None:
         return None
 
-    look_start = start_idx + max(min_bars, 1)
+    raw_confirmation = breakout_meta.get("confirmation_bars_required")
+    try:
+        confirmation_bars_required = int(raw_confirmation)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        confirmation_bars_required = _DEFAULT_RETEST_CONFIRMATION_BARS
+
+    if confirmation_bars_required < 0:
+        confirmation_bars_required = _DEFAULT_RETEST_CONFIRMATION_BARS
+
+    effective_min_bars = max(min_bars, confirmation_bars_required, 1)
+
+    look_start = start_idx + effective_min_bars
     if look_start >= len(df):
         return None
 
@@ -541,6 +537,7 @@ def _detect_retest(
             "level_kind": breakout_meta.get("level_kind"),
             "retest_role": "support" if breakout_direction == "above" else "resistance",
             "bars_since_breakout": bars_since,
+            "confirmation_bars_required": confirmation_bars_required,
             "retest_close": close,
             "retest_high": high,
             "retest_low": low,
@@ -613,16 +610,22 @@ def pivot_retest_rule(context: Mapping[str, Any], payload: Any = None) -> List[D
     return results
 
 
-pivot_breakout_rule.signal_id = "pivot_breakout"
-pivot_breakout_rule.signal_label = "Breakout"
-pivot_breakout_rule.signal_description = (
-    "Detects when price closes beyond a pivot-derived level with confirmation."
+assign_rule_metadata(
+    pivot_breakout_rule,
+    rule_id="pivot_breakout",
+    label="Breakout",
+    description=(
+        "Detects when price closes beyond a pivot-derived level with confirmation."
+    ),
 )
 
-pivot_retest_rule.signal_id = "pivot_retest"
-pivot_retest_rule.signal_label = "Retest"
-pivot_retest_rule.signal_description = (
-    "Labels the first pullback to a freshly broken pivot level while it holds."
+assign_rule_metadata(
+    pivot_retest_rule,
+    rule_id="pivot_retest",
+    label="Retest",
+    description=(
+        "Labels the first pullback to a freshly broken pivot level while it holds."
+    ),
 )
 
 
@@ -835,52 +838,9 @@ def pivot_signals_to_overlays(
     ]
 
 
-def register_pivot_indicator(force: bool = False) -> None:
-    """Ensure the pivot breakout rule and overlays are registered with the engine."""
-
-    try:
-        from signals.engine import signal_generator
-    except ImportError:  # pragma: no cover - defensive guard
-        return
-
-    if not force and PivotLevelIndicator.NAME in signal_generator._REGISTRY:
-        registration = signal_generator._REGISTRY[PivotLevelIndicator.NAME]
-        if registration.overlay_adapter is not None:
-            return
-
-    from signals.engine.signal_generator import register_indicator_rules
-
-    try:
-        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
-        register_indicator_rules(
-            PivotLevelIndicator.NAME,
-            rules=desired_rules,
-            overlay_adapter=pivot_signals_to_overlays,
-        )
-    except ValueError:
-        desired_rules = (pivot_breakout_rule, pivot_retest_rule)
-        if force:
-            signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
-                rules=desired_rules,
-                overlay_adapter=pivot_signals_to_overlays,
-            )
-        else:
-            registration = signal_generator._REGISTRY.get(PivotLevelIndicator.NAME)
-            if registration is not None:
-                if tuple(registration.rules) != desired_rules or registration.overlay_adapter is None:
-                    signal_generator._REGISTRY[PivotLevelIndicator.NAME] = signal_generator.IndicatorRegistration(  # type: ignore[attr-defined]
-                        rules=desired_rules,
-                        overlay_adapter=pivot_signals_to_overlays,
-                    )
-
-
-register_pivot_indicator()
-
-
 __all__ = [
     "PivotBreakoutConfig",
     "pivot_breakout_rule",
     "pivot_retest_rule",
     "pivot_signals_to_overlays",
-    "register_pivot_indicator",
 ]

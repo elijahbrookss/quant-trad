@@ -136,7 +136,7 @@ function AppShell({ chartId }) {
   return (
     <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
         <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl flex-col gap-5 px-6 py-6 md:flex-row md:items-center md:justify-between">
+          <div className="mx-auto flex max-w-[1600px] flex-col gap-5 px-8 py-6 md:flex-row md:items-center md:justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-3 text-lg font-semibold text-slate-100">
                 <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-soft)]">QT</span>
@@ -158,7 +158,7 @@ function AppShell({ chartId }) {
           </div>
         </header>
 
-        <main className="mx-auto max-w-7xl space-y-20 px-6 py-12">
+        <main className="mx-auto max-w-[1600px] space-y-20 px-8 py-12">
           <section id="quantlab" className="space-y-10">
             <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
               <SectionHeading
@@ -236,7 +236,7 @@ function AppShell({ chartId }) {
         </main>
 
         <footer className="border-t border-white/5 bg-[#181b25]/80 py-8">
-          <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mx-auto flex max-w-[1600px] flex-col gap-4 px-8 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
             <p>QuantTrad Portal — unified intelligence for research, ops, and reporting.</p>
             <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
               <a

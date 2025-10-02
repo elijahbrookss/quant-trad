@@ -64,6 +64,68 @@ const toRgba = (hex, alpha = 0.12) => {
   return `rgba(${r},${g},${b},${clampedAlpha})`;
 };
 
+const coalesce = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+};
+
+const toFiniteNumber = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const toIsoFromSeconds = (value) => {
+  const numeric = toFiniteNumber(value);
+  if (numeric == null) return null;
+  try {
+    const date = new Date(numeric * 1000);
+    if (Number.isNaN(date.valueOf())) return null;
+    return date.toISOString();
+  } catch {
+    return null;
+  }
+};
+
+const formatPriceDisplay = (value) => {
+  const numeric = toFiniteNumber(value);
+  return numeric == null ? 'n/a' : numeric.toFixed(2);
+};
+
+const buildVaBoxSummaryText = ({
+  startSec,
+  endSec,
+  requestedEndSec,
+  val,
+  vah,
+  poc,
+  sessions,
+  valueAreaId,
+}) => {
+  const parts = [
+    `start=${toIsoFromSeconds(startSec) ?? 'n/a'}`,
+    `end=${toIsoFromSeconds(endSec) ?? 'n/a'}`,
+    `VAL=${formatPriceDisplay(val)}`,
+    `VAH=${formatPriceDisplay(vah)}`,
+  ];
+
+  if (poc != null) {
+    parts.push(`POC=${formatPriceDisplay(poc)}`);
+  }
+  if (sessions != null) {
+    parts.push(`sessions=${sessions}`);
+  }
+  if (valueAreaId != null) {
+    parts.push(`id=${valueAreaId}`);
+  }
+  if (requestedEndSec != null && requestedEndSec !== endSec) {
+    parts.push('extended_to_last_bar=true');
+  }
+
+  return parts.join(' | ');
+};
+
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
@@ -484,14 +546,16 @@ export const ChartComponent = ({ chartId }) => {
       // 3d) VA Boxes.
       if (paneViews.includes('va_box') && norm.boxes?.length) {
         const lastCandleSec = toSec(lastBarRef.current?.time);
-        const normalizedBoxes = norm.boxes.map((b, idxInGroup) => {
-          const x1 = toSec(b.x1);
-          const requestedX2 = toSec(b.x2);
+        const baseIndex = boxes.length;
+        const summaryEntries = [];
+        const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
+          const x1 = toSec(box.x1);
+          const requestedX2 = toSec(box.x2);
           const x2 = Number.isFinite(lastCandleSec) ? lastCandleSec : requestedX2;
 
           if (Number.isFinite(lastCandleSec) && lastCandleSec !== requestedX2) {
             overlayLogger.debug('va_box_span_adjusted', {
-              boxIndex: boxes.length + idxInGroup,
+              boxIndex: baseIndex + idxInGroup,
               x1,
               originalX2: requestedX2,
               forcedX2: x2,
@@ -499,13 +563,63 @@ export const ChartComponent = ({ chartId }) => {
             });
           }
 
+          const pocValue = toFiniteNumber(
+            coalesce(
+              box.poc,
+              box.POC,
+              box?.meta?.poc,
+              box?.metadata?.poc,
+            ),
+          );
+          const sessions = coalesce(
+            box.session_count,
+            box.sessions,
+            box.sessionCount,
+            box?.meta?.session_count,
+            box?.metadata?.session_count,
+          );
+          const valueAreaId = coalesce(
+            box.value_area_id,
+            box.valueAreaId,
+            box.value_areaId,
+            box.id,
+            box?.meta?.value_area_id,
+            box?.metadata?.value_area_id,
+          );
+          const label = coalesce(
+            box.label,
+            box.session_label,
+            box.session,
+            box.profile_label,
+          );
+          const sourceStart = coalesce(box.start, box.start_date, box.startDate);
+          const sourceEnd = coalesce(box.end, box.end_date, box.endDate);
+
+          const y1 = Number(box.y1);
+          const y2 = Number(box.y2);
+
+          summaryEntries.push({
+            index: baseIndex + idxInGroup + 1,
+            startSec: x1,
+            endSec: x2,
+            requestedEndSec: requestedX2,
+            val: Number.isFinite(y1) ? y1 : null,
+            vah: Number.isFinite(y2) ? y2 : null,
+            poc: pocValue,
+            sessions,
+            valueAreaId,
+            label,
+            sourceStart,
+            sourceEnd,
+          });
+
           return {
             x1,
             x2,
-            y1: Number(b.y1),
-            y2: Number(b.y2),
-            color: b.color,
-            border: b.border,
+            y1,
+            y2,
+            color: box.color,
+            border: box.border,
           };
         });
         boxes.push(...normalizedBoxes);
@@ -514,7 +628,7 @@ export const ChartComponent = ({ chartId }) => {
             ? Number(b.x2) - Number(b.x1)
             : null;
           overlayLogger.debug('va_box_applied', {
-            boxIndex: idx,
+            boxIndex: baseIndex + idx,
             x1: b.x1,
             x2: b.x2,
             y1: b.y1,
@@ -522,6 +636,23 @@ export const ChartComponent = ({ chartId }) => {
             width,
           });
         });
+
+        if (summaryEntries.length) {
+          overlayLogger.info('va_box_summary', {
+            appended: summaryEntries.length,
+            total: boxes.length,
+          });
+          summaryEntries.forEach((entry) => {
+            overlayLogger.info('va_box_summary_entry', {
+              index: entry.index,
+              detail: buildVaBoxSummaryText(entry),
+              valueAreaId: entry.valueAreaId ?? null,
+              label: entry.label ?? null,
+              sourceStart: entry.sourceStart ?? null,
+              sourceEnd: entry.sourceEnd ?? null,
+            });
+          });
+        }
       }
 
       if (paneViews.includes('segment') && norm.segments?.length) {

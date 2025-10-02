@@ -1,6 +1,7 @@
+import math
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Set, Any
+from typing import Dict, List, Tuple, Set, Any, Optional, Mapping
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 from mplfinance.plotting import make_addplot
@@ -13,7 +14,12 @@ from .config import DataContext
 
 def _ts_iso(ts) -> str:
     # Lightweight markers/lines in your app are fine with ISO8601 strings
-    return pd.Timestamp(ts).tz_convert("UTC").isoformat().replace("+00:00", "Z")
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    else:
+        stamp = stamp.tz_convert("UTC")
+    return stamp.isoformat().replace("+00:00", "Z")
 
 def _to_business_day_str(ts):
     return pd.Timestamp(ts).tz_convert("UTC").date().isoformat()
@@ -44,8 +50,19 @@ class MarketProfileIndicator(BaseIndicator):
     Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
     """
     NAME = "market_profile"
+    DEFAULT_MIN_MERGE_SESSIONS = 3
 
-    def __init__(self, df: pd.DataFrame, bin_size: float = 0.1, mode: str = "tpo", interval: str = "30m"):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        bin_size: float = 0.1,
+        mode: str = "tpo",
+        interval: str = "30m",
+        extend_value_area_to_chart_end: bool = True,
+        use_merged_value_areas: bool = True,
+        merge_threshold: float = 0.6,
+        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+    ):
         super().__init__(df)
         self.bin_size = bin_size
         self.mode = mode
@@ -53,9 +70,71 @@ class MarketProfileIndicator(BaseIndicator):
         self.daily_profiles = self._compute_daily_profiles()
         self.merged_profiles = []
         self.interval = interval
+        self.extend_value_area_to_chart_end = bool(extend_value_area_to_chart_end)
+        self.use_merged_value_areas = bool(use_merged_value_areas)
+        self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
+        self.min_merge_sessions = int(min_merge_sessions)
+
+    @staticmethod
+    def describe_profile(profile: Mapping[str, Any]) -> str:
+        """Return a concise, human readable description for a market profile."""
+
+        def _format_ts(value: Any) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                return _ts_iso(value)
+            except Exception:
+                try:
+                    return pd.Timestamp(value).isoformat()
+                except Exception:
+                    return str(value)
+
+        def _format_price(value: Any) -> str:
+            numeric = None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "n/a"
+
+            if math.isnan(numeric) or math.isinf(numeric):
+                return "n/a"
+            return f"{numeric:.2f}"
+
+        start_ts = profile.get("start") or profile.get("start_date") or profile.get("date")
+        end_ts = profile.get("end") or profile.get("end_date") or start_ts
+
+        val = profile.get("VAL")
+        vah = profile.get("VAH")
+        poc = profile.get("POC")
+
+        session_count = profile.get("session_count") or profile.get("sessions")
+        if not session_count:
+            session_count = profile.get("sessionCount")
+
+        extra_bits = []
+        if session_count:
+            extra_bits.append(f"sessions={session_count}")
+
+        return (
+            f"start={_format_ts(start_ts)} | end={_format_ts(end_ts)} | "
+            f"VAL={_format_price(val)} | VAH={_format_price(vah)} | "
+            f"POC={_format_price(poc)}" + (" | " + ", ".join(extra_bits) if extra_bits else "")
+        )
 
     @classmethod
-    def from_context(cls, provider, ctx: DataContext, bin_size: float = 0.1, mode: str = "tpo", interval: str = "30m"):
+    def from_context(
+        cls,
+        provider,
+        ctx: DataContext,
+        bin_size: float = 0.1,
+        mode: str = "tpo",
+        interval: str = "30m",
+        extend_value_area_to_chart_end: bool = True,
+        use_merged_value_areas: bool = True,
+        merge_threshold: float = 0.6,
+        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+    ):
         """
         Fetches OHLCV from provider and constructs the indicator.
         Raises ValueError if no data is available.
@@ -67,7 +146,16 @@ class MarketProfileIndicator(BaseIndicator):
         if df is None or df.empty:
             raise ValueError(f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest")
 
-        return cls(df=df, bin_size=bin_size, mode=mode)
+        return cls(
+            df=df,
+            bin_size=bin_size,
+            mode=mode,
+            interval=interval,
+            extend_value_area_to_chart_end=extend_value_area_to_chart_end,
+            use_merged_value_areas=use_merged_value_areas,
+            merge_threshold=merge_threshold,
+            min_merge_sessions=min_merge_sessions,
+        )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
         """
@@ -142,11 +230,28 @@ class MarketProfileIndicator(BaseIndicator):
         logger.debug("Extracted value area: POC=%.2f, VAH=%.2f, VAL=%.2f, total TPO=%d", poc_price, max(va_prices), min(va_prices), total)
         return {"POC": poc_price, "VAH": max(va_prices), "VAL": min(va_prices)}
 
-    def merge_value_areas(self, threshold: float = 0.6, min_merge: int = 2) -> List[Dict[str, float]]:
+    def merge_value_areas(
+        self,
+        threshold: Optional[float] = None,
+        min_merge: Optional[int] = None,
+    ) -> List[Dict[str, float]]:
         """
         Combine consecutive daily profiles whose value areas overlap
         at least `threshold` fraction, requiring at least `min_merge` days.
         """
+        if threshold is None:
+            threshold = getattr(self, "merge_threshold", 0.6)
+        threshold = float(threshold)
+
+        if min_merge is None:
+            min_merge = getattr(
+                self,
+                "min_merge_sessions",
+                getattr(self, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            )
+        else:
+            min_merge = int(min_merge)
+
         merged = []
         profiles = self.daily_profiles
         i, n = 0, len(profiles)
@@ -184,7 +289,8 @@ class MarketProfileIndicator(BaseIndicator):
                     "end": end_ts,
                     "VAL": merged_val,
                     "VAH": merged_vah,
-                    "POC": avg_poc
+                    "POC": avg_poc,
+                    "session_count": count,
                 })
                 logger.info("Merged %d profiles: [%s → %s], VAL=%.2f, VAH=%.2f, avg POC=%.2f", count, start_ts, end_ts, merged_val, merged_vah, avg_poc if avg_poc else float('nan'))
             else:
@@ -193,14 +299,32 @@ class MarketProfileIndicator(BaseIndicator):
 
         self.merged_profiles = merged
         logger.info("Completed merging. Total merged profiles: %d", len(merged))
+
+        if profiles:
+            logger.info("Daily market profiles summary (%d):", len(profiles))
+            for idx, prof in enumerate(profiles, start=1):
+                logger.info("  [%d] %s", idx, self.describe_profile(prof))
+
+        if merged:
+            logger.info("Merged market profiles summary (%d):", len(merged))
+            for idx, prof in enumerate(merged, start=1):
+                logger.info("  [%d] %s", idx, self.describe_profile(prof))
+
         return merged
 
-    def to_overlays(self, plot_df: pd.DataFrame, use_merged: bool = True) -> Tuple[List, Set[Tuple[str, str]]]:
+    def to_overlays(
+        self,
+        plot_df: pd.DataFrame,
+        use_merged: Optional[bool] = None,
+    ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
         Emit two kinds of overlay specs:
-        • kind="rect" → persistent VAH/VAL zones  
+        • kind="rect" → persistent VAH/VAL zones
         • kind="addplot" → POC horizontal line
         """
+        if use_merged is None:
+            use_merged = getattr(self, "use_merged_value_areas", True)
+
         profiles = self.merged_profiles if use_merged else self.daily_profiles
         if not profiles:
             logger.warning("No profiles to generate overlays.")
@@ -292,11 +416,12 @@ class MarketProfileIndicator(BaseIndicator):
     def to_lightweight(
         self,
         plot_df: pd.DataFrame,
-        use_merged: bool = True,
-        merge_threshold: float = 0.60,
-        min_merge: int = 3,
-        include_touches: bool = True, 
-        time_fmt="business_day"
+        use_merged: Optional[bool] = None,
+        merge_threshold: Optional[float] = None,
+        min_merge: Optional[int] = None,
+        include_touches: bool = True,
+        time_fmt="business_day",
+        extend_boxes_to_chart_end: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Return overlays in your portal's expected shape:
@@ -307,6 +432,7 @@ class MarketProfileIndicator(BaseIndicator):
         Notes:
         • 'time' is when the line starts; renderer should extend to the right.
         • Color will be recolored uniformly per-indicator on the client.
+        • Value-area boxes extend to the chart end unless extend_value_area_to_chart_end=False.
         """
         if plot_df is None or plot_df.empty:
             return {"price_lines": [], "markers": []}
@@ -317,10 +443,30 @@ class MarketProfileIndicator(BaseIndicator):
 
         fmt_time = _to_business_day_str if time_fmt == "business_day" else _to_unix_s
 
+        if extend_boxes_to_chart_end is None:
+            extend_boxes_to_chart_end = getattr(self, "extend_value_area_to_chart_end", True)
+        else:
+            extend_boxes_to_chart_end = bool(extend_boxes_to_chart_end)
+
+        if use_merged is None:
+            use_merged = getattr(self, "use_merged_value_areas", True)
+
+        if merge_threshold is None:
+            merge_threshold = getattr(self, "merge_threshold", 0.6)
+
         if use_merged:
             # compute merged profiles once if needed
             if not getattr(self, "merged_profiles", None):
-                self.merge_value_areas(threshold=merge_threshold, min_merge=min_merge)
+                default_min_merge = getattr(
+                    self,
+                    "min_merge_sessions",
+                    getattr(self, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+                )
+                effective_min_merge = default_min_merge if min_merge is None else int(min_merge)
+                self.merge_value_areas(
+                    threshold=merge_threshold,
+                    min_merge=effective_min_merge,
+                )
             profiles = self.merged_profiles or []
         else:
             profiles = self.daily_profiles or []
@@ -365,10 +511,17 @@ class MarketProfileIndicator(BaseIndicator):
             # start_iso = _ts_iso(start_ts)
             start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
             
-            # Boxes span from start to chart end
-            end_ts = pd.to_datetime(prof.get("end") or prof.get("end_date") or chart_end, utc=True)
-            if end_ts > chart_end:
+            if extend_boxes_to_chart_end:
                 end_ts = chart_end
+            else:
+                end_ts = pd.to_datetime(
+                    prof.get("end") or prof.get("end_date") or chart_end,
+                    utc=True,
+                )
+                if end_ts > chart_end:
+                    end_ts = chart_end
+            if end_ts < start_ts:
+                end_ts = start_ts
 
             out_boxes.append({
                 "x1": _to_unix_s(start_ts),   # epoch seconds
@@ -441,107 +594,3 @@ class MarketProfileIndicator(BaseIndicator):
             "markers": out_markers,
             "boxes": out_boxes
         }
-#Rules below
-
-def breakout_rule(context: Dict, va: Dict) -> List[Dict]:
-    df = context["df"]
-    symbol = context["symbol"]
-    results = []
-
-    logger = logging.getLogger("MarketProfileBreakoutRule")
-    logger.debug("Evaluating breakout_rule for symbol=%s, VA start=%s, VAH=%.2f, VAL=%.2f",
-                 symbol, va.get("start"), va.get("VAH"), va.get("VAL"))
-
-    va_start = va.get("start")
-    curr_time = df.index[-1]
-
-    if va_start is None or (curr_time - va_start) < pd.Timedelta(days=1):
-        logger.debug(
-            "Skipping VA starting at %s: less than 1 day old (age=%s)",
-            va_start, curr_time - va_start
-        )
-        return results
-
-
-    if len(df) < 2:
-        logger.info("Not enough bars in DataFrame (len=%d), skipping breakout evaluation.", len(df))
-        return results
-
-    prev_bar = df.iloc[-2]
-    curr_bar = df.iloc[-1]
-    curr_time = df.index[-1]
-
-    logger.debug(
-        "Prev close=%.2f, Curr close=%.2f, VAH=%.2f, VAL=%.2f",
-        prev_bar["close"], curr_bar["close"], va["VAH"], va["VAL"]
-    )
-
-    if va["VAL"] <= prev_bar["close"] <= va["VAH"]:
-        # Breakout ABOVE
-        if curr_bar["close"] > va["VAH"]:
-            logger.info(
-                "Breakout UP detected: prev_close=%.2f in VA, curr_close=%.2f > VAH=%.2f at %s",
-                prev_bar["close"], curr_bar["close"], va["VAH"], curr_time
-            )
-            results.append({
-                "source": "MarketProfile",
-                "type": "breakout",
-                "symbol": symbol,
-                "time": curr_time,
-                "level_type": "VAH",
-                "distance_pct": round((curr_bar["close"] - va["VAH"]) / va["VAH"], 4),
-                "direction": "up",
-                "trigger_price": curr_bar["close"],
-                "trigger_volume": curr_bar["volume"],
-                "trigger_open": curr_bar["open"],
-                "trigger_high": curr_bar["high"],
-                "trigger_low": curr_bar["low"],
-                "trigger_close": curr_bar["close"],
-                "bar_range": round(curr_bar["high"] - curr_bar["low"], 4),
-                "prev_close": prev_bar["close"],
-                "VAH": va["VAH"],
-                "VAL": va["VAL"],
-                "POC": va.get("POC"),
-                "session_start": va["start"]
-            })
-
-        # Breakout BELOW
-        elif curr_bar["close"] < va["VAL"]:
-            logger.info(
-                "Breakout DOWN detected: prev_close=%.2f in VA, curr_close=%.2f < VAL=%.2f at %s",
-                prev_bar["close"], curr_bar["close"], va["VAL"], curr_time
-            )
-            results.append({
-                "source": "MarketProfile",
-                "type": "breakout",
-                "symbol": symbol,
-                "time": curr_time,
-                "level_type": "VAL",
-                "distance_pct": round((va["VAL"] - curr_bar["close"]) / va["VAL"], 4),
-                "direction": "down",
-                "trigger_price": curr_bar["close"],
-                "trigger_volume": curr_bar["volume"],
-                "trigger_open": curr_bar["open"],
-                "trigger_high": curr_bar["high"],
-                "trigger_low": curr_bar["low"],
-                "trigger_close": curr_bar["close"],
-                "bar_range": round(curr_bar["high"] - curr_bar["low"], 4),
-                "prev_close": prev_bar["close"],
-                "VAH": va["VAH"],
-                "VAL": va["VAL"],
-                "POC": va.get("POC"),
-                "session_start": va["start"]
-            })
-        else:
-            logger.debug(
-                "No breakout: prev_close=%.2f in VA, curr_close=%.2f within VA bounds.",
-                prev_bar["close"], curr_bar["close"]
-            )
-    else:
-        logger.debug(
-            "No breakout: prev_close=%.2f not in VA (VAL=%.2f, VAH=%.2f).",
-            prev_bar["close"], va["VAL"], va["VAH"]
-        )
-
-    logger.debug("Breakout rule produced %d signal(s).", len(results))
-    return results

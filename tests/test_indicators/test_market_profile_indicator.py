@@ -44,7 +44,7 @@ def test_market_profile_indicator_integration_plot():
     assert isinstance(mpi.daily_profiles, list)
     assert mpi.daily_profiles, "Integration: daily_profiles is empty"
 
-    # Merge value areas (default threshold=0.6, min_merge=2)
+    # Merge value areas (default threshold=0.6, min_merge=3)
     merged = mpi.merge_value_areas()
     # merged_profiles may be empty if no consecutive overlaps exist, but daily_profiles must exist
     assert isinstance(merged, list)
@@ -245,3 +245,105 @@ def test_to_overlays_using_merge(dummy_df):
 
     # We expect 2 overlays (VAH, VAL) for that merged session
     assert len(overlays) == 2
+
+
+@pytest.mark.unit
+def test_to_lightweight_extends_boxes_to_chart_end_by_default(dummy_df):
+    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
+
+    start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
+    end = start + pd.Timedelta(hours=2)
+    chart_end = end + pd.Timedelta(hours=2)
+
+    mpi.daily_profiles = [
+        {
+            "start_date": start,
+            "end_date": end,
+            "VAL": 99.0,
+            "VAH": 101.0,
+            "POC": 100.0,
+        }
+    ]
+
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    payload = mpi.to_lightweight(
+        plot_df,
+        use_merged=False,
+        include_touches=False,
+    )
+
+    assert payload["boxes"], "Expected at least one value-area box"
+    box = payload["boxes"][0]
+    assert box["x2"] == int(chart_end.timestamp())
+
+
+@pytest.mark.unit
+def test_to_lightweight_can_limit_box_to_profile_end(dummy_df):
+    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
+
+    start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
+    end = start + pd.Timedelta(hours=1)
+    chart_end = end + pd.Timedelta(hours=3)
+
+    mpi.daily_profiles = [
+        {
+            "start_date": start,
+            "end_date": end,
+            "VAL": 99.0,
+            "VAH": 101.0,
+            "POC": 100.0,
+        }
+    ]
+
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    payload = mpi.to_lightweight(
+        plot_df,
+        use_merged=False,
+        include_touches=False,
+        extend_boxes_to_chart_end=False,
+    )
+
+    assert payload["boxes"], "Expected at least one value-area box"
+    box = payload["boxes"][0]
+    assert box["x2"] == int(end.timestamp())
+
+
+@pytest.mark.unit
+def test_to_lightweight_inherits_extend_flag_from_indicator(dummy_df):
+    mpi = MarketProfileIndicator(
+        dummy_df,
+        bin_size=1.0,
+        mode="tpo",
+        extend_value_area_to_chart_end=False,
+    )
+
+    start = pd.Timestamp("2025-01-02 09:30", tz="UTC")
+    end = start + pd.Timedelta(hours=2)
+    chart_end = end + pd.Timedelta(hours=3)
+
+    mpi.daily_profiles = [
+        {
+            "start_date": start,
+            "end_date": end,
+            "VAL": 95.0,
+            "VAH": 105.0,
+            "POC": 100.0,
+        }
+    ]
+
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    payload = mpi.to_lightweight(
+        plot_df,
+        use_merged=False,
+        include_touches=False,
+    )
+
+    assert payload["boxes"], "Expected at least one value-area box"
+    box = payload["boxes"][0]
+    assert box["x2"] == int(end.timestamp())

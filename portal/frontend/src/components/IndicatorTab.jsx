@@ -105,7 +105,6 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
-
   useEffect(() => {
     if (!Array.isArray(indicators)) {
       setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
@@ -355,13 +354,28 @@ export const IndicatorSection = ({ chartId }) => {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
       const currentConfig = getChart(chartId)?.signalsConfig
-      const enabledRules = currentConfig?.enabledRules
-      if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
-        const nextEnabled = { ...enabledRules }
-        delete nextEnabled[id]
-        updateChart(chartId, {
-          signalsConfig: { ...currentConfig, enabledRules: nextEnabled },
-        })
+      if (currentConfig && typeof currentConfig === 'object') {
+        const nextConfig = { ...currentConfig }
+        let changed = false
+
+        const enabledRules = currentConfig.enabledRules
+        if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
+          const nextEnabled = { ...enabledRules }
+          delete nextEnabled[id]
+          if (Object.keys(nextEnabled).length > 0) {
+            nextConfig.enabledRules = nextEnabled
+          } else {
+            delete nextConfig.enabledRules
+          }
+          changed = true
+        }
+
+        if (changed) {
+          const remainingKeys = Object.keys(nextConfig)
+          updateChart(chartId, {
+            signalsConfig: remainingKeys.length > 0 ? nextConfig : null,
+          })
+        }
       }
     } catch (e) {
       setError(e.message)
@@ -377,7 +391,6 @@ export const IndicatorSection = ({ chartId }) => {
       return next;
     });
   };
-
 
   // Regenerate signals (not yet implemented)
   const generateSignals = async (id) => {
@@ -628,7 +641,7 @@ export const IndicatorSection = ({ chartId }) => {
                 <select
                   value={typeFilter}
                   onChange={(event) => setTypeFilter(event.target.value)}
-                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 >
                   <option value="all">All types</option>
                   {typeOptions.map((type) => (
