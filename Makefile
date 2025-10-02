@@ -32,12 +32,15 @@ STACK_PRESET_database      := database
 STACK_PRESET_observability := observability
 STACK_PROFILES             ?= all
 
-define _resolve_profiles
-$(strip $(foreach item,$(subst ',', ,$(1)),$(if $(STACK_PRESET_$(item)),$(STACK_PRESET_$(item)),$(item))))
-endef
+empty :=
+space := $(empty) $(empty)
+comma := ,
 
-STACK_PROFILE_LIST := $(call _resolve_profiles,$(STACK_PROFILES))
-STACK_PROFILE_ARGS := $(foreach profile,$(sort $(subst ',', ,$(STACK_PROFILE_LIST))),--profile $(profile))
+STACK_PROFILES_EFFECTIVE := $(if $(strip $(STACK_PROFILES)),$(STACK_PROFILES),all)
+STACK_PROFILE_EXPANDED   := $(foreach token,$(subst $(comma), ,$(STACK_PROFILES_EFFECTIVE)),$(if $(strip $(token)),$(if $(STACK_PRESET_$(strip $(token))),$(STACK_PRESET_$(strip $(token))),$(strip $(token))),))
+STACK_PROFILE_WORDS      := $(filter-out ,$(subst $(comma), ,$(STACK_PROFILE_EXPANDED)))
+STACK_PROFILE_ARGS       := $(foreach profile,$(STACK_PROFILE_WORDS),--profile $(profile))
+STACK_PROFILE_DISPLAY    := $(if $(STACK_PROFILE_WORDS),$(subst $(space),$(comma) ,$(strip $(STACK_PROFILE_WORDS))),all)
 
 # Allow "make stack-up BUILD=1" to trigger docker compose --build
 STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
@@ -158,9 +161,10 @@ frontend-stop: ## Stop Vite dev server
 .PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
-	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_LIST))"
+	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_DISPLAY))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d
-	@profiles="$(STACK_PROFILE_LIST)"; \
+	@profiles="$(STACK_PROFILE_WORDS)"; \
+
 		if echo "$$profiles" | grep -qw core; then \
 		        echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
 		fi; \
@@ -172,19 +176,20 @@ stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|dat
 		fi
 
 stack-stop: ## Stop running services for selected profiles (containers remain)
-	@echo "🛑 Stopping stack (profiles: $(STACK_PROFILE_LIST))"
+	@echo "🛑 Stopping stack (profiles: $(STACK_PROFILE_DISPLAY))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop
 
 stack-down: ## Remove containers for selected profiles
-	@echo "🧹 Removing stack (profiles: $(STACK_PROFILE_LIST))"
+	@echo "🧹 Removing stack (profiles: $(STACK_PROFILE_DISPLAY))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans
 
 stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
-	@echo "♻️  Restarting stack (profiles: $(STACK_PROFILE_LIST))"
+	@echo "♻️  Restarting stack (profiles: $(STACK_PROFILE_DISPLAY))"
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d
 
 stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
-	@echo "📜 Tailing logs (profiles: $(STACK_PROFILE_LIST))"
+	@echo "📜 Tailing logs (profiles: $(STACK_PROFILE_DISPLAY))"
+
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) logs -f $(SERVICE)
 
 stack-ps: ## Show status for selected profiles
@@ -195,7 +200,7 @@ stack-build: ## Build images for selected profiles
 
 stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
-	@$(MAKE) stack-up STACK_PROFILES="$(STACK_PROFILES)"
+	@$(MAKE) stack-up STACK_PROFILES=$(STACK_PROFILES)
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean
