@@ -306,7 +306,7 @@ class PivotLevelIndicator(BaseIndicator):
     def to_lightweight(
         self,
         plot_df: pd.DataFrame,
-        color_mode: str = 'timeframe'
+        color_mode: str = 'timeframe',
     ) -> Dict[str, Any]:
         """
         Produce TradingView Lightweight Charts overlays:
