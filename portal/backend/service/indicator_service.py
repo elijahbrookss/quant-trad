@@ -522,33 +522,7 @@ def overlays_for_instance(
 
     # Expect indicator to expose one of: to_lightweight(df) | to_overlays(df)
     if hasattr(overlay_indicator, "to_lightweight"):
-        to_lightweight = overlay_indicator.to_lightweight
-        signature = inspect.signature(to_lightweight)
-        extra_kwargs: dict[str, Any] = {}
-
-        if len(signature.parameters) > 1:
-            param_names = set(signature.parameters.keys()) - {"df"}
-
-            def maybe_add(param: str, value: Any) -> None:
-                if param in param_names:
-                    extra_kwargs[param] = value
-
-            maybe_add("use_merged", getattr(inst, "use_merged_value_areas", True))
-            maybe_add("merge_threshold", getattr(inst, "merge_threshold", 0.6))
-            maybe_add(
-                "min_merge",
-                getattr(
-                    inst,
-                    "min_merge_sessions",
-                    getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-                ),
-            )
-            maybe_add(
-                "extend_boxes_to_chart_end",
-                getattr(inst, "extend_value_area_to_chart_end", True),
-            )
-
-        payload = to_lightweight(df, **extra_kwargs)
+        payload = overlay_indicator.to_lightweight(df)
     elif hasattr(overlay_indicator, "to_overlays"):
         payload = overlay_indicator.to_overlays(df)
     else:
