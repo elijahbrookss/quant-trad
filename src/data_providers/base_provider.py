@@ -16,6 +16,7 @@ load_dotenv("secrets.env")
 class DataSource(str, Enum):
     YFINANCE = "YFINANCE"
     ALPACA = "ALPACA"
+    CCXT = "CCXT"
     UNKNOWN = "UNKNOWN"
 
 

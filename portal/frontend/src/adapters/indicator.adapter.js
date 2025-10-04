@@ -96,12 +96,12 @@ export async function deleteIndicator(id) {
   return handleResponse(res)
 }
 
-export async function fetchIndicatorOverlays(id, { start, end, interval, symbol }) {
-  adapterLogger.debug('fetch_indicator_overlays_request', { id, start, end, interval, symbol })
+export async function fetchIndicatorOverlays(id, { start, end, interval, symbol, datasource, exchange }) {
+  adapterLogger.debug('fetch_indicator_overlays_request', { id, start, end, interval, symbol, datasource, exchange })
   const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ start, end, interval, symbol }),
+    body: JSON.stringify({ start, end, interval, symbol, datasource, exchange }),
     mode: 'cors',
   });
   return handleResponse(res);
@@ -109,7 +109,7 @@ export async function fetchIndicatorOverlays(id, { start, end, interval, symbol 
 
 export async function generateIndicatorSignals(
   id,
-  { start, end, interval, symbol, config } = {},
+  { start, end, interval, symbol, datasource, exchange, config } = {},
 ) {
   const payload = {
     start,
@@ -118,6 +118,8 @@ export async function generateIndicatorSignals(
   };
 
   if (symbol) payload.symbol = symbol;
+  if (datasource) payload.datasource = datasource;
+  if (exchange) payload.exchange = exchange;
 
   const cfgEntries = Object.entries(config || {}).filter(([, v]) => v !== undefined && v !== null);
   if (cfgEntries.length) {
