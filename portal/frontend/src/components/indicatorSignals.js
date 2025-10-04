@@ -95,6 +95,8 @@ export async function runSignalGeneration({
     start: startISO,
     end: endISO,
     interval: chartState.interval,
+    datasource: chartState.datasource,
+    exchange: chartState.exchange,
   });
 
   updateChart(chartId, { signalsLoading: true, signalsLoadingFor: indicator.id });
@@ -121,6 +123,8 @@ export async function runSignalGeneration({
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
+      datasource: chartState.datasource,
+      exchange: chartState.exchange,
       config,
     });
 

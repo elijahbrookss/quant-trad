@@ -12,6 +12,7 @@ mplfinance
 pandas-ta
 setuptools
 alpaca-py
+ccxt
 pytest
 requests
 pytest-cov
