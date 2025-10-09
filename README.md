@@ -105,5 +105,6 @@ make shutdown
 
 - `secrets.env` is ignored by Git but required locally for features that call the Alpaca API.
 - Start by copying `secrets.env.example` to `secrets.env` and populate `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`.
+- Optional: provide shared CCXT credentials (`CCXT_API_KEY`, `CCXT_API_SECRET`, `CCXT_PASSWORD`) or per-exchange overrides (e.g. `CCXT_BINANCE_API_KEY`) to unlock authenticated crypto feeds.
 - When you run `docker compose` the file is bind-mounted into the backend container, so your keys stay on the host machine while remaining available to the app.
 - Docker Compose automatically points the backend at the bundled Loki service via `LOKI_URL=http://loki:3100`. Override or unset this variable if you do not want container logs forwarded to Loki.

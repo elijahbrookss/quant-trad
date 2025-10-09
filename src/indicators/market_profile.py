@@ -55,7 +55,7 @@ class MarketProfileIndicator(BaseIndicator):
     def __init__(
         self,
         df: pd.DataFrame,
-        bin_size: float = 0.1,
+        bin_size: Optional[float] = None,
         mode: str = "tpo",
         interval: str = "30m",
         extend_value_area_to_chart_end: bool = True,
@@ -64,7 +64,9 @@ class MarketProfileIndicator(BaseIndicator):
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
     ):
         super().__init__(df)
-        self.bin_size = bin_size
+        self.bin_size = self._select_bin_size(df, bin_size)
+        self._bin_precision = self._infer_precision_from_step(self.bin_size)
+        self.price_precision = max(2, self._bin_precision)
         self.mode = mode
         # Compute raw daily profiles on initialization
         self.daily_profiles = self._compute_daily_profiles()
@@ -74,6 +76,77 @@ class MarketProfileIndicator(BaseIndicator):
         self.use_merged_value_areas = bool(use_merged_value_areas)
         self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
         self.min_merge_sessions = int(min_merge_sessions)
+
+    @staticmethod
+    def _normalize_step(value: float) -> float:
+        if not math.isfinite(value) or value <= 0:
+            return 0.1
+        exponent = math.floor(math.log10(value))
+        mantissa = value / (10 ** exponent)
+        if mantissa < 1.5:
+            mantissa = 1
+        elif mantissa < 3:
+            mantissa = 2
+        elif mantissa < 7:
+            mantissa = 5
+        else:
+            mantissa = 10
+        return mantissa * (10 ** exponent)
+
+    def _select_bin_size(self, df: pd.DataFrame, provided: Optional[float]) -> float:
+        if provided and provided > 0:
+            return float(provided)
+        return self._infer_bin_size(df)
+
+    def _infer_bin_size(self, df: pd.DataFrame) -> float:
+        highs = pd.to_numeric(df.get("high"), errors="coerce")
+        lows = pd.to_numeric(df.get("low"), errors="coerce")
+        closes = pd.to_numeric(df.get("close"), errors="coerce")
+
+        highs = highs.dropna()
+        lows = lows.dropna()
+        closes = closes.dropna()
+
+        if highs.empty or lows.empty:
+            return 0.1
+
+        span = float(highs.max() - lows.min())
+        if not math.isfinite(span) or span <= 0:
+            base_price = float(closes.median()) if not closes.empty else 1.0
+            span = max(abs(base_price) * 0.05, 1e-6)
+
+        spreads = (highs - lows).abs()
+        spreads = spreads.replace(0, np.nan).dropna()
+        characteristic = float(spreads.median()) if not spreads.empty else span / max(len(df), 1)
+        characteristic = max(characteristic, span / 50, 1e-8)
+
+        step = max(self._normalize_step(characteristic), 1e-8)
+
+        max_bins = 2000
+        if span / step > max_bins:
+            step = max(self._normalize_step(span / max_bins), 1e-8)
+
+        return step
+
+    @staticmethod
+    def _infer_precision_from_step(step: float) -> int:
+        if not math.isfinite(step) or step <= 0:
+            return 4
+        exponent = math.floor(math.log10(step))
+        if exponent >= 0:
+            return 2
+        return min(8, abs(exponent) + 2)
+
+    def _format_price(self, value: Any) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        if math.isnan(numeric) or math.isinf(numeric):
+            return "n/a"
+        return f"{numeric:.{self.price_precision}f}"
 
     @staticmethod
     def describe_profile(profile: Mapping[str, Any]) -> str:
@@ -90,7 +163,7 @@ class MarketProfileIndicator(BaseIndicator):
                 except Exception:
                     return str(value)
 
-        def _format_price(value: Any) -> str:
+        def _format_price(value: Any, precision: int) -> str:
             numeric = None
             try:
                 numeric = float(value)
@@ -99,7 +172,7 @@ class MarketProfileIndicator(BaseIndicator):
 
             if math.isnan(numeric) or math.isinf(numeric):
                 return "n/a"
-            return f"{numeric:.2f}"
+            return f"{numeric:.{precision}f}"
 
         start_ts = profile.get("start") or profile.get("start_date") or profile.get("date")
         end_ts = profile.get("end") or profile.get("end_date") or start_ts
@@ -107,6 +180,7 @@ class MarketProfileIndicator(BaseIndicator):
         val = profile.get("VAL")
         vah = profile.get("VAH")
         poc = profile.get("POC")
+        precision = int(profile.get("precision", 4))
 
         session_count = profile.get("session_count") or profile.get("sessions")
         if not session_count:
@@ -118,8 +192,8 @@ class MarketProfileIndicator(BaseIndicator):
 
         return (
             f"start={_format_ts(start_ts)} | end={_format_ts(end_ts)} | "
-            f"VAL={_format_price(val)} | VAH={_format_price(vah)} | "
-            f"POC={_format_price(poc)}" + (" | " + ", ".join(extra_bits) if extra_bits else "")
+            f"VAL={_format_price(val, precision)} | VAH={_format_price(vah, precision)} | "
+            f"POC={_format_price(poc, precision)}" + (" | " + ", ".join(extra_bits) if extra_bits else "")
         )
 
     @classmethod
@@ -127,7 +201,7 @@ class MarketProfileIndicator(BaseIndicator):
         cls,
         provider,
         ctx: DataContext,
-        bin_size: float = 0.1,
+        bin_size: Optional[float] = None,
         mode: str = "tpo",
         interval: str = "30m",
         extend_value_area_to_chart_end: bool = True,
@@ -176,11 +250,18 @@ class MarketProfileIndicator(BaseIndicator):
             value_area.update({
                 "date": pd.to_datetime(session_date),
                 "start_date": group.index.min(),
-                "end_date": group.index.max()
+                "end_date": group.index.max(),
+                "precision": self.price_precision,
             })
 
             profiles.append(value_area)
-            logger.info("Profile for %s: POC=%.2f, VAH=%.2f, VAL=%.2f", session_date, value_area["POC"], value_area["VAH"], value_area["VAL"])
+            logger.info(
+                "Profile for %s: POC=%s, VAH=%s, VAL=%s",
+                session_date,
+                self._format_price(value_area["POC"]),
+                self._format_price(value_area["VAH"]),
+                self._format_price(value_area["VAL"]),
+            )
 
         logger.info("Completed daily profile computation. Total profiles: %d", len(profiles))
         return profiles
@@ -194,10 +275,17 @@ class MarketProfileIndicator(BaseIndicator):
         tpo_counts = {}
         logger.debug("Building TPO histogram for session with %d bars", len(data))
         for _, row in data.iterrows():
-            low, high = row["low"], row["high"]
-            prices = np.arange(low, high + self.bin_size, self.bin_size)
+            low, high = float(row["low"]), float(row["high"])
+            if not math.isfinite(low) or not math.isfinite(high):
+                continue
+            if high < low:
+                low, high = high, low
+
+            step = self.bin_size
+            prices = np.arange(low, high + step * 1.0001, step)
             for price in prices:
-                bucket = round(price / self.bin_size) * self.bin_size
+                scaled = round(price / step)
+                bucket = round(scaled * step, self._bin_precision)
                 tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
         logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
         return tpo_counts
@@ -227,8 +315,18 @@ class MarketProfileIndicator(BaseIndicator):
             if cumulative >= threshold:
                 break
 
-        logger.debug("Extracted value area: POC=%.2f, VAH=%.2f, VAL=%.2f, total TPO=%d", poc_price, max(va_prices), min(va_prices), total)
-        return {"POC": poc_price, "VAH": max(va_prices), "VAL": min(va_prices)}
+        poc_price = round(float(poc_price), self.price_precision)
+        vah = round(float(max(va_prices)), self.price_precision)
+        val = round(float(min(va_prices)), self.price_precision)
+
+        logger.debug(
+            "Extracted value area: POC=%s, VAH=%s, VAL=%s, total TPO=%d",
+            self._format_price(poc_price),
+            self._format_price(vah),
+            self._format_price(val),
+            total,
+        )
+        return {"POC": poc_price, "VAH": vah, "VAL": val, "precision": self.price_precision}
 
     def merge_value_areas(
         self,
@@ -284,15 +382,27 @@ class MarketProfileIndicator(BaseIndicator):
 
             if count >= min_merge:
                 avg_poc = sum(poc_list) / len(poc_list) if poc_list else None
-                merged.append({
+                if avg_poc is not None:
+                    avg_poc = round(float(avg_poc), self.price_precision)
+                merged_payload = {
                     "start": start_ts,
                     "end": end_ts,
-                    "VAL": merged_val,
-                    "VAH": merged_vah,
+                    "VAL": round(float(merged_val), self.price_precision),
+                    "VAH": round(float(merged_vah), self.price_precision),
                     "POC": avg_poc,
                     "session_count": count,
-                })
-                logger.info("Merged %d profiles: [%s → %s], VAL=%.2f, VAH=%.2f, avg POC=%.2f", count, start_ts, end_ts, merged_val, merged_vah, avg_poc if avg_poc else float('nan'))
+                    "precision": self.price_precision,
+                }
+                merged.append(merged_payload)
+                logger.info(
+                    "Merged %d profiles: [%s → %s], VAL=%s, VAH=%s, avg POC=%s",
+                    count,
+                    start_ts,
+                    end_ts,
+                    self._format_price(merged_payload["VAL"]),
+                    self._format_price(merged_payload["VAH"]),
+                    self._format_price(avg_poc),
+                )
             else:
                 logger.debug("Merge group too small (%d < %d), skipping", count, min_merge)
             i = j
@@ -529,6 +639,8 @@ class MarketProfileIndicator(BaseIndicator):
                 "y1": float(val),             # VAL
                 "y2": float(vah),             # VAH
                 "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
+                "precision": prof.get("precision", self.price_precision),
+                "extend": bool(extend_boxes_to_chart_end),
             })
 
             logger.debug(

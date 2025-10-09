@@ -29,18 +29,24 @@ class IndicatorInstanceOut(BaseModel):
     params: Dict[str, Any]
     enabled: bool
     color: Optional[str] = None
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
 
 class OverlayRequest(BaseModel):
     start: str
     end: str
     interval: str
     symbol: Optional[str] = None  # optional override; defaults to stored
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
 
 class SignalRequest(BaseModel):
     start: str
     end: str
     interval: str
     symbol: Optional[str] = None
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
 
 # ===== Instances =====
@@ -116,6 +122,8 @@ async def overlays(inst_id: str, req: OverlayRequest):
             end=req.end,
             interval=req.interval,
             symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
         )
         return payload
     except KeyError:
@@ -141,6 +149,8 @@ async def signals(inst_id: str, req: SignalRequest):
             end=req.end,
             interval=req.interval,
             symbol=req.symbol,
+            datasource=req.datasource,
+            exchange=req.exchange,
             config=req.config,
         )
     except KeyError:

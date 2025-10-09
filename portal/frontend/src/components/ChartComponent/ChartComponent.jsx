@@ -17,6 +17,32 @@ import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 
+const DATASOURCE_OPTIONS = [
+  { id: 'ALPACA', label: 'Markets' },
+  { id: 'CCXT', label: 'Crypto' },
+];
+
+const MARKET_PROVIDERS = [
+  { id: 'alpaca', label: 'Alpaca (Equities)' },
+  { id: 'yfinance', label: 'Yahoo Finance' },
+];
+
+const CRYPTO_EXCHANGES = [
+  { id: 'binanceus', label: 'Binance US', category: 'CEX' },
+  { id: 'coinbase', label: 'Coinbase Advanced', category: 'CEX' },
+  { id: 'kraken', label: 'Kraken', category: 'CEX' },
+  { id: 'gemini', label: 'Gemini', category: 'CEX' },
+  { id: 'kucoin', label: 'KuCoin', category: 'CEX' },
+  { id: 'apex', label: 'Apex', category: 'DEX' },
+  { id: 'defx', label: 'DefX', category: 'DEX' },
+  { id: 'hyperliquid', label: 'Hyperliquid', category: 'DEX' },
+  { id: 'woofipro', label: 'woofipro', category: 'DEX' },
+  { id: 'wavesexchange', label: 'Waves Exchange', category: 'DEX' },
+];
+
+const DEFAULT_CRYPTO_EXCHANGE = 'binanceus';
+const DEFAULT_MARKET_PROVIDER = 'alpaca';
+
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
   const base = { timeVisible: true, secondsVisible: false };
@@ -88,9 +114,45 @@ const toIsoFromSeconds = (value) => {
   }
 };
 
-const formatPriceDisplay = (value) => {
+const formatPriceDisplay = (value, precision = 2) => {
   const numeric = toFiniteNumber(value);
-  return numeric == null ? 'n/a' : numeric.toFixed(2);
+  if (numeric == null) return 'n/a';
+  const digits = Math.min(Math.max(Number(precision) || 2, 2), 8);
+  return numeric.toFixed(digits);
+};
+
+const deriveCcxtPriceFormat = (candles = []) => {
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return null;
+  }
+
+  const values = [];
+  for (const c of candles) {
+    if (!c) continue;
+    const { open, high, low, close } = c;
+    [open, high, low, close].forEach((v) => {
+      if (Number.isFinite(v)) values.push(Math.abs(v));
+    });
+  }
+
+  if (!values.length) {
+    return null;
+  }
+
+  const reference = Math.max(...values);
+
+  let precision = 4;
+  if (reference >= 1000) precision = 2;
+  else if (reference >= 100) precision = 3;
+  else if (reference >= 10) precision = 4;
+  else if (reference >= 1) precision = 4;
+  else if (reference >= 0.1) precision = 5;
+  else if (reference >= 0.01) precision = 6;
+  else if (reference >= 0.001) precision = 7;
+  else precision = 8;
+
+  const minMove = Number((10 ** -precision).toFixed(precision));
+  return { type: 'price', precision, minMove };
 };
 
 const buildVaBoxSummaryText = ({
@@ -102,16 +164,17 @@ const buildVaBoxSummaryText = ({
   poc,
   sessions,
   valueAreaId,
+  precision,
 }) => {
   const parts = [
     `start=${toIsoFromSeconds(startSec) ?? 'n/a'}`,
     `end=${toIsoFromSeconds(endSec) ?? 'n/a'}`,
-    `VAL=${formatPriceDisplay(val)}`,
-    `VAH=${formatPriceDisplay(vah)}`,
+    `VAL=${formatPriceDisplay(val, precision)}`,
+    `VAH=${formatPriceDisplay(vah, precision)}`,
   ];
 
   if (poc != null) {
-    parts.push(`POC=${formatPriceDisplay(poc)}`);
+    parts.push(`POC=${formatPriceDisplay(poc, precision)}`);
   }
   if (sessions != null) {
     parts.push(`sessions=${sessions}`);
@@ -138,6 +201,8 @@ export const ChartComponent = ({ chartId }) => {
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
+  const [datasource, setDatasource] = useState('ALPACA');
+  const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
@@ -192,6 +257,36 @@ export const ChartComponent = ({ chartId }) => {
   const symbolRef = useRef(symbol);
   const intervalRef = useRef(interval);
   const dateRangeRef = useRef(dateRange);
+  const datasourceRef = useRef(datasource);
+  const exchangeRef = useRef(exchange);
+  const lastCryptoExchangeRef = useRef(DEFAULT_CRYPTO_EXCHANGE);
+  const lastMarketProviderRef = useRef(DEFAULT_MARKET_PROVIDER);
+
+  const handleDatasourceChange = useCallback((nextId) => {
+    setDatasource((prev) => {
+      if (prev === nextId) return prev;
+      return nextId;
+    });
+
+    if (nextId === 'CCXT') {
+      lastMarketProviderRef.current = exchangeRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
+      setExchange(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
+    } else {
+      lastCryptoExchangeRef.current = exchangeRef.current || lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE;
+      setExchange(lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER);
+    }
+  }, []);
+
+  const handleExchangeChange = useCallback((nextId) => {
+    setExchange(nextId);
+    if (nextId) {
+      if (datasourceRef.current === 'CCXT') {
+        lastCryptoExchangeRef.current = nextId;
+      } else {
+        lastMarketProviderRef.current = nextId;
+      }
+    }
+  }, []);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -208,10 +303,33 @@ export const ChartComponent = ({ chartId }) => {
     dateRangeRef.current = dateRange;
   }, [dateRange]);
 
-  const loadChartData = useCallback(async ({ targetSymbol, targetInterval, targetRange } = {}) => {
+  useEffect(() => {
+    datasourceRef.current = datasource;
+  }, [datasource]);
+
+  useEffect(() => {
+    exchangeRef.current = exchange;
+  }, [exchange]);
+
+  const showWarning = useCallback((message) => {
+    setRangeWarning(message);
+    if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
+    timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
+  }, []);
+
+  const loadChartData = useCallback(async ({
+    targetSymbol,
+    targetInterval,
+    targetRange,
+    targetDatasource,
+    targetExchange,
+  } = {}) => {
     const effectiveSymbol = targetSymbol ?? symbolRef.current;
     const effectiveInterval = targetInterval ?? intervalRef.current;
     const effectiveRange = targetRange ?? dateRangeRef.current;
+    const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || 'ALPACA';
+    const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
+    const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
     const [startDate, endDate] = effectiveRange || [];
     const startISO = startDate?.toISOString();
     const endISO = endDate?.toISOString();
@@ -219,22 +337,45 @@ export const ChartComponent = ({ chartId }) => {
     try {
       setDataLoading(true);
       if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
-        warn('chart_load_missing_inputs', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+        warn('chart_load_missing_inputs', {
+          symbol: effectiveSymbol,
+          interval: effectiveInterval,
+          startISO,
+          endISO,
+          datasource: effectiveDatasource,
+          exchange: effectiveExchange,
+        });
+        return;
+      }
+
+      if (effectiveDatasource === 'CCXT' && !effectiveExchange) {
+        warn('chart_load_missing_exchange', { symbol: effectiveSymbol, interval: effectiveInterval });
+        showWarning('Select a crypto exchange before loading data.');
         return;
       }
 
       markAttempt();
-      info('candles_fetch_start', { symbol: effectiveSymbol, interval: effectiveInterval, startISO, endISO });
+      info('candles_fetch_start', {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        startISO,
+        endISO,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
+      });
       const resp = await fetchCandleData({
         symbol: effectiveSymbol,
         timeframe: effectiveInterval,
         start: startISO,
         end: endISO,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange ?? undefined,
       });
 
       if (!Array.isArray(resp) || resp.length === 0) {
         warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
         markSuccess();
+        showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
         return;
       }
 
@@ -253,7 +394,15 @@ export const ChartComponent = ({ chartId }) => {
         return;
       }
 
-      seriesRef.current.setData(data);
+      if (seriesRef.current) {
+        if (effectiveDatasource === 'CCXT') {
+          const format = deriveCcxtPriceFormat(resp);
+          if (format) {
+            seriesRef.current.applyOptions({ priceFormat: format });
+          }
+        }
+        seriesRef.current.setData(data);
+      }
 
       lastBarRef.current = data.at(-1);
 
@@ -279,9 +428,21 @@ export const ChartComponent = ({ chartId }) => {
       if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
         const span = Math.max(1, last - first);
         const pad = Math.max(1, Math.floor(span * 0.05));
-        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
+        const scaleApi = chartRef.current.timeScale();
+        scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
+        scaleApi.scrollToPosition(0, false);
       } else {
         chartRef.current?.timeScale().scrollToRealTime();
+      }
+
+      try {
+        const priceScaleApi = typeof seriesRef.current?.priceScale === 'function'
+          ? seriesRef.current.priceScale()
+          : null;
+        priceScaleApi?.applyOptions?.({ autoScale: true });
+        priceScaleApi?.setAutoScale?.(true);
+      } catch (scaleErr) {
+        debug('price_scale_autoscale_failed', scaleErr);
       }
 
       info('candles_fetch_success', {
@@ -295,6 +456,8 @@ export const ChartComponent = ({ chartId }) => {
         symbol: effectiveSymbol,
         interval: effectiveInterval,
         dateRange: effectiveRange,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
         lastUpdatedAt: new Date().toISOString(),
       });
     } catch (e) {
@@ -303,7 +466,7 @@ export const ChartComponent = ({ chartId }) => {
     } finally {
       setDataLoading(false);
     }
-  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId]);
+  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug]);
 
   // Create chart once.
   useEffect(() => {
@@ -339,7 +502,13 @@ export const ChartComponent = ({ chartId }) => {
     loadChartData();
 
     if (!seededRef.current) {
-      updateChart?.(chartId, { symbol: initialSymbol, interval: initialInterval, dateRange: initialRange });
+      updateChart?.(chartId, {
+        symbol: initialSymbol,
+        interval: initialInterval,
+        dateRange: initialRange,
+        datasource: datasourceRef.current,
+        exchange: exchangeRef.current || null,
+      });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;
     }
@@ -551,16 +720,23 @@ export const ChartComponent = ({ chartId }) => {
         const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
           const x1 = toSec(box.x1);
           const requestedX2 = toSec(box.x2);
-          const x2 = Number.isFinite(lastCandleSec) ? lastCandleSec : requestedX2;
+          const extendBox = box.extend !== undefined ? Boolean(box.extend) : false;
+          let x2 = requestedX2;
 
-          if (Number.isFinite(lastCandleSec) && lastCandleSec !== requestedX2) {
-            overlayLogger.debug('va_box_span_adjusted', {
+          if (!Number.isFinite(x2)) {
+            if (extendBox && Number.isFinite(lastCandleSec)) {
+              x2 = lastCandleSec;
+            } else {
+              x2 = x1;
+            }
+          } else if (extendBox && Number.isFinite(lastCandleSec) && lastCandleSec > x2) {
+            overlayLogger.debug('va_box_span_extended', {
               boxIndex: baseIndex + idxInGroup,
               x1,
               originalX2: requestedX2,
-              forcedX2: x2,
-              lastCandle: lastCandleSec,
+              forcedX2: lastCandleSec,
             });
+            x2 = lastCandleSec;
           }
 
           const pocValue = toFiniteNumber(
@@ -597,6 +773,9 @@ export const ChartComponent = ({ chartId }) => {
 
           const y1 = Number(box.y1);
           const y2 = Number(box.y2);
+          const precision = Number.isFinite(Number(box.precision))
+            ? Math.min(Math.max(Number(box.precision), 2), 8)
+            : undefined;
 
           summaryEntries.push({
             index: baseIndex + idxInGroup + 1,
@@ -611,6 +790,7 @@ export const ChartComponent = ({ chartId }) => {
             label,
             sourceStart,
             sourceEnd,
+            precision,
           });
 
           return {
@@ -620,8 +800,9 @@ export const ChartComponent = ({ chartId }) => {
             y2,
             color: box.color,
             border: box.border,
+            precision: box.precision,
           };
-        });
+        }).filter(Boolean);
         boxes.push(...normalizedBoxes);
         normalizedBoxes.forEach((b, idx) => {
           const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
@@ -724,24 +905,49 @@ export const ChartComponent = ({ chartId }) => {
     const nextSymbol = overrides.symbol ?? symbol;
     const nextInterval = overrides.interval ?? interval;
     const nextRange = overrides.dateRange ?? dateRange;
+    const nextDatasource = overrides.datasource ?? datasource;
+    const nextExchange = overrides.exchange ?? exchange;
     const [start, end] = nextRange || [];
     const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
     const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
     if (windowMs > maxWindowMs) {
       warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
-      setRangeWarning('Please choose a window of 90 days or less before applying.');
-      if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
-      timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
+      showWarning('Please choose a window of 90 days or less before applying.');
+      return;
+    }
+
+    if (nextDatasource === 'CCXT' && !nextExchange) {
+      warn('apply_missing_exchange', { chartId, symbol: nextSymbol });
+      showWarning('Select a crypto exchange before loading data.');
       return;
     }
 
     setRangeWarning(null);
-    info('apply', { chartId, symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
+    info('apply', {
+      chartId,
+      symbol: nextSymbol,
+      interval: nextInterval,
+      dateRange: nextRange,
+      datasource: nextDatasource,
+      exchange: nextExchange,
+    });
     syncOverlays([]); // clear overlays on apply
-    updateChart?.(chartId, { symbol: nextSymbol, interval: nextInterval, dateRange: nextRange });
-    loadChartData({ targetSymbol: nextSymbol, targetInterval: nextInterval, targetRange: nextRange });
+    updateChart?.(chartId, {
+      symbol: nextSymbol,
+      interval: nextInterval,
+      dateRange: nextRange,
+      datasource: nextDatasource,
+      exchange: nextExchange || null,
+    });
+    loadChartData({
+      targetSymbol: nextSymbol,
+      targetInterval: nextInterval,
+      targetRange: nextRange,
+      targetDatasource: nextDatasource,
+      targetExchange: nextExchange,
+    });
     bumpRefresh?.(chartId);
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, warn, syncOverlays]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -797,6 +1003,61 @@ export const ChartComponent = ({ chartId }) => {
       <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-6 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
         <div className="flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end md:justify-between">
           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <div className="flex min-w-[13rem] flex-col gap-2">
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
+              <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
+                {DATASOURCE_OPTIONS.map((option) => {
+                  const isActive = datasource === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => handleDatasourceChange(option.id)}
+                      className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner' : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'}`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex min-w-[15rem] flex-col gap-2">
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Exchange</span>
+              {datasource === 'CCXT' ? (
+                <select
+                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+                  value={exchange || ''}
+                  onChange={(e) => handleExchangeChange(e.target.value)}
+                >
+                  {['CEX', 'DEX'].map((category) => (
+                    <optgroup
+                      key={category}
+                      label={category === 'CEX' ? 'Top Centralized Exchanges' : 'Top Decentralized Exchanges'}
+                    >
+                      {CRYPTO_EXCHANGES.filter((ex) => ex.category === category).map((ex) => (
+                        <option key={ex.id} value={ex.id}>
+                          {ex.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+                  value={exchange || DEFAULT_MARKET_PROVIDER}
+                  onChange={(e) => handleExchangeChange(e.target.value)}
+                >
+                  {MARKET_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
             <TimeframeSelect selected={interval} onChange={setInterval} />
             <SymbolInput value={symbol} onChange={setSymbol} />
             <div className="flex items-end gap-2">

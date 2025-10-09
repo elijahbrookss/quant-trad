@@ -28,10 +28,17 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
 
       const left   = Math.min(xLeft, xRight);
       const width  = Math.max(1, Math.abs(xRight - xLeft));
-      const top    = Math.min(y1, y2);
-      const height = Math.abs(y2 - y1);
+      let top    = Math.min(y1, y2);
+      let height = Math.abs(y2 - y1);
       const col    = b.color || 'rgba(156,163,175,0.18)';
       const brd    = b.border || { color: 'rgba(100,116,139,.45)', width: 1 };
+
+      const MIN_HEIGHT = 1;
+      if (height < MIN_HEIGHT) {
+        const mid = top + height / 2;
+        height = MIN_HEIGHT;
+        top = mid - MIN_HEIGHT / 2;
+      }
 
       pxRects.push({ left, top, width, height, color: col, border: brd });
 

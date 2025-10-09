@@ -14,7 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
-from data_providers.alpaca_provider import AlpacaProvider
+from data_providers.base_provider import DataSource
+from data_providers.factory import get_provider
 from indicators.config import DataContext
 from indicators.vwap import VWAPIndicator
 from indicators.pivot_level import PivotLevelIndicator
@@ -286,6 +287,20 @@ def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
         meta["color"] = None
     return meta
 
+
+def _normalize_datasource(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip().upper()
+    return cleaned or None
+
+
+def _normalize_exchange(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    return cleaned or None
+
 def _extract_ctor_params(inst) -> Dict[str, Any]:
     """Reflectively capture constructor params currently set on the instance."""
     sig = inspect.signature(inst.__class__.__init__)
@@ -394,7 +409,12 @@ def create_instance(
     ctx = DataContext(**ctx_kwargs)
     ctx.validate()
 
-    provider = AlpacaProvider()
+    datasource = _normalize_datasource(params.pop("datasource", None))
+    exchange = _normalize_exchange(params.pop("exchange", None))
+    if exchange and not datasource:
+        datasource = DataSource.CCXT.value
+
+    provider = get_provider(datasource, exchange=exchange)
 
     try:
         logger.info("event=indicator_create type=%s params=%s", type_str, params)
@@ -403,6 +423,10 @@ def create_instance(
         raise RuntimeError(f"Failed to instantiate indicator: {e}")
 
     captured = _extract_ctor_params(inst)
+    if datasource:
+        captured["datasource"] = datasource
+    if exchange:
+        captured["exchange"] = exchange
     inst_id = str(uuid.uuid4())
     meta = {
         "id": inst_id,
@@ -411,6 +435,9 @@ def create_instance(
         "enabled": True,
         "name": name or type_str.replace("_", " ").title(),
     }
+    meta["datasource"] = datasource or DataSource.ALPACA.value
+    if exchange:
+        meta["exchange"] = exchange
     meta["color"] = _normalize_color(color)
     _ensure_color(meta)
     _REGISTRY[inst_id] = {"meta": meta, "instance": inst}
@@ -450,13 +477,22 @@ def update_instance(
     ctx = DataContext(**ctx_kwargs)
     ctx.validate()
 
-    provider = AlpacaProvider()
+    datasource = _normalize_datasource(params.pop("datasource", entry["meta"].get("datasource")))
+    exchange = _normalize_exchange(params.pop("exchange", entry["meta"].get("exchange")))
+    if exchange and not datasource:
+        datasource = DataSource.CCXT.value
+
+    provider = get_provider(datasource, exchange=exchange)
     try:
         new_inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as e:
         raise RuntimeError(f"Failed to re-instantiate indicator: {e}")
 
     captured = _extract_ctor_params(new_inst)
+    if datasource:
+        captured["datasource"] = datasource
+    if exchange:
+        captured["exchange"] = exchange
     entry["instance"] = new_inst
     _purge_breakout_cache(inst_id)
     meta = _ensure_color(entry["meta"])
@@ -465,6 +501,11 @@ def update_instance(
         meta["name"] = name
     if color_provided:
         meta["color"] = _normalize_color(color)
+    meta["datasource"] = datasource or DataSource.ALPACA.value
+    if exchange:
+        meta["exchange"] = exchange
+    elif "exchange" in meta:
+        meta.pop("exchange", None)
     return meta
 
 def overlays_for_instance(
@@ -473,6 +514,8 @@ def overlays_for_instance(
     end: str,
     interval: str,
     symbol: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Compute Lightweight-Charts-ready overlays for an existing indicator UUID,
@@ -490,8 +533,21 @@ def overlays_for_instance(
     if not sym:
         raise ValueError("Stored indicator has no symbol and none was provided")
 
-    # fetch windowed OHLCV for overlay computation
-    provider = AlpacaProvider()
+    meta = entry["meta"]
+    stored_params = meta.get("params", {})
+    stored_datasource = _normalize_datasource(meta.get("datasource") or stored_params.get("datasource"))
+    stored_exchange = _normalize_exchange(meta.get("exchange") or stored_params.get("exchange"))
+
+    req_datasource = _normalize_datasource(datasource)
+    req_exchange = _normalize_exchange(exchange)
+
+    effective_datasource = req_datasource or stored_datasource
+    effective_exchange = req_exchange or stored_exchange
+
+    if effective_exchange and not effective_datasource:
+        effective_datasource = DataSource.CCXT.value
+
+    provider = get_provider(effective_datasource, exchange=effective_exchange)
     logger.info(
         "event=indicator_overlay_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
@@ -582,6 +638,8 @@ def generate_signals_for_instance(
     end: str,
     interval: str,
     symbol: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute registered signal rules for an indicator instance."""
@@ -596,7 +654,18 @@ def generate_signals_for_instance(
     if not sym:
         raise ValueError("Stored indicator has no symbol and none was provided")
 
-    provider = AlpacaProvider()
+    meta = entry["meta"]
+    stored_datasource = _normalize_datasource(meta.get("datasource") or base_params.get("datasource"))
+    stored_exchange = _normalize_exchange(meta.get("exchange") or base_params.get("exchange"))
+
+    req_datasource = _normalize_datasource(datasource)
+    req_exchange = _normalize_exchange(exchange)
+    effective_datasource = req_datasource or stored_datasource
+    effective_exchange = req_exchange or stored_exchange
+    if effective_exchange and not effective_datasource:
+        effective_datasource = DataSource.CCXT.value
+
+    provider = get_provider(effective_datasource, exchange=effective_exchange)
     logger.info(
         "event=indicator_signal_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
