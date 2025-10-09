@@ -6,9 +6,13 @@ set -e
 TIMEOUT=${DB_TIMEOUT:-120}
 START_TIME=$(date +%s)
 
-echo "Waiting for TimescaleDB to be ready (timeout: ${TIMEOUT}s)..."
+DB_HOST=${TSDB_HOST:-timescaledb}
+DB_PORT=${TSDB_PORT:-5432}
+DB_USER=${POSTGRES_USER:-postgres}
 
-until pg_isready -h timescaledb -p 5432 -U postgres; do
+echo "Waiting for TimescaleDB to be ready on ${DB_HOST}:${DB_PORT} (timeout: ${TIMEOUT}s)..."
+
+until pg_isready -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}"; do
   NOW=$(date +%s)
   ELAPSED=$((NOW - START_TIME))
 
