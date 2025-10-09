@@ -114,6 +114,10 @@ def test_build_tpo_histogram_and_extract_value_area(dummy_df):
     expected_hist = {99.0: 1, 100.0: 2, 101.0: 2, 102.0: 1}
     assert hist == expected_hist
 
+    # Regression: ensure the buckets align exactly with integer price levels
+    int_bucket_hist = {int(price): count for price, count in hist.items()}
+    assert int_bucket_hist == {99: 1, 100: 2, 101: 2, 102: 1}
+
     # 2) Extract the value area:
     va = mpi._extract_value_area(hist)
     assert va["POC"] == pytest.approx(100.0)

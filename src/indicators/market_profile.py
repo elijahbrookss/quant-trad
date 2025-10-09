@@ -282,8 +282,18 @@ class MarketProfileIndicator(BaseIndicator):
                 low, high = high, low
 
             step = self.bin_size
-            prices = np.arange(low, high + step * 1.0001, step)
-            for price in prices:
+            if step <= 0:
+                continue
+
+            tolerance = abs(step) * 1e-9
+            span = max(high - low, 0.0)
+            steps = int(math.floor(span / step + 1e-9))
+
+            for idx in range(steps + 1):
+                price = low + idx * step
+                if price > high + tolerance:
+                    break
+
                 scaled = round(price / step)
                 bucket = round(scaled * step, self._bin_precision)
                 tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
