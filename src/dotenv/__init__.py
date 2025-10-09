@@ -36,6 +36,7 @@ def load_dotenv(path: str | os.PathLike[str] | None = None) -> bool:
         if not key:
             continue
         value = value.strip().strip('"').strip("'")
+        value = os.path.expandvars(value)
         os.environ.setdefault(key, value)
         loaded = True
     return loaded
