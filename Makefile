@@ -95,7 +95,7 @@ _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
 
 ## ============================ LOCAL SETUP ================================ ##
-.PHONY: frontend-install local-setup local-up local-stop local-restart
+.PHONY: frontend-install local-setup local-up local-stop local-restart local-db-up local-db-stop
 
 frontend-install: ## Install frontend dependencies (npm install)
 	@[ -f "$(FRONT_DIR)/package.json" ] && { \
@@ -106,13 +106,33 @@ frontend-install: ## Install frontend dependencies (npm install)
 local-setup: venv deps frontend-install ## Prepare dependencies for a local (non-Docker) dev run
 	@echo "✅ Local dependencies ready"
 
-local-up: local-setup api-start frontend-start ## Start backend & frontend locally without Docker
-	@echo "🚀 Portal running locally (API: http://localhost:8000, Frontend: http://localhost:5173)"
+local-db-up: ## Start TimescaleDB (and companions) for local dev via Docker
+	@echo "🐘 Starting TimescaleDB via docker compose"
+	@$(COMPOSE_CMD) --profile database up -d tsdb pgadmin
+	@echo "⏳ Waiting for TimescaleDB to accept connections..."
+	@attempt=0; \
+	until $(COMPOSE_CMD) --profile database exec -T tsdb bash -c 'PGPASSWORD=quanttrad pg_isready -q -h localhost -p 5432 -d quanttrad -U quanttrad' >/dev/null 2>&1; do \
+		attempt=$$((attempt+1)); \
+		if [ $$attempt -ge 30 ]; then \
+			echo "❌ TimescaleDB readiness check failed"; \
+			exit 1; \
+		fi; \
+		echo "  ⏱️  waiting for TimescaleDB (attempt $$attempt)..."; \
+		sleep 1; \
+	done
+	@echo "✅ TimescaleDB ready on localhost:$(TSDB_PORT)"
 
-local-stop: api-stop frontend-stop ## Stop locally started backend & frontend
-	@echo "🛑 Local portal processes stopped"
+local-up: local-setup local-db-up api-start frontend-start ## Start backend & frontend locally, provisioning TimescaleDB via Docker
+	@echo "🚀 Portal running locally (API: http://localhost:8000, Frontend: http://localhost:5173, DB: localhost:$(TSDB_PORT))"
 
-local-restart: local-stop local-up ## Restart locally started backend & frontend
+local-db-stop: ## Stop TimescaleDB containers used for local dev
+	@echo "🛑 Stopping TimescaleDB containers"
+	@$(COMPOSE_CMD) --profile database stop tsdb pgadmin >/dev/null 2>&1 || true
+
+local-stop: api-stop frontend-stop local-db-stop ## Stop locally started backend, frontend, and TimescaleDB
+	@echo "🛑 Local portal processes stopped (including TimescaleDB)"
+
+local-restart: local-stop local-up ## Restart locally started backend, frontend, and TimescaleDB
 
 ## ============================== API ===================================== ##
 .PHONY: api-start api-stop
