@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from data_providers.alpaca_provider import AlpacaProvider
 from data_providers.base_provider import DataSource
 from data_providers.factory import get_provider
 from indicators.config import DataContext
