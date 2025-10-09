@@ -258,8 +258,10 @@ def _evaluate_level(
             config=config,
         )
 
+        prior_confirmed_side = current_run_prior_confirmed_side
         if result.just_confirmed and result.active_side is not None:
             confirmed_side = result.active_side
+            current_run_prior_confirmed_side = result.active_side
 
         breakout_start_pos = result.start_position
 
@@ -274,13 +276,19 @@ def _evaluate_level(
         breakout_end_idx = index
         last_bar = df.loc[breakout_end_idx]
 
-        prior_confirmed_side = current_run_prior_confirmed_side
         active_side = result.active_side
+        detected_level_kind: Optional[str] = None
         if prior_confirmed_side == "above" and active_side == "below":
-            detected_level_kind: Optional[str] = "support"
+            detected_level_kind = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
             detected_level_kind = "resistance"
-        else:
+        elif prior_confirmed_side is None:
+            if active_side == "above":
+                detected_level_kind = "resistance"
+            elif active_side == "below":
+                detected_level_kind = "support"
+
+        if detected_level_kind is None:
             log.debug(
                 "pivotbrk | level_skip | level=%s | reason=unconfirmed_prior_state | "
                 "prior_side=%s | active_side=%s",
