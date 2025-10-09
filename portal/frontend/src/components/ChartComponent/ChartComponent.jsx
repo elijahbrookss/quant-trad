@@ -28,19 +28,19 @@ const MARKET_PROVIDERS = [
 ];
 
 const CRYPTO_EXCHANGES = [
-  { id: 'binance', label: 'Binance', category: 'CEX' },
+  { id: 'binanceus', label: 'Binance US', category: 'CEX' },
   { id: 'coinbase', label: 'Coinbase Advanced', category: 'CEX' },
   { id: 'kraken', label: 'Kraken', category: 'CEX' },
-  { id: 'bybit', label: 'Bybit', category: 'CEX' },
+  { id: 'gemini', label: 'Gemini', category: 'CEX' },
   { id: 'kucoin', label: 'KuCoin', category: 'CEX' },
-  { id: 'uniswap', label: 'Uniswap', category: 'DEX' },
-  { id: 'sushiswap', label: 'SushiSwap', category: 'DEX' },
-  { id: 'pancakeswap1', label: 'PancakeSwap (v1)', category: 'DEX' },
-  { id: 'dydx', label: 'dYdX', category: 'DEX' },
-  { id: 'balancer', label: 'Balancer', category: 'DEX' },
+  { id: 'apex', label: 'Apex', category: 'DEX' },
+  { id: 'defx', label: 'DefX', category: 'DEX' },
+  { id: 'hyperliquid', label: 'Hyperliquid', category: 'DEX' },
+  { id: 'woofipro', label: 'woofipro', category: 'DEX' },
+  { id: 'wavesexchange', label: 'Waves Exchange', category: 'DEX' },
 ];
 
-const DEFAULT_CRYPTO_EXCHANGE = 'binance';
+const DEFAULT_CRYPTO_EXCHANGE = 'binanceus';
 const DEFAULT_MARKET_PROVIDER = 'alpaca';
 
 const deriveTimeScaleOptions = (rawInterval) => {
