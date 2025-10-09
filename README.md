@@ -101,6 +101,12 @@ make db_cli
 make shutdown
 ```
 
+### Database connection settings
+
+- Docker Compose publishes TimescaleDB on `localhost:${TSDB_PORT}` (the default is `15432`).
+- `.env` and `.env.test` define `TSDB_HOST`/`TSDB_PORT` and compose `PG_DSN` with those values so application code and helper scripts point at the same port.
+- If you customise the mapped port in `docker/docker-compose.yml` or `docker/docker-compose.test.yml`, update `TSDB_PORT` (and related DSNs) accordingly to keep the configuration in sync.
+
 ### Secrets configuration
 
 - `secrets.env` is ignored by Git but required locally for features that call the Alpaca API.
