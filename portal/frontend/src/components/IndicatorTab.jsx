@@ -215,13 +215,32 @@ export const IndicatorSection = ({ chartId }) => {
       if (!needPatch) return ind;
 
       try {
-        const nextParams = { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO };
+        const nextParams = {
+          ...p,
+          symbol: desiredSymbol,
+          interval: desiredInterval,
+          start: startISO,
+          end: endISO,
+          datasource: chartState?.datasource,
+          exchange: chartState?.exchange,
+        };
         const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
         return updated || { ...ind, params: nextParams };
       } catch (e) {
         warn('indicator_param_patch_failed', { indicatorId: ind.id, message: e?.message }, e);
         // fall back locally so overlays still align this session
-        return { ...ind, params: { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO } };
+        return {
+          ...ind,
+          params: {
+            ...p,
+            symbol: desiredSymbol,
+            interval: desiredInterval,
+            start: startISO,
+            end: endISO,
+            datasource: chartState?.datasource,
+            exchange: chartState?.exchange,
+          },
+        };
       }
     }));
 
@@ -239,6 +258,8 @@ export const IndicatorSection = ({ chartId }) => {
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
+      datasource: chartState?.datasource,
+      exchange: chartState?.exchange,
     };
 
     const results = await Promise.all(
@@ -259,6 +280,10 @@ export const IndicatorSection = ({ chartId }) => {
             msg.includes('No overlays computed')
           ) {
             warn('overlay_fetch_skipped', { indicatorId: ind.id, message: msg });
+            if (msg.includes('No candles available')) {
+              const label = ind?.name || formatIndicatorType(ind?.type);
+              setError(`No candles were available for ${label}. Adjust the chart range, timeframe, or datasource and try again.`);
+            }
             return null;
           }
           logError('overlay_fetch_failed', { indicatorId: ind.id }, e);
@@ -298,6 +323,8 @@ export const IndicatorSection = ({ chartId }) => {
         end: endISO,
         symbol: chartState?.symbol,
         interval: chartState?.interval,
+        datasource: chartState?.datasource,
+        exchange: chartState?.exchange,
       };
 
       let result;

@@ -10,15 +10,20 @@ const candleLogger = createLogger('CandleAdapter');
  * @param {string} params.timeframe
  * @param {string} params.start - ISO string
  * @param {string} params.end - ISO string
+ * @param {string} [params.datasource]
+ * @param {string} [params.exchange]
  * @returns {Promise<Array>} - array of candles
  */
-export async function fetchCandleData({ symbol, timeframe, start, end }) {
+export async function fetchCandleData({ symbol, timeframe, start, end, datasource, exchange }) {
   try {
-    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end });
+    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange });
+    const payload = { symbol, timeframe, start, end };
+    if (datasource) payload.datasource = datasource;
+    if (exchange) payload.exchange = exchange;
     const res = await fetch(`${API_BASE_URL}/api/candles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol, timeframe, start, end }),
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
