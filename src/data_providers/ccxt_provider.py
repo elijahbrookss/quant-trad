@@ -4,11 +4,7 @@ import datetime as dt
 from typing import Optional, Tuple, Union
 
 import pandas as pd
-
-try:
-    import ccxt
-except ModuleNotFoundError as exc:  # pragma: no cover - import guarded for optional dependency
-    raise RuntimeError("ccxt package is required for CCXTProvider") from exc
+import ccxt
 
 from core.logger import logger
 from .base_provider import BaseDataProvider
