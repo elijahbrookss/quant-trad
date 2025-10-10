@@ -278,15 +278,24 @@ def _evaluate_level(
 
         active_side = result.active_side
         detected_level_kind: Optional[str] = None
+        source_kind = getattr(level, "kind", None)
+        source_kind_key = str(source_kind).lower() if source_kind is not None else None
+
         if prior_confirmed_side == "above" and active_side == "below":
             detected_level_kind = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
             detected_level_kind = "resistance"
         elif prior_confirmed_side is None:
             if active_side == "above":
-                detected_level_kind = "resistance"
+                if source_kind_key in {"resistance", "pivot", "na", "none", ""}:
+                    detected_level_kind = "resistance"
+                elif source_kind_key is None:
+                    detected_level_kind = "resistance"
             elif active_side == "below":
-                detected_level_kind = "support"
+                if source_kind_key in {"support", "pivot", "na", "none", ""}:
+                    detected_level_kind = "support"
+                elif source_kind_key is None:
+                    detected_level_kind = "support"
 
         if detected_level_kind is None:
             log.debug(
@@ -296,7 +305,6 @@ def _evaluate_level(
                 prior_confirmed_side,
                 active_side,
             )
-            mark_breakout_emitted(state)
             continue
 
         meta: Dict[str, Any] = {
