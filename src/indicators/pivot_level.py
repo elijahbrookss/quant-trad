@@ -55,13 +55,22 @@ class PivotLevelIndicator(BaseIndicator):
     """
     NAME = 'pivot_level'
 
+    @staticmethod
+    def _normalise_confirmation_bars(value: Any) -> int:
+        try:
+            bars = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return bars if bars >= 1 else 1
+
     def __init__(
         self,
         df: pd.DataFrame,
         timeframe: str,
         lookbacks: Tuple[int, ...] = (10, 20, 50),
         threshold: float = 0.005,
-        days_back: int = 180
+        days_back: int = 180,
+        pivot_breakout_confirmation_bars: int = 1,
     ):
         """
         :param df: OHLC DataFrame indexed by timestamp
@@ -74,6 +83,9 @@ class PivotLevelIndicator(BaseIndicator):
         self.lookbacks = lookbacks
         self.threshold = threshold
         self.days_back = days_back
+        self.pivot_breakout_confirmation_bars = self._normalise_confirmation_bars(
+            pivot_breakout_confirmation_bars,
+        )
         self.levels: List[Level] = []
         self.trace_id = self._build_trace_id()
 
@@ -272,6 +284,7 @@ class PivotLevelIndicator(BaseIndicator):
         ctx: DataContext,
         timeframe: str,
         days_back: int = 180,
+        pivot_breakout_confirmation_bars: int = 1,
         **kwargs
     ):
         """
@@ -300,7 +313,13 @@ class PivotLevelIndicator(BaseIndicator):
             raise ValueError(
                 f"Data missing for {ctx.symbol} [{timeframe}]"
             )
-        return cls(df=df, timeframe=timeframe, **kwargs)
+        return cls(
+            df=df,
+            timeframe=timeframe,
+            days_back=days_back,
+            pivot_breakout_confirmation_bars=pivot_breakout_confirmation_bars,
+            **kwargs,
+        )
 
 
     def to_lightweight(
@@ -341,7 +360,7 @@ class PivotLevelIndicator(BaseIndicator):
                 "color": color,
                 "lineStyle": 2,             # Dashed
                 "lineWidth": 2,
-                "axisLabelVisible": True,
+                "axisLabelVisible": False,
                 "originTime": origin_ts     # for optional client logic
             })
 

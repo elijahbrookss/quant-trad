@@ -958,7 +958,7 @@ def pivot_signals_to_overlays(
                     "extend": "none",
                     "lineWidth": 1,
                     "lineStyle": 0,
-                    "axisLabelVisible": True,
+                    "axisLabelVisible": False,
                     "title": marker_label,
                     "originTime": _to_unix_seconds(origin_time),
                     "endTime": marker_time,
