@@ -436,31 +436,67 @@ class MarketProfileIndicator(BaseIndicator):
         self,
         plot_df: pd.DataFrame,
         use_merged: Optional[bool] = None,
+        merge_threshold: Optional[float] = None,
+        min_merge: Optional[int] = None,
+        extend_to_chart_end: Optional[bool] = None,
     ) -> Tuple[List, Set[Tuple[str, str]]]:
         """
         Emit two kinds of overlay specs:
         • kind="rect" → persistent VAH/VAL zones
         • kind="addplot" → POC horizontal line
         """
+        if plot_df is None or plot_df.empty:
+            return [], set()
+
+        plot_df = plot_df.copy()
+        plot_df.index = pd.to_datetime(plot_df.index, utc=True)
+
         if use_merged is None:
             use_merged = getattr(self, "use_merged_value_areas", True)
 
-        profiles = self.merged_profiles if use_merged else self.daily_profiles
+        if merge_threshold is None:
+            merge_threshold = getattr(self, "merge_threshold", 0.6)
+
+        if extend_to_chart_end is None:
+            extend_to_chart_end = getattr(self, "extend_value_area_to_chart_end", True)
+        else:
+            extend_to_chart_end = bool(extend_to_chart_end)
+
+        if use_merged:
+            default_min_merge = getattr(
+                self,
+                "min_merge_sessions",
+                getattr(self, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            )
+            effective_min_merge = default_min_merge if min_merge is None else int(min_merge)
+            if not getattr(self, "merged_profiles", None):
+                self.merge_value_areas(
+                    threshold=merge_threshold,
+                    min_merge=effective_min_merge,
+                )
+            profiles = self.merged_profiles or []
+            if not profiles:
+                profiles = self.daily_profiles or []
+        else:
+            profiles = self.daily_profiles or []
+
         if not profiles:
             logger.warning("No profiles to generate overlays.")
             return [], set()
 
-        overlays = []
-        legend_entries = set()
+        overlays: List[Dict[str, Any]] = []
+        legend_entries: Set[Tuple[str, str]] = set()
         full_idx = plot_df.index
+        chart_start = full_idx.min()
+        chart_end = full_idx.max()
 
         logger.info(
-            "event=market_profile_overlay_start profiles=%d use_merged=%s",
+            "event=market_profile_overlay_start profiles=%d use_merged=%s extend=%s",
             len(profiles),
             use_merged,
+            extend_to_chart_end,
         )
         for idx, prof in enumerate(profiles):
-            # Robustly get the start timestamp
             try:
                 start_ts = prof.get("start")
                 if start_ts is None:
@@ -478,41 +514,61 @@ class MarketProfileIndicator(BaseIndicator):
                 logger.warning("Profile %d missing VAL or VAH. Skipping overlay.", idx)
                 continue
 
-            plot_min = plot_df.index.min()
-            if start_ts < plot_min:
-                logger.debug("Adjusting rect start from %s to %s (plot start)", start_ts, plot_min)
-                start_ts = plot_min
+            start_ts = pd.to_datetime(start_ts, utc=True)
+            end_ts_source = prof.get("end") or prof.get("end_date")
+            end_ts = pd.to_datetime(end_ts_source, utc=True) if end_ts_source is not None else chart_end
 
-            # 1) persistent rectangle for VA zone
+            if extend_to_chart_end:
+                end_ts = chart_end
+            else:
+                if end_ts > chart_end:
+                    end_ts = chart_end
+                if end_ts < start_ts:
+                    end_ts = start_ts
+
+            if start_ts < chart_start:
+                logger.debug("Adjusting rect start from %s to %s (plot start)", start_ts, chart_start)
+                start_ts = chart_start
+
+            if start_ts > chart_end:
+                logger.debug("Profile %d start %s after chart_end %s. Skipping.", idx, start_ts, chart_end)
+                continue
+
             overlays.append({
                 "kind": "rect",
                 "start": start_ts,
-                "val": val,
-                "vah": vah,
+                "end": end_ts,
+                "val": float(val),
+                "vah": float(vah),
                 "color": "gray",
-                "alpha": 0.2
+                "alpha": 0.2,
             })
             legend_entries.add(("Value Area", "gray"))
             logger.debug(
-                "event=market_profile_rect start=%s val=%.4f vah=%.4f",
+                "event=market_profile_rect start=%s end=%s val=%.4f vah=%.4f",
                 start_ts,
-                val,
-                vah,
+                end_ts,
+                float(val),
+                float(vah),
             )
 
-            # 2) optional POC line as an addplot
             if poc is not None:
                 poc_series = pd.Series(index=full_idx, dtype=float)
-                poc_series.loc[full_idx >= start_ts] = poc
+                mask = full_idx >= start_ts
+                if not extend_to_chart_end:
+                    mask = mask & (full_idx <= end_ts)
+                poc_series.loc[mask] = float(poc)
 
                 ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
                 overlays.append({"kind": "addplot", "plot": ap})
                 legend_entries.add(("POC", "orange"))
                 logger.debug(
-                    "event=market_profile_poc start=%s poc=%.4f",
+                    "event=market_profile_poc start=%s end=%s poc=%.4f",
                     start_ts,
-                    poc,
+                    end_ts,
+                    float(poc),
                 )
+
         logger.info("event=market_profile_overlay_complete overlays=%d", len(overlays))
         return overlays, legend_entries
 

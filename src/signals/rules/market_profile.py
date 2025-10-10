@@ -33,6 +33,8 @@ class MarketProfileBreakoutConfig:
     confirmation_bars: int = 3
     early_confirmation_window: int = 3
     early_confirmation_distance_pct: float = 0.01
+    require_full_candle_confirmation: bool = False
+    accelerated_confirmation_min_bars: int = 2
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
         if self.confirmation_bars < 1:
@@ -41,6 +43,13 @@ class MarketProfileBreakoutConfig:
             raise ValueError("early_confirmation_window must be >= 1")
         if self.early_confirmation_distance_pct < 0:
             raise ValueError("early_confirmation_distance_pct must be >= 0")
+        if self.accelerated_confirmation_min_bars < 1:
+            raise ValueError("accelerated_confirmation_min_bars must be >= 1")
+        object.__setattr__(
+            self,
+            "accelerated_confirmation_min_bars",
+            min(self.confirmation_bars, self.accelerated_confirmation_min_bars),
+        )
 
 
 _DEFAULT_BREAKOUT_CONFIG = MarketProfileBreakoutConfig()
@@ -134,6 +143,7 @@ def _clean_numeric(value: Any, default: Optional[float] = None) -> Optional[floa
 
 
 def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakoutConfig:
+    explicit_confirmation = "market_profile_breakout_confirmation_bars" in context
     confirmation = context.get(
         "market_profile_breakout_confirmation_bars",
         _DEFAULT_BREAKOUT_CONFIG.confirmation_bars,
@@ -144,6 +154,9 @@ def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakou
         confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
     if confirmation < 1:
         confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
+    mode_str = str(context.get("mode", "backtest")).lower()
+    if not explicit_confirmation and mode_str in {"live", "sim"}:
+        confirmation = 1
 
     early_window = context.get(
         "market_profile_breakout_early_window",
@@ -167,19 +180,43 @@ def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakou
     if early_pct < 0:
         early_pct = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct
 
+    require_full_candle = context.get("market_profile_breakout_require_full_candle")
+    if require_full_candle is None:
+        require_full_candle = _DEFAULT_BREAKOUT_CONFIG.require_full_candle_confirmation
+    elif isinstance(require_full_candle, str):
+        require_full_candle = require_full_candle.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        require_full_candle = bool(require_full_candle)
+
+    accel_min = context.get(
+        "market_profile_breakout_acceleration_min_bars",
+        _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars,
+    )
+    try:
+        accel_min = int(accel_min)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        accel_min = _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars
+    if accel_min < 1:
+        accel_min = _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars
+    accel_min = min(accel_min, confirmation)
+
     resolved = MarketProfileBreakoutConfig(
         confirmation_bars=confirmation,
         early_confirmation_window=early_window,
         early_confirmation_distance_pct=early_pct,
+        require_full_candle_confirmation=bool(require_full_candle),
+        accelerated_confirmation_min_bars=accel_min,
     )
     log.debug(
         (
             "mp_brk | config_resolved | confirmation_bars=%d | early_window=%d "
-            "| early_pct=%.5f"
+            "| early_pct=%.5f | require_full_candle=%s | accel_min=%d"
         ),
         resolved.confirmation_bars,
         resolved.early_confirmation_window,
         resolved.early_confirmation_distance_pct,
+        resolved.require_full_candle_confirmation,
+        resolved.accelerated_confirmation_min_bars,
     )
     return resolved
 
@@ -270,6 +307,20 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     config = _resolve_breakout_config(context)
     symbol = context.get("symbol") or getattr(indicator, "symbol", None)
 
+    profile_for_session: Optional[Mapping[str, Any]] = None
+    if session_id:
+        try:
+            profiles = getattr(indicator, "daily_profiles", None) or []
+            for profile in profiles:
+                if not isinstance(profile, Mapping):
+                    continue
+                profile_id = _value_area_identifier(profile)
+                if profile_id == session_id:
+                    profile_for_session = profile
+                    break
+        except Exception:  # pragma: no cover - defensive
+            profile_for_session = None
+
     log.debug(
         "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s | confirmation=%d",
         session_id,
@@ -299,22 +350,44 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     boundary_summaries: List[str] = []
 
     for level_type, level_price, level_kind in boundaries:
-        level = SimpleNamespace(
-            price=level_price,
-            kind=level_kind,
-            lookback=value_area.get("lookback"),
-            timeframe=value_area.get("timeframe"),
-            first_touched=start_ts,
-        )
+        candidate_prices = [float(level_price)]
+        fallback_price: Optional[float] = None
+        if profile_for_session is not None:
+            fallback_price = _clean_numeric(profile_for_session.get(level_type))
+            if fallback_price is not None:
+                fallback_price = float(fallback_price)
+                if not candidate_prices or not math.isclose(
+                    candidate_prices[0],
+                    fallback_price,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                ):
+                    candidate_prices.append(fallback_price)
 
-        eval_start = time.perf_counter() if debug_enabled else None
-        metas = _pivot_evaluate_level(
-            df,
-            level,
-            config.confirmation_bars,
-            mode=mode,
-            config=config,
-        )
+        metas: List[Dict[str, Any]] = []
+        active_level_price = float(level_price)
+
+        for candidate_price in candidate_prices:
+            level = SimpleNamespace(
+                price=candidate_price,
+                kind=level_kind,
+                lookback=value_area.get("lookback"),
+                timeframe=value_area.get("timeframe"),
+                first_touched=start_ts,
+            )
+
+            eval_start = time.perf_counter() if debug_enabled else None
+            metas = _pivot_evaluate_level(
+                df,
+                level,
+                config.confirmation_bars,
+                mode=mode,
+                config=config,
+            )
+            if metas:
+                active_level_price = float(candidate_price)
+                break
+
         eval_duration_ms = 0.0
         if debug_enabled and eval_start is not None:
             eval_duration_ms = (time.perf_counter() - eval_start) * 1000.0
@@ -339,7 +412,15 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         filter_start = time.perf_counter() if debug_enabled else None
 
         if metas:
-            for meta in metas:
+            expected_direction = "above" if level_kind == "resistance" else "below"
+            directional_candidates = [
+                meta
+                for meta in metas
+                if str(meta.get("breakout_direction", "")).lower() == expected_direction
+            ]
+            metas_to_process = directional_candidates if directional_candidates else metas
+
+            for meta in metas_to_process:
                 trigger_ts = _normalise_meta_timestamp(meta.get("trigger_time"), tz)
                 if trigger_ts is None:
                     continue
@@ -347,37 +428,25 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 if start_ts is not None and trigger_ts < start_ts:
                     continue
 
-                if end_ts is not None and trigger_ts > end_ts:
-                    continue
-
                 if min_allowed_ts is not None and trigger_ts < min_allowed_ts:
                     continue
-
-                breakout_start_ts = _normalise_meta_timestamp(meta.get("breakout_start"), tz)
-                if breakout_start_ts is not None:
-                    if start_ts is not None and breakout_start_ts < start_ts:
-                        continue
-                    if end_ts is not None and breakout_start_ts > end_ts:
-                        continue
-                    if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
-                        continue
 
                 enriched = dict(meta)
 
                 direction = str(enriched.get("breakout_direction", "")).lower()
-                trigger_close = float(enriched.get("trigger_close", level_price))
+                trigger_close = float(enriched.get("trigger_close", active_level_price))
 
                 if direction == "above":
-                    clearance = trigger_close - level_price
+                    clearance = trigger_close - active_level_price
                     bubble_direction = "up"
                 elif direction == "below":
-                    clearance = level_price - trigger_close
+                    clearance = active_level_price - trigger_close
                     bubble_direction = "down"
                 else:
                     clearance = 0.0
                     bubble_direction = "up"
 
-                denominator = abs(level_price) if level_price else 1.0
+                denominator = abs(active_level_price) if active_level_price else 1.0
                 distance_pct = clearance / denominator if denominator else 0.0
 
                 enriched.update(
@@ -408,16 +477,47 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 if symbol is not None:
                     enriched["symbol"] = symbol
 
+                allow_beyond_end = False
                 trigger_idx = _resolve_breakout_bar_index(enriched, df)
                 if trigger_idx is not None:
+                    enriched["trigger_bar_index"] = trigger_idx
                     if end_index is not None and trigger_idx > end_index:
+                        window_start_index = (
+                            start_index if isinstance(start_index, int) and start_index >= 0 else 0
+                        )
+                        window_size = max(0, end_index - window_start_index + 1)
+                        allow_beyond_end = (
+                            not extend_to_chart_end
+                            and window_size >= max(1, int(config.confirmation_bars))
+                        )
+                        if not allow_beyond_end:
+                            continue
+                    if trigger_idx > 0:
+                        try:
+                            enriched["prev_close"] = float(df.iloc[trigger_idx - 1]["close"])
+                        except Exception:  # pragma: no cover - defensive
+                            pass
+                if end_ts is not None and trigger_ts is not None and trigger_ts > end_ts:
+                    if not allow_beyond_end:
                         continue
-                if trigger_idx is not None and trigger_idx > 0:
-                    try:
-                        enriched["prev_close"] = float(df.iloc[trigger_idx - 1]["close"])
-                    except Exception:  # pragma: no cover - defensive
-                        pass
 
+                breakout_start_ts = _normalise_meta_timestamp(enriched.get("breakout_start"), tz)
+                if breakout_start_ts is not None:
+                    if start_ts is not None and breakout_start_ts < start_ts:
+                        continue
+                    if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
+                        continue
+                    breakout_start_idx = _resolve_index_position(df.index, breakout_start_ts)
+                    if end_index is not None and breakout_start_idx is not None and breakout_start_idx > end_index:
+                        if not allow_beyond_end:
+                            continue
+                    if breakout_start_idx is not None:
+                        enriched.setdefault("breakout_start_bar_index", breakout_start_idx)
+                        if 0 <= breakout_start_idx < len(df):
+                            enriched.setdefault(
+                                "breakout_start_index_label",
+                                df.index[int(breakout_start_idx)],
+                            )
                 breakouts.append(enriched)
                 passed_filters += 1
 
@@ -607,6 +707,26 @@ def _detect_value_area_retest(
     )
 
     if result is None:
+        return None
+
+    level_price_value = _clean_numeric(result.get("level_price"))
+    close_value = _clean_numeric(result.get("retest_close"))
+    tolerance_abs = max(
+        0.0, abs(level_price_value) * float(max(tolerance_pct, 0.0)) if level_price_value is not None else 0.0
+    )
+    if (
+        level_price_value is not None
+        and close_value is not None
+        and tolerance_abs > 0.0
+        and abs(close_value - level_price_value) > tolerance_abs * 2.0
+    ):
+        log.debug(
+            "mp_retest | skip | reason=close_out_of_range | session=%s | level=%.5f | close=%.5f | tol=%.5f",
+            breakout_meta.get("value_area_id"),
+            level_price_value,
+            close_value,
+            tolerance_abs,
+        )
         return None
 
     enriched = dict(result)
