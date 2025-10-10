@@ -350,6 +350,28 @@ def _evaluate_level(
         ]
         has_opposite_history = opposite_side in prior_sides if opposite_side else False
 
+        if (
+            not has_opposite_history
+            and breakout_start_pos is not None
+            and breakout_start_pos > 0
+        ):
+            history_slice = df.iloc[:breakout_start_pos]
+            if not history_slice.empty:
+                if opposite_side == "below":
+                    reference = (
+                        history_slice["low"]
+                        if "low" in history_slice.columns
+                        else history_slice["close"]
+                    )
+                    has_opposite_history = bool((reference <= level_price).any())
+                elif opposite_side == "above":
+                    reference = (
+                        history_slice["high"]
+                        if "high" in history_slice.columns
+                        else history_slice["close"]
+                    )
+                    has_opposite_history = bool((reference >= level_price).any())
+
         if prior_confirmed_side == "above" and active_side == "below":
             detected_level_kind = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
