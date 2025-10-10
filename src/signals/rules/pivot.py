@@ -342,11 +342,27 @@ def _evaluate_level(
         source_kind = getattr(level, "kind", None)
         source_kind_key = str(source_kind).lower() if source_kind is not None else None
 
+        opposite_side = "below" if active_side == "above" else "above"
+        prior_sides = [
+            historical_side
+            for historical_side in sides[:breakout_start_pos]
+            if historical_side in {"above", "below"}
+        ]
+        has_opposite_history = opposite_side in prior_sides if opposite_side else False
+
         if prior_confirmed_side == "above" and active_side == "below":
             detected_level_kind = "support"
         elif prior_confirmed_side == "below" and active_side == "above":
             detected_level_kind = "resistance"
         elif prior_confirmed_side is None:
+            if not has_opposite_history:
+                log.debug(
+                    "pivotbrk | level_skip | level=%s | reason=no_prior_flip | "
+                    "active_side=%s",
+                    level_id,
+                    active_side,
+                )
+                continue
             if active_side == "above":
                 if source_kind_key in {"resistance", "pivot", "na", "none", ""}:
                     detected_level_kind = "resistance"
