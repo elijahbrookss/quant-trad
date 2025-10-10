@@ -164,6 +164,7 @@ class BaseDataProvider(ABC):
             df = query_ohlcv()
         except SQLAlchemyError as e:
             logger.exception("Database error during OHLCV query: %s. Falling back to API.", e)
+            logger.warning("Unable to connect to database, deferred to API.")
             return self._fetch_and_format(ctx)
 
         if df.empty:
