@@ -207,6 +207,26 @@ def test_pivot_breakout_rule_requires_enough_bars():
     assert results == []
 
 
+def test_pivot_breakout_rule_requires_prior_flip_for_first_breakout():
+    """Ensure the first breakout only emits after price trades the opposite side."""
+
+    closes = [105, 104.8, 104.6, 105.1, 105.3]
+    df = _build_dataframe(closes)
+    level = _build_level(104, kind="resistance")
+    indicator = DummyPivotIndicator([level])
+
+    context = {
+        "indicator": indicator,
+        "df": df,
+        "symbol": indicator.symbol,
+        "pivot_breakout_config": PivotBreakoutConfig(confirmation_bars=2),
+    }
+
+    results = pivot_breakout_rule(context)
+
+    assert results == []
+
+
 def test_pivot_breakout_rule_emits_multiple_breakouts_in_backtest():
     closes = [100, 103, 104, 105, 106, 103, 102, 105, 107]
     df = _build_dataframe(closes)
