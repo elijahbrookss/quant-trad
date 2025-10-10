@@ -9,3 +9,7 @@ secrets.env
 .pytest_cache/
 env/
 output/
+logs/
+.pids/
+.coverage
+coverage.xml
