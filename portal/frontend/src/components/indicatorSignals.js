@@ -118,15 +118,22 @@ export async function runSignalGeneration({
 
     scopedLogger.debug('signal_generation_request', { config });
 
-    const response = await signalsAdapter(indicator.id, {
+    const requestPayload = {
       start: startISO,
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
-      datasource: chartState.datasource,
-      exchange: chartState.exchange,
       config,
-    });
+    };
+
+    if (chartState.datasource) {
+      requestPayload.datasource = chartState.datasource;
+    }
+    if (chartState.exchange) {
+      requestPayload.exchange = chartState.exchange;
+    }
+
+    const response = await signalsAdapter(indicator.id, requestPayload);
 
     const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
     const signalOverlays = Array.isArray(response?.overlays) ? response.overlays : [];
