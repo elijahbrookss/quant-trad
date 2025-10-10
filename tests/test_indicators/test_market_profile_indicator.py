@@ -11,9 +11,9 @@ from data_providers.alpaca_provider import AlpacaProvider
 def test_market_profile_indicator_integration_plot():
     """
     Integration test for MarketProfileIndicator:
-    - Pulls 30m chart data for AAPL between 2025-05-01 and 2025-05-15
+    - Pulls 30m chart data for CL between 2025-06-01 and 2025-06-30
     - Builds MarketProfileIndicator via from_context
-    - Merges value areas using default thresholds
+    - Relies on to_overlays to trigger value-area merging under the hood
     - Generates overlays on the same 30m data
     - Verifies overlays and legend entries exist
     - Uses provider’s plot_ohlcv to write a file under integration_tests/market_profile
@@ -44,17 +44,15 @@ def test_market_profile_indicator_integration_plot():
     assert isinstance(mpi.daily_profiles, list)
     assert mpi.daily_profiles, "Integration: daily_profiles is empty"
 
-    # Merge value areas (default threshold=0.6, min_merge=3)
-    merged = mpi.merge_value_areas()
-    # merged_profiles may be empty if no consecutive overlaps exist, but daily_profiles must exist
-    assert isinstance(merged, list)
-
     # Generate overlays on the plot_df index
     overlays, legend_entries = mpi.to_overlays(plot_df, use_merged=True)
 
     # At least one overlay should have been generated
     assert overlays, "Integration: no overlays generated"
     assert legend_entries, "Integration: no legend entries generated"
+    rect_overlays = [o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect"]
+    assert rect_overlays, "Integration: expected rectangle overlays for value areas"
+    assert all("end" in r for r in rect_overlays), "Integration: rectangle overlays should include 'end' timestamps"
 
     # Finally, call provider.plot_ohlcv (integration) to save a chart
     provider.plot_ohlcv(
@@ -198,19 +196,13 @@ def test_merge_value_areas_no_merge_due_to_threshold_unit(dummy_df):
     assert merged == []
 
 @pytest.mark.unit
-def test_to_overlays_using_merge(dummy_df):
+def test_to_overlays_auto_merges_and_returns_rect_with_end(dummy_df):
     """
-    Instead of manually setting merged_profiles, we:
-      1. Manually assign daily_profiles so merge_value_areas has something to merge.
-      2. Call merge_value_areas(...) to populate merged_profiles.
-      3. Build a small plot_df index that exactly spans one session.
-      4. Call to_overlays(...) and assert we get 3 overlays and the correct legend set.
+    Ensure to_overlays can trigger merge_value_areas internally and emits
+    rect overlays that respect the chart window end.
     """
-
-    # 1) Create an indicator instance using dummy_df
     mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
 
-    # 2) Overwrite daily_profiles with two synthetic profiles that overlap at threshold=0.5
     day1_start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
     day1_end   = pd.Timestamp("2025-01-01 11:00", tz="UTC")
     day2_start = pd.Timestamp("2025-01-02 10:00", tz="UTC")
@@ -233,22 +225,59 @@ def test_to_overlays_using_merge(dummy_df):
         }
     ]
 
-    # 3) Call merge_value_areas so merged_profiles is computed “under the hood”
-    merged = mpi.merge_value_areas(threshold=0.5, min_merge=2)
-    assert len(merged) == 1, "We expected exactly one merged session"
-
-    # 4) Build a small plot_df index spanning exactly the first session’s times
-    #    (this ensures to_overlays sees at least one index within [start_date, end_date]).
-    plot_start = day1_start
-    plot_end   = day1_end
-    plot_idx   = pd.date_range(start=plot_start, end=plot_end, freq="30min", tz="UTC")
+    plot_idx   = pd.date_range(start=day1_start, end=day2_end, freq="30min", tz="UTC")
     plot_df    = pd.DataFrame({"open": [100]*len(plot_idx)}, index=plot_idx)
 
-    # 5) Call to_overlays with use_merged=True
-    overlays, legend_entries = mpi.to_overlays(plot_df, use_merged=True)
+    overlays, legend_entries = mpi.to_overlays(
+        plot_df,
+        use_merged=True,
+        merge_threshold=0.5,
+        min_merge=2,
+    )
 
-    # We expect 2 overlays (VAH, VAL) for that merged session
-    assert len(overlays) == 2
+    assert len(overlays) == 2, "Expected one rect + one POC overlay for merged profile"
+    rects = [o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect"]
+    assert rects, "Expected a rectangle overlay for merged value area"
+    rect = rects[0]
+    assert rect["start"] == plot_df.index.min()
+    assert rect["end"] == plot_df.index.max()
+    assert ("Value Area", "gray") in legend_entries
+    assert ("POC", "orange") in legend_entries
+
+
+@pytest.mark.unit
+def test_to_overlays_respects_extend_flag(dummy_df):
+    mpi = MarketProfileIndicator(
+        dummy_df,
+        bin_size=1.0,
+        mode="tpo",
+        extend_value_area_to_chart_end=False,
+    )
+
+    start = pd.Timestamp("2025-01-03 09:30", tz="UTC")
+    end = start + pd.Timedelta(hours=1)
+    chart_end = end + pd.Timedelta(hours=3)
+
+    mpi.daily_profiles = [
+        {
+            "start_date": start,
+            "end_date": end,
+            "VAL": 95.0,
+            "VAH": 105.0,
+            "POC": 100.0,
+        }
+    ]
+
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    overlays, _ = mpi.to_overlays(plot_df, use_merged=False)
+    rect = next(o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect")
+    assert rect["end"] == end
+
+    overlays_extend, _ = mpi.to_overlays(plot_df, use_merged=False, extend_to_chart_end=True)
+    rect_extend = next(o for o in overlays_extend if isinstance(o, dict) and o.get("kind") == "rect")
+    assert rect_extend["end"] == plot_df.index.max()
 
 
 @pytest.mark.unit

@@ -40,7 +40,7 @@ def _as_signals(results):
 
 def _build_dataframe(closes):
     periods = len(closes)
-    index = pd.date_range("2024-01-01", periods=periods, freq="H")
+    index = pd.date_range("2024-01-01", periods=periods, freq="h")
     data = {
         "open": [float(price) for price in closes],
         "high": [float(price) + 0.5 for price in closes],
@@ -53,7 +53,7 @@ def _build_dataframe(closes):
 
 def _build_dataframe_from_ohlc(rows):
     periods = len(rows)
-    index = pd.date_range("2024-02-01", periods=periods, freq="H")
+    index = pd.date_range("2024-02-01", periods=periods, freq="h")
     data = {"open": [], "high": [], "low": [], "close": [], "volume": []}
 
     for open_, high, low, close in rows:
@@ -69,7 +69,7 @@ def _build_dataframe_from_ohlc(rows):
 def _build_touch_dataframe(*, level_price: float, touch_after: Optional[int] = None, final_touch: Optional[int] = None) -> pd.DataFrame:
     """Construct a dataframe with optional retest touches for confirmation tests."""
 
-    index = pd.date_range("2025-01-01", periods=7, freq="H")
+    index = pd.date_range("2025-01-01", periods=7, freq="h")
     base_prices = [level_price - 1.5, level_price - 0.7, level_price + 2.1, level_price + 1.8, level_price + 1.6, level_price + 1.5, level_price + 1.4]
 
     lows = [price - 0.5 for price in base_prices]

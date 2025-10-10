@@ -12,7 +12,7 @@ def _make_df(end_timestamp: str) -> pd.DataFrame:
     index = pd.date_range(
         start="2025-08-01 13:30:00+00:00",
         end=end_timestamp,
-        freq="15T",
+        freq="15min",
         tz="UTC",
     )
     data = {

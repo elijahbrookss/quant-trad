@@ -27,6 +27,8 @@ class PivotBreakoutConfig:
     confirmation_bars: int = 1
     early_confirmation_window: int = 3
     early_confirmation_distance_pct: float = 0.01
+    require_full_candle_confirmation: bool = True
+    accelerated_confirmation_min_bars: int = 1
 
     def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
         if self.confirmation_bars < 1:
@@ -35,11 +37,18 @@ class PivotBreakoutConfig:
             raise ValueError("early_confirmation_window must be >= 1")
         if self.early_confirmation_distance_pct < 0:
             raise ValueError("early_confirmation_distance_pct must be >= 0")
+        if self.accelerated_confirmation_min_bars < 1:
+            raise ValueError("accelerated_confirmation_min_bars must be >= 1")
+        object.__setattr__(
+            self,
+            "accelerated_confirmation_min_bars",
+            min(self.confirmation_bars, self.accelerated_confirmation_min_bars),
+        )
 
 
 log = logging.getLogger("PivotBreakoutRule")
 
-_DEFAULT_RETEST_CONFIRMATION_BARS = 3
+_DEFAULT_RETEST_CONFIRMATION_BARS = 1
 
 _DEFAULT_CONFIG = PivotBreakoutConfig()
 _PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
@@ -121,19 +130,43 @@ def _resolve_config(context: Mapping[str, Any]) -> PivotBreakoutConfig:
     if early_pct < 0:
         early_pct = _DEFAULT_CONFIG.early_confirmation_distance_pct
 
+    require_full_candle = context.get("pivot_breakout_require_full_candle")
+    if require_full_candle is None:
+        require_full_candle = _DEFAULT_CONFIG.require_full_candle_confirmation
+    elif isinstance(require_full_candle, str):
+        require_full_candle = require_full_candle.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        require_full_candle = bool(require_full_candle)
+
+    accel_min = context.get(
+        "pivot_breakout_acceleration_min_bars",
+        _DEFAULT_CONFIG.accelerated_confirmation_min_bars,
+    )
+    try:
+        accel_min = int(accel_min)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        accel_min = _DEFAULT_CONFIG.accelerated_confirmation_min_bars
+    if accel_min < 1:
+        accel_min = _DEFAULT_CONFIG.accelerated_confirmation_min_bars
+    accel_min = min(accel_min, confirmation_bars)
+
     resolved = PivotBreakoutConfig(
         confirmation_bars=confirmation_bars,
         early_confirmation_window=early_window,
         early_confirmation_distance_pct=early_pct,
+        require_full_candle_confirmation=bool(require_full_candle),
+        accelerated_confirmation_min_bars=accel_min,
     )
     log.debug(
         (
             "pivotbrk | config_resolved | confirmation_bars=%d | early_window=%d "
-            "| early_pct=%.4f | context_keys=%s"
+            "| early_pct=%.4f | require_full_candle=%s | accel_min=%d | context_keys=%s"
         ),
         resolved.confirmation_bars,
         resolved.early_confirmation_window,
         resolved.early_confirmation_distance_pct,
+        resolved.require_full_candle_confirmation,
+        resolved.accelerated_confirmation_min_bars,
         sorted(context.keys()),
     )
     return resolved
@@ -164,10 +197,15 @@ def _evaluate_level(
     if "close" not in df.columns:
         raise KeyError("DataFrame must contain a 'close' column for pivot breakout rule")
 
-    if len(df) <= confirmation_bars:
+    simulate_current_only = mode in {"sim", "live"}
+    required_bars = max(1, confirmation_bars)
+    if not simulate_current_only:
+        required_bars = confirmation_bars + 1
+
+    if len(df) < required_bars:
         log.debug(
             "pivotbrk | level_skip | reason=insufficient_bars | required=%d | available=%d",
-            confirmation_bars + 1,
+            required_bars,
             len(df),
         )
         return []
@@ -176,6 +214,7 @@ def _evaluate_level(
     highs = df["high"] if "high" in df.columns else None
     lows = df["low"] if "low" in df.columns else None
     level_price = float(level.price)
+    require_full_candle = bool(getattr(config, "require_full_candle_confirmation", True))
 
     def _get_series_value(series: Optional[pd.Series], position: int, fallback: float) -> float:
         if series is None:
@@ -189,10 +228,22 @@ def _evaluate_level(
         high_value = _get_series_value(highs, position, close_value)
         low_value = _get_series_value(lows, position, close_value)
 
+        clearance = 0.0
+
+        if not require_full_candle:
+            if close_value > level_price:
+                clearance = close_value - level_price
+                return "above", clearance
+            if close_value < level_price:
+                clearance = level_price - close_value
+                return "below", clearance
+            if close_value == level_price:
+                return "at", 0.0
+            return "straddle", 0.0
+
         # Require the full candle to be beyond the level before classifying as above/below.
         above = False
         below = False
-        clearance = 0.0
 
         if lows is not None:
             above = low_value > level_price
@@ -225,7 +276,6 @@ def _evaluate_level(
         return "straddle", 0.0
     level_id = _summarise_level(level)
     last_idx_position = len(closes) - 1
-    simulate_current_only = mode in {"sim", "live"}
 
     state = BreakoutRunState()
     confirmed_side: Optional[str] = None
@@ -237,17 +287,26 @@ def _evaluate_level(
         sides.append(side)
 
         if side in {"at", "straddle"}:
-            if state.active_side is not None and state.run_confirmed:
+            if state.active_side is not None and state.run_confirmed and state.run_emitted:
                 confirmed_side = state.active_side
             reset_breakout_state(state)
             current_run_prior_confirmed_side = None
             continue
 
-        if state.active_side is not None and state.active_side != side and state.run_confirmed:
+        if (
+            state.active_side is not None
+            and state.active_side != side
+            and state.run_confirmed
+            and state.run_emitted
+        ):
             confirmed_side = state.active_side
 
-        if state.active_side != side:
+        if state.active_side != side and confirmed_side is not None and state.run_emitted:
             current_run_prior_confirmed_side = confirmed_side
+
+        allow_accelerated = True
+        if current_run_prior_confirmed_side is not None and current_run_prior_confirmed_side != side:
+            allow_accelerated = False
 
         result = update_breakout_state(
             state,
@@ -256,12 +315,14 @@ def _evaluate_level(
             position=position,
             level_price=level_price,
             config=config,
+            allow_accelerated=allow_accelerated,
         )
 
         prior_confirmed_side = current_run_prior_confirmed_side
         if result.just_confirmed and result.active_side is not None:
             confirmed_side = result.active_side
-            current_run_prior_confirmed_side = result.active_side
+            if state.run_emitted:
+                current_run_prior_confirmed_side = result.active_side
 
         breakout_start_pos = result.start_position
 
@@ -339,6 +400,7 @@ def _evaluate_level(
 
         results.append(meta)
         mark_breakout_emitted(state)
+        current_run_prior_confirmed_side = result.active_side
 
     if not results:
         log.debug(
@@ -357,10 +419,10 @@ def pivot_breakout_rule(
     """Detect breakouts through pivot levels using closing price confirmation."""
 
     indicator = context.get("indicator")
-    if not isinstance(indicator, PivotLevelIndicator):
+    if indicator is None or not hasattr(indicator, "levels"):
         log.debug(
             "pivotbrk | guard_fail | reason=indicator_type | indicator=%r",
-            type(indicator),
+            type(indicator) if indicator is not None else None,
         )
         return []
 
@@ -732,6 +794,8 @@ def pivot_signals_to_overlays(
         return []
 
     bubbles: List[Dict[str, Any]] = []
+    markers: List[Dict[str, Any]] = []
+    price_lines: List[Dict[str, Any]] = []
 
     for signal in signals:
         metadata = signal.metadata or {}
@@ -836,13 +900,39 @@ def pivot_signals_to_overlays(
             "subtype": "bubble",
         }
         bubbles.append(bubble_payload)
+        if breakout_direction in {"above", "below"}:
+            shape = "triangleUp" if breakout_direction == "above" else "triangleDown"
+            marker_color = _BREAKOUT_COLORS.get(breakout_direction, color)
+            marker_entry = {
+                "time": marker_time,
+                "price": anchor_price,
+                "shape": shape,
+                "color": marker_color,
+                "text": marker_label,
+            }
+            markers.append(marker_entry)
+
+            origin_time = metadata.get("breakout_start")
+            price_lines.append(
+                {
+                    "price": float(level_price),
+                    "color": marker_color,
+                    "extend": "none",
+                    "lineWidth": 1,
+                    "lineStyle": 0,
+                    "axisLabelVisible": True,
+                    "title": marker_label,
+                    "originTime": _to_unix_seconds(origin_time),
+                    "endTime": marker_time,
+                }
+            )
 
     if not bubbles:
         return []
 
     payload = {
-        "price_lines": [],
-        "markers": [],
+        "price_lines": price_lines,
+        "markers": markers,
         "bubbles": bubbles,
     }
 

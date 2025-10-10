@@ -3,6 +3,8 @@
 > vite
 
 Port 5173 is in use, trying another one...
-Port 5174 is in use, trying another one...
 
-  VITE v7.0.5  ready i2:42:35 PM [vite] (client) hmr update /src/components/IndicatorTab.jsx, /src/index.css
+  VITE v7.0.5  ready in 643 ms
+
+  ➜  Local:   http://localhost:5174/
+  ➜  Network: use --host to expose
