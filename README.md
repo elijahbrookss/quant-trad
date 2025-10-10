@@ -72,6 +72,16 @@ make stack-down              # remove containers
 
 Docker Compose publishes the services on the same ports listed in the local workflow. Override `TSDB_PORT` if you need a different TimescaleDB port on the host.
 
+### When to rebuild containers
+
+Use the rebuild flow whenever you need fresh Docker images that include new dependencies or base image updates:
+
+```bash
+make stack-rebuild           # rebuild images with --no-cache and restart
+```
+
+Trigger this after changing `requirements.txt`, updating frontend dependencies in `package.json`, or modifying Dockerfiles. For routine code edits that do not touch dependencies or build configuration, a normal `make stack-restart` is usually sufficient.
+
 ## Secrets
 
 `secrets.env` is not committed to version control but is required for anything that touches live market data.
