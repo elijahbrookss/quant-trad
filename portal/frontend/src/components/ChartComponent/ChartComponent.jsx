@@ -678,7 +678,7 @@ export const ChartComponent = ({ chartId }) => {
             color: pl.color ?? undefined,
             lineWidth: pl.lineWidth ?? 1,
             lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: pl.axisLabelVisible ?? true,
+            axisLabelVisible: pl.axisLabelVisible ?? false,
             title: pl.title ?? type ?? '',
           });
           overlayHandlesRef.current.priceLines.push(handle);
