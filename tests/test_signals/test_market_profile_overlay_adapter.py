@@ -12,7 +12,7 @@ from signals.engine import market_profile_generator  # noqa: F401 ensure adapter
 
 
 def _make_df():
-    index = pd.date_range("2024-06-01", periods=10, freq="30T", tz="UTC")
+    index = pd.date_range("2024-06-01", periods=10, freq="30min", tz="UTC")
     data = {
         "open": [4300.0 + i for i in range(10)],
         "high": [4301.0 + i for i in range(10)],

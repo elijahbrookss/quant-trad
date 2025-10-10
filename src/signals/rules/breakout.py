@@ -12,6 +12,7 @@ class BreakoutConfig(Protocol):
     confirmation_bars: int
     early_confirmation_window: int
     early_confirmation_distance_pct: float
+    accelerated_confirmation_min_bars: int
 
 
 @dataclass
@@ -63,6 +64,7 @@ def update_breakout_state(
     position: int,
     level_price: float,
     config: BreakoutConfig,
+    allow_accelerated: bool = True,
 ) -> BreakoutEvaluationResult:
     """Update a breakout state with the latest candle classification.
 
@@ -110,12 +112,21 @@ def update_breakout_state(
     ready = state.consecutive >= max(1, int(config.confirmation_bars))
     accelerated = False
 
-    if not ready and state.candidate_start_pos is not None:
+    if allow_accelerated and not ready and state.candidate_start_pos is not None:
         threshold = abs(float(level_price)) * float(config.early_confirmation_distance_pct)
         if threshold > 0:
             bars_since_start = position - state.candidate_start_pos + 1
             if bars_since_start <= max(1, int(config.early_confirmation_window)):
-                if state.max_distance >= threshold:
+                try:
+                    configured_min = int(getattr(config, "accelerated_confirmation_min_bars", 0))
+                except (TypeError, ValueError):
+                    configured_min = 0
+                if configured_min <= 0:
+                    configured_min = max(1, int(config.confirmation_bars) - 1)
+                required_accelerated_bars = max(
+                    1, min(int(config.confirmation_bars), configured_min)
+                )
+                if state.max_distance >= threshold and state.consecutive >= required_accelerated_bars:
                     ready = True
                     accelerated = True
 
