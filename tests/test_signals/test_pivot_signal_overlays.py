@@ -11,7 +11,7 @@ from signals.engine import pivot_level_generator  # noqa: F401
 
 
 def _make_df():
-    index = pd.date_range("2024-01-01", periods=5, freq="H", tz="UTC")
+    index = pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC")
     data = {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}
     return pd.DataFrame(data, index=index)
 

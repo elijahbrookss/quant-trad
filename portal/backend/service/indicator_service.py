@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from data_providers.alpaca_provider import AlpacaProvider
 from data_providers.base_provider import DataSource
 from data_providers.factory import get_provider
 from indicators.config import DataContext
@@ -301,6 +302,23 @@ def _normalize_exchange(value: Optional[str]) -> Optional[str]:
     cleaned = str(value).strip().lower()
     return cleaned or None
 
+
+def _resolve_data_provider(
+    datasource: Optional[str], *, exchange: Optional[str] = None
+):
+    """Return a data provider instance honouring local monkeypatches."""
+
+    ds = _normalize_datasource(datasource)
+    ex = _normalize_exchange(exchange)
+
+    if not ds:
+        ds = DataSource.ALPACA.value
+
+    if ds == DataSource.ALPACA.value:
+        return AlpacaProvider()
+
+    return get_provider(ds, exchange=ex)
+
 def _extract_ctor_params(inst) -> Dict[str, Any]:
     """Reflectively capture constructor params currently set on the instance."""
     sig = inspect.signature(inst.__class__.__init__)
@@ -414,7 +432,7 @@ def create_instance(
     if exchange and not datasource:
         datasource = DataSource.CCXT.value
 
-    provider = get_provider(datasource, exchange=exchange)
+    provider = _resolve_data_provider(datasource, exchange=exchange)
 
     try:
         logger.info("event=indicator_create type=%s params=%s", type_str, params)
@@ -482,7 +500,7 @@ def update_instance(
     if exchange and not datasource:
         datasource = DataSource.CCXT.value
 
-    provider = get_provider(datasource, exchange=exchange)
+    provider = _resolve_data_provider(datasource, exchange=exchange)
     try:
         new_inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as e:
@@ -547,7 +565,10 @@ def overlays_for_instance(
     if effective_exchange and not effective_datasource:
         effective_datasource = DataSource.CCXT.value
 
-    provider = get_provider(effective_datasource, exchange=effective_exchange)
+    provider = _resolve_data_provider(
+        effective_datasource,
+        exchange=effective_exchange,
+    )
     logger.info(
         "event=indicator_overlay_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
@@ -665,7 +686,10 @@ def generate_signals_for_instance(
     if effective_exchange and not effective_datasource:
         effective_datasource = DataSource.CCXT.value
 
-    provider = get_provider(effective_datasource, exchange=effective_exchange)
+    provider = _resolve_data_provider(
+        effective_datasource,
+        exchange=effective_exchange,
+    )
     logger.info(
         "event=indicator_signal_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
         inst_id,
@@ -680,8 +704,14 @@ def generate_signals_for_instance(
         raise LookupError("No candles available for given window")
 
     rule_config: Dict[str, Any] = dict(config or {})
-    rule_config.setdefault("pivot_breakout_confirmation_bars", 3)
-    rule_config.setdefault("market_profile_breakout_confirmation_bars", 3)
+    rule_config.setdefault(
+        "pivot_breakout_confirmation_bars",
+        _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
+    )
+    rule_config.setdefault(
+        "market_profile_breakout_confirmation_bars",
+        _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
+    )
     rule_config.setdefault("symbol", sym)
 
     if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:

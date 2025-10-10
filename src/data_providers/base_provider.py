@@ -10,6 +10,7 @@ from core.logger import logger
 from indicators.config import DataContext
 from core.chart_plotter import ChartPlotter
 
+load_dotenv(".env")
 load_dotenv("secrets.env")
 
 
@@ -24,10 +25,16 @@ class BaseDataProvider(ABC):
     _dsn = os.getenv("PG_DSN")
     _table = os.getenv("OHLC_TABLE")
 
-    if not _dsn:
-        raise ValueError("PG_DSN is not defined. Check your .env or environment variables.")
+    _engine = None
 
-    _engine = create_engine(_dsn)
+    if not _dsn:
+        logger.warning("PG_DSN is not defined. Database operations will be skipped.")
+    else:
+        try:
+            _engine = create_engine(_dsn)
+        except SQLAlchemyError as e:
+            logger.exception("Failed to create database engine: %s", e)
+            _engine = None
 
     @abstractmethod
     def get_datasource(self) -> str:
@@ -38,6 +45,10 @@ class BaseDataProvider(ABC):
         pass
 
     def ensure_schema(self):
+        if not self._engine:
+            logger.warning("Database engine unavailable; skipping ensure_schema call for '%s'.", self._table)
+            return
+
         ddl_create = f"""
         CREATE TABLE IF NOT EXISTS {self._table} (
             datasource TEXT NOT NULL,
@@ -93,6 +104,10 @@ class BaseDataProvider(ABC):
             logger.exception("Data fetch failed for %s: %s", ctx.symbol, e)
             return 0
 
+        if not self._engine:
+            logger.warning("Database engine unavailable; skipping ingestion for %s [%s].", ctx.symbol, ctx.interval)
+            return 0
+
         try:
             with self._engine.connect() as conn:
                 with conn.begin():
@@ -114,6 +129,10 @@ class BaseDataProvider(ABC):
 
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
         ctx.validate()
+
+        if not self._engine:
+            logger.warning("Database engine unavailable; fetching OHLCV from API for %s [%s].", ctx.symbol, ctx.interval)
+            return self._fetch_and_format(ctx)
 
         def query_ohlcv():
             try:
@@ -141,11 +160,12 @@ class BaseDataProvider(ABC):
                 else:
                     logger.exception("Query failed for table '%s': %s", self._table, e)
                 return pd.DataFrame()
-            except SQLAlchemyError as e:
-                logger.exception("Database error during OHLCV query: %s", e)
-                return pd.DataFrame()
-
-        df = query_ohlcv()
+        try:
+            df = query_ohlcv()
+        except SQLAlchemyError as e:
+            logger.exception("Database error during OHLCV query: %s. Falling back to API.", e)
+            logger.warning("Unable to connect to database, deferred to API.")
+            return self._fetch_and_format(ctx)
 
         if df.empty:
             logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
@@ -159,6 +179,36 @@ class BaseDataProvider(ABC):
             except Exception as e:
                 logger.exception("Auto-ingestion failed: %s", e)
                 return df
+
+        return self._format_ohlcv_dataframe(df, ctx)
+
+    def _fetch_and_format(self, ctx: DataContext) -> pd.DataFrame:
+        try:
+            df = self.fetch_from_api(ctx.symbol, ctx.start, ctx.end, ctx.interval)
+        except Exception as e:
+            logger.exception("Fallback fetch_from_api failed for %s: %s", ctx.symbol, e)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            logger.warning("Fallback fetch returned no data for %s [%s].", ctx.symbol, ctx.interval)
+            return pd.DataFrame()
+
+        df["datasource"] = self.get_datasource()
+        df["interval"] = ctx.interval
+        df["symbol"] = ctx.symbol
+
+        return self._format_ohlcv_dataframe(df, ctx)
+
+    def _format_ohlcv_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> pd.DataFrame:
+        if df.empty:
+            return df
+
+        if "datasource" not in df.columns:
+            df["datasource"] = self.get_datasource()
+        if "interval" not in df.columns:
+            df["interval"] = ctx.interval
+        if "symbol" not in df.columns:
+            df["symbol"] = ctx.symbol
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df.set_index("timestamp", inplace=True)
