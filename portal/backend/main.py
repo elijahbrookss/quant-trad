@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .controller import candles, indicators
@@ -17,3 +19,9 @@ app.add_middleware(
 
 app.include_router(candles.router, prefix="/api/candles")
 app.include_router(indicators.router, prefix="/api/indicators")
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """Simple health check endpoint for uptime probes."""
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}

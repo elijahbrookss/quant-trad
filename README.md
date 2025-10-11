@@ -1,94 +1,121 @@
-# Quant-Trad  
-*A modular, test-driven quantitative trading bot with strategy orchestration and live chart overlays*
+# Quant-Trad
 
----
+A practical quantitative trading bot with modular data pipelines, indicators, and strategy orchestration. This README focuses on getting the stack running quickly and keeping day-to-day workflows consistent.
 
-## Vision
+## Prerequisites
 
-Quant-Trad is being built to **trade autonomously**, combining clean data ingestion, flexible indicators, stateless signal rules, and configurable strategies.  
-Current focus is on structured feature extraction and signal generation, with backtesting and execution infrastructure in progress.
+Install the following tools before you start:
 
----
+- Python 3.10 or newer
+- Docker Desktop (or Docker Engine + Docker Compose plugin)
+- GNU Make
 
-## Core Architecture
+## Initial Setup
 
-| Layer           | Key Components | Notes |
-|----------------|----------------|-------|
-| **Data**        | `BaseProvider`, `AlpacaProvider`, `YahooProvider` | Unified OHLCV schema, optional TimescaleDB caching |
-| **Indicators**  | `PivotLevelIndicator`, `MarketProfileIndicator`, `TrendlineIndicator`, `VWAPIndicator` | Modular, composable, overlay-capable |
-| **Signals**     | Stateless signal rules (e.g. `breakout_rule`, `bounce_rule`) | Operate on indicator output + context |
-| **Strategies**  | `BaseStrategy`, `ReversalStrategy` | Orchestrates indicators and rules, produces structured signals |
-| **Visualization** | `ChartPlotter`, `OverlayRegistry`, `OverlayHandlers` | Candlesticks with high-signal overlays |
-| **Backtesting** | `Backtester`, `StrategyEngine` | Simulate strategy decisions over historical data |
-| **Monitoring**  | Loki (logs), Grafana (dashboards) | Docker services for system observability |
-| *(Planned)*     | Live Execution, Parameter Sweeps | Hooks for automated live trading and optimization |
+1. Clone the repository and enter the project directory.
+   ```bash
+   git clone https://github.com/elijahbrookss/quant-trad.git
+   cd quant-trad
+   ```
+2. Create your secrets file from the provided template and add credentials (see [Secrets](#secrets)).
+   ```bash
+   cp secrets.env.example secrets.env
+   ```
 
----
+## Local (non-Docker) workflow
 
-## Strategy Framework Overview
-
-| Component | Purpose |
-|----------|---------|
-| `Indicator` | Extracts features from OHLCV (levels, trendlines, VAH/VAL/POC) |
-| `SignalRule` | Stateless logic to evaluate market conditions |
-| `Strategy` | Registers indicators and rules, manages context, emits trade signals |
-| `DataContext` | Defines timeframe and range for each indicator instance |
-| `Signal` | Output object enriched with strategy and indicator metadata |
-
-Strategies can register the same indicator multiple times with different configurations and rules to support confluence across timeframes or techniques.
-
----
-
-## Indicators Summary
-
-| Indicator | Status | Purpose | Overlay Features |
-|-----------|--------|---------|------------------|
-| **Pivot Level** | Complete | Convert swing highs/lows into support/resistance zones | Timeframe coloring, touchpoint dots |
-| **Market Profile (TPO)** | Complete | Compute value areas and merged sessions | VA bands, dashed session overlays |
-| **Trendline** | Complete | Auto-detect dynamic trendlines from pivots | Line overlays, breakout regions |
-| **VWAP** | Complete | Compute value areas from intraday volume | Rolling session anchors, POC tracking |
-
----
-
-## Makefile Commands
-
-| Target            | Description |
-|-------------------|-------------|
-| `make setup`      | Start TimescaleDB, pgAdmin, Grafana, and Loki containers |
-| `make shutdown`   | Stop all containers |
-| `make db_cli`     | Open a `psql` shell to TimescaleDB |
-| `make run`        | Run the app with `PYTHONPATH` set to the project root |
-| `make test`       | Run all tests |
-| `make test-unit`  | Run only unit tests |
-| `make test-integration` | Run only integration tests |
-| `make status`     | Show status of running containers |
-| `make dev`        | Run the local dev startup script (`scripts/dev_startup.sh`) |
-
----
-
-## Quick Start
-
-**Prerequisites**
-- Python 3.10+
-- Docker Desktop
-- GNU Make (comes with macOS/Linux; Windows users can use Git Bash or WSL)
+Use this flow when you want to develop against the Python sources directly on your machine.
 
 ```bash
-# Clone the repo
-git clone --branch develop https://github.com/elijahbrookss/quant-trad.git
-cd quant-trad
+# Install Python and frontend dependencies in a virtual environment
+make local-setup
 
-# Create dev setup
-make dev
+# Start TimescaleDB + pgAdmin in Docker
+make local-db-up
 
-# Start core services (TimescaleDB, pgAdmin, Grafana, Loki)
-make setup 
+# Launch the FastAPI backend and Vite frontend locally
+make api-start
+make frontend-start
+```
 
-# Run tests
-make test            # or: make test-unit / make test-integration
+Services run on:
 
-# Launch TimescaleDB CLI (optional)
-make db_cli
+- API: http://localhost:8000
+- Frontend: http://localhost:5173
+- TimescaleDB: `localhost:15432` (configurable via `TSDB_PORT`)
 
-# Shut down services when done
-make shutdown
+When you are done, stop everything with:
+
+```bash
+make frontend-stop
+make api-stop
+make local-db-stop
+```
+
+`make local-up` and `make local-stop` are convenience shortcuts that bundle the commands above.
+
+## Docker Compose workflow
+
+Run the entire stack in containers when you want an isolated environment:
+
+```bash
+# Start backend, frontend, TimescaleDB, pgAdmin, Grafana, and Loki
+make stack-up                # or STACK_PROFILES=core/database/observability make stack-up
+
+# Tail container logs as needed
+make stack-logs              # optional helper defined in the Makefile
+
+# Stop or tear down the stack
+make stack-stop              # keep containers
+make stack-down              # remove containers
+```
+
+Docker Compose publishes the services on the same ports listed in the local workflow. Override `TSDB_PORT` if you need a different TimescaleDB port on the host.
+
+### When to rebuild containers
+
+Use the rebuild flow whenever you need fresh Docker images that include new dependencies or base image updates:
+
+```bash
+make stack-rebuild           # rebuild images with --no-cache and restart
+```
+
+Trigger this after changing `requirements.txt`, updating frontend dependencies in `package.json`, or modifying Dockerfiles. For routine code edits that do not touch dependencies or build configuration, a normal `make stack-restart` is usually sufficient.
+
+## Secrets
+
+`secrets.env` is not committed to version control but is required for anything that touches live market data.
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `ALPACA_API_KEY` | ✅ | Alpaca trading API key for equities data/execution |
+| `ALPACA_SECRET_KEY` | ✅ | Alpaca secret key |
+| `CCXT_API_KEY` | Optional | Shared CCXT API key for crypto exchanges |
+| `CCXT_API_SECRET` | Optional | Shared CCXT secret |
+| `CCXT_PASSWORD` | Optional | Some exchanges (e.g., BitMEX) require an API password |
+| `CCXT_<EXCHANGE>_*` | Optional | Exchange-specific overrides (e.g., `CCXT_BINANCE_API_KEY`) |
+
+The file is mounted into the backend container automatically when you use Docker Compose.
+
+## Running tests and checks
+
+```bash
+# Full suite
+make test
+
+# Narrow scope
+make test-unit
+make test-integration
+```
+
+## Useful Make targets
+
+| Target | Purpose |
+| --- | --- |
+| `make deps` | Install Python dependencies into `.venv` |
+| `make reset-venv` | Recreate the virtual environment |
+| `make db_cli` | Open a psql shell against TimescaleDB |
+| `make stack-ps` | Show running containers |
+| `make stack-restart` | Restart the selected Docker profiles |
+
+For more commands, run `make help`.

@@ -1,12 +1,9 @@
 export function createVABoxPaneView(timeScaleApi, opts = {}) {
   const {
     hatchOverlap = true,
-    extendRight = true,
     outlineFront = false,
-    rightEdgeMode = 'last-bar',        // 'pane' | 'last-bar'
-  } = opts;  
+  } = opts;
   let boxes = []; // [{ x1, x2, y1, y2, color, border? }]
-  let rightEdgeTimeSec = null;     // set from outside when you know last candle time
 
   const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
   const withAlpha = (rgba, a) =>
@@ -17,15 +14,12 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     const pxRects = [];
 
     for (const b of boxes) {
-      const xLeft  = timeScaleApi.timeToCoordinate(toSec(b.x1)) * hpr;
+      const leftCoord = timeScaleApi.timeToCoordinate(toSec(b.x1));
+      const xLeft = leftCoord != null ? leftCoord * hpr : null;
       let xRight;
-      if (!extendRight) {
-        xRight = timeScaleApi.timeToCoordinate(toSec(b.x2)) * hpr;
-      } else if (rightEdgeMode === 'last-bar' && rightEdgeTimeSec != null) {
-        xRight = timeScaleApi.timeToCoordinate(rightEdgeTimeSec) * hpr;
-      } else {
-        xRight = mediaWidth; // pane edge
-      } 
+      const hasExplicitRight = b?.x2 != null;
+      const rightCoord = timeScaleApi.timeToCoordinate(toSec(hasExplicitRight ? b.x2 : b.x1));
+      xRight = rightCoord != null ? rightCoord * hpr : null;
       if (xLeft == null || xRight == null) continue;
 
       const y1 = priceToCoordinate(b.y1) * vpr;
@@ -34,10 +28,17 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
 
       const left   = Math.min(xLeft, xRight);
       const width  = Math.max(1, Math.abs(xRight - xLeft));
-      const top    = Math.min(y1, y2);
-      const height = Math.abs(y2 - y1);
+      let top    = Math.min(y1, y2);
+      let height = Math.abs(y2 - y1);
       const col    = b.color || 'rgba(156,163,175,0.18)';
       const brd    = b.border || { color: 'rgba(100,116,139,.45)', width: 1 };
+
+      const MIN_HEIGHT = 1;
+      if (height < MIN_HEIGHT) {
+        const mid = top + height / 2;
+        height = MIN_HEIGHT;
+        top = mid - MIN_HEIGHT / 2;
+      }
 
       pxRects.push({ left, top, width, height, color: col, border: brd });
 
@@ -109,6 +110,5 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     defaultOptions() { return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }; },
     destroy: () => {},
     setBoxes(arr) { boxes = Array.isArray(arr) ? arr : []; },
-    setRightEdgeTime(sec) { rightEdgeTimeSec = Number.isFinite(sec) ? sec : null; },
   };
 }

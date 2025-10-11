@@ -81,7 +81,7 @@ def simulate_signal_generation(delay_seconds: int = 5):
             logger.warning("No value areas available for signal generation")
             return
 
-        signal_generator = MarketProfileSignalGenerator(symbol=symbol)
+        signal_generator = MarketProfileSignalGenerator(indicator=mpi, symbol=symbol)
         all_signals = []
 
         for i in range(30, len(full_df)):
