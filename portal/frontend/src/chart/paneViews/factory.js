@@ -2,6 +2,7 @@ import { createTouchPaneView } from './touchPaneView';
 import { createVABoxPaneView } from './vaBoxPaneView';
 import { createSegmentPaneView } from './segmentPaneView';
 import { createPolylinePaneView } from './polylinePaneView';
+import { createSignalBubblePaneView } from './signalBubblePaneView';
 
 const toSec = (t) => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
 
@@ -10,6 +11,7 @@ export const PaneViewType = {
   VA_BOX: 'va_box',
   SEGMENT: 'segment',
   POLYLINE: 'polyline',
+  SIGNAL_BUBBLE: 'signal_bubble',
 };
 
 export class PaneViewManager {
@@ -18,15 +20,17 @@ export class PaneViewManager {
     this.ts = chart.timeScale();
     this.series = new Map();
     this.views = new Map();
+    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
     this.ensure(PaneViewType.VA_BOX); // create VA boxes first so they are in back
   }
   ensure(type) {
     if (this.series.has(type)) return;
     let view;
     if (type === PaneViewType.TOUCH)      view = createTouchPaneView(this.ts);
-    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { extendRight: true, hatchOverlap: false, outlineFront: true });
+    else if (type === PaneViewType.VA_BOX)  view = createVABoxPaneView(this.ts, { hatchOverlap: true, outlineFront: true });
     else if (type === PaneViewType.SEGMENT) view = createSegmentPaneView(this.ts);
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
+    else if (type === PaneViewType.SIGNAL_BUBBLE) view = createSignalBubblePaneView(this.ts);
     else throw new Error(`Unknown pane view: ${type}`);
     const base = view.defaultOptions?.() ?? {};
     const s = this.chart.addCustomSeries(view, {
@@ -41,23 +45,70 @@ export class PaneViewManager {
   clearFrame() {
     for (const [type, view] of this.views.entries()) {
       if (type === PaneViewType.TOUCH)    { view.setRows?.([]);   this.series.get(type)?.setData([]); }
-      if (type === PaneViewType.VA_BOX)   { view.setBoxes?.([]);  this.series.get(type)?.setData([]); }
+      if (type === PaneViewType.VA_BOX)   {
+        this.vaBoxState.boxes = [];
+        this._syncVABlocks();
+      }
       if (type === PaneViewType.SEGMENT)  { view.setSegments?.([]); this.series.get(type)?.setData([]); }
       if (type === PaneViewType.POLYLINE) { view.setPolylines?.([]); this.series.get(type)?.setData([]); }
+      if (type === PaneViewType.SIGNAL_BUBBLE) { view.setBubbles?.([]); this.series.get(type)?.setData([]); }
     }
   }
   destroy() {
-    for (const s of this.series.values()) { try { this.chart.removeSeries(s); } catch {} }
+    for (const s of this.series.values()) {
+      try { this.chart.removeSeries(s); }
+      catch {
+        // swallow errors when series already detached
+      }
+    }
     this.series.clear(); this.views.clear();
+    this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
   }
 
-  setVABlocks(boxes){ this.ensure(PaneViewType.VA_BOX);
-    this.views.get(PaneViewType.VA_BOX).setBoxes(boxes || []);
-    // seed unique ascending times
-    const times = [...new Set((boxes||[]).flatMap(b => [toSec(b.x1), toSec(b.x2)]))]
-      .filter(Number.isFinite).sort((a,b)=>a-b)
-      .map(t => ({ time: t, originalData: {} }));
-    this.series.get(PaneViewType.VA_BOX).setData(times);
+  setVABlocks(boxes, opts = {}){
+    this.ensure(PaneViewType.VA_BOX);
+
+    this.vaBoxState.boxes = Array.isArray(boxes) ? boxes : [];
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
+      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+    }
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
+      this.vaBoxState.barSpacing = opts.barSpacing;
+    }
+
+    this._syncVABlocks();
+  }
+
+  updateVABlockContext(opts = {}) {
+    if (!this.views.has(PaneViewType.VA_BOX)) return;
+    if (Object.prototype.hasOwnProperty.call(opts, 'lastSeriesTime')) {
+      this.vaBoxState.lastSeriesTime = opts.lastSeriesTime;
+    }
+    if (Object.prototype.hasOwnProperty.call(opts, 'barSpacing')) {
+      this.vaBoxState.barSpacing = opts.barSpacing;
+    }
+    this._syncVABlocks();
+  }
+
+  _syncVABlocks() {
+    if (!this.views.has(PaneViewType.VA_BOX)) return;
+
+    const view = this.views.get(PaneViewType.VA_BOX);
+    const series = this.series.get(PaneViewType.VA_BOX);
+    if (!view || !series) return;
+
+    const boxes = this.vaBoxState.boxes || [];
+    const { lastSeriesTime } = this.vaBoxState;
+
+    view.setBoxes(boxes);
+
+    const normalizedLast = toSec(lastSeriesTime);
+
+    const seriesTimes = [...new Set(boxes.flatMap(b => [toSec(b.x1), toSec(b.x2), normalizedLast]))]
+      .filter((t) => typeof t === 'number' && Number.isFinite(t))
+      .sort((a, b) => a - b);
+
+    series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
   }
   setSegments(segs){ this.ensure(PaneViewType.SEGMENT);
     this.views.get(PaneViewType.SEGMENT).setSegments(segs || []);
@@ -74,6 +125,24 @@ export class PaneViewManager {
        .filter(Number.isFinite).sort((a,b)=>a-b)
        .map(t => ({ time: t, originalData: {} }));
     this.series.get(PaneViewType.POLYLINE).setData(times);
+  }
+  setSignalBubbles(bubs){ this.ensure(PaneViewType.SIGNAL_BUBBLE);
+    const normalized = (bubs || []).map(b => ({ ...b, time: toSec(b.time) }));
+    this.views.get(PaneViewType.SIGNAL_BUBBLE).setBubbles(normalized);
+
+    const grouped = new Map();
+    for (const bubble of normalized) {
+      const time = bubble?.time;
+      if (!Number.isFinite(time)) continue;
+      if (!grouped.has(time)) grouped.set(time, []);
+      grouped.get(time).push(bubble);
+    }
+
+    const data = [...grouped.entries()]
+      .sort((a,b) => a[0] - b[0])
+      .map(([time, entries]) => ({ time, originalData: { bubbles: entries } }));
+
+    this.series.get(PaneViewType.SIGNAL_BUBBLE).setData(data);
   }
     setTouchPoints(points) {
     // points: [{ time, price, color, size }]

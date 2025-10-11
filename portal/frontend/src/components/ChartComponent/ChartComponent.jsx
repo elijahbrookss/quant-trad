@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createChart, CandlestickSeries, createSeriesMarkers} from 'lightweight-charts';
+import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
+import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent';
 import { options, seriesOptions } from './ChartOptions';
@@ -9,16 +10,189 @@ import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
 import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
 import LoadingOverlay from '../LoadingOverlay.jsx';
-import SymbolPresets from './SymbolPresets.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
+import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 
+const DATASOURCE_OPTIONS = [
+  { id: 'ALPACA', label: 'Markets' },
+  { id: 'CCXT', label: 'Crypto' },
+];
+
+const MARKET_PROVIDERS = [
+  { id: 'alpaca', label: 'Alpaca (Equities)' },
+  { id: 'yfinance', label: 'Yahoo Finance' },
+];
+
+const CRYPTO_EXCHANGES = [
+  { id: 'binanceus', label: 'Binance US', category: 'CEX' },
+  { id: 'coinbase', label: 'Coinbase Advanced', category: 'CEX' },
+  { id: 'kraken', label: 'Kraken', category: 'CEX' },
+  { id: 'gemini', label: 'Gemini', category: 'CEX' },
+  { id: 'kucoin', label: 'KuCoin', category: 'CEX' },
+  { id: 'apex', label: 'Apex', category: 'DEX' },
+  { id: 'defx', label: 'DefX', category: 'DEX' },
+  { id: 'hyperliquid', label: 'Hyperliquid', category: 'DEX' },
+  { id: 'woofipro', label: 'woofipro', category: 'DEX' },
+  { id: 'wavesexchange', label: 'Waves Exchange', category: 'DEX' },
+];
+
+const DEFAULT_CRYPTO_EXCHANGE = 'binanceus';
+const DEFAULT_MARKET_PROVIDER = 'alpaca';
+
+const deriveTimeScaleOptions = (rawInterval) => {
+  const interval = (rawInterval || '').toString().toLowerCase();
+  const base = { timeVisible: true, secondsVisible: false };
+
+  if (!interval) return base;
+
+  if (interval.endsWith('s')) {
+    return { ...base, secondsVisible: true };
+  }
+
+  if (interval.endsWith('m')) {
+    return base;
+  }
+
+  if (interval.endsWith('h')) {
+    return base;
+  }
+
+  if (interval.endsWith('d')) {
+    return { timeVisible: false, secondsVisible: false };
+  }
+
+  if (interval.endsWith('w') || interval.endsWith('mo') || interval.endsWith('y')) {
+    return { timeVisible: false, secondsVisible: false };
+  }
+
+  return base;
+};
+
+const toRgba = (hex, alpha = 0.12) => {
+  if (typeof hex !== 'string') return null;
+  const trimmed = hex.trim().replace('#', '');
+  if (!(trimmed.length === 3 || trimmed.length === 6)) return null;
+
+  const expand = (value) => value.split('').map((c) => c + c).join('');
+  const normalized = trimmed.length === 3 ? expand(trimmed) : trimmed;
+
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+
+  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+
+  const clampedAlpha = Math.min(Math.max(alpha, 0), 1);
+  return `rgba(${r},${g},${b},${clampedAlpha})`;
+};
+
+const coalesce = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+};
+
+const toFiniteNumber = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const toIsoFromSeconds = (value) => {
+  const numeric = toFiniteNumber(value);
+  if (numeric == null) return null;
+  try {
+    const date = new Date(numeric * 1000);
+    if (Number.isNaN(date.valueOf())) return null;
+    return date.toISOString();
+  } catch {
+    return null;
+  }
+};
+
+const formatPriceDisplay = (value, precision = 2) => {
+  const numeric = toFiniteNumber(value);
+  if (numeric == null) return 'n/a';
+  const digits = Math.min(Math.max(Number(precision) || 2, 2), 8);
+  return numeric.toFixed(digits);
+};
+
+const deriveCcxtPriceFormat = (candles = []) => {
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return null;
+  }
+
+  const values = [];
+  for (const c of candles) {
+    if (!c) continue;
+    const { open, high, low, close } = c;
+    [open, high, low, close].forEach((v) => {
+      if (Number.isFinite(v)) values.push(Math.abs(v));
+    });
+  }
+
+  if (!values.length) {
+    return null;
+  }
+
+  const reference = Math.max(...values);
+
+  let precision = 4;
+  if (reference >= 1000) precision = 2;
+  else if (reference >= 100) precision = 3;
+  else if (reference >= 10) precision = 4;
+  else if (reference >= 1) precision = 4;
+  else if (reference >= 0.1) precision = 5;
+  else if (reference >= 0.01) precision = 6;
+  else if (reference >= 0.001) precision = 7;
+  else precision = 8;
+
+  const minMove = Number((10 ** -precision).toFixed(precision));
+  return { type: 'price', precision, minMove };
+};
+
+const buildVaBoxSummaryText = ({
+  startSec,
+  endSec,
+  requestedEndSec,
+  val,
+  vah,
+  poc,
+  sessions,
+  valueAreaId,
+  precision,
+}) => {
+  const parts = [
+    `start=${toIsoFromSeconds(startSec) ?? 'n/a'}`,
+    `end=${toIsoFromSeconds(endSec) ?? 'n/a'}`,
+    `VAL=${formatPriceDisplay(val, precision)}`,
+    `VAH=${formatPriceDisplay(vah, precision)}`,
+  ];
+
+  if (poc != null) {
+    parts.push(`POC=${formatPriceDisplay(poc, precision)}`);
+  }
+  if (sessions != null) {
+    parts.push(`sessions=${sessions}`);
+  }
+  if (valueAreaId != null) {
+    parts.push(`id=${valueAreaId}`);
+  }
+  if (requestedEndSec != null && requestedEndSec !== endSec) {
+    parts.push('extended_to_last_bar=true');
+  }
+
+  return parts.join(' | ');
+};
+
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
-  const { debug, info, warn, error } = useMemo(() => createLogger(LOG_NS), []);
+  const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
+  const { debug, info, warn, error } = logger;
 
   // Context wiring.
   const { registerChart, updateChart, bumpRefresh } = useChartState();
@@ -27,12 +201,49 @@ export const ChartComponent = ({ chartId }) => {
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
+  const [datasource, setDatasource] = useState('ALPACA');
+  const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
     new Date()
   ]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [rangeWarning, setRangeWarning] = useState(null);
+  const [connectionNotice, setConnectionNotice] = useState(null);
+
+  const connection = useConnectionMonitor({ name: 'QuantLab API' });
+  const {
+    status: connectionStatus,
+    message: connectionMessage,
+    markAttempt,
+    markSuccess,
+    markError,
+  } = connection;
+
+  const statusStyles = useMemo(() => {
+    if (connectionStatus === 'online') {
+      return {
+        text: 'text-emerald-200',
+      };
+    }
+
+    if (connectionStatus === 'connecting' || connectionStatus === 'recovering') {
+      return {
+        text: 'text-amber-200',
+      };
+    }
+
+    if (connectionStatus === 'error') {
+      return {
+        text: 'text-rose-200',
+      };
+    }
+
+    return {
+      text: 'text-slate-300',
+    };
+  }, [connectionStatus]);
 
   // Refs for chart and DOM.
   const chartContainerRef = useRef(null);
@@ -41,32 +252,243 @@ export const ChartComponent = ({ chartId }) => {
   const seededRef = useRef(false); // ensure we seed only once
   const pvMgrRef = useRef(null);
   const lastBarRef = useRef(null);
+  const barSpacingRef = useRef(null);
+  const timeframeWarningRef = useRef(null);
+  const symbolRef = useRef(symbol);
+  const intervalRef = useRef(interval);
+  const dateRangeRef = useRef(dateRange);
+  const datasourceRef = useRef(datasource);
+  const exchangeRef = useRef(exchange);
+  const lastCryptoExchangeRef = useRef(DEFAULT_CRYPTO_EXCHANGE);
+  const lastMarketProviderRef = useRef(DEFAULT_MARKET_PROVIDER);
+
+  const handleDatasourceChange = useCallback((nextId) => {
+    setDatasource((prev) => {
+      if (prev === nextId) return prev;
+      return nextId;
+    });
+
+    if (nextId === 'CCXT') {
+      lastMarketProviderRef.current = exchangeRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
+      setExchange(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
+    } else {
+      lastCryptoExchangeRef.current = exchangeRef.current || lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE;
+      setExchange(lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER);
+    }
+  }, []);
+
+  const handleExchangeChange = useCallback((nextId) => {
+    setExchange(nextId);
+    if (nextId) {
+      if (datasourceRef.current === 'CCXT') {
+        lastCryptoExchangeRef.current = nextId;
+      } else {
+        lastMarketProviderRef.current = nextId;
+      }
+    }
+  }, []);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
 
-  // Derive ISO once per range change.
-  const [startISO, endISO] = useMemo(() => {
-    const [s, e] = dateRange || [];
-    return [s?.toISOString(), e?.toISOString()];
-  }, [dateRange?.[0]?.getTime(), dateRange?.[1]?.getTime()]);
+  useEffect(() => {
+    symbolRef.current = symbol;
+  }, [symbol]);
+
+  useEffect(() => {
+    intervalRef.current = interval;
+  }, [interval]);
+
+  useEffect(() => {
+    dateRangeRef.current = dateRange;
+  }, [dateRange]);
+
+  useEffect(() => {
+    datasourceRef.current = datasource;
+  }, [datasource]);
+
+  useEffect(() => {
+    exchangeRef.current = exchange;
+  }, [exchange]);
+
+  const showWarning = useCallback((message) => {
+    setRangeWarning(message);
+    if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
+    timeframeWarningRef.current = setTimeout(() => setRangeWarning(null), 5000);
+  }, []);
+
+  const loadChartData = useCallback(async ({
+    targetSymbol,
+    targetInterval,
+    targetRange,
+    targetDatasource,
+    targetExchange,
+  } = {}) => {
+    const effectiveSymbol = targetSymbol ?? symbolRef.current;
+    const effectiveInterval = targetInterval ?? intervalRef.current;
+    const effectiveRange = targetRange ?? dateRangeRef.current;
+    const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || 'ALPACA';
+    const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
+    const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
+    const [startDate, endDate] = effectiveRange || [];
+    const startISO = startDate?.toISOString();
+    const endISO = endDate?.toISOString();
+
+    try {
+      setDataLoading(true);
+      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
+        warn('chart_load_missing_inputs', {
+          symbol: effectiveSymbol,
+          interval: effectiveInterval,
+          startISO,
+          endISO,
+          datasource: effectiveDatasource,
+          exchange: effectiveExchange,
+        });
+        return;
+      }
+
+      if (effectiveDatasource === 'CCXT' && !effectiveExchange) {
+        warn('chart_load_missing_exchange', { symbol: effectiveSymbol, interval: effectiveInterval });
+        showWarning('Select a crypto exchange before loading data.');
+        return;
+      }
+
+      markAttempt();
+      info('candles_fetch_start', {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        startISO,
+        endISO,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
+      });
+      const resp = await fetchCandleData({
+        symbol: effectiveSymbol,
+        timeframe: effectiveInterval,
+        start: startISO,
+        end: endISO,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange ?? undefined,
+      });
+
+      if (!Array.isArray(resp) || resp.length === 0) {
+        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
+        markSuccess();
+        showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
+        return;
+      }
+
+      const data = resp
+        .filter(c => c && typeof c.time === 'number')
+        .map(c => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }));
+
+      if (!seriesRef.current) {
+        warn('series missing');
+        return;
+      }
+
+      if (seriesRef.current) {
+        if (effectiveDatasource === 'CCXT') {
+          const format = deriveCcxtPriceFormat(resp);
+          if (format) {
+            seriesRef.current.applyOptions({ priceFormat: format });
+          }
+        }
+        seriesRef.current.setData(data);
+      }
+
+      lastBarRef.current = data.at(-1);
+
+      if (data.length > 1) {
+        let minStep = Infinity;
+        for (let i = 1; i < data.length; i += 1) {
+          const step = data[i].time - data[i - 1].time;
+          if (Number.isFinite(step) && step > 0 && step < minStep) {
+            minStep = step;
+          }
+        }
+        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
+      } else {
+        barSpacingRef.current = null;
+      }
+
+      pvMgrRef.current?.updateVABlockContext({
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
+      const first = data[0]?.time;
+      const last = data.at(-1)?.time;
+      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+        const span = Math.max(1, last - first);
+        const pad = Math.max(1, Math.floor(span * 0.05));
+        const scaleApi = chartRef.current.timeScale();
+        scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
+        scaleApi.scrollToPosition(0, false);
+      } else {
+        chartRef.current?.timeScale().scrollToRealTime();
+      }
+
+      try {
+        const priceScaleApi = typeof seriesRef.current?.priceScale === 'function'
+          ? seriesRef.current.priceScale()
+          : null;
+        priceScaleApi?.applyOptions?.({ autoScale: true });
+        priceScaleApi?.setAutoScale?.(true);
+      } catch (scaleErr) {
+        debug('price_scale_autoscale_failed', scaleErr);
+      }
+
+      info('candles_fetch_success', {
+        points: data.length,
+        first: data[0]?.time,
+        last: data.at(-1)?.time,
+      });
+
+      markSuccess();
+      updateChart?.(chartId, {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        dateRange: effectiveRange,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      markError(e);
+      error('candles_fetch_failed', e);
+    } finally {
+      setDataLoading(false);
+    }
+  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug]);
 
   // Create chart once.
   useEffect(() => {
     const el = chartContainerRef.current;
     if (!el || chartRef.current) return;
 
+    const initialInterval = intervalRef.current;
+    const initialSymbol = symbolRef.current;
+    const initialRange = dateRangeRef.current;
+
     chartRef.current = createChart(el, {
       ...options,
       width: el.clientWidth,
       height: el.clientHeight || 400,
+      timeScale: deriveTimeScaleOptions(initialInterval),
     });
 
     const series = chartRef.current.addSeries(CandlestickSeries, {
       ...seriesOptions,
       priceScaleId: 'right',
-    })
-    seriesRef.current = series
+    });
+    seriesRef.current = series;
 
     // Create pane view manager.
     pvMgrRef.current = new PaneViewManager(chartRef.current);
@@ -80,30 +502,53 @@ export const ChartComponent = ({ chartId }) => {
     loadChartData();
 
     if (!seededRef.current) {
-      updateChart?.(chartId, { symbol, interval, dateRange });
+      updateChart?.(chartId, {
+        symbol: initialSymbol,
+        interval: initialInterval,
+        dateRange: initialRange,
+        datasource: datasourceRef.current,
+        exchange: exchangeRef.current || null,
+      });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;
     }
 
-    info('chart created', { chartId });
+    info('chart_created');
+
+    const overlayHandles = overlayHandlesRef.current;
 
     return () => {
       try {
-        overlayHandlesRef.current?.priceLines?.forEach(h => {
-          try { seriesRef.current?.removePriceLine(h); } catch {}
+        overlayHandles?.priceLines?.forEach(h => {
+          try {
+            seriesRef.current?.removePriceLine(h);
+          } catch {
+            // ignore failures when price line already removed
+          }
         });
-        overlayHandlesRef.current?.markersApi?.setMarkers?.([]);
+        overlayHandles?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
         pvMgrRef.current = null;
         chartRef.current?.remove();
         chartRef.current = null;
         seriesRef.current = null;
-        info('chart removed', { chartId });
+        info('chart_removed');
       } catch (e) {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData]);
+
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const scaleOpts = deriveTimeScaleOptions(interval);
+    chartRef.current.applyOptions({ timeScale: scaleOpts });
+    debug('time_scale_updated', {
+      interval,
+      timeVisible: scaleOpts.timeVisible,
+      secondsVisible: scaleOpts.secondsVisible,
+    });
+  }, [interval, debug]);
 
   // Resize via ResizeObserver.
   useEffect(() => {
@@ -113,7 +558,7 @@ export const ChartComponent = ({ chartId }) => {
     const ro = new ResizeObserver(([entry]) => {
       const r = entry?.contentRect; if (!r) return;
       chartRef.current.applyOptions({ width: r.width, height: r.height });
-      debug('resize', { w: r.width, h: r.height });
+      debug('chart_resize', { width: r.width, height: r.height });
     });
 
     ro.observe(el);
@@ -133,75 +578,31 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const applySymbol = (sym) => { setSymbol(sym); handleApply(); };
-  // Data loader.
-  const loadChartData = useCallback(async () => {
-    try {
-      setDataLoading(true);
-      if (!symbol || !interval || !startISO || !endISO) {
-        warn('missing inputs', { symbol, interval, startISO, endISO });
-        return;
-      }
-
-      info('fetch', { symbol, interval, startISO, endISO });
-      const resp = await fetchCandleData({
-        symbol,
-        timeframe: interval,
-        start: startISO,
-        end: endISO,
-      });
-
-      if (!Array.isArray(resp) || resp.length === 0) {
-        warn('no data', { symbol, interval });
-        return;
-      }
-
-      const data = resp
-        .filter(c => c && typeof c.time === 'number')
-        .map(c => ({
-          time: c.time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }));
-
-      if (!seriesRef.current) {
-        warn('series missing');
-        return;
-      }
-
-      // seriesRef.current.setData(data);
-      // chartRef.current?.timeScale().fitContent();
-      
-      seriesRef.current.setData(data);
-
-      // Remember last bar for real-time updates.
-      lastBarRef.current = data.at(-1);
-
-      // move view to the loaded window; add small padding for context
-      const first = data[0]?.time;
-      const last  = data.at(-1)?.time;
-      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
-        const span = Math.max(1, last - first);
-        const pad  = Math.max(1, Math.floor(span * 0.05));
-        chartRef.current.timeScale().setVisibleRange({ from: first - pad, to: last + pad });
-      } else {
-        chartRef.current?.timeScale().scrollToRealTime(); // fallback to latest
-      }
-
-      info('data set', {
-        points: data.length,
-        first: data[0]?.time,
-        last: data.at(-1)?.time,
-      });
-    } catch (e) {
-      error('load failed', e);
-    } finally {
-      setDataLoading(false);
+  useEffect(() => {
+    if (connectionStatus === 'error') {
+      setConnectionNotice(connectionMessage);
+    } else {
+      setConnectionNotice(null);
     }
-  }, [symbol, interval, startISO, endISO, info, warn, error]);
+  }, [connectionStatus, connectionMessage]);
 
+  useEffect(() => {
+    updateChart?.(chartId, {
+      connectionStatus,
+      connectionMessage,
+    });
+  }, [chartId, connectionStatus, connectionMessage, updateChart]);
+
+  useEffect(() => () => {
+    if (timeframeWarningRef.current) {
+      clearTimeout(timeframeWarningRef.current);
+    }
+  }, []);
+
+  const applySymbol = (sym) => {
+    setSymbol(sym);
+    setPalOpen(false);
+  };
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
@@ -218,7 +619,11 @@ export const ChartComponent = ({ chartId }) => {
 
     // 1) Clear existing price lines.
     overlayHandlesRef.current.priceLines.forEach(h => {
-      try { seriesRef.current.removePriceLine(h); } catch {}
+      try {
+        seriesRef.current.removePriceLine(h);
+      } catch {
+        // ignore if price line already cleared
+      }
     });
     overlayHandlesRef.current.priceLines = [];
 
@@ -235,19 +640,35 @@ export const ChartComponent = ({ chartId }) => {
     const markers = [];
     const touchPoints = [];
     const boxes = [];
+    const signalBubbles = [];
     const allSegments = [];
     const allPolylines = [];
 
     // 3) Walk overlays and apply.
     for (const ov of overlays) {
-      const { type, payload, color } = ov || {};
+      const { type, payload, color, ind_id: indicatorId } = ov || {};
       if (!payload) continue;
+
+      const overlayLogger = logger.child({ indicatorId, indicatorType: type });
+      overlayLogger.debug('overlay_payload_received', {
+        priceLines: Array.isArray(payload.price_lines) ? payload.price_lines.length : 0,
+        markers: Array.isArray(payload.markers) ? payload.markers.length : 0,
+        boxes: Array.isArray(payload.boxes) ? payload.boxes.length : 0,
+        segments: Array.isArray(payload.segments) ? payload.segments.length : 0,
+        polylines: Array.isArray(payload.polylines) ? payload.polylines.length : 0,
+      });
 
       const paneViews = getPaneViewsFor(type);
       const norm = adaptPayload(type, payload, color);
-
-      // Norm
-      console.log("Overlay", { type, color, paneViews, norm });
+      overlayLogger.debug('overlay_adapted', {
+        priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,
+        markers: Array.isArray(norm.markers) ? norm.markers.length : 0,
+        touchPoints: Array.isArray(norm.touchPoints) ? norm.touchPoints.length : 0,
+        boxes: Array.isArray(norm.boxes) ? norm.boxes.length : 0,
+        segments: Array.isArray(norm.segments) ? norm.segments.length : 0,
+        polylines: Array.isArray(norm.polylines) ? norm.polylines.length : 0,
+        bubbles: Array.isArray(norm.bubbles) ? norm.bubbles.length : 0,
+      });
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {
@@ -257,7 +678,7 @@ export const ChartComponent = ({ chartId }) => {
             color: pl.color ?? undefined,
             lineWidth: pl.lineWidth ?? 1,
             lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: pl.axisLabelVisible ?? true,
+            axisLabelVisible: pl.axisLabelVisible ?? false,
             title: pl.title ?? type ?? '',
           });
           overlayHandlesRef.current.priceLines.push(handle);
@@ -266,6 +687,22 @@ export const ChartComponent = ({ chartId }) => {
 
       // 3b) Markers.
       markers.push(...norm.markers);
+
+      if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
+        if (color) {
+          signalBubbles.push(...norm.bubbles.map(b => {
+            const accentColor = color;
+            const backgroundColor = toRgba(accentColor, 0.16) ?? undefined;
+            return {
+              ...b,
+              accentColor,
+              backgroundColor,
+            };
+          }));
+        } else {
+          signalBubbles.push(...norm.bubbles);
+        }
+      }
 
       // 3c) Touch points.
       if (paneViews.includes('touch') && norm.touchPoints?.length) {
@@ -277,24 +714,132 @@ export const ChartComponent = ({ chartId }) => {
 
       // 3d) VA Boxes.
       if (paneViews.includes('va_box') && norm.boxes?.length) {
-        boxes.push(
-          ...norm.boxes.map(b => ({
-            x1: toSec(b.x1),
-            x2: toSec(b.x2),
-            y1: Number(b.y1),
-            y2: Number(b.y2),
-            color: b.color,
-            border: b.border,
-          }))
-        );
+        const lastCandleSec = toSec(lastBarRef.current?.time);
+        const baseIndex = boxes.length;
+        const summaryEntries = [];
+        const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
+          const x1 = toSec(box.x1);
+          const requestedX2 = toSec(box.x2);
+          const extendBox = box.extend !== undefined ? Boolean(box.extend) : false;
+          let x2 = requestedX2;
+
+          if (!Number.isFinite(x2)) {
+            if (extendBox && Number.isFinite(lastCandleSec)) {
+              x2 = lastCandleSec;
+            } else {
+              x2 = x1;
+            }
+          } else if (extendBox && Number.isFinite(lastCandleSec) && lastCandleSec > x2) {
+            overlayLogger.debug('va_box_span_extended', {
+              boxIndex: baseIndex + idxInGroup,
+              x1,
+              originalX2: requestedX2,
+              forcedX2: lastCandleSec,
+            });
+            x2 = lastCandleSec;
+          }
+
+          const pocValue = toFiniteNumber(
+            coalesce(
+              box.poc,
+              box.POC,
+              box?.meta?.poc,
+              box?.metadata?.poc,
+            ),
+          );
+          const sessions = coalesce(
+            box.session_count,
+            box.sessions,
+            box.sessionCount,
+            box?.meta?.session_count,
+            box?.metadata?.session_count,
+          );
+          const valueAreaId = coalesce(
+            box.value_area_id,
+            box.valueAreaId,
+            box.value_areaId,
+            box.id,
+            box?.meta?.value_area_id,
+            box?.metadata?.value_area_id,
+          );
+          const label = coalesce(
+            box.label,
+            box.session_label,
+            box.session,
+            box.profile_label,
+          );
+          const sourceStart = coalesce(box.start, box.start_date, box.startDate);
+          const sourceEnd = coalesce(box.end, box.end_date, box.endDate);
+
+          const y1 = Number(box.y1);
+          const y2 = Number(box.y2);
+          const precision = Number.isFinite(Number(box.precision))
+            ? Math.min(Math.max(Number(box.precision), 2), 8)
+            : undefined;
+
+          summaryEntries.push({
+            index: baseIndex + idxInGroup + 1,
+            startSec: x1,
+            endSec: x2,
+            requestedEndSec: requestedX2,
+            val: Number.isFinite(y1) ? y1 : null,
+            vah: Number.isFinite(y2) ? y2 : null,
+            poc: pocValue,
+            sessions,
+            valueAreaId,
+            label,
+            sourceStart,
+            sourceEnd,
+            precision,
+          });
+
+          return {
+            x1,
+            x2,
+            y1,
+            y2,
+            color: box.color,
+            border: box.border,
+            precision: box.precision,
+          };
+        }).filter(Boolean);
+        boxes.push(...normalizedBoxes);
+        normalizedBoxes.forEach((b, idx) => {
+          const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
+            ? Number(b.x2) - Number(b.x1)
+            : null;
+          overlayLogger.debug('va_box_applied', {
+            boxIndex: baseIndex + idx,
+            x1: b.x1,
+            x2: b.x2,
+            y1: b.y1,
+            y2: b.y2,
+            width,
+          });
+        });
+
+        if (summaryEntries.length) {
+          overlayLogger.info('va_box_summary', {
+            appended: summaryEntries.length,
+            total: boxes.length,
+          });
+          summaryEntries.forEach((entry) => {
+            overlayLogger.info('va_box_summary_entry', {
+              index: entry.index,
+              detail: buildVaBoxSummaryText(entry),
+              valueAreaId: entry.valueAreaId ?? null,
+              label: entry.label ?? null,
+              sourceStart: entry.sourceStart ?? null,
+              sourceEnd: entry.sourceEnd ?? null,
+            });
+          });
+        }
       }
 
       if (paneViews.includes('segment') && norm.segments?.length) {
-        console.log("Adding segments", norm.segments);
         allSegments.push(...norm.segments);
       }
       if (paneViews.includes('polyline') && norm.polylines?.length) {
-        console.log("Adding polylines", norm.polylines);
         allPolylines.push(...norm.polylines);
       }
     }
@@ -320,84 +865,89 @@ export const ChartComponent = ({ chartId }) => {
       overlayHandlesRef.current.markersApi.setMarkers(markers);
       
 
-      console.log("Custom overlays", { touchPoints: grouped, boxes, allSegments, allPolylines });
       pvMgrRef.current?.setTouchPoints(touchPoints);
-      pvMgrRef.current?.setVABlocks(boxes);
+      pvMgrRef.current?.setVABlocks(boxes, {
+        lastSeriesTime: lastBarRef.current?.time,
+        barSpacing: barSpacingRef.current,
+      });
       pvMgrRef.current?.setSegments(allSegments);
       pvMgrRef.current?.setPolylines(allPolylines);
+      pvMgrRef.current?.setSignalBubbles(signalBubbles);
 
       // --- C: VWAP vs Candles coverage + coordinate check ---
-      const ts = chartRef.current.timeScale();
-      const s = seriesRef.current;
-      const toSec = t => (typeof t === 'number' && t > 2e10 ? Math.floor(t/1000) : t);
-
-      // last candle (from the ref set in loadChartData)
-      const c = lastBarRef.current;
-      const cTime = typeof c?.time === 'number' ? c.time : c?.time?.timestamp;
-      const cClose = Number(c?.close);
-
-      // last vwap point across ALL polylines
-      const vPts = (allPolylines || [])
-        .flatMap(l => (l.points || []).map(p => ({ t: toSec(p.time), p: +p.price })))
-        .filter(o => Number.isFinite(o.t) && Number.isFinite(o.p))
-        .sort((a,b) => a.t - b.t);
-      const vLast = vPts.at(-1);
-
-      // fallbacks if no candle ref yet
-      const vr = ts.getVisibleRange?.();
-      const vrTo = (vr?.to ?? cTime);
-
-      // log both time/price and pixel coords
-      console.log('[CHK] last candle', {
-        t: cTime ?? vrTo,
-        iso: (cTime ?? vrTo) ? new Date((cTime ?? vrTo) * 1000).toISOString() : null,
-        close: cClose,
-        x: cTime != null ? ts.timeToCoordinate(cTime) : (vrTo != null ? ts.timeToCoordinate(vrTo) : null),
-        y: Number.isFinite(cClose) ? s.priceToCoordinate(cClose) : null,
-      });
-
-      console.log('[CHK] last vwap', {
-        t: vLast?.t,
-        iso: vLast ? new Date(vLast.t * 1000).toISOString() : null,
-        p: vLast?.p,
-        x: vLast ? ts.timeToCoordinate(vLast.t) : null,
-        y: vLast ? s.priceToCoordinate(vLast.p) : null,
-        nPts: vPts.length,
-      });
-
-
       // seriesRef.current.setData(touch)
     } catch (e) {
-      error('setMarkers failed', e);
+      error('overlays_apply_failed', e);
     }
 
     // 6) Log summary for quick tracing.
-    info('overlays applied', {
+    info('overlays_applied', {
       priceLines: overlayHandlesRef.current.priceLines.length,
       markers: markers.length,
       touchPoints: touchPoints.length,
       boxes: boxes.length,
+      bubbles: signalBubbles.length,
       segments: allSegments.length,
       polylines: allPolylines.length,
     });
 
     setDataLoading(false);
-  }, [info, error]);
+  }, [info, error, logger]);
 
   // React to overlay changes.
   useEffect(() => {
     if (!chartState) return;
     syncOverlays(chartState.overlays || []);
-  }, [chartState?.overlays, syncOverlays]);
+  }, [chartState, syncOverlays]);
 
   // Apply handler.
-  const handleApply = useCallback(() => {
-    info('apply', { chartId, symbol, interval, dateRange });
+  const handleApply = useCallback((overrides = {}) => {
+    const nextSymbol = overrides.symbol ?? symbol;
+    const nextInterval = overrides.interval ?? interval;
+    const nextRange = overrides.dateRange ?? dateRange;
+    const nextDatasource = overrides.datasource ?? datasource;
+    const nextExchange = overrides.exchange ?? exchange;
+    const [start, end] = nextRange || [];
+    const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
+    const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
+    if (windowMs > maxWindowMs) {
+      warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
+      showWarning('Please choose a window of 90 days or less before applying.');
+      return;
+    }
+
+    if (nextDatasource === 'CCXT' && !nextExchange) {
+      warn('apply_missing_exchange', { chartId, symbol: nextSymbol });
+      showWarning('Select a crypto exchange before loading data.');
+      return;
+    }
+
+    setRangeWarning(null);
+    info('apply', {
+      chartId,
+      symbol: nextSymbol,
+      interval: nextInterval,
+      dateRange: nextRange,
+      datasource: nextDatasource,
+      exchange: nextExchange,
+    });
     syncOverlays([]); // clear overlays on apply
-    updateChart?.(chartId, { symbol, interval, dateRange });
-    loadChartData();
+    updateChart?.(chartId, {
+      symbol: nextSymbol,
+      interval: nextInterval,
+      dateRange: nextRange,
+      datasource: nextDatasource,
+      exchange: nextExchange || null,
+    });
+    loadChartData({
+      targetSymbol: nextSymbol,
+      targetInterval: nextInterval,
+      targetRange: nextRange,
+      targetDatasource: nextDatasource,
+      targetExchange: nextExchange,
+    });
     bumpRefresh?.(chartId);
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -408,54 +958,141 @@ export const ChartComponent = ({ chartId }) => {
     return show;
   }
 
+  const loaderActive = useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading);
+  const loaderMessage = chartState?.signalsLoading ? 'Generating signals…'
+    : chartState?.overlayLoading ? 'Loading overlays…'
+      : 'Loading chart…';
+
+  const statusTextClass = statusStyles.text ?? 'text-slate-300';
+
+  const lastRefreshCopy = useMemo(() => {
+    if (dataLoading) return 'Refreshing data…';
+    const iso = chartState?.lastUpdatedAt;
+    if (!iso) return 'No data fetched yet.';
+    try {
+      return `Last refreshed ${new Intl.DateTimeFormat(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(new Date(iso))}`;
+    } catch {
+      return `Last refreshed ${new Date(iso).toLocaleTimeString()}`;
+    }
+  }, [chartState?.lastUpdatedAt, dataLoading]);
+
   return (
-    <>
+    <div className="space-y-5">
+      {connectionNotice && (
+        <div className="flex items-start gap-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
+          <span className="mt-0.5 text-lg">⚠️</span>
+          <div>
+            <p className="font-semibold tracking-tight">Connection issue</p>
+            <p className="text-xs text-rose-100/80">{connectionNotice}</p>
+          </div>
+        </div>
+      )}
 
-      {/* 90-day note */}
-      <div className="mb-2">
-        <span className="inline-flex items-center rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 ring-1 ring-inset ring-amber-500/20">
-          ⚠️Timeframe max is 90 days
-        </span>
-      </div>
+      {rangeWarning && (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 shadow-lg shadow-amber-900/30">
+          <span className="text-lg">⚠️</span>
+          <span className="font-medium">{rangeWarning}</span>
+        </div>
+      )}
 
-      <div className="flex items-end space-x-4">
-        <TimeframeSelect selected={interval} onChange={setInterval} />
-        <SymbolInput value={symbol} onChange={setSymbol} />
-        <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
-        <button
-          className="mt-5.5 self-center border border-neutral-600 rounded-md p-2 hover:bg-neutral-700 transition-colors cursor-pointer"
-          onClick={handleApply}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-          </svg>
-        </button>
-      </div>
-      <div className="flex space-x-4 mt-5">
-        <div className="relative flex-1 rounded-lg overflow-hidden bg-gray-800 h-[550px]">
-          <div ref={chartContainerRef} className="h-full w-full bg-transparent" />
-          <button
-            type="button"
-            onClick={() => setPalOpen(true)}
-            className="h-9 px-3 rounded-md border border-neutral-600 bg-neutral-800/70 text-neutral-200 hover:bg-neutral-700"
-            title="Open symbol presets (/)"
-          >
-            Presets
-          </button>
+      <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-6 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
+        <div className="flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end md:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <div className="flex min-w-[13rem] flex-col gap-2">
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
+              <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
+                {DATASOURCE_OPTIONS.map((option) => {
+                  const isActive = datasource === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => handleDatasourceChange(option.id)}
+                      className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner' : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'}`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex min-w-[15rem] flex-col gap-2">
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Exchange</span>
+              {datasource === 'CCXT' ? (
+                <select
+                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+                  value={exchange || ''}
+                  onChange={(e) => handleExchangeChange(e.target.value)}
+                >
+                  {['CEX', 'DEX'].map((category) => (
+                    <optgroup
+                      key={category}
+                      label={category === 'CEX' ? 'Top Centralized Exchanges' : 'Top Decentralized Exchanges'}
+                    >
+                      {CRYPTO_EXCHANGES.filter((ex) => ex.category === category).map((ex) => (
+                        <option key={ex.id} value={ex.id}>
+                          {ex.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+                  value={exchange || DEFAULT_MARKET_PROVIDER}
+                  onChange={(e) => handleExchangeChange(e.target.value)}
+                >
+                  {MARKET_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <TimeframeSelect selected={interval} onChange={setInterval} />
+            <SymbolInput value={symbol} onChange={setSymbol} />
+            <div className="flex items-end gap-2">
+              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+              <button
+                type="button"
+                onClick={() => handleApply()}
+                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                aria-label="Reload chart data"
+                title="Reload chart data"
+              >
+                <RotateCcw className="size-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-slate-400">{lastRefreshCopy}</p>
+          {connectionStatus === 'error' && connectionMessage ? (
+            <p className={`text-xs ${statusTextClass} sm:text-right`}>{connectionMessage}</p>
+          ) : null}
+        </div>
+
+        <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-[#222430] to-[#151720]">
+          <div className="pointer-events-none absolute right-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
+            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
+          </div>
+          <div ref={chartContainerRef} className="h-full w-full" />
 
           <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
           <HotkeyHint />
-          {/* overlay */}
-          <LoadingOverlay
-            show={useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading)}
-            message={
-              chartState?.signalsLoading ? 'Generating signals…'
-              : chartState?.overlayLoading ? 'Loading overlays…'
-              : 'Loading chart…'
-            }
-          />
+          <LoadingOverlay show={loaderActive} message={loaderMessage} />
         </div>
       </div>
-    </>
+    </div>
   )
 };

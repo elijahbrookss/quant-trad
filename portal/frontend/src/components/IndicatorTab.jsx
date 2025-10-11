@@ -1,17 +1,22 @@
-import  { useState, useEffect, Fragment, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
+import { Plus, X } from 'lucide-react'
 import {
   fetchIndicators,
   createIndicator,
   updateIndicator,
   deleteIndicator,
   fetchIndicatorOverlays,
+  generateIndicatorSignals,
 } from '../adapters/indicator.adapter'
+import { applyIndicatorColors, runSignalGeneration } from './indicatorSignals.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
+import { createLogger } from '../utils/logger.js';
+import LoadingOverlay from './LoadingOverlay.jsx';
 
 
 // Gold, Maroon, Orange, Purple, Lime, Gray
@@ -19,6 +24,38 @@ const COLOR_SWATCHES = [
   '#facc15', '#b91c1c', '#f97316', '#a855f7', '#84cc16', '#6b7280',
   '#3b82f6', '#10b981', '#ec4899', '#14b8a6', '#eab308', '#f43f5e'
 ];
+
+const DEFAULT_INDICATOR_COLOR = '#60a5fa';
+const INDICATOR_PAGE_SIZE = 6;
+
+const buildColorMap = (list = []) => {
+  if (!Array.isArray(list)) return {};
+  return list.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc;
+    const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : '';
+    acc[indicator.id] = raw || DEFAULT_INDICATOR_COLOR;
+    return acc;
+  }, {});
+};
+
+const shallowEqualMap = (a = {}, b = {}) => {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+};
+
+const formatIndicatorType = (type) => {
+  if (!type) return 'Custom';
+  return type
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ');
+};
 
 const toInt = (v) => {
   if (typeof v === 'number') return Math.trunc(v);
@@ -47,15 +84,6 @@ const normalizeParams = (params) => {
   return p;
 };
 
-const hexToRgba = (hex, a = 0.18) => {
-  if (!hex || !hex.startsWith('#')) return `rgba(156,163,175,${a})`;
-  const v = hex.slice(1);
-  const n = v.length === 3
-    ? v.split('').map(c => parseInt(c + c, 16))
-    : [parseInt(v.slice(0,2),16), parseInt(v.slice(2,4),16), parseInt(v.slice(4,6),16)];
-  return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
-};
-
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
@@ -64,13 +92,35 @@ export const IndicatorSection = ({ chartId }) => {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
   const [indColors, setIndColors] = useState({});
+  const [showEnabledOnly, setShowEnabledOnly] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
 
 
   const { updateChart, getChart } = useChartState()
 
+  const logger = useMemo(() => createLogger('IndicatorSection', { chartId }), [chartId])
+  const { debug, info, warn, error: logError } = logger
+
   // Read current chart slice
   const chartState = getChart(chartId)
-  console.log('[IndicatorSection] chartId:', chartId, 'chartState:', chartState)
+  useEffect(() => {
+    if (!Array.isArray(indicators)) {
+      setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+    const next = buildColorMap(indicators);
+    setIndColors((prev) => (shallowEqualMap(prev, next) ? prev : next));
+  }, [indicators]);
+
+  useEffect(() => {
+    debug('indicator_chart_state_snapshot', {
+      hasState: Boolean(chartState),
+      version: chartState?._version ?? 0,
+      overlayCount: chartState?.overlays?.length ?? 0,
+    });
+  }, [chartState, debug]);
 
   // Derive ISO start/end from dateRange
   const [startISO, endISO] = useMemo(() => {
@@ -82,12 +132,15 @@ export const IndicatorSection = ({ chartId }) => {
 
   useEffect(() => {
     if (!chartState || !chartState._version) {
-      console.warn('[IndicatorSection] No chart state version yet, skipping fetch');
+      warn('indicator_refresh_skipped_version', { reason: 'no_version' });
       setIsLoading(false);
       return;
     }
     if (!chartState.symbol || !chartState.interval) {
-      console.warn('[IndicatorSection] Missing symbol/interval, skipping fetch');
+      warn('indicator_refresh_skipped_inputs', {
+        symbol: chartState.symbol,
+        interval: chartState.interval,
+      });
       setIsLoading(false);
       return;
     }
@@ -104,7 +157,7 @@ export const IndicatorSection = ({ chartId }) => {
       } catch (e) {
         if (isMounted) {
           setError(e.message);
-          console.error('[IndicatorSection] Refresh failed:', e);
+          logError('indicator_refresh_failed', e);
         }
       } finally {
         if (isMounted) setIsLoading(false);
@@ -130,7 +183,6 @@ export const IndicatorSection = ({ chartId }) => {
   const refreshEnabledOverlays = async (list = indicators) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
-    console.log('[IndicatorSection - Overlays] Refresh start for chartId:', chartId);
     if (!chartState) return;
 
     // if list is empty/undefined, try one fetch to seed; otherwise use provided/current list
@@ -141,7 +193,7 @@ export const IndicatorSection = ({ chartId }) => {
         setIndicators(working);
         updateChart(chartId, { indicators: working });
       } catch (e) {
-        console.error('[IndicatorSection - Overlays] Failed to seed indicators:', e);
+        logError('indicator_seed_failed', e);
         updateChart(chartId, { overlays: [] });
         return;
       }
@@ -149,6 +201,11 @@ export const IndicatorSection = ({ chartId }) => {
 
     // patch params for enabled indicators if symbol/interval mismatch
     const enabled = working.filter(i => i?.enabled);
+    info('overlay_refresh_start', {
+      enabled: enabled.length,
+      symbol: chartState.symbol,
+      interval: chartState.interval,
+    });
     const patched = await Promise.all(enabled.map(async (ind) => {
       const p = ind?.params || {};
       const desiredSymbol = chartState.symbol;
@@ -158,13 +215,32 @@ export const IndicatorSection = ({ chartId }) => {
       if (!needPatch) return ind;
 
       try {
-        const nextParams = { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO };
+        const nextParams = {
+          ...p,
+          symbol: desiredSymbol,
+          interval: desiredInterval,
+          start: startISO,
+          end: endISO,
+          datasource: chartState?.datasource,
+          exchange: chartState?.exchange,
+        };
         const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
         return updated || { ...ind, params: nextParams };
       } catch (e) {
-        console.warn('[IndicatorSection - Overlays] Param patch failed for', ind.id, e);
+        warn('indicator_param_patch_failed', { indicatorId: ind.id, message: e?.message }, e);
         // fall back locally so overlays still align this session
-        return { ...ind, params: { ...p, symbol: desiredSymbol, interval: desiredInterval, start: startISO, end: endISO } };
+        return {
+          ...ind,
+          params: {
+            ...p,
+            symbol: desiredSymbol,
+            interval: desiredInterval,
+            start: startISO,
+            end: endISO,
+            datasource: chartState?.datasource,
+            exchange: chartState?.exchange,
+          },
+        };
       }
     }));
 
@@ -182,12 +258,19 @@ export const IndicatorSection = ({ chartId }) => {
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
+      datasource: chartState?.datasource,
+      exchange: chartState?.exchange,
     };
 
     const results = await Promise.all(
       patched.map(async (ind) => {
         try {
           const payload = await fetchIndicatorOverlays(ind.id, body);
+          info('overlay_fetch_success', {
+            indicatorId: ind.id,
+            indicatorType: ind.type,
+            hasPayload: Boolean(payload),
+          });
           return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
         } catch (e) {
           const msg = String(e?.message ?? e);
@@ -196,19 +279,30 @@ export const IndicatorSection = ({ chartId }) => {
             msg.includes('No candles available') ||
             msg.includes('No overlays computed')
           ) {
-            console.warn(`[IndicatorSection - Overlays] Skipping ${ind.id}: ${msg}`);
+            warn('overlay_fetch_skipped', { indicatorId: ind.id, message: msg });
+            if (msg.includes('No candles available')) {
+              const label = ind?.name || formatIndicatorType(ind?.type);
+              setError(`No candles were available for ${label}. Adjust the chart range, timeframe, or datasource and try again.`);
+            }
             return null;
           }
-          console.error(`[IndicatorSection - Overlays] Overlay error for ${ind.id}:`, e);
+          logError('overlay_fetch_failed', { indicatorId: ind.id }, e);
           return null;
         }
       })
     );
 
     const overlaysPayload = results.filter(Boolean);
-    const colored = applyIndicatorColors(overlaysPayload, indColors);
+    const nextColorMap = buildColorMap(merged);
+    setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
+
+    const colored = applyIndicatorColors(overlaysPayload, nextColorMap);
     updateChart(chartId, { overlays: colored, overlayLoading: false });
-    console.log('[IndicatorSection] Updated overlays (colored):', colored);
+    info('overlay_refresh_complete', {
+      overlays: colored.length,
+      indicatorsProcessed: patched.length,
+      enabledCount: enabled.length,
+    });
   };
 
   // Handlers for modal save/delete
@@ -216,7 +310,6 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       const core = normalizeParams(meta.params);
 
-      // light validation for lookbacks
       if ('lookbacks' in core) {
         if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
           setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
@@ -230,11 +323,21 @@ export const IndicatorSection = ({ chartId }) => {
         end: endISO,
         symbol: chartState?.symbol,
         interval: chartState?.interval,
+        datasource: chartState?.datasource,
+        exchange: chartState?.exchange,
       };
 
       let result;
+      let indicatorId = meta.id;
       if (meta.id) {
-        result = await updateIndicator(meta.id, { type: meta.type, params, name: meta.name });
+        const existing = indicators.find((i) => i.id === meta.id);
+        result = await updateIndicator(meta.id, {
+          type: meta.type,
+          params,
+          name: meta.name,
+          color: existing?.color ?? null,
+        });
+        indicatorId = result?.id ?? meta.id;
         setIndicators((prev) => {
           const next = prev.map((i) => (i.id === result.id ? result : i));
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
@@ -242,6 +345,7 @@ export const IndicatorSection = ({ chartId }) => {
         });
       } else {
         result = await createIndicator({ type: meta.type, params, name: meta.name });
+        indicatorId = result?.id ?? null;
         setIndicators((prev) => {
           const next = [...prev, result];
           queueMicrotask(() => { void refreshEnabledOverlays(next); });
@@ -249,11 +353,26 @@ export const IndicatorSection = ({ chartId }) => {
         });
       }
 
+      if (indicatorId) {
+        const ruleSelection = Array.isArray(meta.signalRules) ? meta.signalRules : null;
+        const currentConfig = getChart(chartId)?.signalsConfig || {};
+        const currentEnabled = currentConfig.enabledRules || {};
+        const nextEnabled = { ...currentEnabled };
+        if (ruleSelection && ruleSelection.length) {
+          nextEnabled[indicatorId] = ruleSelection;
+        }
+        const nextSignalsConfig = {
+          ...currentConfig,
+          enabledRules: nextEnabled,
+        };
+        updateChart(chartId, { signalsConfig: nextSignalsConfig });
+      }
+
       setModalOpen(false);
       setError(null);
     } catch (e) {
       setError(e.message);
-      console.error('[IndicatorSection] Error saving indicator:', e);
+      logError('indicator_save_failed', e);
     }
   };
 
@@ -261,9 +380,33 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       await deleteIndicator(id)
       setIndicators(prev => prev.filter(i => i.id !== id))
+      const currentConfig = getChart(chartId)?.signalsConfig
+      if (currentConfig && typeof currentConfig === 'object') {
+        const nextConfig = { ...currentConfig }
+        let changed = false
+
+        const enabledRules = currentConfig.enabledRules
+        if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
+          const nextEnabled = { ...enabledRules }
+          delete nextEnabled[id]
+          if (Object.keys(nextEnabled).length > 0) {
+            nextConfig.enabledRules = nextEnabled
+          } else {
+            delete nextConfig.enabledRules
+          }
+          changed = true
+        }
+
+        if (changed) {
+          const remainingKeys = Object.keys(nextConfig)
+          updateChart(chartId, {
+            signalsConfig: remainingKeys.length > 0 ? nextConfig : null,
+          })
+        }
+      }
     } catch (e) {
       setError(e.message)
-      console.error('[IndicatorSection] Error deleting indicator:', e)
+      logError('indicator_delete_failed', e)
     }
   }
 
@@ -276,92 +419,364 @@ export const IndicatorSection = ({ chartId }) => {
     });
   };
 
-
   // Regenerate signals (not yet implemented)
   const generateSignals = async (id) => {
-    console.log('[IndicatorSection] generateSignals not yet implemented', id);
+    const indicator = indicators.find((ind) => ind.id === id);
+    await runSignalGeneration({
+      indicator,
+      chartId,
+      chartState,
+      startISO,
+      endISO,
+      indColors,
+      getChart,
+      updateChart,
+      setError,
+      signalsAdapter: generateIndicatorSignals,
+    });
   };
 
 
   const openEditModal = (indicator = null) => {
-    setEditing(indicator)
+    if (indicator) {
+      const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id] || []
+      setEditing({ ...indicator, signalRules: [...enabledRules] })
+    } else {
+      setEditing(null)
+    }
     setModalOpen(true)
     setError(null)
   }
 
-    // apply selected colors to overlays' price_lines and markers
-  const applyIndicatorColors = (overlays = [], colors = {}) =>
-    (overlays || []).map(ov => {
-      if (!ov || !ov.ind_id || !ov.payload) return ov;
-      const color = colors[ov.ind_id];
-      if (!color) return ov;
+  const handleSelectColor = async (indicatorId, color) => {
+    const indicator = indicators.find((ind) => ind.id === indicatorId);
+    if (!indicator) return;
 
-      // price lines → uniform color
-      const price_lines = Array.isArray(ov.payload.price_lines)
-        ? ov.payload.price_lines.map(pl => ({ ...pl, color }))
-        : ov.payload.price_lines;
+    const normalizedColor = typeof color === 'string' && color.trim()
+      ? color.trim()
+      : DEFAULT_INDICATOR_COLOR;
 
-      // markers (touch + regular) → override color
-      const markers = Array.isArray(ov.payload.markers)
-        ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
-        : ov.payload.markers;
+    const patchedParams = {
+      ...indicator.params,
+      symbol: indicator.params?.symbol ?? chartState?.symbol ?? undefined,
+      interval: indicator.params?.interval ?? chartState?.interval ?? undefined,
+      start: indicator.params?.start ?? startISO ?? undefined,
+      end: indicator.params?.end ?? endISO ?? undefined,
+    };
 
-      const boxes = Array.isArray(ov.payload.boxes)
-        ? ov.payload.boxes.map(b => {
-            if (!b) return b;
-            return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
-          })
-        : ov.payload.boxes;
+    setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
 
-        const tintHex = hexToRgba(color, 0.7);
+    const optimisticIndicators = indicators.map((ind) =>
+      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null, params: patchedParams } : ind,
+    );
+    setIndicators(optimisticIndicators);
+    updateChart(chartId, { indicators: optimisticIndicators });
 
-        if (Array.isArray(ov.payload.segments)) {
-          ov.payload.segments = ov.payload.segments.map(s => ({ ...s, color: tintHex }));
-        }
-        if (Array.isArray(ov.payload.polylines)) {
-          ov.payload.polylines = ov.payload.polylines.map(l => ({ ...l, color: tintHex }));
-        }
-
-      return { ...ov, payload: { ...ov.payload, price_lines, markers, boxes } };
-    });
-
-  const handleSelectColor = (indicatorId, color) => {
-    setIndColors(prev => ({ ...prev, [indicatorId]: color }));
+    try {
+      const updated = await updateIndicator(indicatorId, {
+        type: indicator.type,
+        name: indicator.name,
+        params: patchedParams,
+        color: normalizedColor,
+      });
+      if (updated) {
+        setIndicators((prev) => {
+          const next = prev.map((ind) => (ind.id === indicatorId ? updated : ind));
+          updateChart(chartId, { indicators: next });
+          return next;
+        });
+        setIndColors((prev) => ({
+          ...prev,
+          [indicatorId]: updated.color?.trim() ? updated.color : DEFAULT_INDICATOR_COLOR,
+        }));
+      }
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_color_update_failed', e);
+      setIndColors((prev) => ({
+        ...prev,
+        [indicatorId]: indicator.color?.trim() ? indicator.color : DEFAULT_INDICATOR_COLOR,
+      }));
+      setIndicators((prev) => {
+        const next = prev.map((ind) => (
+          ind.id === indicatorId
+            ? {
+                ...ind,
+                color: indicator.color ?? null,
+                params: indicator.params ?? ind.params,
+              }
+            : ind
+        ));
+        updateChart(chartId, { indicators: next });
+        return next;
+      });
+    }
   };
 
-  if (isLoading) return <div>Loading indicators…</div>
-  if (error) return <div className="text-red-500">Error: {error}</div>
-  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
+  const isSignalsLoading = !!chartState?.signalsLoading
+  const signalsLoadingFor = chartState?.signalsLoadingFor
 
+  const typeOptions = useMemo(() => {
+    const unique = new Set();
+    indicators.forEach((indicator) => {
+      if (indicator?.type) unique.add(indicator.type);
+    });
+    return Array.from(unique).sort();
+  }, [indicators]);
+
+  const trimmedSearchQuery = searchQuery.trim();
+
+  const filteredIndicators = useMemo(() => {
+    const base = showEnabledOnly ? indicators.filter((ind) => ind?.enabled) : indicators;
+
+    const byType = typeFilter === 'all'
+      ? base
+      : base.filter((indicator) => (indicator?.type ?? '') === typeFilter);
+
+    const query = trimmedSearchQuery.toLowerCase();
+    if (!query) return byType;
+
+    return byType.filter((indicator) => {
+      const name = (indicator?.name ?? '').toLowerCase();
+      const type = (indicator?.type ?? '').toLowerCase();
+      const paramsString = JSON.stringify(indicator?.params ?? {}).toLowerCase();
+      return name.includes(query) || type.includes(query) || paramsString.includes(query);
+    });
+  }, [indicators, showEnabledOnly, trimmedSearchQuery, typeFilter]);
+
+  const enabledCount = useMemo(
+    () => indicators.filter((indicator) => indicator?.enabled).length,
+    [indicators]
+  );
+
+  const totalCount = indicators.length;
+  const filteredCount = filteredIndicators.length;
+  const totalPages = filteredCount ? Math.ceil(filteredCount / INDICATOR_PAGE_SIZE) : 1;
+  const pageStartIndex = (currentPage - 1) * INDICATOR_PAGE_SIZE;
+  const paginatedIndicators = filteredIndicators.slice(
+    pageStartIndex,
+    pageStartIndex + INDICATOR_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [trimmedSearchQuery, typeFilter, showEnabledOnly]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages || 1);
+    }
+  }, [currentPage, totalPages]);
+
+  const indicatorSummary = useMemo(() => {
+    if (!totalCount) return 'No indicators created yet.';
+    if (!filteredCount) {
+      if (showEnabledOnly && enabledCount === 0) return 'No enabled indicators found.';
+      return 'No indicators match your filters yet.';
+    }
+
+    const pageStart = pageStartIndex + 1;
+    const pageEnd = Math.min(pageStartIndex + INDICATOR_PAGE_SIZE, filteredCount);
+    const pageSummary = `${pageStart}-${pageEnd} of ${filteredCount} matching ${filteredCount === 1 ? 'indicator' : 'indicators'}`;
+
+    if (!showEnabledOnly && !trimmedSearchQuery && (typeFilter === 'all' || typeFilter === '')) {
+      if (filteredCount === totalCount) return `${pageSummary} (out of ${totalCount} total)`;
+      return `${pageSummary} (from ${totalCount} total)`;
+    }
+    return pageSummary;
+  }, [
+    totalCount,
+    filteredCount,
+    showEnabledOnly,
+    enabledCount,
+    pageStartIndex,
+    trimmedSearchQuery,
+    typeFilter,
+  ]);
+
+  const noIndicatorsMessage = useMemo(() => {
+    if (!totalCount) return 'No indicators yet. Create one to get started.';
+    if (showEnabledOnly && !trimmedSearchQuery && (typeFilter === 'all' || typeFilter === '')) {
+      return 'No enabled indicators yet. Toggle the filter to view all indicators.';
+    }
+    return 'No indicators match your filters yet. Try adjusting the filters or search terms.';
+  }, [totalCount, showEnabledOnly, trimmedSearchQuery, typeFilter]);
+
+  if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
     <div className="space-y-6">
-      <button
-        onClick={() => openEditModal()}
-        className="flex flex-col items-center w-full px-4 py-3 rounded-lg bg-neutral-900 text-neutral-400 hover:text-neutral-100 shadow-lg cursor-pointer transition-colors"
-      >
-        {/* plus icon preserved */}
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="size-6 mb-2">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-        Create Indicator
-      </button>
+      {error && (
+        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+          <div className="pr-6">
+            <p className="font-medium text-red-200">Request failed</p>
+            <p className="mt-1 text-red-100">{error}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            aria-label="Dismiss error"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+      )}
 
       {/* List of indicators */}
-      <div className="space-y-1">
-          {indicators.map(indicator => (
-            <IndicatorCard
-              key={indicator.id}
-              indicator={indicator}
-              color={indColors[indicator.id] || '#60a5fa'}
-              onToggle={toggleEnable}
-              onEdit={openEditModal}
-              onDelete={handleDelete}
-              onGenerateSignals={generateSignals}
-              onSelectColor={handleSelectColor}
-            />
-          ))}
-      </div>
+      <section className="relative rounded-2xl border border-white/10 bg-[#0d0d11]/80 shadow-inner shadow-black/30">
+        <LoadingOverlay show={isLoading} message="Loading indicators…" />
+        <div
+          className={`flex flex-col gap-6 p-6 transition ${
+            isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'
+          }`}
+        >
+          <header className="flex flex-col gap-4 border-b border-white/5 pb-4 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-1">
+              <p className="text-[11px] uppercase tracking-[0.32em] text-slate-500">Indicators</p>
+              <h3 className="text-base font-semibold text-slate-100">Manage overlay configurations</h3>
+              <p className="text-xs text-slate-400">
+                Review saved indicators, toggle their availability, and open edits without leaving the console.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => openEditModal()}
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+              >
+                <Plus className="size-4" aria-hidden="true" />
+                Add indicator
+              </button>
+            </div>
+          </header>
+
+          <div className="flex flex-col gap-3 rounded-xl border border-white/5 bg-white/5 p-3 text-xs md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-1 flex-wrap items-center gap-3">
+              <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
+              <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
+                <input
+                  type="checkbox"
+                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                  checked={showEnabledOnly}
+                  onChange={(event) => setShowEnabledOnly(event.target.checked)}
+                />
+                Show enabled only
+              </label>
+
+              <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Type</span>
+                <select
+                  value={typeFilter}
+                  onChange={(event) => setTypeFilter(event.target.value)}
+                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                >
+                  <option value="all">All types</option>
+                  {typeOptions.map((type) => (
+                    <option key={type} value={type}>
+                      {formatIndicatorType(type)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex min-w-[12rem] flex-1 items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200 md:max-w-xs">
+                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Search</span>
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Name, type, or param"
+                  className="w-full bg-transparent text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">{indicatorSummary}</p>
+          </div>
+
+          <div className="space-y-4">
+            {paginatedIndicators.map(indicator => {
+              const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
+              const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+              return (
+                <IndicatorCard
+                  key={indicator.id}
+                  indicator={indicator}
+                  color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
+                  onToggle={toggleEnable}
+                  onEdit={openEditModal}
+                  onDelete={handleDelete}
+                  onGenerateSignals={generateSignals}
+                  onSelectColor={handleSelectColor}
+                  colorSwatches={COLOR_SWATCHES}
+                  isGeneratingSignals={isGenerating}
+                  disableSignalAction={disableSignals}
+                />
+              )
+            })}
+
+            {!isLoading && paginatedIndicators.length === 0 && (
+              <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+                {noIndicatorsMessage}
+              </div>
+            )}
+          </div>
+
+          {filteredCount > INDICATOR_PAGE_SIZE && (
+            <nav className="flex flex-col gap-2 rounded-lg border border-white/10 bg-[#11131b] px-4 py-3 text-xs text-slate-300 md:flex-row md:items-center md:justify-between" aria-label="Indicator pagination">
+              <span>
+                Page {currentPage} of {totalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                  disabled={currentPage === 1}
+                  className={`rounded-full border px-3 py-1 transition ${
+                    currentPage === 1
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                  }`}
+                >
+                  Previous
+                </button>
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: totalPages }).map((_, index) => {
+                    const pageNumber = index + 1;
+                    const isActive = pageNumber === currentPage;
+                    return (
+                      <button
+                        key={pageNumber}
+                        type="button"
+                        onClick={() => setCurrentPage(pageNumber)}
+                        className={`size-8 rounded-full border text-xs font-medium transition ${
+                          isActive
+                            ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
+                            : 'border-white/10 text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                        }`}
+                        aria-current={isActive ? 'page' : undefined}
+                      >
+                        {pageNumber}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                  disabled={currentPage === totalPages}
+                  className={`rounded-full border px-3 py-1 transition ${
+                    currentPage === totalPages
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                  }`}
+                >
+                  Next
+                </button>
+              </div>
+            </nav>
+          )}
+        </div>
+      </section>
 
       <IndicatorModal
         isOpen={modalOpen}
