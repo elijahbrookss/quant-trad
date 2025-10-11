@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 from ..service.candle_service import fetch_ohlcv
@@ -10,10 +12,19 @@ class CandleRequest(BaseModel):
     start: str
     end: str
     timeframe: str
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
 
 @router.post("/")
 def get_candles(req: CandleRequest):
-    df = fetch_ohlcv(req.symbol, req.start, req.end, req.timeframe)
+    df = fetch_ohlcv(
+        req.symbol,
+        req.start,
+        req.end,
+        req.timeframe,
+        datasource=req.datasource,
+        exchange=req.exchange,
+    )
 
     if df is None or df.empty:
        return {"candles": []}

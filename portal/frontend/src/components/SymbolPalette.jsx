@@ -6,7 +6,11 @@ const FAV_KEY = 'qt.symbolFavorites';
 const loadFavs = () => {
   try { return JSON.parse(localStorage.getItem(FAV_KEY) || '[]'); } catch { return []; }
 };
-const saveFavs = (arr) => { try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {} };
+const saveFavs = (arr) => {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {
+    // ignore persistence issues (private browsing, etc.)
+  }
+};
 
 export default function SymbolPalette({ open, onClose, onPick }) {
   const [q, setQ] = useState('');

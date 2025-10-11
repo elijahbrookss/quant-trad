@@ -17,8 +17,33 @@ UVICORN_OPTS?= --reload --host 0.0.0.0 --port 8000
 FRONT_DIR   ?= portal/frontend
 NPM         ?= npm
 
-DC_FILE     ?= docker/docker-compose.local.yml
-SERVICES    ?= timescaledb pgadmin grafana loki
+COMPOSE_FILE ?= docker/docker-compose.yml
+COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
+COMPOSE_BAKE ?= true
+export COMPOSE_BAKE
+
+TSDB_PORT ?= 15432
+export TSDB_PORT
+
+# Docker stack profile helpers
+STACK_PRESET_all           := core,database,observability
+STACK_PRESET_core          := core,database
+STACK_PRESET_database      := database
+STACK_PRESET_observability := observability
+STACK_PROFILES             ?= all
+
+empty :=
+space := $(empty) $(empty)
+comma := ,
+
+STACK_PROFILES_EFFECTIVE := $(if $(strip $(STACK_PROFILES)),$(STACK_PROFILES),all)
+STACK_PROFILE_EXPANDED   := $(foreach token,$(subst $(comma), ,$(STACK_PROFILES_EFFECTIVE)),$(if $(strip $(token)),$(if $(STACK_PRESET_$(strip $(token))),$(STACK_PRESET_$(strip $(token))),$(strip $(token))),))
+STACK_PROFILE_WORDS      := $(filter-out ,$(subst $(comma), ,$(STACK_PROFILE_EXPANDED)))
+STACK_PROFILE_ARGS       := $(foreach profile,$(STACK_PROFILE_WORDS),--profile $(profile))
+STACK_PROFILE_DISPLAY    := $(if $(STACK_PROFILE_WORDS),$(subst $(space),$(comma) ,$(strip $(STACK_PROFILE_WORDS))),all)
+
+# Allow "make stack-up BUILD=1" to trigger docker compose --build
+STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
 
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
@@ -26,13 +51,8 @@ LOG_DIR     ?= logs
 ## ============================== HELP ==================================== ##
 .PHONY: help
 help: ## Show this help
-	@awk 'BEGIN {FS":.*##"; print "Usage: make <target>\n\nTargets:"} \
+	@awk 'BEGIN {FS=":.*##"; print "Usage: make <target>\n\nTargets:"} \
 	/^[a-zA-Z0-9_.-]+:.*##/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-
-## ============================ ORCHESTRATOR =============================== ##
-.PHONY: dev stop
-dev: venv deps dev-up api-up frontend-start ## One-shot: venv+deps → infra → API → Frontend
-stop: api-stop frontend-stop dev-down           ## Stop API & Frontend, then infra
 
 ## ============================ BOOTSTRAP ================================= ##
 .PHONY: venv deps deps-dev freeze reset-venv _deps_hash _ensure_python _ensure_dirs
@@ -74,15 +94,48 @@ _ensure_python:
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
 
-## ============================== API ===================================== ##
-.PHONY: api-dev api-up api-start api-stop api-reload api-shell
-api-dev: venv deps ## Ensure venv+deps, then run API (reload)
-	@echo "🚀 API dev server"
-	$(PYTHON) -m uvicorn $(UVICORN_APP) $(UVICORN_OPTS)
+## ============================ LOCAL SETUP ================================ ##
+.PHONY: frontend-install local-setup local-up local-stop local-restart local-db-up local-db-stop
 
-api-up: ## Run API only (assumes venv+deps)
-	@echo "🚀 API server (no bootstrap)"
-	$(PYTHON) -m uvicorn $(UVICORN_APP) --host 0.0.0.0 --port 8000
+frontend-install: ## Install frontend dependencies (npm install)
+	@[ -f "$(FRONT_DIR)/package.json" ] && { \
+		echo "📦 Installing frontend deps..."; \
+		$(NPM) --prefix $(FRONT_DIR) install; \
+	} || echo "ℹ️ No frontend package.json found at $(FRONT_DIR)"
+
+local-setup: venv deps frontend-install ## Prepare dependencies for a local (non-Docker) dev run
+	@echo "✅ Local dependencies ready"
+
+local-db-up: ## Start TimescaleDB (and companions) for local dev via Docker
+	@echo "🐘 Starting TimescaleDB via docker compose"
+	@$(COMPOSE_CMD) --profile database up -d tsdb pgadmin
+	@echo "⏳ Waiting for TimescaleDB to accept connections..."
+	@attempt=0; \
+	until $(COMPOSE_CMD) --profile database exec -T tsdb bash -c 'PGPASSWORD=quanttrad pg_isready -q -h localhost -p 5432 -d quanttrad -U quanttrad' >/dev/null 2>&1; do \
+		attempt=$$((attempt+1)); \
+		if [ $$attempt -ge 30 ]; then \
+			echo "❌ TimescaleDB readiness check failed"; \
+			exit 1; \
+		fi; \
+		echo "  ⏱️  waiting for TimescaleDB (attempt $$attempt)..."; \
+		sleep 1; \
+	done
+	@echo "✅ TimescaleDB ready on localhost:$(TSDB_PORT)"
+
+local-up: local-setup local-db-up api-start frontend-start ## Start backend & frontend locally, provisioning TimescaleDB via Docker
+	@echo "🚀 Portal running locally (API: http://localhost:8000, Frontend: http://localhost:5173, DB: localhost:$(TSDB_PORT))"
+
+local-db-stop: ## Stop TimescaleDB containers used for local dev
+	@echo "🛑 Stopping TimescaleDB containers"
+	@$(COMPOSE_CMD) --profile database stop tsdb pgadmin >/dev/null 2>&1 || true
+
+local-stop: api-stop frontend-stop local-db-stop ## Stop locally started backend, frontend, and TimescaleDB
+	@echo "🛑 Local portal processes stopped (including TimescaleDB)"
+
+local-restart: local-stop local-up ## Restart locally started backend, frontend, and TimescaleDB
+
+## ============================== API ===================================== ##
+.PHONY: api-start api-stop
 
 api-start: _ensure_dirs ## Start API in background (logs/PID managed)
 	@if pgrep -f "uvicorn.*$(UVICORN_APP)" >/dev/null; then \
@@ -90,7 +143,7 @@ api-start: _ensure_dirs ## Start API in background (logs/PID managed)
 	else \
 		echo "🚀 Starting API (logs: $(LOG_DIR)/api.log)"; \
 		nohup $(PYTHON) -m uvicorn $(UVICORN_APP) $(UVICORN_OPTS) \
-			>$(LOG_DIR)/api.log 2>&1 & echo $$! > $(PID_DIR)/api.pid; \
+		        >$(LOG_DIR)/api.log 2>&1 & echo $$! > $(PID_DIR)/api.pid; \
 		sleep 1; \
 		[ -s $(PID_DIR)/api.pid ] && echo "✅ API PID $$(cat $(PID_DIR)/api.pid)" || echo "⚠️ API PID not recorded"; \
 	fi
@@ -103,13 +156,6 @@ api-stop: ## Stop API (PID file preferred; fallback to pkill)
 	else \
 		pkill -f "uvicorn.*$(UVICORN_APP)" 2>/dev/null || true; \
 	fi
-
-api-reload: ## Touch file to trigger --reload
-	@touch backend/.reload && echo "♻️  Triggered reload"
-
-api-shell: venv ## Project-aware Python shell
-	@$(PYTHON) -q
-
 ## ============================ FRONTEND ================================== ##
 .PHONY: frontend-start frontend-stop
 frontend-start: _ensure_dirs ## Start Vite dev server in background
@@ -132,21 +178,49 @@ frontend-stop: ## Stop Vite dev server
 	fi
 
 ## ============================== DOCKER ================================== ##
-.PHONY: dev-up dev-down dev-logs dev-ps
-dev-up: ## Start local infra (TimescaleDB, Grafana, Loki, pgAdmin)
-	@docker compose -f $(DC_FILE) up -d $(SERVICES)
-	@echo "⏳ Waiting for TimescaleDB..." && sleep 2
-	@echo "✅ TimescaleDB ready"
-	@echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100 | pgAdmin http://localhost:8080"
+.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild
 
-dev-down: ## Stop infra
-	@docker compose -f $(DC_FILE) down
+stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
+	@echo "🚢 Starting stack (profiles: $(STACK_PROFILE_DISPLAY))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d
+	@profiles="$(STACK_PROFILE_WORDS)"; \
 
-dev-logs: ## Tail docker logs
-	@docker compose -f $(DC_FILE) logs -f
+		if echo "$$profiles" | grep -qw core; then \
+		        echo "➡ Frontend http://localhost:5173 | Backend http://localhost:8000"; \
+		fi; \
+		if echo "$$profiles" | grep -qw database; then \
+		        echo "➡ TimescaleDB tcp://localhost:$(TSDB_PORT) | pgAdmin http://localhost:8080"; \
+		fi; \
+		if echo "$$profiles" | grep -qw observability; then \
+		        echo "➡ Grafana http://localhost:3000 | Loki http://localhost:3100"; \
+		fi
 
-dev-ps: ## Show docker service status
-	@docker compose -f $(DC_FILE) ps
+stack-stop: ## Stop running services for selected profiles (containers remain)
+	@echo "🛑 Stopping stack (profiles: $(STACK_PROFILE_DISPLAY))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) stop
+
+stack-down: ## Remove containers for selected profiles
+	@echo "🧹 Removing stack (profiles: $(STACK_PROFILE_DISPLAY))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans
+
+stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
+	@echo "♻️  Restarting stack (profiles: $(STACK_PROFILE_DISPLAY))"
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d
+
+stack-logs: ## Follow logs for selected profiles (SERVICE=name to filter)
+	@echo "📜 Tailing logs (profiles: $(STACK_PROFILE_DISPLAY))"
+
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) logs -f $(SERVICE)
+
+stack-ps: ## Show status for selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) ps
+
+stack-build: ## Build images for selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build
+
+stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
+	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
+	@$(MAKE) stack-up STACK_PROFILES=$(STACK_PROFILES)
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean
