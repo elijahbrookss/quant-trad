@@ -1,6 +1,8 @@
 """Tests for the portal backend strategy service."""
 
 import importlib.util
+import json
+from pathlib import Path
 
 import pytest
 
@@ -27,8 +29,8 @@ def _build_payload():
     }
 
 
-def test_save_strategy_and_listings():
-    service = StrategyService()
+def test_save_strategy_and_listings(tmp_path: Path):
+    service = StrategyService(storage_path=tmp_path / "strategies.json")
     record = service.save_strategy(_build_payload())
 
     assert record.strategy_id.startswith("strategy-")
@@ -36,8 +38,8 @@ def test_save_strategy_and_listings():
     assert listed and listed[0].strategy_id == record.strategy_id
 
 
-def test_attach_yaml_and_generate_signals():
-    service = StrategyService()
+def test_attach_yaml_and_generate_signals(tmp_path: Path):
+    service = StrategyService(storage_path=tmp_path / "strategies.json")
     record = service.save_strategy(_build_payload())
 
     if not YAML_AVAILABLE:
@@ -61,8 +63,8 @@ def test_attach_yaml_and_generate_signals():
     assert signals[0]["stops"]["take_profit"] == 1.5
 
 
-def test_backtest_and_launch_placeholders():
-    service = StrategyService()
+def test_backtest_and_launch_placeholders(tmp_path: Path):
+    service = StrategyService(storage_path=tmp_path / "strategies.json")
     record = service.save_strategy(_build_payload())
 
     backtest = service.request_backtest(record.strategy_id, {"start": "2023-01-01"})
@@ -72,3 +74,20 @@ def test_backtest_and_launch_placeholders():
     launch = service.launch_strategy(record.strategy_id, mode="live")
     assert launch["mode"] == "live"
     assert launch["status"] == "pending"
+
+
+def test_reload_from_persisted_file(tmp_path: Path):
+    storage_path = tmp_path / "strategies.json"
+    service = StrategyService(storage_path=storage_path)
+    record = service.save_strategy(_build_payload())
+
+    # Force reload via a new service instance
+    reloaded = StrategyService(storage_path=storage_path)
+    fetched = reloaded.get_strategy(record.strategy_id)
+    assert fetched is not None
+    assert fetched.name == record.name
+
+    # Ensure persisted JSON is structured as expected
+    with storage_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["strategies"][0]["strategy_id"] == record.strategy_id
