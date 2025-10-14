@@ -1,7 +1,8 @@
 # test_market_profile_indicator.py
 
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas")
 from indicators.market_profile import MarketProfileIndicator
 from indicators.config import DataContext
 from data_providers.alpaca_provider import AlpacaProvider

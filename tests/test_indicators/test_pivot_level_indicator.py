@@ -1,5 +1,6 @@
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas")
 from indicators.pivot_level import PivotLevelIndicator, Level
 from data_providers.alpaca_provider import AlpacaProvider
 from indicators.config import DataContext

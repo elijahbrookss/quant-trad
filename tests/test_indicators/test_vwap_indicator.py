@@ -1,5 +1,6 @@
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas")
 from data_providers.alpaca_provider import AlpacaProvider
 from indicators.vwap import VWAPIndicator
 from indicators.config import DataContext

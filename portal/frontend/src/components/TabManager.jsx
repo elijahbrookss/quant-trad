@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { IndicatorSection } from './IndicatorTab.jsx'
+import { StrategyBuilder } from './StrategyBuilder.jsx'
 import { createLogger } from '../utils/logger.js'
 
 const tabs = [
   { id: 'Indicators', blurb: 'Configure overlays, oscillators, and custom panes.' },
   { id: 'Signals', blurb: 'Future real-time signal routing and alert orchestration.' },
-  { id: 'Strategies', blurb: 'Blueprint execution flows for live + backtest parity.' },
+  { id: 'Strategies', blurb: 'Blueprint execution flows, YAML metadata, and deployment placeholders.' },
 ]
 
 export const TabManager = ({ chartId }) => {
@@ -80,20 +81,8 @@ export const TabManager = ({ chartId }) => {
         )}
 
         {activeTab === 'Strategies' && (
-          <div className="mt-6 space-y-4 text-sm text-slate-300">
-            <p className="text-slate-400">
-              Assemble execution flows from QuantLab research into deployable strategy blueprints. Link to Ops Command for seamless rollouts.
-            </p>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <h4 className="text-sm font-semibold text-slate-100">Playbook composer</h4>
-                <p className="mt-2 text-xs text-slate-400">Chain signals, filters, and risk gates. Save variants for different market regimes.</p>
-              </div>
-              <div className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-[color:var(--accent-text-soft-alpha)]">
-                <h4 className="text-sm font-semibold text-[color:var(--accent-text-strong)]">Execution sync</h4>
-                <p className="mt-2 text-xs">Push strategies directly into the DevOps control plane for containerized rollout and monitoring.</p>
-              </div>
-            </div>
+          <div className="mt-6">
+            <StrategyBuilder chartId={chartId} />
           </div>
         )}
       </div>

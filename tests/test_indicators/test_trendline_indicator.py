@@ -1,6 +1,7 @@
 
 import pytest
-import pandas as pd
+
+pd = pytest.importorskip("pandas")
 import numpy as np
 
 # New API: TrendlineIndicator now exposes .lines and .to_lightweight()

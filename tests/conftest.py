@@ -9,6 +9,13 @@ warnings.filterwarnings(
     module=r"websockets\.legacy",
 )
 
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_pandas():
+    """Skip the entire test suite when pandas is unavailable."""
+    pytest.importorskip("pandas")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def load_env_once():
     load_dotenv(".env")
