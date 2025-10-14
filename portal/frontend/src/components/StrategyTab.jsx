@@ -1,31 +1,31 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
-import { Switch } from '@headlessui/react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+
 import {
-  fetchStrategies,
-  createStrategy,
-  updateStrategy,
-  deleteStrategy,
   attachStrategyIndicator,
-  detachStrategyIndicator,
+  createStrategy,
   createStrategyRule,
-  updateStrategyRule,
+  deleteStrategy,
   deleteStrategyRule,
+  detachStrategyIndicator,
+  fetchStrategies,
   generateStrategySignals,
+  updateStrategy,
+  updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators } from '../adapters/indicator.adapter.js'
-import { createLogger } from '../utils/logger.js'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
+import { createLogger } from '../utils/logger.js'
 
-const STRATEGY_DEFAULTS = {
+const STRATEGY_FORM_DEFAULT = {
   name: '',
   description: '',
-  symbols: '',
   timeframe: '15m',
   datasource: '',
   exchange: '',
+  symbols: '',
 }
 
-const RULE_DEFAULTS = {
+const RULE_FORM_DEFAULT = {
   name: '',
   description: '',
   indicator_id: '',
@@ -35,47 +35,52 @@ const RULE_DEFAULTS = {
   enabled: true,
 }
 
-const formatIndicatorLabel = (indicator) => {
-  if (!indicator) return 'Unknown indicator'
-  const name = indicator.name || indicator.type
-  const typeLabel = indicator.type ? indicator.type.replace(/[_-]/g, ' ') : 'custom'
-  return `${name} (${typeLabel})`
+const ActionButton = ({ variant = 'default', className = '', ...props }) => {
+  const base =
+    'rounded-lg px-3 py-1.5 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#10121a]'
+
+  const styles = {
+    default: `${base} bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] hover:bg-[color:var(--accent-alpha-40)]`,
+    ghost: `${base} bg-white/5 text-slate-200 hover:bg-white/10`,
+    danger: `${base} bg-rose-500/80 text-white hover:bg-rose-500`,
+    subtle: `${base} bg-transparent text-slate-400 hover:text-slate-100`,
+  }
+
+  const classes = [styles[variant] || styles.default, className].filter(Boolean).join(' ')
+  return <button className={classes} {...props} />
 }
 
-const parseSymbols = (symbols) => {
-  if (!symbols) return []
-  if (Array.isArray(symbols)) return symbols
-  return symbols
-    .split(/[\s,;]+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-}
-
-const StrategyForm = ({
-  open,
-  onClose,
-  onSubmit,
-  initialValues,
-  submitting,
-}) => {
-  const [form, setForm] = useState(STRATEGY_DEFAULTS)
+function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting }) {
+  const [form, setForm] = useState(STRATEGY_FORM_DEFAULT)
 
   useEffect(() => {
+    if (!open) {
+      setForm(STRATEGY_FORM_DEFAULT)
+      return
+    }
+
     if (initialValues) {
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
-        symbols: (initialValues.symbols || []).join(', '),
         timeframe: initialValues.timeframe || '15m',
         datasource: initialValues.datasource || '',
         exchange: initialValues.exchange || '',
+        symbols: Array.isArray(initialValues.symbols)
+          ? initialValues.symbols.join(', ')
+          : initialValues.symbols || '',
       })
     } else {
-      setForm(STRATEGY_DEFAULTS)
+      setForm(STRATEGY_FORM_DEFAULT)
     }
-  }, [initialValues])
+  }, [open, initialValues])
 
   if (!open) return null
+
+  const handleChange = (field) => (event) => {
+    const value = event.target.value
+    setForm((prev) => ({ ...prev, [field]: value }))
+  }
 
   const handleSubmit = async (event) => {
     event.preventDefault()
@@ -85,763 +90,922 @@ const StrategyForm = ({
       timeframe: form.timeframe.trim() || '15m',
       datasource: form.datasource.trim() || null,
       exchange: form.exchange.trim() || null,
-      symbols: parseSymbols(form.symbols),
+      symbols: form.symbols
+        .split(/[\s,;]+/)
+        .map((token) => token.trim())
+        .filter(Boolean),
     }
     await onSubmit(payload)
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
-      <div className="w-full max-w-lg space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-200 shadow-xl">
-        <div>
-          <h3 className="text-lg font-semibold text-white">
-            {initialValues ? 'Edit Strategy' : 'Create Strategy'}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+        <header className="space-y-1">
+          <h3 className="text-lg font-semibold">
+            {initialValues ? 'Edit strategy' : 'Create strategy'}
           </h3>
-          <p className="mt-1 text-sm text-slate-400">
-            Configure baseline metadata for your strategy blueprint.
+          <p className="text-sm text-slate-400">
+            Define the baseline symbol universe and metadata for this strategy blueprint.
           </p>
-        </div>
+        </header>
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
               Name
             </label>
             <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
               value={form.name}
-              onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+              onChange={handleChange('name')}
               required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
               Description
             </label>
             <textarea
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
               rows={3}
               value={form.description}
-              onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
-              Symbols (comma separated)
-            </label>
-            <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.symbols}
-              onChange={(e) => setForm((prev) => ({ ...prev, symbols: e.target.value }))}
+              onChange={handleChange('description')}
             />
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Timeframe
               </label>
               <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={form.timeframe}
-                onChange={(e) => setForm((prev) => ({ ...prev, timeframe: e.target.value }))}
-                placeholder="15m"
+                onChange={handleChange('timeframe')}
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Datasource
               </label>
               <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={form.datasource}
-                onChange={(e) => setForm((prev) => ({ ...prev, datasource: e.target.value }))}
-                placeholder="alpaca"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
-                Exchange
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.exchange}
-                onChange={(e) => setForm((prev) => ({ ...prev, exchange: e.target.value }))}
-                placeholder="CBOT"
+                onChange={handleChange('datasource')}
+                placeholder="optional"
               />
             </div>
           </div>
 
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:border-white/20 hover:text-white"
-              onClick={onClose}
-              disabled={submitting}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="rounded-lg bg-[color:var(--accent-alpha-70)] px-4 py-2 text-sm font-semibold text-black shadow-lg shadow-[color:var(--accent-shadow-strong)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={submitting}
-            >
-              {submitting ? 'Saving…' : initialValues ? 'Save Changes' : 'Create Strategy'}
-            </button>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Exchange
+              </label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.exchange}
+                onChange={handleChange('exchange')}
+                placeholder="optional"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Symbols
+              </label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.symbols}
+                onChange={handleChange('symbols')}
+                placeholder="e.g. BTCUSD, ETHUSD"
+              />
+            </div>
           </div>
+
+          <footer className="flex items-center justify-end gap-2">
+            <ActionButton type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </ActionButton>
+            <ActionButton type="submit" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Save strategy'}
+            </ActionButton>
+          </footer>
         </form>
       </div>
     </div>
   )
 }
 
-const StrategyCard = ({
-  strategy,
-  isExpanded,
-  onToggleExpand,
-  onEdit,
-  onDelete,
-  availableIndicators,
-  onToggleIndicator,
-  onCreateRule,
-  onUpdateRule,
-  onDeleteRule,
-  onGenerateSignals,
-  signalResult,
-  loadingSignals,
-}) => {
-  const [ruleForm, setRuleForm] = useState(RULE_DEFAULTS)
-  const [editingRuleId, setEditingRuleId] = useState(null)
+function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, submitting }) {
+  const [form, setForm] = useState(RULE_FORM_DEFAULT)
 
   useEffect(() => {
-    if (!isExpanded) {
-      setRuleForm(RULE_DEFAULTS)
-      setEditingRuleId(null)
-    }
-  }, [isExpanded])
-
-  const handleRuleSubmit = async (event) => {
-    event.preventDefault()
-    const payload = {
-      name: ruleForm.name.trim(),
-      description: ruleForm.description.trim() || null,
-      indicator_id: ruleForm.indicator_id || null,
-      signal_type: ruleForm.signal_type.trim(),
-      min_confidence: Number(ruleForm.min_confidence) || 0,
-      action: ruleForm.action,
-      enabled: ruleForm.enabled,
-    }
-
-    if (!payload.name || !payload.signal_type) {
+    if (!open) {
+      setForm(RULE_FORM_DEFAULT)
       return
     }
-
-    if (editingRuleId) {
-      await onUpdateRule(strategy.id, editingRuleId, payload)
+    if (initialValues) {
+      setForm({
+        name: initialValues.name || '',
+        description: initialValues.description || '',
+        indicator_id: initialValues.indicator_id || '',
+        signal_type: initialValues.signal_type || '',
+        min_confidence: Number(initialValues.min_confidence ?? 0),
+        action: initialValues.action || 'buy',
+        enabled: Boolean(initialValues.enabled),
+      })
     } else {
-      await onCreateRule(strategy.id, payload)
+      setForm(RULE_FORM_DEFAULT)
     }
+  }, [open, initialValues])
 
-    setRuleForm(RULE_DEFAULTS)
-    setEditingRuleId(null)
+  if (!open) return null
+
+  const handleChange = (field) => (event) => {
+    const value = field === 'enabled' ? event.target.checked : event.target.value
+    setForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleRuleEdit = (rule) => {
-    setEditingRuleId(rule.id)
-    setRuleForm({
-      name: rule.name || '',
-      description: rule.description || '',
-      indicator_id: rule.indicator_id || '',
-      signal_type: rule.signal_type || '',
-      min_confidence: rule.min_confidence ?? 0,
-      action: rule.action || 'buy',
-      enabled: rule.enabled ?? true,
-    })
-  }
-
-  const handleRuleDelete = async (ruleId) => {
-    await onDeleteRule(strategy.id, ruleId)
-    if (editingRuleId === ruleId) {
-      setEditingRuleId(null)
-      setRuleForm(RULE_DEFAULTS)
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const payload = {
+      name: form.name.trim(),
+      description: form.description.trim() || null,
+      indicator_id: form.indicator_id || null,
+      signal_type: form.signal_type.trim(),
+      min_confidence: Number.isFinite(Number(form.min_confidence))
+        ? Number(form.min_confidence)
+        : 0,
+      action: form.action,
+      enabled: Boolean(form.enabled),
     }
+    await onSubmit(payload)
   }
-
-  const currentIndicators = new Set(strategy.indicator_ids || [])
-  const buySignals = signalResult?.buy_signals || []
-  const sellSignals = signalResult?.sell_signals || []
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-sm text-slate-200">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-2">
-          <h3 className="text-lg font-semibold text-white">{strategy.name}</h3>
-          <p className="text-xs uppercase tracking-[0.4em] text-slate-400">
-            {strategy.timeframe} • {strategy.symbols?.join(' / ') || 'No symbols'}
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+        <header className="space-y-1">
+          <h3 className="text-lg font-semibold">
+            {initialValues ? 'Edit rule' : 'Create rule'}
+          </h3>
+          <p className="text-sm text-slate-400">
+            Bind indicator signals to BUY or SELL actions for this strategy.
           </p>
-          {strategy.description && (
-            <p className="text-sm text-slate-400">{strategy.description}</p>
+        </header>
+
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              Name
+            </label>
+            <input
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              value={form.name}
+              onChange={handleChange('name')}
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              Description
+            </label>
+            <textarea
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              rows={3}
+              value={form.description}
+              onChange={handleChange('description')}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              Indicator
+            </label>
+            <select
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              value={form.indicator_id}
+              onChange={handleChange('indicator_id')}
+            >
+              <option value="">Select indicator</option>
+              {indicators.map((indicator) => (
+                <option key={indicator.id} value={indicator.id}>
+                  {indicator.name || indicator.type}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Signal type
+              </label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.signal_type}
+                onChange={handleChange('signal_type')}
+                placeholder="e.g. breakout"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Action
+              </label>
+              <select
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.action}
+                onChange={handleChange('action')}
+              >
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Min confidence
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.min_confidence}
+                onChange={handleChange('min_confidence')}
+              />
+            </div>
+            <label className="mt-6 flex items-center gap-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border border-white/20 bg-black/60"
+                checked={form.enabled}
+                onChange={handleChange('enabled')}
+              />
+              Enabled
+            </label>
+          </div>
+
+          <footer className="flex items-center justify-end gap-2">
+            <ActionButton type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </ActionButton>
+            <ActionButton type="submit" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Save rule'}
+            </ActionButton>
+          </footer>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+const StrategyList = ({ strategies, selectedId, onSelect }) => {
+  if (!strategies.length) {
+    return (
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center text-sm text-slate-400">
+        No strategies yet. Create your first blueprint to combine indicators into rules.
+      </div>
+    )
+  }
+
+  return (
+    <ul className="space-y-2">
+      {strategies.map((strategy) => {
+        const isActive = strategy.id === selectedId
+        return (
+          <li key={strategy.id}>
+            <button
+              onClick={() => onSelect(strategy.id)}
+              className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
+                isActive
+                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-20)] text-white shadow-[0_18px_40px_-20px_var(--accent-shadow-strong)]'
+                  : 'border-white/10 bg-white/5 text-slate-200 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold">{strategy.name}</h4>
+                  <p className="text-xs text-slate-400">
+                    {strategy.timeframe} • {strategy.symbols.join(', ')}
+                  </p>
+                </div>
+                <span className="rounded-full bg-black/40 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-400">
+                  {Array.isArray(strategy.rules) ? strategy.rules.length : 0} rules
+                </span>
+              </div>
+            </button>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
+  const [selected, setSelected] = useState('')
+
+  useEffect(() => {
+    setSelected('')
+  }, [strategy?.id])
+
+  const indicatorById = useMemo(() => {
+    const map = new Map()
+    for (const indicator of indicators) {
+      map.set(indicator.id, indicator)
+    }
+    return map
+  }, [indicators])
+
+  const handleAttach = async (event) => {
+    event.preventDefault()
+    if (!selected) return
+    await onAttach(selected)
+    setSelected('')
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
+          <select
+            className="flex-1 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={selected}
+            onChange={(event) => setSelected(event.target.value)}
+          >
+            <option value="">Attach indicator…</option>
+            {indicators.map((indicator) => (
+              <option key={indicator.id} value={indicator.id}>
+                {indicator.name || indicator.type}
+              </option>
+            ))}
+          </select>
+          <ActionButton type="submit" disabled={!selected}>
+            Attach
+          </ActionButton>
+        </form>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {(!Array.isArray(strategy.indicator_ids) || strategy.indicator_ids.length === 0) && (
+          <span className="text-sm text-slate-400">No indicators linked yet.</span>
+        )}
+        {(Array.isArray(strategy.indicator_ids) ? strategy.indicator_ids : []).map((indicatorId) => {
+          const meta = indicatorById.get(indicatorId)
+          const label = meta?.name || meta?.type || indicatorId
+          return (
+            <span
+              key={indicatorId}
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200"
+            >
+              {label}
+              <button
+                className="rounded-full border border-white/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-300 hover:border-rose-400/70 hover:text-rose-200"
+                onClick={() => onDetach(indicatorId)}
+                type="button"
+              >
+                Remove
+              </button>
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function RuleList({ rules, onEdit, onDelete }) {
+  if (!rules.length) {
+    return (
+      <p className="rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-400">
+        No rules yet. Create at least one BUY or SELL rule to generate signals.
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {rules.map((rule) => (
+        <div
+          key={rule.id}
+          className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-200"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold text-white">{rule.name}</p>
+              <p className="text-xs text-slate-400">
+                {rule.signal_type} → {rule.action.toUpperCase()} • min confidence {rule.min_confidence}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${
+                  rule.enabled
+                    ? 'bg-emerald-500/20 text-emerald-200'
+                    : 'bg-slate-700/60 text-slate-400'
+                }`}
+              >
+                {rule.enabled ? 'Enabled' : 'Disabled'}
+              </span>
+              <ActionButton variant="ghost" onClick={() => onEdit(rule)}>
+                Edit
+              </ActionButton>
+              <ActionButton variant="danger" onClick={() => onDelete(rule)}>
+                Delete
+              </ActionButton>
+            </div>
+          </div>
+          {rule.description && (
+            <p className="mt-3 text-xs text-slate-400">{rule.description}</p>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => onToggleExpand(strategy.id)}
-            className="rounded-full border border-white/10 px-4 py-2 text-xs uppercase tracking-[0.3em] text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-white"
-          >
-            {isExpanded ? 'Hide Details' : 'Manage Strategy'}
-          </button>
-          <button
-            onClick={() => onEdit(strategy)}
-            className="rounded-full border border-white/10 px-4 py-2 text-xs uppercase tracking-[0.3em] text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-white"
-          >
-            Edit
-          </button>
-          <button
-            onClick={() => onDelete(strategy.id)}
-            className="rounded-full border border-red-500/20 px-4 py-2 text-xs uppercase tracking-[0.3em] text-red-300 hover:border-red-500/40 hover:text-red-100"
-          >
-            Delete
-          </button>
+      ))}
+    </div>
+  )
+}
+
+function SignalSummary({ result }) {
+  if (!result) return null
+
+  const { window, buy_signals: buys = [], sell_signals: sells = [], rule_results: rules = [] } = result
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-sm text-slate-200">
+      <div>
+        <h4 className="text-sm font-semibold text-white">Evaluation window</h4>
+        <p className="text-xs text-slate-400">
+          {window?.start || 'start ?'} → {window?.end || 'end ?'} • {window?.interval || 'interval ?'} •{' '}
+          {window?.symbol || 'symbol ?'}
+        </p>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
+          <p className="text-xs uppercase tracking-[0.3em] text-emerald-200/80">Buy</p>
+          <p className="text-lg font-semibold">{buys.length} matches</p>
+        </div>
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-rose-100">
+          <p className="text-xs uppercase tracking-[0.3em] text-rose-200/80">Sell</p>
+          <p className="text-lg font-semibold">{sells.length} matches</p>
         </div>
       </div>
 
-      {isExpanded && (
-        <div className="mt-6 space-y-6">
-          <div className="space-y-3">
-            <h4 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-300">
-              Indicators
-            </h4>
-            <div className="grid gap-3 md:grid-cols-2">
-              {availableIndicators.map((indicator) => {
-                const checked = currentIndicators.has(indicator.id)
-                return (
-                  <label
-                    key={indicator.id}
-                    className={`flex cursor-pointer items-center justify-between rounded-xl border px-4 py-3 text-xs transition ${
-                      checked
-                        ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)]'
-                        : 'border-white/10 bg-black/20 text-slate-300 hover:border-white/20'
-                    }`}
-                  >
-                    <span className="pr-4 text-left text-sm font-medium">
-                      {formatIndicatorLabel(indicator)}
-                    </span>
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4"
-                      checked={checked}
-                      onChange={(e) => onToggleIndicator(strategy.id, indicator.id, e.target.checked)}
-                    />
-                  </label>
-                )
-              })}
-              {!availableIndicators.length && (
-                <p className="rounded-xl border border-dashed border-white/10 bg-black/20 px-4 py-4 text-xs text-slate-400">
-                  Create indicators first to attach them to strategies.
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <h4 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-300">
-              Rules
-            </h4>
-
-            <form className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4" onSubmit={handleRuleSubmit}>
-              <div className="grid gap-3 md:grid-cols-2">
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Rule Name</label>
-                  <input
-                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                    value={ruleForm.name}
-                    onChange={(e) => setRuleForm((prev) => ({ ...prev, name: e.target.value }))}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Signal Type</label>
-                  <input
-                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                    value={ruleForm.signal_type}
-                    onChange={(e) => setRuleForm((prev) => ({ ...prev, signal_type: e.target.value }))}
-                    placeholder="breakout"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Indicator</label>
-                  <select
-                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                    value={ruleForm.indicator_id}
-                    onChange={(e) => setRuleForm((prev) => ({ ...prev, indicator_id: e.target.value }))}
-                  >
-                    <option value="">Select indicator</option>
-                    {availableIndicators.map((indicator) => (
-                      <option key={indicator.id} value={indicator.id}>
-                        {indicator.name || indicator.type}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Min Confidence</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="1"
-                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                    value={ruleForm.min_confidence}
-                    onChange={(e) => setRuleForm((prev) => ({ ...prev, min_confidence: e.target.value }))}
-                  />
-                </div>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Action</label>
-                  <select
-                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                    value={ruleForm.action}
-                    onChange={(e) => setRuleForm((prev) => ({ ...prev, action: e.target.value }))}
-                  >
-                    <option value="buy">Buy</option>
-                    <option value="sell">Sell</option>
-                  </select>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="block text-xs uppercase tracking-[0.3em] text-slate-400">Enabled</span>
-                    <p className="mt-1 text-xs text-slate-400">Toggle to include this rule in signal evaluation.</p>
-                  </div>
-                  <Switch
-                    checked={ruleForm.enabled}
-                    onChange={(value) => setRuleForm((prev) => ({ ...prev, enabled: value }))}
-                    className={`${
-                      ruleForm.enabled ? 'bg-[color:var(--accent-alpha-70)]' : 'bg-slate-600'
-                    } relative inline-flex h-6 w-11 items-center rounded-full transition`}
-                  >
-                    <span
-                      className={`${
-                        ruleForm.enabled ? 'translate-x-6' : 'translate-x-1'
-                      } inline-block h-4 w-4 transform rounded-full bg-white transition`}
-                    />
-                  </Switch>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">Notes</label>
-                <textarea
-                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                  rows={2}
-                  value={ruleForm.description}
-                  onChange={(e) => setRuleForm((prev) => ({ ...prev, description: e.target.value }))}
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                {editingRuleId && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingRuleId(null)
-                      setRuleForm(RULE_DEFAULTS)
-                    }}
-                    className="rounded-lg border border-white/10 px-4 py-2 text-xs uppercase tracking-[0.3em] text-slate-300 hover:border-white/20 hover:text-white"
-                  >
-                    Cancel Edit
-                  </button>
-                )}
-                <button
-                  type="submit"
-                  className="rounded-lg bg-[color:var(--accent-alpha-70)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-black shadow-lg shadow-[color:var(--accent-shadow-strong)]"
+      <div className="space-y-2">
+        <h5 className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+          Rule breakdown
+        </h5>
+        <ul className="space-y-2">
+          {rules.map((entry) => (
+            <li
+              key={entry.rule_id}
+              className="rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs text-slate-200"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-white">{entry.rule_name}</span>
+                <span
+                  className={`rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${
+                    entry.matched
+                      ? 'bg-[color:var(--accent-alpha-40)] text-[color:var(--accent-text-strong)]'
+                      : 'bg-slate-700/70 text-slate-300'
+                  }`}
                 >
-                  {editingRuleId ? 'Update Rule' : 'Add Rule'}
-                </button>
+                  {entry.matched ? 'Matched' : 'Skipped'}
+                </span>
               </div>
-            </form>
-
-            <div className="space-y-2">
-              {(strategy.rules || []).length === 0 && (
-                <p className="text-xs text-slate-400">No rules defined yet. Add one above to start evaluating signals.</p>
+              {entry.signal && (
+                <pre className="mt-2 overflow-x-auto rounded-lg bg-black/50 p-2 text-[11px] leading-tight text-slate-300">
+                  {JSON.stringify(entry.signal, null, 2)}
+                </pre>
               )}
-              {(strategy.rules || []).map((rule) => (
-                <div
-                  key={rule.id}
-                  className="flex flex-col gap-3 rounded-xl border border-white/10 bg-black/20 p-4 md:flex-row md:items-center md:justify-between"
-                >
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-white">{rule.name}</p>
-                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">
-                      {rule.action?.toUpperCase()} • {rule.signal_type}
-                    </p>
-                    <p className="text-xs text-slate-400">
-                      {rule.indicator_id ? `Indicator: ${rule.indicator_id}` : 'No indicator attached'}
-                    </p>
-                    {rule.description && <p className="text-xs text-slate-500">{rule.description}</p>}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] ${
-                        rule.enabled ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)]' : 'bg-white/10 text-slate-400'
-                      }`}
-                    >
-                      {rule.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                    <button
-                      onClick={() => handleRuleEdit(rule)}
-                      className="rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-slate-300 hover:border-white/20 hover:text-white"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => handleRuleDelete(rule.id)}
-                      className="rounded-full border border-red-500/20 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-red-300 hover:border-red-500/40 hover:text-red-100"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+              {!entry.matched && entry.reason && (
+                <p className="mt-1 text-[11px] text-slate-400">{entry.reason}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
 
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h4 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-300">
-                  Signal Checks
-                </h4>
-                <p className="text-xs text-slate-400">Run the rule deck against the current chart window.</p>
-              </div>
-              <button
-                onClick={() => onGenerateSignals(strategy.id)}
-                className="rounded-full bg-[color:var(--accent-alpha-70)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-black shadow-lg shadow-[color:var(--accent-shadow-strong)]"
-                disabled={loadingSignals}
-              >
-                {loadingSignals ? 'Evaluating…' : 'Generate Signals'}
-              </button>
-            </div>
+const StrategyDetails = ({
+  strategy,
+  indicators,
+  onEdit,
+  onDelete,
+  onAttachIndicator,
+  onDetachIndicator,
+  onAddRule,
+  onEditRule,
+  onDeleteRule,
+  onRunSignals,
+  signalWindow,
+  setSignalWindow,
+  signalResult,
+  signalsLoading,
+}) => {
+  if (!strategy) {
+    return (
+      <div className="rounded-2xl border border-dashed border-white/10 bg-[#121520] p-6 text-center text-sm text-slate-400">
+        Select a strategy to manage indicators, rules, and signal evaluations.
+      </div>
+    )
+  }
 
-            {signalResult && (
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-                  <h5 className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-300">Buy Signals</h5>
-                  {buySignals.length === 0 ? (
-                    <p className="mt-3 text-xs text-slate-400">No buy signals for the current window.</p>
-                  ) : (
-                    <ul className="mt-3 space-y-2 text-xs text-slate-200">
-                      {buySignals.map((sig) => (
-                        <li key={sig.rule_id} className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
-                          <p className="font-semibold">{sig.rule_name}</p>
-                          <p className="text-[10px] uppercase tracking-[0.3em] text-emerald-300">
-                            {sig.signal?.type || 'trigger'} • confidence {Number(sig.signal?.confidence || 0).toFixed(2)}
-                          </p>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+  const handleWindowChange = (field) => (event) => {
+    const value = event.target.value
+    setSignalWindow((prev) => ({ ...prev, [field]: value }))
+  }
 
-                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-                  <h5 className="text-xs font-semibold uppercase tracking-[0.3em] text-rose-300">Sell Signals</h5>
-                  {sellSignals.length === 0 ? (
-                    <p className="mt-3 text-xs text-slate-400">No sell signals for the current window.</p>
-                  ) : (
-                    <ul className="mt-3 space-y-2 text-xs text-slate-200">
-                      {sellSignals.map((sig) => (
-                        <li key={sig.rule_id} className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2">
-                          <p className="font-semibold">{sig.rule_name}</p>
-                          <p className="text-[10px] uppercase tracking-[0.3em] text-rose-300">
-                            {sig.signal?.type || 'trigger'} • confidence {Number(sig.signal?.confidence || 0).toFixed(2)}
-                          </p>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </div>
-            )}
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    await onRunSignals(signalWindow)
+  }
 
-            {loadingSignals && (
-              <p className="text-xs text-slate-400">Collecting signal data…</p>
-            )}
-          </div>
+  return (
+    <div className="space-y-8">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-white">{strategy.name}</h3>
+          <p className="text-sm text-slate-400">
+            {strategy.timeframe} • {strategy.symbols.join(', ')}
+          </p>
         </div>
-      )}
+        <div className="flex items-center gap-2">
+          <ActionButton variant="ghost" onClick={onEdit}>
+            Edit
+          </ActionButton>
+          <ActionButton variant="danger" onClick={onDelete}>
+            Delete
+          </ActionButton>
+        </div>
+      </header>
+
+      <section className="space-y-4">
+        <h4 className="text-sm font-semibold text-white">Indicators</h4>
+        <AttachedIndicators
+          strategy={strategy}
+          indicators={indicators}
+          onAttach={onAttachIndicator}
+          onDetach={onDetachIndicator}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-white">Rules</h4>
+          <ActionButton onClick={onAddRule}>New rule</ActionButton>
+        </div>
+        <RuleList
+          rules={Array.isArray(strategy.rules) ? strategy.rules : []}
+          onEdit={onEditRule}
+          onDelete={onDeleteRule}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-white">Signal check</h4>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-2">
+              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Start ISO
+              </span>
+              <input
+                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.start}
+                onChange={handleWindowChange('start')}
+                placeholder="2024-01-01T00:00:00Z"
+              />
+            </label>
+            <label className="space-y-2">
+              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                End ISO
+              </span>
+              <input
+                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.end}
+                onChange={handleWindowChange('end')}
+                placeholder="2024-01-07T00:00:00Z"
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="space-y-2">
+              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Interval
+              </span>
+              <input
+                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.interval}
+                onChange={handleWindowChange('interval')}
+              />
+            </label>
+            <label className="space-y-2">
+              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Symbol
+              </span>
+              <input
+                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.symbol}
+                onChange={handleWindowChange('symbol')}
+                placeholder="e.g. BTCUSD"
+              />
+            </label>
+            <div className="flex items-end">
+              <ActionButton type="submit" disabled={signalsLoading} className="w-full justify-center">
+                {signalsLoading ? 'Running…' : 'Generate signals'}
+              </ActionButton>
+            </div>
+          </div>
+        </form>
+
+        {signalResult && <SignalSummary result={signalResult} />}
+      </section>
     </div>
   )
 }
 
 const StrategyTab = ({ chartId }) => {
-  const [strategies, setStrategies] = useState([])
-  const [indicators, setIndicators] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [status, setStatus] = useState(null)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [editing, setEditing] = useState(null)
-  const [saving, setSaving] = useState(false)
-  const [expandedId, setExpandedId] = useState(null)
-  const [signalResults, setSignalResults] = useState({})
-  const [signalLoading, setSignalLoading] = useState({})
-
   const { getChart } = useChartState()
-  const chartState = getChart(chartId)
-
+  const chartSnapshot = getChart(chartId)
   const logger = useMemo(() => createLogger('StrategyTab', { chartId }), [chartId])
+  const { info, warn, error } = logger
+
+  const [strategies, setStrategies] = useState([])
+  const [selectedId, setSelectedId] = useState(null)
+  const [indicators, setIndicators] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [errorMessage, setErrorMessage] = useState(null)
+  const [strategyModal, setStrategyModal] = useState({ open: false, strategy: null })
+  const [ruleModal, setRuleModal] = useState({ open: false, rule: null })
+  const [savingStrategy, setSavingStrategy] = useState(false)
+  const [savingRule, setSavingRule] = useState(false)
+  const [signalsLoading, setSignalsLoading] = useState(false)
+  const [signalResult, setSignalResult] = useState(null)
+  const [signalWindow, setSignalWindow] = useState({
+    start: '',
+    end: '',
+    interval: '15m',
+    symbol: '',
+  })
+
+  const selectedStrategy = useMemo(
+    () => strategies.find((strategy) => strategy.id === selectedId) || null,
+    [strategies, selectedId],
+  )
 
   useEffect(() => {
-    let isMounted = true
-    async function bootstrap() {
-      setLoading(true)
-      try {
-        const [strategyPayload, indicatorPayload] = await Promise.all([
-          fetchStrategies(),
-          fetchIndicators(),
-        ])
-        if (!isMounted) return
-        setStrategies(Array.isArray(strategyPayload) ? strategyPayload : [])
-        setIndicators(Array.isArray(indicatorPayload) ? indicatorPayload : [])
-        logger.info('strategy_tab_bootstrap_complete', {
-          strategies: strategyPayload?.length ?? 0,
-          indicators: indicatorPayload?.length ?? 0,
-        })
-      } catch (err) {
-        if (!isMounted) return
-        logger.error('strategy_tab_bootstrap_failed', err)
-        setStatus({ type: 'error', message: err.message || 'Failed to load strategies' })
-      } finally {
-        if (isMounted) setLoading(false)
-      }
-    }
-    bootstrap()
-    return () => {
-      isMounted = false
-    }
-  }, [logger])
-
-  const upsertStrategy = (payload) => {
-    setStrategies((prev) => {
-      const idx = prev.findIndex((item) => item.id === payload.id)
-      if (idx === -1) return [...prev, payload]
-      const next = [...prev]
-      next[idx] = payload
-      return next
+    const nextSymbol = selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
+    const nextInterval = selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
+    setSignalWindow((prev) => {
+      if (prev.symbol === nextSymbol && prev.interval === nextInterval) return prev
+      return { ...prev, symbol: nextSymbol, interval: nextInterval }
     })
-  }
+  }, [selectedStrategy?.id, selectedStrategy?.symbols, selectedStrategy?.timeframe, chartSnapshot?.symbol, chartSnapshot?.interval])
 
-  const removeStrategy = (strategyId) => {
-    setStrategies((prev) => prev.filter((item) => item.id !== strategyId))
-    setSignalResults((prev) => {
-      const clone = { ...prev }
-      delete clone[strategyId]
-      return clone
-    })
-    setSignalLoading((prev) => {
-      const clone = { ...prev }
-      delete clone[strategyId]
-      return clone
-    })
-  }
-
-  const handleCreateStrategy = async () => {
-    setEditing(null)
-    setModalOpen(true)
-  }
-
-  const handleEditStrategy = (strategy) => {
-    setEditing(strategy)
-    setModalOpen(true)
-  }
-
-  const handleSubmitStrategy = async (formPayload) => {
-    setSaving(true)
+  const refreshStrategies = useCallback(async () => {
+    setLoading(true)
+    setErrorMessage(null)
     try {
-      if (editing) {
-        const payload = await updateStrategy(editing.id, formPayload)
-        upsertStrategy(payload)
-        setStatus({ type: 'success', message: 'Strategy updated successfully.' })
-      } else {
-        const payload = await createStrategy(formPayload)
-        upsertStrategy(payload)
-        setStatus({ type: 'success', message: 'Strategy created successfully.' })
+      const payload = await fetchStrategies()
+      const list = Array.isArray(payload) ? payload : []
+      setStrategies(list)
+
+      if (!list.length) {
+        setSelectedId(null)
+        return
       }
-      setModalOpen(false)
-      setEditing(null)
+
+      if (!list.some((strategy) => strategy.id === selectedId)) {
+        setSelectedId(list[0].id)
+      }
     } catch (err) {
-      logger.error('strategy_form_submit_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to save strategy' })
+      const message = err?.message || 'Unable to load strategies'
+      setErrorMessage(message)
+      error('strategy_load_failed', err)
     } finally {
-      setSaving(false)
+      setLoading(false)
     }
-  }
+  }, [selectedId, error])
 
-  const handleDeleteStrategy = async (strategyId) => {
-    if (!strategyId) return
+  const loadIndicators = useCallback(async () => {
     try {
-      await deleteStrategy(strategyId)
-      removeStrategy(strategyId)
-      setStatus({ type: 'success', message: 'Strategy deleted.' })
-      if (expandedId === strategyId) {
-        setExpandedId(null)
+      const payload = await fetchIndicators()
+      setIndicators(Array.isArray(payload) ? payload : [])
+    } catch (err) {
+      warn('indicator_fetch_failed', err)
+    }
+  }, [warn])
+
+  useEffect(() => {
+    refreshStrategies()
+  }, [refreshStrategies])
+
+  useEffect(() => {
+    loadIndicators()
+  }, [loadIndicators])
+
+  const openCreateStrategy = () => setStrategyModal({ open: true, strategy: null })
+  const openEditStrategy = (strategy) => setStrategyModal({ open: true, strategy })
+  const closeStrategyModal = () => setStrategyModal({ open: false, strategy: null })
+
+  const openRuleModal = (rule = null) => setRuleModal({ open: true, rule })
+  const closeRuleModal = () => setRuleModal({ open: false, rule: null })
+
+  const handleStrategySubmit = async (payload) => {
+    setSavingStrategy(true)
+    setErrorMessage(null)
+    try {
+      if (strategyModal.strategy) {
+        await updateStrategy(strategyModal.strategy.id, payload)
+        info('strategy_updated', { strategyId: strategyModal.strategy.id })
+      } else {
+        await createStrategy(payload)
+        info('strategy_created', { name: payload.name })
       }
+      await refreshStrategies()
+      closeStrategyModal()
     } catch (err) {
-      logger.error('strategy_delete_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to delete strategy' })
+      setErrorMessage(err?.message || 'Failed to save strategy')
+      error('strategy_save_failed', err)
+    } finally {
+      setSavingStrategy(false)
     }
   }
 
-  const handleIndicatorToggle = async (strategyId, indicatorId, checked) => {
+  const handleDeleteStrategy = async (strategy) => {
+    if (!strategy) return
+    setErrorMessage(null)
     try {
-      const payload = checked
-        ? await attachStrategyIndicator(strategyId, indicatorId)
-        : await detachStrategyIndicator(strategyId, indicatorId)
-      upsertStrategy(payload)
-      setStatus({ type: 'success', message: 'Indicator assignment updated.' })
+      await deleteStrategy(strategy.id)
+      info('strategy_deleted', { strategyId: strategy.id })
+      if (selectedId === strategy.id) {
+        setSelectedId(null)
+      }
+      await refreshStrategies()
     } catch (err) {
-      logger.error('strategy_indicator_toggle_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to update indicator assignment' })
+      setErrorMessage(err?.message || 'Failed to delete strategy')
+      error('strategy_delete_failed', err)
     }
   }
 
-  const handleCreateRule = async (strategyId, payload) => {
+  const handleAttachIndicator = async (indicatorId) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
     try {
-      const record = await createStrategyRule(strategyId, payload)
-      upsertStrategy(record)
-      setStatus({ type: 'success', message: 'Rule created.' })
+      await attachStrategyIndicator(selectedStrategy.id, indicatorId)
+      info('strategy_indicator_attached', { strategyId: selectedStrategy.id, indicatorId })
+      await refreshStrategies()
     } catch (err) {
-      logger.error('strategy_rule_create_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to create rule' })
+      setErrorMessage(err?.message || 'Failed to attach indicator')
+      error('strategy_indicator_attach_failed', err)
     }
   }
 
-  const handleUpdateRule = async (strategyId, ruleId, payload) => {
+  const handleDetachIndicator = async (indicatorId) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
     try {
-      const record = await updateStrategyRule(strategyId, ruleId, payload)
-      upsertStrategy(record)
-      setStatus({ type: 'success', message: 'Rule updated.' })
+      await detachStrategyIndicator(selectedStrategy.id, indicatorId)
+      info('strategy_indicator_detached', { strategyId: selectedStrategy.id, indicatorId })
+      await refreshStrategies()
     } catch (err) {
-      logger.error('strategy_rule_update_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to update rule' })
+      setErrorMessage(err?.message || 'Failed to detach indicator')
+      error('strategy_indicator_detach_failed', err)
     }
   }
 
-  const handleDeleteRule = async (strategyId, ruleId) => {
+  const handleRuleSubmit = async (payload) => {
+    if (!selectedStrategy) return
+    setSavingRule(true)
+    setErrorMessage(null)
     try {
-      const record = await deleteStrategyRule(strategyId, ruleId)
-      upsertStrategy(record)
-      setStatus({ type: 'success', message: 'Rule deleted.' })
+      if (ruleModal.rule) {
+        await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
+        info('strategy_rule_updated', { strategyId: selectedStrategy.id, ruleId: ruleModal.rule.id })
+      } else {
+        await createStrategyRule(selectedStrategy.id, payload)
+        info('strategy_rule_created', { strategyId: selectedStrategy.id })
+      }
+      await refreshStrategies()
+      closeRuleModal()
     } catch (err) {
-      logger.error('strategy_rule_delete_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Unable to delete rule' })
+      setErrorMessage(err?.message || 'Failed to save rule')
+      error('strategy_rule_save_failed', err)
+    } finally {
+      setSavingRule(false)
     }
   }
 
-  const [start, end] = chartState?.dateRange || []
-  const toISO = (value) => (typeof value === 'string' ? value : value?.toISOString?.())
-  const startISO = toISO(start)
-  const endISO = toISO(end)
+  const handleDeleteRule = async (rule) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await deleteStrategyRule(selectedStrategy.id, rule.id)
+      info('strategy_rule_deleted', { strategyId: selectedStrategy.id, ruleId: rule.id })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to delete rule')
+      error('strategy_rule_delete_failed', err)
+    }
+  }
 
-  const handleGenerateSignals = async (strategyId) => {
-    if (!chartState?.symbol || !chartState?.interval) {
-      setStatus({ type: 'error', message: 'Select a symbol and timeframe on the chart before generating signals.' })
+  const runSignals = async (window) => {
+    if (!selectedStrategy) return
+    if (!window.start || !window.end) {
+      setErrorMessage('Start and end timestamps are required to generate signals.')
       return
     }
-    setSignalLoading((prev) => ({ ...prev, [strategyId]: true }))
+    setSignalsLoading(true)
+    setSignalResult(null)
+    setErrorMessage(null)
     try {
-      const payload = await generateStrategySignals(strategyId, {
-        start: startISO,
-        end: endISO,
-        interval: chartState.interval,
-        symbol: chartState.symbol,
+      const result = await generateStrategySignals(selectedStrategy.id, {
+        start: window.start,
+        end: window.end,
+        interval: window.interval,
+        symbol: window.symbol || undefined,
       })
-      setSignalResults((prev) => ({ ...prev, [strategyId]: payload }))
-      setStatus({ type: 'success', message: 'Signal evaluation completed.' })
+      setSignalResult(result)
+      info('strategy_signals_generated', { strategyId: selectedStrategy.id })
     } catch (err) {
-      logger.error('strategy_signal_generation_failed', err)
-      setStatus({ type: 'error', message: err.message || 'Failed to generate signals' })
+      setErrorMessage(err?.message || 'Failed to generate signals')
+      error('strategy_signals_failed', err)
     } finally {
-      setSignalLoading((prev) => ({ ...prev, [strategyId]: false }))
+      setSignalsLoading(false)
     }
   }
 
   return (
-    <Fragment>
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-white">Strategy Blueprints</h2>
-            <p className="text-sm text-slate-400">
-              Create reusable playbooks, attach indicators, and stack rule engines to emit buy/sell calls.
-            </p>
+    <div className="space-y-6">
+      <div className="flex items-start gap-6">
+        <div className="w-full max-w-sm space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-400">
+              Strategies
+            </h2>
+            <ActionButton onClick={openCreateStrategy}>New</ActionButton>
           </div>
-          <button
-            onClick={handleCreateStrategy}
-            className="rounded-full bg-[color:var(--accent-alpha-70)] px-5 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-black shadow-lg shadow-[color:var(--accent-shadow-strong)]"
-          >
-            New Strategy
-          </button>
+          {loading ? (
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center text-sm text-slate-400">
+              Loading strategies…
+            </div>
+          ) : (
+            <StrategyList strategies={strategies} selectedId={selectedId} onSelect={setSelectedId} />
+          )}
+          {errorMessage && (
+            <p className="text-xs text-rose-300">{errorMessage}</p>
+          )}
         </div>
 
-        {status && (
-          <div
-            className={`rounded-xl border px-4 py-3 text-xs ${
-              status.type === 'error'
-                ? 'border-red-500/40 bg-red-500/10 text-red-200'
-                : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-            }`}
-          >
-            {status.message}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-6 text-sm text-slate-400">
-            Loading strategies…
-          </div>
-        ) : strategies.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-sm text-slate-400">
-            No strategies yet. Create one to start wiring indicator outputs into actionable flows.
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {strategies.map((strategy) => (
-              <StrategyCard
-                key={strategy.id}
-                strategy={strategy}
-                isExpanded={expandedId === strategy.id}
-                onToggleExpand={(id) => setExpandedId((prev) => (prev === id ? null : id))}
-                onEdit={handleEditStrategy}
-                onDelete={handleDeleteStrategy}
-                availableIndicators={indicators}
-                onToggleIndicator={handleIndicatorToggle}
-                onCreateRule={handleCreateRule}
-                onUpdateRule={handleUpdateRule}
-                onDeleteRule={handleDeleteRule}
-                onGenerateSignals={handleGenerateSignals}
-                signalResult={signalResults[strategy.id]}
-                loadingSignals={signalLoading[strategy.id]}
-              />
-            ))}
-          </div>
-        )}
+        <div className="flex-1">
+          <StrategyDetails
+            strategy={selectedStrategy}
+            indicators={indicators}
+            onEdit={() => openEditStrategy(selectedStrategy)}
+            onDelete={() => handleDeleteStrategy(selectedStrategy)}
+            onAttachIndicator={handleAttachIndicator}
+            onDetachIndicator={handleDetachIndicator}
+            onAddRule={() => openRuleModal(null)}
+            onEditRule={(rule) => openRuleModal(rule)}
+            onDeleteRule={handleDeleteRule}
+            onRunSignals={runSignals}
+            signalWindow={signalWindow}
+            setSignalWindow={setSignalWindow}
+            signalResult={signalResult}
+            signalsLoading={signalsLoading}
+          />
+        </div>
       </div>
 
-      <StrategyForm
-        open={modalOpen}
-        onClose={() => {
-          setModalOpen(false)
-          setEditing(null)
-        }}
-        onSubmit={handleSubmitStrategy}
-        initialValues={editing}
-        submitting={saving}
+      <StrategyFormModal
+        open={strategyModal.open}
+        initialValues={strategyModal.strategy}
+        onSubmit={handleStrategySubmit}
+        onCancel={closeStrategyModal}
+        submitting={savingStrategy}
       />
-    </Fragment>
+
+      <RuleFormModal
+        open={ruleModal.open}
+        initialValues={ruleModal.rule}
+        indicators={indicators}
+        onSubmit={handleRuleSubmit}
+        onCancel={closeRuleModal}
+        submitting={savingRule}
+      />
+    </div>
   )
 }
 
