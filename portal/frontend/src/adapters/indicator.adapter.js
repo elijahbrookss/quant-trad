@@ -55,6 +55,11 @@ export async function fetchIndicatorType(id) {
     return handleResponse(res)
 }
 
+export async function fetchIndicator(id) {
+  const res = await fetch(`${BASE}/api/indicators/${id}`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
 export async function createIndicator({ type, name, params, color }) {
   adapterLogger.debug('create_indicator_request', {
     type,

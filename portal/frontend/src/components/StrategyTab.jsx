@@ -12,7 +12,7 @@ import {
   updateStrategy,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
-import { fetchIndicators } from '../adapters/indicator.adapter.js'
+import { fetchIndicators, fetchIndicator } from '../adapters/indicator.adapter.js'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
@@ -208,7 +208,15 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
   )
 }
 
-function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, submitting }) {
+function RuleFormModal({
+  open,
+  indicators,
+  ensureIndicatorMeta,
+  initialValues,
+  onSubmit,
+  onCancel,
+  submitting,
+}) {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
 
   const indicatorMap = useMemo(() => {
@@ -253,6 +261,27 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
     }
   }, [open, initialValues, makeEmptyCondition])
 
+  const trackedIndicatorIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (form.conditions || [])
+            .map((condition) => condition.indicator_id)
+            .filter((indicatorId) => typeof indicatorId === 'string' && indicatorId.trim().length > 0),
+        ),
+      ),
+    [form.conditions],
+  )
+
+  useEffect(() => {
+    if (!open || typeof ensureIndicatorMeta !== 'function' || !trackedIndicatorIds.length) {
+      return
+    }
+    trackedIndicatorIds.forEach((indicatorId) => {
+      ensureIndicatorMeta(indicatorId)
+    })
+  }, [open, trackedIndicatorIds, ensureIndicatorMeta])
+
   if (!open) return null
 
   const canSubmit = form.conditions.some(
@@ -276,6 +305,9 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
       signal_type: '',
       direction: '',
     })
+    if (indicatorId && typeof ensureIndicatorMeta === 'function') {
+      ensureIndicatorMeta(indicatorId)
+    }
   }
 
   const handleConditionRuleChange = (index) => (event) => {
@@ -438,7 +470,7 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
                       <div className="grid gap-3 md:grid-cols-2">
                         <div>
                           <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
-                            Signal rule
+                            Signal type
                           </label>
                           <select
                             className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
@@ -448,14 +480,35 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
                             disabled={!condition.indicator_id}
                           >
                             <option value="">Select signal</option>
-                            {ruleOptions.map((rule) => (
-                              <option key={rule.id} value={rule.id}>
-                                {rule.label || rule.id}
-                              </option>
-                            ))}
+                            {ruleOptions.map((rule) => {
+                              const parts = []
+                              if (rule.signal_type) {
+                                parts.push(rule.signal_type.toUpperCase())
+                              }
+                              if (rule.label && rule.label.toLowerCase() !== (rule.signal_type || '').toLowerCase()) {
+                                parts.push(rule.label)
+                              }
+                              const optionLabel = parts.length ? parts.join(' – ') : rule.id
+                              return (
+                                <option key={rule.id} value={rule.id}>
+                                  {optionLabel}
+                                </option>
+                              )
+                            })}
                           </select>
+                          {condition.indicator_id && !ruleOptions.length && (
+                            <p className="mt-1 text-[11px] text-amber-300/80">
+                              No registered signals were found for this indicator.
+                            </p>
+                          )}
                           {selectedRule?.description && (
                             <p className="mt-1 text-[11px] text-slate-400">{selectedRule.description}</p>
+                          )}
+                          {condition.signal_type && (
+                            <p className="mt-1 text-[11px] text-slate-400">
+                              Selected signal:&nbsp;
+                              <span className="font-semibold text-white">{condition.signal_type.toUpperCase()}</span>
+                            </p>
                           )}
                         </div>
 
@@ -993,29 +1046,37 @@ const StrategyDetails = ({
           <div className="grid gap-4 md:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Datasource
+                Data source (market data)
               </label>
               <select
                 className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={signalWindow.datasource || strategy.datasource || ''}
                 onChange={handleWindowChange('datasource')}
               >
-                <option value="">Use strategy default ({strategy.datasource || 'ALPACA'})</option>
-                <option value="ALPACA">Markets (ALPACA)</option>
-                <option value="CCXT">Crypto (CCXT)</option>
+                <option value="">
+                  Use strategy data source ({strategy.datasource || 'ALPACA'})
+                </option>
+                <option value="ALPACA">Market data • ALPACA</option>
+                <option value="CCXT">Crypto data • CCXT</option>
               </select>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Choose the provider used to load candles when checking these rules.
+              </p>
             </div>
 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Exchange / Provider
+                Broker / Exchange
               </label>
               <input
                 className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={signalWindow.exchange || strategy.exchange || ''}
                 onChange={handleWindowChange('exchange')}
-                placeholder="optional"
+                placeholder="e.g. ALPACA, BINANCE"
               />
+              <p className="mt-1 text-[11px] text-slate-500">
+                Specify where trades would be routed in the future.
+              </p>
             </div>
           </div>
 
@@ -1068,6 +1129,39 @@ const StrategyTab = ({ chartId }) => {
     }
     return map
   }, [indicators])
+
+  const ensureIndicatorDetails = useCallback(
+    async (indicatorId) => {
+      if (typeof indicatorId !== 'string') {
+        return null
+      }
+      const trimmed = indicatorId.trim()
+      if (!trimmed.length) {
+        return null
+      }
+      const existing = indicatorLookup.get(trimmed)
+      if (existing?.signal_rules && existing.signal_rules.length > 0) {
+        return existing
+      }
+      try {
+        const payload = await fetchIndicator(trimmed)
+        if (!payload) {
+          return existing || null
+        }
+        setIndicators((prev) => {
+          const map = new Map(prev.map((indicator) => [indicator.id, indicator]))
+          const merged = { ...(map.get(payload.id) || {}), ...payload }
+          map.set(payload.id, merged)
+          return Array.from(map.values())
+        })
+        return payload
+      } catch (err) {
+        warn('indicator_detail_fetch_failed', { indicatorId: trimmed }, err)
+        return existing || null
+      }
+    },
+    [indicatorLookup, setIndicators, warn],
+  )
 
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
@@ -1419,6 +1513,7 @@ const StrategyTab = ({ chartId }) => {
         open={ruleModal.open}
         initialValues={ruleModal.rule}
         indicators={indicatorsForRuleModal}
+        ensureIndicatorMeta={ensureIndicatorDetails}
         onSubmit={handleRuleSubmit}
         onCancel={closeRuleModal}
         submitting={savingRule}
