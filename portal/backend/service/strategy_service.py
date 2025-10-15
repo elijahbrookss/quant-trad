@@ -285,6 +285,8 @@ def _build_markers_for_results(
                     "text": label,
                     "size": 1,
                     "subtype": "strategy_signal",
+                    "direction": direction,
+                    "rule_id": res.get("rule_id"),
                 }
             )
 
@@ -701,6 +703,16 @@ class StrategyRegistry:
                     config=config or {},
                 )
                 indicator_payloads[inst_id] = payload
+                signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
+                signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
+                error_hint = payload.get("error") if isinstance(payload, Mapping) else None
+                logger.debug(
+                    "strategy_indicator_payload | strategy=%s indicator=%s signals=%d error=%s",
+                    strategy_id,
+                    inst_id,
+                    signal_count,
+                    error_hint,
+                )
             except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
                 logger.warning(
                     "strategy_indicator_signal_failed | strategy=%s indicator=%s error=%s",
@@ -711,6 +723,33 @@ class StrategyRegistry:
                 indicator_payloads[inst_id] = {"error": str(exc)}
 
         rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
+        for res in rule_results:
+            conditions = res.get("conditions") or []
+            matched_count = sum(1 for cond in conditions if cond.get("matched"))
+            total_conditions = len(conditions)
+            logger.debug(
+                "strategy_rule_evaluated | strategy=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
+                strategy_id,
+                res.get("rule_id"),
+                res.get("action"),
+                res.get("matched"),
+                matched_count,
+                total_conditions,
+                res.get("reason"),
+            )
+            for cond in conditions:
+                logger.debug(
+                    "strategy_rule_condition | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s",
+                    strategy_id,
+                    res.get("rule_id"),
+                    cond.get("indicator_id"),
+                    cond.get("signal_type"),
+                    cond.get("direction"),
+                    cond.get("direction_detected"),
+                    cond.get("matched"),
+                    cond.get("reason"),
+                )
+
         buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
         sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
 
@@ -718,11 +757,53 @@ class StrategyRegistry:
         sell_markers = _build_markers_for_results(sell_signals, action="sell")
 
         logger.info(
-            "strategy_signals_generated | strategy=%s buys=%d sells=%d",
+            "strategy_signals_generated | strategy=%s symbol=%s interval=%s start=%s end=%s buys=%d sells=%d",
             strategy_id,
+            effective_symbol,
+            interval,
+            start,
+            end,
             len(buy_signals),
             len(sell_signals),
         )
+
+        if not buy_signals and not sell_signals:
+            logger.info(
+                "strategy_signals_none | strategy=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d",
+                strategy_id,
+                effective_symbol,
+                interval,
+                start,
+                end,
+                len(indicator_payloads),
+                len(rule_results),
+            )
+            for res in rule_results:
+                conditions = res.get("conditions") or []
+                matched_count = sum(1 for cond in conditions if cond.get("matched"))
+                total_conditions = len(conditions)
+                logger.info(
+                    "strategy_rule_trace | strategy=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
+                    strategy_id,
+                    res.get("rule_id"),
+                    res.get("action"),
+                    res.get("matched"),
+                    matched_count,
+                    total_conditions,
+                    res.get("reason"),
+                )
+                for cond in conditions:
+                    logger.info(
+                        "strategy_condition_trace | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s",
+                        strategy_id,
+                        res.get("rule_id"),
+                        cond.get("indicator_id"),
+                        cond.get("signal_type"),
+                        cond.get("direction"),
+                        cond.get("direction_detected"),
+                        cond.get("matched"),
+                        cond.get("reason"),
+                    )
 
         return {
             "strategy_id": record.id,
