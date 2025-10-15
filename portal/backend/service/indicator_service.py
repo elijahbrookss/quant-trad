@@ -81,6 +81,56 @@ _BREAKOUT_CACHE_SPECS: Dict[str, BreakoutCacheSpec] = {}
 _BREAKOUT_SIGNAL_CACHE: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
 
 
+_RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "market_profile": {
+        "market_profile_breakout": {
+            "signal_type": "breakout",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long breakout",
+                    "description": "Breakout above the active value area high (VAH) that confirms continuation.",
+                },
+                {
+                    "id": "short",
+                    "label": "Short breakdown",
+                    "description": "Breakdown below the active value area low (VAL) signalling downside momentum.",
+                },
+            ],
+        },
+        "market_profile_retest": {
+            "signal_type": "retest",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long retest",
+                    "description": (
+                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
+                        " favouring continuation to the upside."
+                    ),
+                },
+                {
+                    "id": "short",
+                    "label": "Short retest",
+                    "description": (
+                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds," \
+                        " signalling continuation lower."
+                    ),
+                },
+            ],
+        },
+    },
+    "pivot_level": {
+        "pivot_breakout": {
+            "signal_type": "breakout",
+        },
+        "pivot_retest": {
+            "signal_type": "retest",
+        },
+    },
+}
+
+
 def _purge_breakout_cache(inst_id: str) -> None:
     if not inst_id:
         return
@@ -274,6 +324,76 @@ _BREAKOUT_CACHE_SPECS.update(
 )
 
 
+def _guess_signal_type(indicator_type: str, rule_id: str) -> str:
+    hints = _RULE_HINTS.get(indicator_type.lower(), {}).get(rule_id.lower(), {})
+    if hints.get("signal_type"):
+        return str(hints["signal_type"])
+
+    rule_key = rule_id.lower()
+    if "retest" in rule_key:
+        return "retest"
+    if "breakout" in rule_key or "break" in rule_key:
+        return "breakout"
+    if "touch" in rule_key:
+        return "touch"
+    if "trend" in rule_key:
+        return "trend"
+    return rule_key or "signal"
+
+
+def _default_direction_hints(signal_type: str) -> List[Dict[str, str]]:
+    normalized = (signal_type or "").lower()
+    if normalized in {"breakout", "retest", "touch", "trend"}:
+        return [
+            {
+                "id": "long",
+                "label": "Long",
+                "description": "Setup that supports a long bias.",
+            },
+            {
+                "id": "short",
+                "label": "Short",
+                "description": "Setup that supports a short bias.",
+            },
+        ]
+    return []
+
+
+def _build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
+    rule_meta = describe_indicator_rules(indicator_type) or []
+    if not rule_meta:
+        return []
+
+    catalog: List[Dict[str, Any]] = []
+    indicator_key = indicator_type.lower()
+    hints_for_indicator = _RULE_HINTS.get(indicator_key, {})
+
+    for entry in rule_meta:
+        rule_id = str(entry.get("id", "")).strip()
+        if not rule_id:
+            continue
+        hint = hints_for_indicator.get(rule_id.lower(), {})
+        signal_type = hint.get("signal_type") or _guess_signal_type(indicator_key, rule_id)
+        directions = hint.get("directions") or _default_direction_hints(signal_type)
+        enriched = dict(entry)
+        enriched["signal_type"] = signal_type
+        if directions:
+            enriched["directions"] = directions
+        catalog.append(enriched)
+
+    return catalog
+
+
+def _attach_signal_catalog(meta: Dict[str, Any]) -> Dict[str, Any]:
+    indicator_type = meta.get("type") or meta.get("name")
+    if not indicator_type:
+        return meta
+    catalog = _build_signal_catalog(str(indicator_type))
+    if catalog:
+        meta["signal_rules"] = catalog
+    return meta
+
+
 def _normalize_color(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -286,7 +406,7 @@ def _normalize_color(value: Optional[str]) -> Optional[str]:
 def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
     if "color" not in meta:
         meta["color"] = None
-    return meta
+    return _attach_signal_catalog(meta)
 
 
 def _normalize_datasource(value: Optional[str]) -> Optional[str]:
@@ -377,15 +497,17 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
             required.append(name)
         else:
             defaults[name] = param.default
+    indicator_name = getattr(Cls, "NAME", type_id)
+
     details = {
         "id": type_id,
-        "name": getattr(Cls, "NAME", type_id),
+        "name": indicator_name,
         "required_params": required,
         "default_params": defaults,
         "field_types": field_types,
     }
 
-    rule_meta = describe_indicator_rules(getattr(Cls, "NAME", type_id))
+    rule_meta = _build_signal_catalog(indicator_name)
     if rule_meta:
         details["signal_rules"] = rule_meta
 
