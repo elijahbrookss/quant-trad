@@ -15,6 +15,7 @@ import {
 import { fetchIndicators } from '../adapters/indicator.adapter.js'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
+import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -28,10 +29,16 @@ const STRATEGY_FORM_DEFAULT = {
 const RULE_FORM_DEFAULT = {
   name: '',
   description: '',
-  indicator_id: '',
-  signal_type: '',
-  min_confidence: 0.5,
   action: 'buy',
+  match: 'all',
+  conditions: [
+    {
+      indicator_id: '',
+      rule_id: '',
+      signal_type: '',
+      direction: '',
+    },
+  ],
   enabled: true,
 }
 
@@ -94,6 +101,9 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         .split(/[\s,;]+/)
         .map((token) => token.trim())
         .filter(Boolean),
+    }
+    if (Array.isArray(payload.symbols) && payload.symbols.length > 1) {
+      payload.symbols = payload.symbols.slice(0, 1)
     }
     await onSubmit(payload)
   }
@@ -201,44 +211,142 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
 function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, submitting }) {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
 
+  const indicatorMap = useMemo(() => {
+    const map = new Map()
+    for (const indicator of indicators || []) {
+      map.set(indicator.id, indicator)
+    }
+    return map
+  }, [indicators])
+
+  const makeEmptyCondition = useCallback(
+    () => ({ indicator_id: '', rule_id: '', signal_type: '', direction: '' }),
+    [],
+  )
+
   useEffect(() => {
     if (!open) {
       setForm(RULE_FORM_DEFAULT)
       return
     }
+
     if (initialValues) {
+      const mappedConditions = Array.isArray(initialValues.conditions)
+        ? initialValues.conditions.map((condition) => ({
+            indicator_id: condition.indicator_id || '',
+            rule_id: condition.rule_id || '',
+            signal_type: condition.signal_type || '',
+            direction: condition.direction || '',
+          }))
+        : []
+
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
-        indicator_id: initialValues.indicator_id || '',
-        signal_type: initialValues.signal_type || '',
-        min_confidence: Number(initialValues.min_confidence ?? 0),
         action: initialValues.action || 'buy',
+        match: initialValues.match || 'all',
+        conditions: mappedConditions.length ? mappedConditions : [makeEmptyCondition()],
         enabled: Boolean(initialValues.enabled),
       })
     } else {
-      setForm(RULE_FORM_DEFAULT)
+      setForm({ ...RULE_FORM_DEFAULT, conditions: [makeEmptyCondition()] })
     }
-  }, [open, initialValues])
+  }, [open, initialValues, makeEmptyCondition])
 
   if (!open) return null
 
-  const handleChange = (field) => (event) => {
+  const canSubmit = form.conditions.some(
+    (condition) => condition.indicator_id && condition.signal_type,
+  )
+
+  const updateCondition = (index, updates) => {
+    setForm((prev) => {
+      const nextConditions = prev.conditions.map((condition, idx) =>
+        idx === index ? { ...condition, ...updates } : condition,
+      )
+      return { ...prev, conditions: nextConditions }
+    })
+  }
+
+  const handleConditionIndicatorChange = (index) => (event) => {
+    const indicatorId = event.target.value
+    updateCondition(index, {
+      indicator_id: indicatorId,
+      rule_id: '',
+      signal_type: '',
+      direction: '',
+    })
+  }
+
+  const handleConditionRuleChange = (index) => (event) => {
+    const ruleId = event.target.value
+    setForm((prev) => {
+      const nextConditions = [...prev.conditions]
+      const current = nextConditions[index]
+      const indicatorMeta = indicatorMap.get(current.indicator_id)
+      const rules = Array.isArray(indicatorMeta?.signal_rules) ? indicatorMeta.signal_rules : []
+      const selectedRule = rules.find((rule) => rule.id === ruleId)
+      const defaultDirection = Array.isArray(selectedRule?.directions) && selectedRule.directions.length === 1
+        ? selectedRule.directions[0].id
+        : ''
+      nextConditions[index] = {
+        ...current,
+        rule_id: ruleId,
+        signal_type: selectedRule?.signal_type || '',
+        direction: defaultDirection || '',
+      }
+      return { ...prev, conditions: nextConditions }
+    })
+  }
+
+  const handleConditionDirectionChange = (index) => (event) => {
+    const direction = event.target.value
+    updateCondition(index, { direction })
+  }
+
+  const addCondition = () => {
+    setForm((prev) => ({
+      ...prev,
+      conditions: [...prev.conditions, makeEmptyCondition()],
+    }))
+  }
+
+  const removeCondition = (index) => {
+    setForm((prev) => {
+      const nextConditions = prev.conditions.filter((_, idx) => idx !== index)
+      return {
+        ...prev,
+        conditions: nextConditions.length ? nextConditions : [makeEmptyCondition()],
+      }
+    })
+  }
+
+  const handleFieldChange = (field) => (event) => {
     const value = field === 'enabled' ? event.target.checked : event.target.value
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    const conditions = form.conditions
+      .map((condition) => ({
+        indicator_id: condition.indicator_id,
+        signal_type: condition.signal_type,
+        rule_id: condition.rule_id || null,
+        direction: condition.direction || null,
+      }))
+      .filter((condition) => condition.indicator_id && condition.signal_type)
+
+    if (!conditions.length) {
+      return
+    }
+
     const payload = {
       name: form.name.trim(),
       description: form.description.trim() || null,
-      indicator_id: form.indicator_id || null,
-      signal_type: form.signal_type.trim(),
-      min_confidence: Number.isFinite(Number(form.min_confidence))
-        ? Number(form.min_confidence)
-        : 0,
       action: form.action,
+      match: form.match,
+      conditions,
       enabled: Boolean(form.enabled),
     }
     await onSubmit(payload)
@@ -246,17 +354,17 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+      <div className="w-full max-w-2xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
         <header className="space-y-1">
           <h3 className="text-lg font-semibold">
             {initialValues ? 'Edit rule' : 'Create rule'}
           </h3>
           <p className="text-sm text-slate-400">
-            Bind indicator signals to BUY or SELL actions for this strategy.
+            Combine indicator signals into modular buy or sell logic for this strategy.
           </p>
         </header>
 
-        <form className="space-y-4" onSubmit={handleSubmit}>
+        <form className="space-y-5" onSubmit={handleSubmit}>
           <div>
             <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
               Name
@@ -264,7 +372,7 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
             <input
               className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
               value={form.name}
-              onChange={handleChange('name')}
+              onChange={handleFieldChange('name')}
               required
             />
           </div>
@@ -277,41 +385,127 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
               className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
               rows={3}
               value={form.description}
-              onChange={handleChange('description')}
+              onChange={handleFieldChange('description')}
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Indicator
-            </label>
-            <select
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.indicator_id}
-              onChange={handleChange('indicator_id')}
-            >
-              <option value="">Select indicator</option>
-              {indicators.map((indicator) => (
-                <option key={indicator.id} value={indicator.id}>
-                  {indicator.name || indicator.type}
-                </option>
-              ))}
-            </select>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Conditions
+              </h4>
+              <ActionButton type="button" variant="ghost" onClick={addCondition}>
+                Add condition
+              </ActionButton>
+            </div>
+
+            {form.conditions.map((condition, index) => {
+              const indicatorMeta = indicatorMap.get(condition.indicator_id)
+              const ruleOptions = Array.isArray(indicatorMeta?.signal_rules)
+                ? indicatorMeta.signal_rules
+                : []
+              const selectedRule = ruleOptions.find((rule) => rule.id === condition.rule_id)
+              const directionOptions = Array.isArray(selectedRule?.directions)
+                ? selectedRule.directions
+                : []
+
+              return (
+                <div
+                  key={`condition-${index}`}
+                  className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 space-y-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                          Indicator
+                        </label>
+                        <select
+                          className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          value={condition.indicator_id}
+                          onChange={handleConditionIndicatorChange(index)}
+                          required
+                        >
+                          <option value="">Select indicator</option>
+                          {indicators.map((indicator) => (
+                            <option key={indicator.id} value={indicator.id}>
+                              {indicator.name || indicator.type}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div>
+                          <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                            Signal rule
+                          </label>
+                          <select
+                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                            value={condition.rule_id}
+                            onChange={handleConditionRuleChange(index)}
+                            required
+                            disabled={!condition.indicator_id}
+                          >
+                            <option value="">Select signal</option>
+                            {ruleOptions.map((rule) => (
+                              <option key={rule.id} value={rule.id}>
+                                {rule.label || rule.id}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedRule?.description && (
+                            <p className="mt-1 text-[11px] text-slate-400">{selectedRule.description}</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                            Direction filter
+                          </label>
+                          <select
+                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                            value={condition.direction || ''}
+                            onChange={handleConditionDirectionChange(index)}
+                            disabled={!directionOptions.length}
+                          >
+                            <option value="">Any direction</option>
+                            {directionOptions.map((direction) => (
+                              <option key={direction.id} value={direction.id}>
+                                {direction.label || direction.id}
+                              </option>
+                            ))}
+                          </select>
+                          {directionOptions.length > 0 && (
+                            <ul className="mt-1 space-y-1 text-[11px] text-slate-400">
+                              {directionOptions.map((direction) => (
+                                <li key={`${direction.id}-hint`}>
+                                  <span className="font-semibold text-slate-300">{direction.label || direction.id}:</span>{' '}
+                                  {direction.description}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {form.conditions.length > 1 && (
+                      <button
+                        type="button"
+                        className="mt-2 rounded-full border border-white/20 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-300 hover:border-rose-400/70 hover:text-rose-200"
+                        onClick={() => removeCondition(index)}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Signal type
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.signal_type}
-                onChange={handleChange('signal_type')}
-                placeholder="e.g. breakout"
-                required
-              />
-            </div>
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Action
@@ -319,45 +513,49 @@ function RuleFormModal({ open, indicators, initialValues, onSubmit, onCancel, su
               <select
                 className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={form.action}
-                onChange={handleChange('action')}
+                onChange={handleFieldChange('action')}
               >
                 <option value="buy">Buy</option>
                 <option value="sell">Sell</option>
               </select>
             </div>
-          </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Min confidence
+                Confluence logic
               </label>
-              <input
-                type="number"
-                min="0"
-                max="1"
-                step="0.05"
+              <select
                 className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.min_confidence}
-                onChange={handleChange('min_confidence')}
-              />
+                value={form.match}
+                onChange={handleFieldChange('match')}
+              >
+                <option value="all">All conditions must match</option>
+                <option value="any">Any condition can trigger</option>
+              </select>
             </div>
-            <label className="mt-6 flex items-center gap-2 text-sm text-slate-300">
-              <input
-                type="checkbox"
-                className="h-4 w-4 rounded border border-white/20 bg-black/60"
-                checked={form.enabled}
-                onChange={handleChange('enabled')}
-              />
-              Enabled
-            </label>
           </div>
+
+          <label className="mt-1 flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border border-white/20 bg-black/60"
+              checked={form.enabled}
+              onChange={handleFieldChange('enabled')}
+            />
+            Enabled
+          </label>
+
+          {!indicators.length && (
+            <p className="text-[11px] text-amber-300/80">
+              Attach at least one indicator to this strategy to build rule conditions.
+            </p>
+          )}
 
           <footer className="flex items-center justify-end gap-2">
             <ActionButton type="button" variant="ghost" onClick={onCancel}>
               Cancel
             </ActionButton>
-            <ActionButton type="submit" disabled={submitting}>
+            <ActionButton type="submit" disabled={submitting || !canSubmit}>
               {submitting ? 'Saving…' : 'Save rule'}
             </ActionButton>
           </footer>
@@ -481,7 +679,7 @@ function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
   )
 }
 
-function RuleList({ rules, onEdit, onDelete }) {
+function RuleList({ rules, onEdit, onDelete, indicatorLookup }) {
   if (!rules.length) {
     return (
       <p className="rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-400">
@@ -501,7 +699,7 @@ function RuleList({ rules, onEdit, onDelete }) {
             <div>
               <p className="text-sm font-semibold text-white">{rule.name}</p>
               <p className="text-xs text-slate-400">
-                {rule.signal_type} → {rule.action.toUpperCase()} • min confidence {rule.min_confidence}
+                {rule.action?.toUpperCase()} • {rule.match === 'any' ? 'Any condition triggers' : 'All conditions required'}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -525,6 +723,30 @@ function RuleList({ rules, onEdit, onDelete }) {
           {rule.description && (
             <p className="mt-3 text-xs text-slate-400">{rule.description}</p>
           )}
+
+          <div className="mt-3 space-y-2 text-xs text-slate-300">
+            {Array.isArray(rule.conditions) && rule.conditions.length ? (
+              rule.conditions.map((condition, index) => {
+                const indicatorMeta = indicatorLookup?.get?.(condition.indicator_id) || indicatorLookup?.[condition.indicator_id]
+                const label = indicatorMeta?.name || indicatorMeta?.type || condition.indicator_id
+                return (
+                  <div
+                    key={`${rule.id}-condition-${index}`}
+                    className="rounded-lg border border-white/10 bg-black/30 px-3 py-2"
+                  >
+                    <p className="font-semibold text-white">{label}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {condition.rule_id || condition.signal_type} •{' '}
+                      {condition.signal_type ? condition.signal_type.toUpperCase() : 'Signal'}
+                      {condition.direction ? ` • ${condition.direction.toUpperCase()}` : ''}
+                    </p>
+                  </div>
+                )
+              })
+            ) : (
+              <p className="text-[11px] text-slate-400">No conditions configured.</p>
+            )}
+          </div>
         </div>
       ))}
     </div>
@@ -534,7 +756,12 @@ function RuleList({ rules, onEdit, onDelete }) {
 function SignalSummary({ result }) {
   if (!result) return null
 
-  const { window, buy_signals: buys = [], sell_signals: sells = [], rule_results: rules = [] } = result
+  const {
+    window,
+    buy_signals: buys = [],
+    sell_signals: sells = [],
+    rule_results: rules = [],
+  } = result
 
   return (
     <div className="space-y-4 rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-sm text-slate-200">
@@ -543,6 +770,8 @@ function SignalSummary({ result }) {
         <p className="text-xs text-slate-400">
           {window?.start || 'start ?'} → {window?.end || 'end ?'} • {window?.interval || 'interval ?'} •{' '}
           {window?.symbol || 'symbol ?'}
+          {window?.datasource ? ` • ${window.datasource}` : ''}
+          {window?.exchange ? ` (${window.exchange})` : ''}
         </p>
       </div>
 
@@ -579,11 +808,61 @@ function SignalSummary({ result }) {
                   {entry.matched ? 'Matched' : 'Skipped'}
                 </span>
               </div>
-              {entry.signal && (
-                <pre className="mt-2 overflow-x-auto rounded-lg bg-black/50 p-2 text-[11px] leading-tight text-slate-300">
-                  {JSON.stringify(entry.signal, null, 2)}
-                </pre>
-              )}
+              <div className="mt-2 space-y-2">
+                {Array.isArray(entry.conditions) && entry.conditions.length > 0 && (
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Conditions</p>
+                    <ul className="mt-1 space-y-1">
+                      {entry.conditions.map((condition, idx) => (
+                        <li key={`${entry.rule_id}-condition-${idx}`} className="rounded-lg border border-white/10 bg-black/50 px-3 py-2">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-white">{condition.indicator_id}</span>
+                            <span className={`text-[10px] uppercase tracking-[0.2em] ${condition.matched ? 'text-emerald-200' : 'text-slate-400'}`}>
+                              {condition.matched ? 'Matched' : 'Missed'}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[11px] text-slate-400">
+                            {condition.signal_type?.toUpperCase()}
+                            {condition.direction ? ` • ${condition.direction.toUpperCase()}` : ''}
+                            {condition.direction_detected ? ` → ${condition.direction_detected.toUpperCase()}` : ''}
+                          </p>
+                          {!condition.matched && condition.reason && (
+                            <p className="text-[11px] text-slate-500">{condition.reason}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {Array.isArray(entry.signals) && entry.signals.length > 0 && (
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Signals</p>
+                    <ul className="mt-1 space-y-1">
+                      {entry.signals.map((signal, idx) => {
+                        const rawPrice = signal.metadata?.retest_close
+                          ?? signal.metadata?.price
+                          ?? signal.metadata?.level_price
+                          ?? signal.metadata?.POC
+                        const price = Number(rawPrice)
+                        return (
+                          <li key={`${entry.rule_id}-signal-${idx}`} className="rounded-lg border border-white/10 bg-black/60 px-3 py-2">
+                            <p className="text-[11px] text-slate-300">
+                              {signal.type?.toUpperCase()} • {signal.time}
+                            </p>
+                            {Number.isFinite(price) && (
+                              <p className="text-[11px] text-slate-400">Price {price.toFixed(2)}</p>
+                            )}
+                            {signal.metadata?.direction && (
+                              <p className="text-[11px] text-slate-400">Direction {signal.metadata.direction}</p>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                )}
+              </div>
               {!entry.matched && entry.reason && (
                 <p className="mt-1 text-[11px] text-slate-400">{entry.reason}</p>
               )}
@@ -598,6 +877,7 @@ function SignalSummary({ result }) {
 const StrategyDetails = ({
   strategy,
   indicators,
+  indicatorLookup,
   onEdit,
   onDelete,
   onAttachIndicator,
@@ -617,6 +897,10 @@ const StrategyDetails = ({
         Select a strategy to manage indicators, rules, and signal evaluations.
       </div>
     )
+  }
+
+  const handleDateRangeChange = (range) => {
+    setSignalWindow((prev) => ({ ...prev, dateRange: range }))
   }
 
   const handleWindowChange = (field) => (event) => {
@@ -667,6 +951,7 @@ const StrategyDetails = ({
           rules={Array.isArray(strategy.rules) ? strategy.rules : []}
           onEdit={onEditRule}
           onDelete={onDeleteRule}
+          indicatorLookup={indicatorLookup}
         />
       </section>
 
@@ -674,59 +959,70 @@ const StrategyDetails = ({
         <div className="flex items-center justify-between">
           <h4 className="text-sm font-semibold text-white">Signal check</h4>
         </div>
-        <form onSubmit={handleSubmit} className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="space-y-2">
-              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Start ISO
-              </span>
-              <input
-                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={signalWindow.start}
-                onChange={handleWindowChange('start')}
-                placeholder="2024-01-01T00:00:00Z"
-              />
-            </label>
-            <label className="space-y-2">
-              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                End ISO
-              </span>
-              <input
-                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={signalWindow.end}
-                onChange={handleWindowChange('end')}
-                placeholder="2024-01-07T00:00:00Z"
-              />
-            </label>
-          </div>
+        <form onSubmit={handleSubmit} className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
+          <DateRangePickerComponent
+            dateRange={signalWindow.dateRange}
+            setDateRange={handleDateRangeChange}
+          />
 
-          <div className="grid gap-3 md:grid-cols-3">
-            <label className="space-y-2">
-              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
                 Interval
-              </span>
+              </label>
               <input
-                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                 value={signalWindow.interval}
                 onChange={handleWindowChange('interval')}
+                placeholder={strategy.timeframe || '15m'}
               />
-            </label>
-            <label className="space-y-2">
-              <span className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Symbol
-              </span>
-              <input
-                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={signalWindow.symbol}
-                onChange={handleWindowChange('symbol')}
-                placeholder="e.g. BTCUSD"
-              />
-            </label>
-            <div className="flex items-end">
-              <ActionButton type="submit" disabled={signalsLoading} className="w-full justify-center">
-                {signalsLoading ? 'Running…' : 'Generate signals'}
-              </ActionButton>
             </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Symbol
+              </label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-300 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={strategy.symbols?.[0] || signalWindow.symbol}
+                readOnly
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Datasource
+              </label>
+              <select
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.datasource || strategy.datasource || ''}
+                onChange={handleWindowChange('datasource')}
+              >
+                <option value="">Use strategy default ({strategy.datasource || 'ALPACA'})</option>
+                <option value="ALPACA">Markets (ALPACA)</option>
+                <option value="CCXT">Crypto (CCXT)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Exchange / Provider
+              </label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={signalWindow.exchange || strategy.exchange || ''}
+                onChange={handleWindowChange('exchange')}
+                placeholder="optional"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-end justify-end">
+            <ActionButton type="submit" disabled={signalsLoading} className="w-full justify-center md:w-auto">
+              {signalsLoading ? 'Running…' : 'Generate signals'}
+            </ActionButton>
           </div>
         </form>
 
@@ -737,7 +1033,7 @@ const StrategyDetails = ({
 }
 
 const StrategyTab = ({ chartId }) => {
-  const { getChart } = useChartState()
+  const { getChart, updateChart } = useChartState()
   const chartSnapshot = getChart(chartId)
   const logger = useMemo(() => createLogger('StrategyTab', { chartId }), [chartId])
   const { info, warn, error } = logger
@@ -753,26 +1049,99 @@ const StrategyTab = ({ chartId }) => {
   const [savingRule, setSavingRule] = useState(false)
   const [signalsLoading, setSignalsLoading] = useState(false)
   const [signalResult, setSignalResult] = useState(null)
-  const [signalWindow, setSignalWindow] = useState({
-    start: '',
-    end: '',
-    interval: '15m',
-    symbol: '',
+  const [signalWindow, setSignalWindow] = useState(() => {
+    const end = new Date()
+    const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
+    return {
+      dateRange: [start, end],
+      interval: '15m',
+      symbol: '',
+      datasource: '',
+      exchange: '',
+    }
   })
+
+  const indicatorLookup = useMemo(() => {
+    const map = new Map()
+    for (const indicator of indicators) {
+      map.set(indicator.id, indicator)
+    }
+    return map
+  }, [indicators])
 
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
     [strategies, selectedId],
   )
 
+  const attachedIndicators = useMemo(() => {
+    if (!selectedStrategy || !Array.isArray(selectedStrategy.indicator_ids)) {
+      return []
+    }
+    const allowed = new Set(selectedStrategy.indicator_ids)
+    return indicators.filter((indicator) => allowed.has(indicator.id))
+  }, [selectedStrategy, indicators])
+
+  const indicatorsForRuleModal = useMemo(() => {
+    if (!ruleModal?.rule) {
+      return attachedIndicators
+    }
+    const existing = new Map(attachedIndicators.map((indicator) => [indicator.id, indicator]))
+    const extras = []
+    for (const condition of ruleModal.rule.conditions || []) {
+      const indicatorId = condition.indicator_id
+      if (!indicatorId || existing.has(indicatorId)) continue
+      const meta = indicatorLookup.get(indicatorId)
+      if (meta) {
+        existing.set(indicatorId, meta)
+        extras.push(meta)
+      }
+    }
+    return [...existing.values()]
+  }, [attachedIndicators, ruleModal?.rule, indicatorLookup])
+
   useEffect(() => {
     const nextSymbol = selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
     const nextInterval = selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
+    const nextDatasource = selectedStrategy?.datasource || chartSnapshot?.datasource || ''
+    const nextExchange = selectedStrategy?.exchange || chartSnapshot?.exchange || ''
+    const chartRange = Array.isArray(chartSnapshot?.dateRange) ? chartSnapshot.dateRange : null
+
     setSignalWindow((prev) => {
-      if (prev.symbol === nextSymbol && prev.interval === nextInterval) return prev
-      return { ...prev, symbol: nextSymbol, interval: nextInterval }
+      const updates = { ...prev }
+      let changed = false
+
+      if (prev.symbol !== nextSymbol) {
+        updates.symbol = nextSymbol
+        changed = true
+      }
+      if (prev.interval !== nextInterval) {
+        updates.interval = nextInterval
+        changed = true
+      }
+      if ((prev.datasource || '') !== nextDatasource) {
+        updates.datasource = nextDatasource
+        changed = true
+      }
+      if ((prev.exchange || '') !== nextExchange) {
+        updates.exchange = nextExchange
+        changed = true
+      }
+
+      const hasValidRange = Array.isArray(prev.dateRange)
+        && prev.dateRange[0] instanceof Date
+        && !Number.isNaN(prev.dateRange[0]?.valueOf())
+        && prev.dateRange[1] instanceof Date
+        && !Number.isNaN(prev.dateRange[1]?.valueOf())
+
+      if (!hasValidRange && Array.isArray(chartRange) && chartRange[0] instanceof Date && chartRange[1] instanceof Date) {
+        updates.dateRange = chartRange
+        changed = true
+      }
+
+      return changed ? updates : prev
     })
-  }, [selectedStrategy?.id, selectedStrategy?.symbols, selectedStrategy?.timeframe, chartSnapshot?.symbol, chartSnapshot?.interval])
+  }, [selectedStrategy?.id, selectedStrategy?.symbols, selectedStrategy?.timeframe, selectedStrategy?.datasource, selectedStrategy?.exchange, chartSnapshot?.symbol, chartSnapshot?.interval, chartSnapshot?.datasource, chartSnapshot?.exchange, chartSnapshot?.dateRange])
 
   const refreshStrategies = useCallback(async () => {
     setLoading(true)
@@ -923,22 +1292,70 @@ const StrategyTab = ({ chartId }) => {
 
   const runSignals = async (window) => {
     if (!selectedStrategy) return
-    if (!window.start || !window.end) {
-      setErrorMessage('Start and end timestamps are required to generate signals.')
+    const [startDate, endDate] = window.dateRange || []
+    if (!(startDate instanceof Date) || Number.isNaN(startDate.valueOf()) || !(endDate instanceof Date) || Number.isNaN(endDate.valueOf())) {
+      setErrorMessage('A valid start and end date are required to generate signals.')
       return
     }
     setSignalsLoading(true)
     setSignalResult(null)
     setErrorMessage(null)
     try {
+      const symbol = selectedStrategy.symbols?.[0] || window.symbol || chartSnapshot?.symbol
+      const interval = window.interval || selectedStrategy.timeframe || chartSnapshot?.interval || '15m'
+      const datasource = window.datasource || selectedStrategy.datasource || chartSnapshot?.datasource || ''
+      const exchange = window.exchange || selectedStrategy.exchange || chartSnapshot?.exchange || ''
+
       const result = await generateStrategySignals(selectedStrategy.id, {
-        start: window.start,
-        end: window.end,
-        interval: window.interval,
-        symbol: window.symbol || undefined,
+        start: startDate.toISOString(),
+        end: endDate.toISOString(),
+        interval,
+        symbol,
+        datasource: datasource || undefined,
+        exchange: exchange || undefined,
       })
       setSignalResult(result)
       info('strategy_signals_generated', { strategyId: selectedStrategy.id })
+
+      const appliedInputs = result?.applied_inputs || {}
+      const resolvedSymbol = appliedInputs.symbol || symbol
+      const resolvedInterval = appliedInputs.timeframe || interval
+      const resolvedDatasource = appliedInputs.datasource || datasource
+      const resolvedExchange = appliedInputs.exchange || exchange
+
+      const buyMarkers = Array.isArray(result?.chart_markers?.buy) ? result.chart_markers.buy : []
+      const sellMarkers = Array.isArray(result?.chart_markers?.sell) ? result.chart_markers.sell : []
+      const combinedMarkers = [...buyMarkers, ...sellMarkers]
+
+      const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
+      const remaining = existing.filter((overlay) => !(overlay?.source === 'strategy' && overlay?.strategyId === selectedStrategy.id))
+      const overlays = combinedMarkers.length
+        ? [
+            ...remaining,
+            {
+              id: `strategy-${selectedStrategy.id}-signals`,
+              source: 'strategy',
+              strategyId: selectedStrategy.id,
+              type: 'strategy',
+              payload: { markers: combinedMarkers },
+            },
+          ]
+        : remaining
+
+      const appliedDateRange = Array.isArray(window.dateRange)
+        && window.dateRange[0] instanceof Date
+        && window.dateRange[1] instanceof Date
+          ? window.dateRange
+          : undefined
+
+      updateChart(chartId, {
+        overlays,
+        symbol: resolvedSymbol,
+        interval: resolvedInterval,
+        datasource: resolvedDatasource || null,
+        exchange: resolvedExchange || null,
+        dateRange: appliedDateRange,
+      })
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to generate signals')
       error('strategy_signals_failed', err)
@@ -973,6 +1390,7 @@ const StrategyTab = ({ chartId }) => {
           <StrategyDetails
             strategy={selectedStrategy}
             indicators={indicators}
+            indicatorLookup={indicatorLookup}
             onEdit={() => openEditStrategy(selectedStrategy)}
             onDelete={() => handleDeleteStrategy(selectedStrategy)}
             onAttachIndicator={handleAttachIndicator}
@@ -1000,7 +1418,7 @@ const StrategyTab = ({ chartId }) => {
       <RuleFormModal
         open={ruleModal.open}
         initialValues={ruleModal.rule}
-        indicators={indicators}
+        indicators={indicatorsForRuleModal}
         onSubmit={handleRuleSubmit}
         onCancel={closeRuleModal}
         submitting={savingRule}

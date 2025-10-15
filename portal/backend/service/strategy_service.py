@@ -6,7 +6,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, MutableMapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from .indicator_service import generate_signals_for_instance, get_instance_meta
 
@@ -20,16 +20,282 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+def _normalise_direction(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    if text in {"long", "buy", "bull", "bullish", "above", "up"}:
+        return "long"
+    if text in {"short", "sell", "bear", "bearish", "below", "down"}:
+        return "short"
+    return None
+
+
+def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(signal, dict):
+        return None
+
+    # Try explicit metadata first.
+    metadata = signal.get("metadata")
+    if isinstance(metadata, dict):
+        direct = _normalise_direction(metadata.get("direction"))
+        if direct:
+            return direct
+
+        breakout_direction = _normalise_direction(metadata.get("breakout_direction"))
+        if breakout_direction:
+            return breakout_direction
+
+        role_value = str(metadata.get("retest_role", "")).lower()
+        if role_value:
+            if role_value == "support":
+                return "long"
+            if role_value == "resistance":
+                return "short"
+
+        level_kind = str(metadata.get("level_type") or metadata.get("level_kind") or "").lower()
+        if level_kind in {"vah", "value_area_high", "resistance"}:
+            return "short"
+        if level_kind in {"val", "value_area_low", "support"}:
+            return "long"
+
+    # Fallback to rule-level hints.
+    rule_id = str(signal.get("metadata", {}).get("pattern_id", "")).lower()
+    if rule_id.endswith("breakout"):
+        candidate = _normalise_direction(signal.get("metadata", {}).get("breakout_direction"))
+        if candidate:
+            return candidate
+
+    return None
+
+
+def _extract_signal_price(signal: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(signal, dict):
+        return None
+    metadata = signal.get("metadata")
+    candidates = []
+    if isinstance(metadata, dict):
+        candidates.extend(
+            metadata.get(key)
+            for key in (
+                "price",
+                "close",
+                "retest_close",
+                "trigger_price",
+                "level_price",
+                "poc",
+            )
+        )
+    candidates.append(signal.get("price"))
+    for value in candidates:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not (number is None or number != number):  # NaN check
+            return number
+    return None
+
+
+def _iso_to_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    try:
+        return int(dt.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _normalise_match_mode(value: Any) -> str:
+    if isinstance(value, str) and value.strip().lower() == "any":
+        return "any"
+    return "all"
+
+
+def _normalise_action(value: Any) -> str:
+    action_value = str(value).strip().lower()
+    if action_value not in {"buy", "sell"}:
+        raise ValueError("Action must be 'buy' or 'sell'")
+    return action_value
+
+
+def _parse_conditions(
+    strategy: "StrategyDefinition", raw_conditions: Optional[Iterable[Mapping[str, Any]]]
+) -> List["RuleCondition"]:
+    if not raw_conditions:
+        raise ValueError("At least one condition must be provided")
+
+    parsed: List[RuleCondition] = []
+    for idx, condition in enumerate(raw_conditions):
+        if not isinstance(condition, Mapping):
+            raise ValueError(f"Condition at index {idx} must be an object")
+
+        indicator_id = str(condition.get("indicator_id", "")).strip()
+        if not indicator_id:
+            raise ValueError(f"Condition {idx + 1} is missing indicator_id")
+        if strategy.indicator_ids and indicator_id not in strategy.indicator_ids:
+            raise ValueError(
+                f"Indicator {indicator_id} is not attached to this strategy"
+            )
+
+        signal_type = str(condition.get("signal_type", "")).strip()
+        if not signal_type:
+            raise ValueError(f"Condition {idx + 1} is missing signal_type")
+
+        rule_id = str(condition.get("rule_id", "")).strip() or None
+        direction = _normalise_direction(condition.get("direction"))
+
+        # Validate indicator exists.
+        get_instance_meta(indicator_id)
+
+        parsed.append(
+            RuleCondition(
+                indicator_id=indicator_id,
+                signal_type=signal_type,
+                rule_id=rule_id,
+                direction=direction,
+            )
+        )
+
+    return parsed
+
+
+def _evaluate_condition(
+    condition: "RuleCondition", indicator_payloads: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "indicator_id": condition.indicator_id,
+        "signal_type": condition.signal_type,
+        "rule_id": condition.rule_id,
+        "direction": condition.direction,
+        "matched": False,
+        "signal": None,
+        "reason": None,
+    }
+
+    payload = indicator_payloads.get(condition.indicator_id)
+    if payload is None:
+        info["reason"] = "No signals for indicator"
+        return info
+
+    if isinstance(payload, dict) and payload.get("error"):
+        info["reason"] = str(payload.get("error"))
+        return info
+
+    signals = payload.get("signals") if isinstance(payload, dict) else None
+    if not isinstance(signals, list):
+        info["reason"] = "Indicator returned no signals"
+        return info
+
+    desired_type = str(condition.signal_type or "").lower()
+    desired_rule = str(condition.rule_id or "").lower()
+    desired_direction = _normalise_direction(condition.direction)
+
+    for candidate in signals:
+        if not isinstance(candidate, dict):
+            continue
+        cand_type = str(candidate.get("type", "")).lower()
+        if desired_type and cand_type != desired_type:
+            continue
+
+        metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+        pattern_id = str(metadata.get("pattern_id", "")).lower()
+        if desired_rule and pattern_id != desired_rule:
+            continue
+
+        cand_direction = _infer_signal_direction(candidate)
+        if desired_direction and cand_direction != desired_direction:
+            continue
+
+        info["matched"] = True
+        info["signal"] = candidate
+        info["direction_detected"] = cand_direction
+        info["reason"] = None
+        return info
+
+    info["reason"] = "No matching signals"
+    return info
+
+
+def _build_markers_for_results(
+    results: Sequence[Mapping[str, Any]],
+    *,
+    action: str,
+) -> List[Dict[str, Any]]:
+    color = "#10b981" if action == "buy" else "#f87171"
+    shape = "arrowUp" if action == "buy" else "arrowDown"
+    markers: List[Dict[str, Any]] = []
+
+    for res in results:
+        rule_name = str(res.get("rule_name") or res.get("rule_id") or action.title())
+        for signal in res.get("signals") or []:
+            if not isinstance(signal, Mapping):
+                continue
+            epoch = _iso_to_epoch_seconds(signal.get("time"))
+            price = _extract_signal_price(signal)
+            if epoch is None or price is None:
+                continue
+            direction = _infer_signal_direction(signal) or ("long" if action == "buy" else "short")
+            label = f"{rule_name} ({direction})" if direction else rule_name
+            markers.append(
+                {
+                    "time": epoch,
+                    "price": price,
+                    "color": color,
+                    "shape": shape,
+                    "text": label,
+                    "size": 1,
+                    "subtype": "strategy_signal",
+                }
+            )
+
+    return markers
+
+
+@dataclass
+class RuleCondition:
+    """Represents a single indicator signal requirement for a rule."""
+
+    indicator_id: str
+    signal_type: str
+    rule_id: Optional[str] = None
+    direction: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "indicator_id": self.indicator_id,
+            "signal_type": self.signal_type,
+            "rule_id": self.rule_id,
+            "direction": self.direction,
+        }
+
+
 @dataclass
 class StrategyRule:
-    """Represents a single rule bound to an indicator signal type."""
+    """Represents a rule composed of one or more indicator signal conditions."""
 
     id: str
     name: str
-    signal_type: str
     action: str
-    indicator_id: Optional[str] = None
-    min_confidence: float = 0.0
+    conditions: List[RuleCondition]
+    match: str = "all"
     description: Optional[str] = None
     enabled: bool = True
     created_at: datetime = field(default_factory=_utcnow)
@@ -41,10 +307,9 @@ class StrategyRule:
         return {
             "id": self.id,
             "name": self.name,
-            "indicator_id": self.indicator_id,
-            "signal_type": self.signal_type,
-            "min_confidence": self.min_confidence,
             "action": self.action,
+            "conditions": [condition.to_dict() for condition in self.conditions],
+            "match": self.match,
             "description": self.description,
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat() + "Z",
@@ -58,51 +323,43 @@ class StrategyRule:
         """Evaluate the rule against collected indicator payloads."""
 
         matched = False
-        signal: Optional[Dict[str, Any]] = None
         reason: Optional[str] = None
+        condition_results: List[Dict[str, Any]] = []
+        trigger_signals: List[Dict[str, Any]] = []
 
         if not self.enabled:
             reason = "Rule disabled"
-        elif not self.indicator_id:
-            reason = "No indicator attached"
+        elif not self.conditions:
+            reason = "Rule has no conditions"
         else:
-            payload = indicator_payloads.get(self.indicator_id)
-            if payload is None:
-                reason = "No signals for indicator"
+            match_results: List[bool] = []
+            for condition in self.conditions:
+                result = _evaluate_condition(condition, indicator_payloads)
+                condition_results.append(result)
+                match_results.append(result["matched"])
+                if result["matched"] and result.get("signal"):
+                    trigger_signals.append(result["signal"])
+
+            if self.match == "any":
+                matched = any(match_results)
             else:
-                error = payload.get("error") if isinstance(payload, dict) else None
-                if error:
-                    reason = str(error)
-                else:
-                    signals = payload.get("signals") if isinstance(payload, dict) else None
-                    if not isinstance(signals, list):
-                        reason = "Indicator returned no signals"
-                    else:
-                        target_type = self.signal_type.lower()
-                        for candidate in signals:
-                            if not isinstance(candidate, dict):
-                                continue
-                            sig_type = str(candidate.get("type", "")).lower()
-                            if sig_type != target_type:
-                                continue
-                            try:
-                                confidence = float(candidate.get("confidence", 0.0))
-                            except (TypeError, ValueError):
-                                confidence = 0.0
-                            if confidence >= self.min_confidence:
-                                matched = True
-                                signal = candidate
-                                break
-                        if not matched:
-                            reason = "No matching signals"
+                matched = bool(match_results) and all(match_results)
+
+            if not matched and not reason:
+                reason = "No matching signals"
+
+        direction = None
+        if trigger_signals:
+            direction = _infer_signal_direction(trigger_signals[-1])
 
         return {
             "rule_id": self.id,
             "rule_name": self.name,
-            "indicator_id": self.indicator_id,
             "action": self.action,
             "matched": matched,
-            "signal": signal,
+            "conditions": condition_results,
+            "signals": trigger_signals if matched else [],
+            "direction": direction,
             "reason": reason,
         }
 
@@ -155,7 +412,7 @@ class StrategyDefinition:
                 if str(symbol).strip()
             ]
             if symbols:
-                self.symbols = symbols
+                self.symbols = symbols[:1]
         if "timeframe" in fields and fields["timeframe"] is not None:
             self.timeframe = str(fields["timeframe"]).strip()
         if "datasource" in fields:
@@ -238,7 +495,7 @@ class StrategyRegistry:
             id=strategy_id,
             name=clean_name,
             description=str(description).strip() if description else None,
-            symbols=clean_symbols or ["Unknown"],
+            symbols=clean_symbols[:1] or ["Unknown"],
             timeframe=str(timeframe).strip(),
             datasource=str(datasource).strip() if datasource else None,
             exchange=str(exchange).strip() if exchange else None,
@@ -310,32 +567,22 @@ class StrategyRegistry:
         strategy_id: str,
         *,
         name: str,
-        signal_type: str,
         action: str,
-        indicator_id: Optional[str] = None,
-        min_confidence: float = 0.0,
+        conditions: Iterable[Mapping[str, Any]],
+        match: str = "all",
         description: Optional[str] = None,
         enabled: bool = True,
     ) -> Dict[str, Any]:
         """Create a rule for the strategy."""
 
         record = self.get(strategy_id)
-        rule_id = str(uuid.uuid4())
-        indicator = str(indicator_id).strip() if indicator_id else None
-        if indicator:
-            get_instance_meta(indicator)
-
-        action_value = str(action).strip().lower()
-        if action_value not in {"buy", "sell"}:
-            raise ValueError("Action must be 'buy' or 'sell'")
-
+        parsed_conditions = _parse_conditions(record, conditions)
         rule = StrategyRule(
-            id=rule_id,
+            id=str(uuid.uuid4()),
             name=str(name).strip(),
-            signal_type=str(signal_type).strip(),
-            action=action_value,
-            indicator_id=indicator,
-            min_confidence=float(min_confidence or 0.0),
+            action=_normalise_action(action),
+            conditions=parsed_conditions,
+            match=_normalise_match_mode(match),
             description=str(description).strip() if description else None,
             enabled=bool(enabled),
         )
@@ -344,7 +591,7 @@ class StrategyRegistry:
         logger.info(
             "strategy_rule_created | strategy=%s rule=%s",
             strategy_id,
-            rule_id,
+            rule.id,
         )
         return record.to_dict()
 
@@ -358,21 +605,12 @@ class StrategyRegistry:
 
         if "name" in fields and fields["name"] is not None:
             rule.name = str(fields["name"]).strip()
-        if "signal_type" in fields and fields["signal_type"] is not None:
-            rule.signal_type = str(fields["signal_type"]).strip()
         if "action" in fields and fields["action"] is not None:
-            action_value = str(fields["action"]).strip().lower()
-            if action_value not in {"buy", "sell"}:
-                raise ValueError("Action must be 'buy' or 'sell'")
-            rule.action = action_value
-        if "indicator_id" in fields:
-            indicator_id = fields["indicator_id"]
-            indicator = str(indicator_id).strip() if indicator_id else None
-            if indicator:
-                get_instance_meta(indicator)
-            rule.indicator_id = indicator
-        if "min_confidence" in fields and fields["min_confidence"] is not None:
-            rule.min_confidence = float(fields["min_confidence"])
+            rule.action = _normalise_action(fields["action"])
+        if "match" in fields and fields["match"] is not None:
+            rule.match = _normalise_match_mode(fields["match"])
+        if "conditions" in fields and fields["conditions"] is not None:
+            rule.conditions = _parse_conditions(record, fields["conditions"])
         if "description" in fields:
             description = fields["description"]
             rule.description = str(description).strip() if description else None
@@ -454,6 +692,9 @@ class StrategyRegistry:
         buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
         sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
 
+        buy_markers = _build_markers_for_results(buy_signals, action="buy")
+        sell_markers = _build_markers_for_results(sell_signals, action="sell")
+
         logger.info(
             "strategy_signals_generated | strategy=%s buys=%d sells=%d",
             strategy_id,
@@ -469,11 +710,23 @@ class StrategyRegistry:
                 "end": end,
                 "interval": interval,
                 "symbol": effective_symbol,
+                "datasource": effective_datasource,
+                "exchange": effective_exchange,
             },
             "indicator_results": indicator_payloads,
             "rule_results": rule_results,
             "buy_signals": buy_signals,
             "sell_signals": sell_signals,
+            "chart_markers": {
+                "buy": buy_markers,
+                "sell": sell_markers,
+            },
+            "applied_inputs": {
+                "symbol": effective_symbol,
+                "timeframe": record.timeframe,
+                "datasource": effective_datasource,
+                "exchange": effective_exchange,
+            },
         }
 
 
@@ -543,10 +796,9 @@ def create_rule(
     strategy_id: str,
     *,
     name: str,
-    signal_type: str,
     action: str,
-    indicator_id: Optional[str] = None,
-    min_confidence: float = 0.0,
+    conditions: Iterable[Mapping[str, Any]],
+    match: str = "all",
     description: Optional[str] = None,
     enabled: bool = True,
 ) -> Dict[str, Any]:
@@ -555,10 +807,9 @@ def create_rule(
     return _REGISTRY.add_rule(
         strategy_id,
         name=name,
-        signal_type=signal_type,
         action=action,
-        indicator_id=indicator_id,
-        min_confidence=min_confidence,
+        conditions=conditions,
+        match=match,
         description=description,
         enabled=enabled,
     )

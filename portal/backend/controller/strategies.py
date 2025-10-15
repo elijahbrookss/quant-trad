@@ -15,15 +15,23 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+class RuleConditionOut(BaseModel):
+    """Condition that must be satisfied for a rule."""
+
+    indicator_id: str
+    signal_type: str
+    rule_id: Optional[str] = None
+    direction: Optional[str] = None
+
+
 class StrategyRuleOut(BaseModel):
     """Response model describing a stored strategy rule."""
 
     id: str
     name: str
-    indicator_id: Optional[str] = None
-    signal_type: str
-    min_confidence: float
     action: str
+    conditions: List[RuleConditionOut]
+    match: str
     description: Optional[str] = None
     enabled: bool
     created_at: str
@@ -70,26 +78,42 @@ class StrategyUpdateRequest(BaseModel):
     indicator_ids: Optional[List[str]] = None
 
 
+class RuleConditionCreate(BaseModel):
+    """Definition of a single rule condition."""
+
+    indicator_id: str
+    signal_type: str
+    rule_id: Optional[str] = None
+    direction: Optional[str] = Field(default=None)
+
+
 class StrategyRuleCreateRequest(BaseModel):
     """Payload for creating a strategy rule."""
 
     name: str
-    signal_type: str
     action: str
-    indicator_id: Optional[str] = None
-    min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    conditions: List[RuleConditionCreate] = Field(default_factory=list)
+    match: str = Field(default="all")
     description: Optional[str] = None
     enabled: bool = True
+
+
+class RuleConditionUpdate(BaseModel):
+    """Mutable condition definition."""
+
+    indicator_id: str
+    signal_type: str
+    rule_id: Optional[str] = None
+    direction: Optional[str] = None
 
 
 class StrategyRuleUpdateRequest(BaseModel):
     """Payload for updating a strategy rule."""
 
     name: Optional[str] = None
-    signal_type: Optional[str] = None
     action: Optional[str] = None
-    indicator_id: Optional[str] = None
-    min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    conditions: Optional[List[RuleConditionUpdate]] = None
+    match: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
@@ -196,10 +220,9 @@ async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict
         return strategy_service.create_rule(
             strategy_id,
             name=body.name,
-            signal_type=body.signal_type,
             action=body.action,
-            indicator_id=body.indicator_id,
-            min_confidence=body.min_confidence,
+            conditions=[condition.dict(exclude_none=True) for condition in body.conditions],
+            match=body.match,
             description=body.description,
             enabled=body.enabled,
         )
@@ -216,6 +239,11 @@ async def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRe
 
     try:
         payload = body.dict(exclude_unset=True)
+        if "conditions" in payload and payload["conditions"] is not None:
+            payload["conditions"] = [
+                {k: v for k, v in condition.items() if v is not None}
+                for condition in payload["conditions"]
+            ]
         return strategy_service.update_rule(strategy_id, rule_id, **payload)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
