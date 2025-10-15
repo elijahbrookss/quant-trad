@@ -131,6 +131,9 @@ _RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
 }
 
 
+_RUNTIME_PARAM_KEYS = {"datasource", "exchange"}
+
+
 def _purge_breakout_cache(inst_id: str) -> None:
     if not inst_id:
         return
@@ -154,6 +157,17 @@ def _hashable_signature(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(_hashable_signature(v) for v in value)
     return str(value)
+
+
+def _scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(params, Mapping):
+        return {}
+    cleaned: Dict[str, Any] = {}
+    for key, value in params.items():
+        if key in _RUNTIME_PARAM_KEYS:
+            continue
+        cleaned[key] = value
+    return cleaned
 
 
 def _coerce_int(value: Any, default: int, *, minimum: Optional[int] = None) -> int:
@@ -406,6 +420,7 @@ def _normalize_color(value: Optional[str]) -> Optional[str]:
 def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
     if "color" not in meta:
         meta["color"] = None
+    meta["params"] = _scrub_runtime_params(meta.get("params") or {})
     return _attach_signal_catalog(meta)
 
 
@@ -563,15 +578,16 @@ def create_instance(
         raise RuntimeError(f"Failed to instantiate indicator: {e}")
 
     captured = _extract_ctor_params(inst)
+    runtime_params = dict(captured)
     if datasource:
-        captured["datasource"] = datasource
+        runtime_params["datasource"] = datasource
     if exchange:
-        captured["exchange"] = exchange
+        runtime_params["exchange"] = exchange
     inst_id = str(uuid.uuid4())
     meta = {
         "id": inst_id,
         "type": type_str,
-        "params": captured,
+        "params": _scrub_runtime_params(runtime_params),
         "enabled": True,
         "name": name or type_str.replace("_", " ").title(),
     }
@@ -579,7 +595,7 @@ def create_instance(
     if exchange:
         meta["exchange"] = exchange
     meta["color"] = _normalize_color(color)
-    _ensure_color(meta)
+    meta = _ensure_color(meta)
     _REGISTRY[inst_id] = {"meta": meta, "instance": inst}
     return meta
 
@@ -629,14 +645,15 @@ def update_instance(
         raise RuntimeError(f"Failed to re-instantiate indicator: {e}")
 
     captured = _extract_ctor_params(new_inst)
+    runtime_params = dict(captured)
     if datasource:
-        captured["datasource"] = datasource
+        runtime_params["datasource"] = datasource
     if exchange:
-        captured["exchange"] = exchange
+        runtime_params["exchange"] = exchange
     entry["instance"] = new_inst
     _purge_breakout_cache(inst_id)
-    meta = _ensure_color(entry["meta"])
-    meta["params"] = captured
+    meta = entry["meta"]
+    meta["params"] = _scrub_runtime_params(runtime_params)
     if name:
         meta["name"] = name
     if color_provided:
@@ -646,6 +663,7 @@ def update_instance(
         meta["exchange"] = exchange
     elif "exchange" in meta:
         meta.pop("exchange", None)
+    meta = _ensure_color(meta)
     return meta
 
 def overlays_for_instance(
