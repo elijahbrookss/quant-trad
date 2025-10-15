@@ -31,6 +31,7 @@ class IndicatorInstanceOut(BaseModel):
     color: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    signal_rules: Optional[List[Dict[str, Any]]] = None
 
 class OverlayRequest(BaseModel):
     start: str
