@@ -35,36 +35,58 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(signal, dict):
         return None
 
-    # Try explicit metadata first.
-    metadata = signal.get("metadata")
-    if isinstance(metadata, dict):
-        direct = _normalise_direction(metadata.get("direction"))
+    def _iter_sources() -> Iterable[Mapping[str, Any]]:
+        yield signal
+        metadata = signal.get("metadata")
+        if isinstance(metadata, Mapping):
+            yield metadata
+
+    for source in _iter_sources():
+        direct = _normalise_direction(source.get("direction"))
         if direct:
             return direct
 
-        breakout_direction = _normalise_direction(metadata.get("breakout_direction"))
+        breakout_direction = _normalise_direction(source.get("breakout_direction"))
         if breakout_direction:
             return breakout_direction
 
-        role_value = str(metadata.get("retest_role", "")).lower()
-        if role_value:
-            if role_value == "support":
-                return "long"
-            if role_value == "resistance":
-                return "short"
+        role_value = str(source.get("retest_role", "")).strip().lower()
+        if role_value == "support":
+            return "long"
+        if role_value == "resistance":
+            return "short"
 
-        level_kind = str(metadata.get("level_type") or metadata.get("level_kind") or "").lower()
+        level_kind = str(
+            source.get("level_type")
+            or source.get("level_kind")
+            or source.get("level_role")
+            or ""
+        ).strip().lower()
         if level_kind in {"vah", "value_area_high", "resistance"}:
             return "short"
         if level_kind in {"val", "value_area_low", "support"}:
             return "long"
 
-    # Fallback to rule-level hints.
-    rule_id = str(signal.get("metadata", {}).get("pattern_id", "")).lower()
+    # Fallback to rule-level hints using either top-level or metadata identifiers.
+    rule_id = str(signal.get("pattern_id") or "").lower()
+    if not rule_id:
+        metadata = signal.get("metadata")
+        if isinstance(metadata, Mapping):
+            rule_id = str(metadata.get("pattern_id") or "").lower()
+
     if rule_id.endswith("breakout"):
-        candidate = _normalise_direction(signal.get("metadata", {}).get("breakout_direction"))
-        if candidate:
-            return candidate
+        for source in _iter_sources():
+            candidate = _normalise_direction(source.get("breakout_direction"))
+            if candidate:
+                return candidate
+
+    if rule_id.endswith("retest"):
+        for source in _iter_sources():
+            role_value = str(source.get("retest_role", "")).strip().lower()
+            if role_value == "support":
+                return "long"
+            if role_value == "resistance":
+                return "short"
 
     return None
 
