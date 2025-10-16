@@ -4,8 +4,11 @@ import pytest
 
 pytest.importorskip("numpy")
 
+from datetime import datetime, timezone
+
 from portal.backend.service.strategy_service import (
     RuleCondition,
+    _build_markers_for_results,
     _evaluate_condition,
 )
 
@@ -73,3 +76,27 @@ def test_condition_collects_all_matching_signals():
     assert result["matched"] is True
     assert result["signal"] is second
     assert result.get("signals") == [first, second]
+
+
+def test_build_markers_uses_metadata_time():
+    rule_result = {
+        "rule_id": "market_profile_retest",
+        "rule_name": "Retest Buy",
+        "signals": [
+            {
+                "type": "retest",
+                "metadata": {
+                    "bar_time": "2025-01-03T12:00:00Z",
+                    "price": 80.5,
+                },
+            }
+        ],
+    }
+
+    markers = _build_markers_for_results([rule_result], action="buy")
+
+    assert len(markers) == 1
+    marker = markers[0]
+    expected_epoch = int(datetime(2025, 1, 3, 12, tzinfo=timezone.utc).timestamp())
+    assert marker["time"] == expected_epoch
+    assert marker["price"] == 80.5

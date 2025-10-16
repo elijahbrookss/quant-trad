@@ -176,6 +176,41 @@ def _iso_to_epoch_seconds(value: Any) -> Optional[int]:
         return None
 
 
+def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """Return the first usable epoch timestamp from a signal payload."""
+
+    if not isinstance(signal, Mapping):
+        return None
+
+    candidates: List[Any] = []
+    if "time" in signal:
+        candidates.append(signal.get("time"))
+    if "timestamp" in signal:
+        candidates.append(signal.get("timestamp"))
+
+    metadata = signal.get("metadata")
+    if isinstance(metadata, Mapping):
+        for key in (
+            "time",
+            "timestamp",
+            "bar_time",
+            "bar_timestamp",
+            "candle_time",
+            "event_time",
+            "retest_time",
+            "signal_time",
+        ):
+            if key in metadata:
+                candidates.append(metadata.get(key))
+
+    for value in candidates:
+        epoch = _iso_to_epoch_seconds(value)
+        if epoch is not None:
+            return epoch
+
+    return None
+
+
 def _normalise_match_mode(value: Any) -> str:
     if isinstance(value, str) and value.strip().lower() == "any":
         return "any"
@@ -280,6 +315,8 @@ def _evaluate_condition(
 
         matched_candidates.append(candidate)
 
+    matched_candidates.sort(key=lambda entry: (_extract_signal_epoch(entry) or 0))
+
     if matched_candidates:
         terminal_signal = matched_candidates[-1]
         info["matched"] = True
@@ -305,10 +342,12 @@ def _build_markers_for_results(
     for res in results:
         rule_name = str(res.get("rule_name") or res.get("rule_id") or action.title())
         seen_keys = set()
-        for signal in res.get("signals") or []:
+        signals = list(res.get("signals") or [])
+        signals.sort(key=lambda entry: (_extract_signal_epoch(entry) or 0))
+        for signal in signals:
             if not isinstance(signal, Mapping):
                 continue
-            epoch = _iso_to_epoch_seconds(signal.get("time"))
+            epoch = _extract_signal_epoch(signal)
             price = _extract_signal_price(signal)
             if epoch is None or price is None:
                 continue
