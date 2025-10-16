@@ -5,7 +5,7 @@ import { createLogger } from '../utils/logger.js'
 
 const tabs = [
   { id: 'Indicators', blurb: 'Configure overlays, oscillators, and custom panes.' },
-  { id: 'Signals', blurb: 'Future real-time signal routing and alert orchestration.' },
+  { id: 'Bots', blurb: 'Plan automated trading modes for backtesting, paper, and live deployment.' },
   { id: 'Strategies', blurb: 'Blueprint execution flows for live + backtest parity.' },
 ]
 
@@ -62,19 +62,23 @@ export const TabManager = ({ chartId }) => {
           </div>
         )}
 
-        {activeTab === 'Signals' && (
+        {activeTab === 'Bots' && (
           <div className="mt-6 space-y-4 text-sm text-slate-300">
             <p className="text-slate-400">
-              Design the routing for future signal engines. Define which indicators feed each signal, throttle policies, and notification targets.
+              Draft how automated bots will execute: define backtest presets today and prepare toggles for simulated or live deployment when engines arrive.
             </p>
             <div className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-[color:var(--accent-text-soft-alpha)]">
-                <h4 className="text-sm font-semibold text-[color:var(--accent-text-strong)]">Live routing</h4>
-                <p className="mt-2 text-xs">Map signals to webhooks, Discord channels, or automation web services. Future UI will surface connection health inline.</p>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-slate-200">
+                <h4 className="text-sm font-semibold text-white">Backtest scenarios</h4>
+                <p className="mt-2 text-xs text-slate-300">
+                  Outline the datasets, slippage assumptions, and position sizing rules you want the future backtester to honour.
+                </p>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-slate-300">
-                <h4 className="text-sm font-semibold text-slate-100">Alert templates</h4>
-                <p className="mt-2 text-xs">Pre-build alert payloads that pull in indicator context, risk tags, and strategy ownership metadata.</p>
+              <div className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-[color:var(--accent-text-soft-alpha)]">
+                <h4 className="text-sm font-semibold text-[color:var(--accent-text-strong)]">Execution modes</h4>
+                <p className="mt-2 text-xs">
+                  Reserve slots for paper trading and exchange connections so strategy configs can be promoted without rework once brokers are wired in.
+                </p>
               </div>
             </div>
           </div>

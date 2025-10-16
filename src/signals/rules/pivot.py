@@ -208,11 +208,6 @@ def _evaluate_level(
         required_bars = confirmation_bars + 1
 
     if len(df) < required_bars:
-        log.debug(
-            "pivotbrk | level_skip | reason=insufficient_bars | required=%d | available=%d",
-            required_bars,
-            len(df),
-        )
         return []
 
     closes = df["close"]
@@ -396,13 +391,6 @@ def _evaluate_level(
                     detected_level_kind = "support"
 
         if detected_level_kind is None:
-            log.debug(
-                "pivotbrk | level_skip | level=%s | reason=unconfirmed_prior_state | "
-                "prior_side=%s | active_side=%s",
-                level_id,
-                prior_confirmed_side,
-                active_side,
-            )
             continue
 
         if active_side == "above":
@@ -457,13 +445,6 @@ def _evaluate_level(
         results.append(meta)
         mark_breakout_emitted(state)
         current_run_prior_confirmed_side = result.active_side
-
-    if not results:
-        log.debug(
-            "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
-            level_id,
-            confirmation_bars,
-        )
 
     return results
 

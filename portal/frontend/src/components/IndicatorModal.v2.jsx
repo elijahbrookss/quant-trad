@@ -177,6 +177,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const [metaError, setMetaError] = useState(null)
   const [availableSignalRules, setAvailableSignalRules] = useState([])
   const [selectedSignalRules, setSelectedSignalRules] = useState([])
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
     if (!isOpen) return
@@ -192,6 +193,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMeta(EMPTY_META)
     setMetaError(null)
     setParams(initial?.params || {})
+    setShowAdvanced(false)
     const existingRules = Array.isArray(initial?.signalRules) ? [...initial.signalRules] : []
     setSelectedSignalRules(existingRules)
     setAvailableSignalRules([])
@@ -208,6 +210,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setMeta(nextMeta)
         const preparedParams = prepareInitialParams(nextMeta, initial?.params)
         setParams(preparedParams)
+        setShowAdvanced(false)
 
         const rules = Array.isArray(nextMeta.signal_rules) ? nextMeta.signal_rules : []
         setAvailableSignalRules(rules)
@@ -234,6 +237,27 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const fieldOrder = useMemo(() => buildFieldOrder(meta, params), [meta, params])
   const intListKeys = useMemo(() => deriveIntListKeys(meta), [meta])
 
+  const { primaryKeys, advancedKeys } = useMemo(() => {
+    if (!fieldOrder.length) return { primaryKeys: [], advancedKeys: [] }
+
+    const required = Array.isArray(meta.required_params) ? meta.required_params : []
+    const preferred = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
+    const contextKeys = ['symbol', 'interval', 'start', 'end', 'timeframe', 'days_back']
+      .filter((key) => fieldOrder.includes(key))
+
+    const essential = new Set([...required, ...preferred, ...contextKeys])
+
+    for (const key of fieldOrder) {
+      if (essential.size >= Math.max(required.length, Math.min(fieldOrder.length, 6))) break
+      essential.add(key)
+    }
+
+    const primary = fieldOrder.filter((key) => essential.has(key))
+    const advanced = fieldOrder.filter((key) => !essential.has(key))
+
+    return { primaryKeys: primary, advancedKeys: advanced }
+  }, [fieldOrder, meta])
+
   const handleParamChange = (key) => (event) => {
     const value = event?.target?.value ?? ''
     setParams((prev) => ({ ...prev, [key]: value }))
@@ -256,6 +280,72 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   }
 
   const allRulesSelected = availableSignalRules.length > 0 && selectedSignalRules.length === availableSignalRules.length
+
+  const renderField = (key) => {
+    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
+    const isRequired = Array.isArray(meta.required_params) && meta.required_params.includes(key)
+    const description = meta.ui_descriptions?.[key]
+    const value = params[key] ?? (fieldType === 'bool' ? false : '')
+    const enumValues = Array.isArray(meta.ui_enums?.[key]) ? meta.ui_enums[key] : null
+
+    return (
+      <div key={key} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-4">
+        <div>
+          <label className="text-sm font-semibold text-white">
+            {key}
+            {isRequired && <span className="ml-1 text-rose-300">*</span>}
+          </label>
+          {description && <p className="text-xs text-slate-300/80">{description}</p>}
+        </div>
+
+        {fieldType === 'bool' ? (
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={Boolean(value)}
+              onChange={handleBooleanChange(key)}
+              className={`${value ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+            >
+              <span className={`${value ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+            </Switch>
+            <span className="text-sm text-slate-200">{value ? 'Enabled' : 'Disabled'}</span>
+          </div>
+        ) : enumValues ? (
+          <select
+            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={value}
+            onChange={handleParamChange(key)}
+          >
+            {enumValues.map((entry) => (
+              <option key={entry} value={entry}>
+                {entry}
+              </option>
+            ))}
+          </select>
+        ) : intListKeys.has(key) ? (
+          <input
+            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={value}
+            onChange={handleParamChange(key)}
+            placeholder="e.g. 5, 10, 20"
+          />
+        ) : NUMBER_FIELDS.has(fieldType) ? (
+          <input
+            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={value}
+            onChange={handleParamChange(key)}
+            inputMode="decimal"
+            placeholder="Enter a number"
+          />
+        ) : (
+          <input
+            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={value}
+            onChange={handleParamChange(key)}
+          />
+        )}
+      </div>
+    )
+  }
 
   const handleSubmit = () => {
     if (!typeId) {
@@ -333,72 +423,34 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
             {typeId ? (
               <div className="space-y-4">
                 {fieldOrder.length ? (
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {fieldOrder.map((key) => {
-                      const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-                      const isRequired = Array.isArray(meta.required_params) && meta.required_params.includes(key)
-                      const description = meta.ui_descriptions?.[key]
-                      const value = params[key] ?? (fieldType === 'bool' ? false : '')
-                      const enumValues = Array.isArray(meta.ui_enums?.[key]) ? meta.ui_enums[key] : null
+                  <div className="space-y-4">
+                    {primaryKeys.length > 0 && (
+                      <div className="grid gap-3 md:grid-cols-2">{primaryKeys.map(renderField)}</div>
+                    )}
 
-                      return (
-                        <div key={key} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-4">
+                    {advancedKeys.length > 0 && (
+                      <div className="space-y-3 rounded-xl border border-dashed border-white/10 bg-white/5 p-4">
+                        <div className="flex items-center justify-between">
                           <div>
-                            <label className="text-sm font-semibold text-white">
-                              {key}
-                              {isRequired && <span className="ml-1 text-rose-300">*</span>}
-                            </label>
-                            {description && <p className="text-xs text-slate-300/80">{description}</p>}
+                            <h4 className="text-sm font-semibold text-white">Advanced parameters</h4>
+                            <p className="text-xs text-slate-400">
+                              {advancedKeys.length} optional setting{advancedKeys.length > 1 ? 's' : ''} hidden by default.
+                            </p>
                           </div>
-
-                          {fieldType === 'bool' ? (
-                            <div className="flex items-center gap-3">
-                              <Switch
-                                checked={Boolean(value)}
-                                onChange={handleBooleanChange(key)}
-                                className={`${value ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
-                              >
-                                <span className={`${value ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-                              </Switch>
-                              <span className="text-sm text-slate-200">{value ? 'Enabled' : 'Disabled'}</span>
-                            </div>
-                          ) : enumValues ? (
-                            <select
-                              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              value={value}
-                              onChange={handleParamChange(key)}
-                            >
-                              {enumValues.map((entry) => (
-                                <option key={entry} value={entry}>
-                                  {entry}
-                                </option>
-                              ))}
-                            </select>
-                          ) : intListKeys.has(key) ? (
-                            <input
-                              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              value={value}
-                              onChange={handleParamChange(key)}
-                              placeholder="e.g. 5, 10, 20"
-                            />
-                          ) : NUMBER_FIELDS.has(fieldType) ? (
-                            <input
-                              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              value={value}
-                              onChange={handleParamChange(key)}
-                              inputMode="decimal"
-                              placeholder="Enter a number"
-                            />
-                          ) : (
-                            <input
-                              className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              value={value}
-                              onChange={handleParamChange(key)}
-                            />
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => setShowAdvanced((prev) => !prev)}
+                            className="rounded-full border border-white/15 px-3 py-1 text-xs text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white"
+                          >
+                            {showAdvanced ? 'Hide advanced' : 'Show advanced'}
+                          </button>
                         </div>
-                      )
-                    })}
+
+                        {showAdvanced && (
+                          <div className="grid gap-3 md:grid-cols-2">{advancedKeys.map(renderField)}</div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <p className="text-sm text-slate-400">No editable parameters for this indicator.</p>

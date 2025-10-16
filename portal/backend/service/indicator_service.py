@@ -844,14 +844,28 @@ def generate_signals_for_instance(
         raise LookupError("No candles available for given window")
 
     rule_config: Dict[str, Any] = dict(config or {})
-    rule_config.setdefault(
-        "pivot_breakout_confirmation_bars",
-        _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
-    )
-    rule_config.setdefault(
-        "market_profile_breakout_confirmation_bars",
-        _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
-    )
+    stored_params = meta.get("params", {}) if isinstance(meta, Mapping) else {}
+
+    if "pivot_breakout_confirmation_bars" not in rule_config:
+        pivot_bars = stored_params.get("pivot_breakout_confirmation_bars")
+        if pivot_bars is None and hasattr(inst, "pivot_breakout_confirmation_bars"):
+            pivot_bars = getattr(inst, "pivot_breakout_confirmation_bars")
+        rule_config["pivot_breakout_confirmation_bars"] = _coerce_int(
+            pivot_bars,
+            _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
+            minimum=1,
+        )
+
+    if "market_profile_breakout_confirmation_bars" not in rule_config:
+        mp_bars = stored_params.get("market_profile_breakout_confirmation_bars")
+        if mp_bars is None and hasattr(inst, "market_profile_breakout_confirmation_bars"):
+            mp_bars = getattr(inst, "market_profile_breakout_confirmation_bars")
+        rule_config["market_profile_breakout_confirmation_bars"] = _coerce_int(
+            mp_bars,
+            _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
+            minimum=1,
+        )
+
     rule_config.setdefault("symbol", sym)
 
     if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:
