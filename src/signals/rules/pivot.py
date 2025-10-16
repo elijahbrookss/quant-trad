@@ -53,6 +53,11 @@ _DEFAULT_RETEST_CONFIRMATION_BARS = 1
 _DEFAULT_CONFIG = PivotBreakoutConfig()
 _PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
 
+_PIVOT_BREAKOUT_RULE_ID = "pivot_breakout"
+_PIVOT_BREAKOUT_ALIASES = ("pivot_level_breakout",)
+_PIVOT_RETEST_RULE_ID = "pivot_retest"
+_PIVOT_RETEST_ALIASES = ("pivot_level_retest",)
+
 
 def _maybe_mutable_context(context: Mapping[str, Any]) -> Optional[MutableMapping[str, Any]]:
     if isinstance(context, MutableMapping):
@@ -439,6 +444,15 @@ def _evaluate_level(
         if trade_direction:
             meta["direction"] = trade_direction
 
+        meta.setdefault("rule_id", _PIVOT_BREAKOUT_RULE_ID)
+        meta.setdefault("pattern_id", _PIVOT_BREAKOUT_RULE_ID)
+        existing_aliases = list(meta.get("rule_aliases", ())) if meta.get("rule_aliases") else []
+        for alias in _PIVOT_BREAKOUT_ALIASES:
+            if alias not in existing_aliases:
+                existing_aliases.append(alias)
+        if existing_aliases:
+            meta["rule_aliases"] = existing_aliases
+
         log.debug(
             "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
             level_id,
@@ -686,6 +700,15 @@ def _detect_retest(
 
         if direction:
             payload["direction"] = direction
+
+        payload.setdefault("rule_id", _PIVOT_RETEST_RULE_ID)
+        payload.setdefault("pattern_id", _PIVOT_RETEST_RULE_ID)
+        aliases = list(payload.get("rule_aliases", ())) if payload.get("rule_aliases") else []
+        for alias in _PIVOT_RETEST_ALIASES:
+            if alias not in aliases:
+                aliases.append(alias)
+        if aliases:
+            payload["rule_aliases"] = aliases
 
         return payload
 

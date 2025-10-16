@@ -100,3 +100,69 @@ def test_build_markers_uses_metadata_time():
     expected_epoch = int(datetime(2025, 1, 3, 12, tzinfo=timezone.utc).timestamp())
     assert marker["time"] == expected_epoch
     assert marker["price"] == 80.5
+
+
+def test_pivot_retest_signals_match_strategy_conditions():
+    condition = RuleCondition(
+        indicator_id="indicator-1",
+        signal_type="retest",
+        rule_id="pivot_retest",
+        direction="long",
+    )
+
+    signal_payload = {
+        "type": "retest",
+        "rule_id": "pivot_retest",
+        "pattern_id": "pivot_retest",
+        "rule_aliases": ["pivot_level_retest"],
+        "direction": "long",
+        "metadata": {
+            "rule_id": "pivot_retest",
+            "pattern_id": "pivot_retest",
+            "rule_aliases": ["pivot_level_retest"],
+            "breakout_direction": "above",
+            "direction": "long",
+        },
+    }
+
+    payloads = {"indicator-1": {"signals": [signal_payload]}}
+
+    result = _evaluate_condition(condition, payloads)
+
+    assert result["matched"] is True
+    assert result.get("direction_detected") == "long"
+    assert result.get("stats", {}).get("final_matches") == 1
+    assert "pivot_retest" in (result.get("observed_rules") or [])
+    assert "pivot_level_retest" in (result.get("observed_rules") or [])
+
+
+def test_direction_mismatch_reason_is_descriptive():
+    condition = RuleCondition(
+        indicator_id="indicator-1",
+        signal_type="retest",
+        rule_id="pivot_retest",
+        direction="short",
+    )
+
+    signal_payload = {
+        "type": "retest",
+        "rule_id": "pivot_retest",
+        "pattern_id": "pivot_retest",
+        "direction": "long",
+        "metadata": {
+            "rule_id": "pivot_retest",
+            "pattern_id": "pivot_retest",
+            "breakout_direction": "above",
+            "direction": "long",
+        },
+    }
+
+    payloads = {"indicator-1": {"signals": [signal_payload]}}
+
+    result = _evaluate_condition(condition, payloads)
+
+    assert result["matched"] is False
+    assert result.get("reason") == "No matching signals (direction mismatch)"
+    stats = result.get("stats") or {}
+    assert stats.get("rule_matches") == 1
+    assert stats.get("direction_matches") == 0

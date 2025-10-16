@@ -318,25 +318,56 @@ def _evaluate_condition(
     desired_rule = str(condition.rule_id or "").lower()
     desired_direction = _normalise_direction(condition.direction)
 
+    total_signals = len(signals)
+    observed_rules: set[str] = set()
+    observed_directions: set[str] = set()
+    type_candidates: List[Dict[str, Any]] = []
+    rule_candidates: List[Dict[str, Any]] = []
+    direction_candidates: List[Dict[str, Any]] = []
     matched_candidates: List[Dict[str, Any]] = []
+
     for candidate in signals:
         if not isinstance(candidate, dict):
             continue
+
+        candidate_rules = _collect_rule_identifiers(candidate)
+        if candidate_rules:
+            observed_rules.update(candidate_rules)
+
+        cand_direction = _infer_signal_direction(candidate)
+        if cand_direction:
+            observed_directions.add(cand_direction)
+
         cand_type = str(candidate.get("type", "")).lower()
         if desired_type and cand_type != desired_type:
             continue
+        type_candidates.append(candidate)
 
-        candidate_rules = _collect_rule_identifiers(candidate)
-        if desired_rule and desired_rule not in candidate_rules:
-            continue
+        if desired_rule:
+            if desired_rule not in candidate_rules:
+                continue
+        rule_candidates.append(candidate)
 
-        cand_direction = _infer_signal_direction(candidate)
-        if desired_direction and cand_direction != desired_direction:
-            continue
+        if desired_direction:
+            if cand_direction != desired_direction:
+                continue
+            direction_candidates.append(candidate)
+        else:
+            direction_candidates.append(candidate)
 
         matched_candidates.append(candidate)
 
     matched_candidates.sort(key=lambda entry: (_extract_signal_epoch(entry) or 0))
+
+    info["observed_rules"] = sorted(observed_rules)
+    info["observed_directions"] = sorted(observed_directions)
+    info["stats"] = {
+        "signals": total_signals,
+        "type_matches": len(type_candidates),
+        "rule_matches": len(rule_candidates),
+        "direction_matches": len(direction_candidates) if desired_direction else len(rule_candidates),
+        "final_matches": len(matched_candidates),
+    }
 
     if matched_candidates:
         terminal_signal = matched_candidates[-1]
@@ -347,7 +378,14 @@ def _evaluate_condition(
         info["reason"] = None
         return info
 
-    info["reason"] = "No matching signals"
+    if not type_candidates:
+        info["reason"] = "No matching signals (type mismatch)"
+    elif desired_rule and not rule_candidates:
+        info["reason"] = "No matching signals (rule mismatch)"
+    elif desired_direction and not direction_candidates:
+        info["reason"] = "No matching signals (direction mismatch)"
+    else:
+        info["reason"] = "No matching signals"
     return info
 
 
@@ -850,7 +888,7 @@ class StrategyRegistry:
             )
             for cond in conditions:
                 logger.debug(
-                    "strategy_rule_condition | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s",
+                    "strategy_rule_condition | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
                     strategy_id,
                     res.get("rule_id"),
                     cond.get("indicator_id"),
@@ -859,6 +897,9 @@ class StrategyRegistry:
                     cond.get("direction_detected"),
                     cond.get("matched"),
                     cond.get("reason"),
+                    cond.get("stats"),
+                    cond.get("observed_rules"),
+                    cond.get("observed_directions"),
                 )
 
         buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
@@ -879,8 +920,30 @@ class StrategyRegistry:
         )
 
         if not buy_signals and not sell_signals:
+            aggregate_stats = {
+                "signals": 0,
+                "type_matches": 0,
+                "rule_matches": 0,
+                "direction_matches": 0,
+                "final_matches": 0,
+            }
+            aggregate_rules: set[str] = set()
+            aggregate_directions: set[str] = set()
+            for res in rule_results:
+                for cond in res.get("conditions") or []:
+                    stats = cond.get("stats") or {}
+                    for key in aggregate_stats:
+                        try:
+                            aggregate_stats[key] += int(stats.get(key, 0) or 0)
+                        except (TypeError, ValueError):  # pragma: no cover - defensive
+                            continue
+                    observed_rules = cond.get("observed_rules") or []
+                    observed_directions = cond.get("observed_directions") or []
+                    aggregate_rules.update(map(str, observed_rules))
+                    aggregate_directions.update(map(str, observed_directions))
+
             logger.info(
-                "strategy_signals_none | strategy=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d",
+                "strategy_signals_none | strategy=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d stats=%s observed_rules=%s observed_directions=%s",
                 strategy_id,
                 effective_symbol,
                 interval,
@@ -888,6 +951,9 @@ class StrategyRegistry:
                 end,
                 len(indicator_payloads),
                 len(rule_results),
+                aggregate_stats,
+                sorted(aggregate_rules),
+                sorted(aggregate_directions),
             )
             for res in rule_results:
                 conditions = res.get("conditions") or []
@@ -905,7 +971,7 @@ class StrategyRegistry:
                 )
                 for cond in conditions:
                     logger.info(
-                        "strategy_condition_trace | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s",
+                        "strategy_condition_trace | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
                         strategy_id,
                         res.get("rule_id"),
                         cond.get("indicator_id"),
@@ -914,6 +980,9 @@ class StrategyRegistry:
                         cond.get("direction_detected"),
                         cond.get("matched"),
                         cond.get("reason"),
+                        cond.get("stats"),
+                        cond.get("observed_rules"),
+                        cond.get("observed_directions"),
                     )
 
         return {

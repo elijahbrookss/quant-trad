@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   attachStrategyIndicator,
@@ -648,7 +648,7 @@ const StrategyList = ({ strategies, selectedId, onSelect }) => {
               onClick={() => onSelect(strategy.id)}
               className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
                 isActive
-                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-20)] text-white shadow-[0_18px_40px_-20px_var(--accent-shadow-strong)]'
+                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-15)] text-white ring-1 ring-[color:var(--accent-alpha-30)] ring-inset'
                   : 'border-white/10 bg-white/5 text-slate-200 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
               }`}
             >
@@ -743,6 +743,44 @@ function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
   )
 }
 
+const ConditionBadge = ({ label, signalType, direction, ruleId }) => {
+  const normalizedDirection = typeof direction === 'string' ? direction.toLowerCase() : ''
+  let directionLabel = 'Any direction'
+  let directionClasses = 'border-white/10 bg-white/10 text-slate-200'
+  const ruleLabel = typeof ruleId === 'string' && ruleId.trim().length
+    ? ruleId.replace(/_/g, ' ').toUpperCase()
+    : ''
+
+  if (normalizedDirection === 'long') {
+    directionLabel = 'Long bias'
+    directionClasses = 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+  } else if (normalizedDirection === 'short') {
+    directionLabel = 'Short bias'
+    directionClasses = 'border-rose-500/40 bg-rose-500/15 text-rose-200'
+  }
+
+  return (
+    <div className="min-w-[200px] rounded-xl border border-white/10 bg-black/40 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-white">{label}</span>
+        {ruleLabel ? (
+          <span className="max-w-[140px] truncate rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] uppercase tracking-[0.2em] text-slate-400">
+            {ruleLabel}
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-slate-200">
+          {signalType ? signalType.toUpperCase() : 'SIGNAL'}
+        </span>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] ${directionClasses}`}>
+          {directionLabel}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function RuleList({ rules, onEdit, onDelete, indicatorLookup }) {
   if (!rules.length) {
     return (
@@ -790,23 +828,28 @@ function RuleList({ rules, onEdit, onDelete, indicatorLookup }) {
 
           <div className="mt-3 space-y-2 text-xs text-slate-300">
             {Array.isArray(rule.conditions) && rule.conditions.length ? (
-              rule.conditions.map((condition, index) => {
-                const indicatorMeta = indicatorLookup?.get?.(condition.indicator_id) || indicatorLookup?.[condition.indicator_id]
-                const label = indicatorMeta?.name || indicatorMeta?.type || condition.indicator_id
-                return (
-                  <div
-                    key={`${rule.id}-condition-${index}`}
-                    className="rounded-lg border border-white/10 bg-black/30 px-3 py-2"
-                  >
-                    <p className="font-semibold text-white">{label}</p>
-                    <p className="text-[11px] text-slate-400">
-                      {condition.rule_id || condition.signal_type} •{' '}
-                      {condition.signal_type ? condition.signal_type.toUpperCase() : 'Signal'}
-                      {condition.direction ? ` • ${condition.direction.toUpperCase()}` : ''}
-                    </p>
-                  </div>
-                )
-              })
+              <div className="flex flex-wrap items-center gap-2">
+                {rule.conditions.map((condition, index) => {
+                  const indicatorMeta = indicatorLookup?.get?.(condition.indicator_id) || indicatorLookup?.[condition.indicator_id]
+                  const label = indicatorMeta?.name || indicatorMeta?.type || condition.indicator_id
+                  const connectorLabel = rule.match === 'any' ? 'OR' : 'AND'
+                  return (
+                    <Fragment key={`${rule.id}-condition-${index}`}>
+                      <ConditionBadge
+                        label={label}
+                        signalType={condition.signal_type}
+                        direction={condition.direction}
+                        ruleId={condition.rule_id || condition.signal_type}
+                      />
+                      {index < rule.conditions.length - 1 && (
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                          {connectorLabel}
+                        </span>
+                      )}
+                    </Fragment>
+                  )
+                })}
+              </div>
             ) : (
               <p className="text-[11px] text-slate-400">No conditions configured.</p>
             )}
