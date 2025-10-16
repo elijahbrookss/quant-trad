@@ -16,6 +16,7 @@ import { fetchIndicators, fetchIndicator } from '../adapters/indicator.adapter.j
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
+import { applyIndicatorColors } from './indicatorSignals.js'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -40,6 +41,18 @@ const RULE_FORM_DEFAULT = {
     },
   ],
   enabled: true,
+}
+
+const DEFAULT_INDICATOR_COLOR = '#60a5fa'
+
+const buildIndicatorColorMap = (list = []) => {
+  if (!Array.isArray(list)) return {}
+  return list.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc
+    const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : ''
+    acc[indicator.id] = raw || DEFAULT_INDICATOR_COLOR
+    return acc
+  }, {})
 }
 
 const ActionButton = ({ variant = 'default', className = '', ...props }) => {
@@ -1130,6 +1143,8 @@ const StrategyTab = ({ chartId }) => {
     return map
   }, [indicators])
 
+  const indicatorColors = useMemo(() => buildIndicatorColorMap(indicators), [indicators])
+
   const ensureIndicatorDetails = useCallback(
     async (indicatorId) => {
       if (typeof indicatorId !== 'string') {
@@ -1421,20 +1436,82 @@ const StrategyTab = ({ chartId }) => {
       const sellMarkers = Array.isArray(result?.chart_markers?.sell) ? result.chart_markers.sell : []
       const combinedMarkers = [...buyMarkers, ...sellMarkers]
 
-      const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
-      const remaining = existing.filter((overlay) => !(overlay?.source === 'strategy' && overlay?.strategyId === selectedStrategy.id))
-      const overlays = combinedMarkers.length
-        ? [
-            ...remaining,
-            {
-              id: `strategy-${selectedStrategy.id}-signals`,
-              source: 'strategy',
+      const indicatorResults = result && typeof result === 'object' ? result.indicator_results || {} : {}
+      const strategyIndicatorOverlays = []
+      if (indicatorResults && typeof indicatorResults === 'object') {
+        Object.entries(indicatorResults).forEach(([indicatorId, payload]) => {
+          if (!payload || typeof payload !== 'object') return
+          const overlayList = Array.isArray(payload.overlays) ? payload.overlays : []
+          if (!overlayList.length) return
+          const indicatorMeta = indicatorLookup.get(indicatorId)
+          overlayList.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') return
+            const overlay = { ...entry }
+            const hasPayload = overlay.payload && typeof overlay.payload === 'object'
+            const payloadObject = hasPayload
+              ? overlay.payload
+              : Object.fromEntries(
+                  Object.entries(overlay).filter(([key]) => !['type', 'ind_id', 'source', 'strategyId'].includes(key)),
+                )
+            if (!hasPayload && Object.keys(payloadObject).length === 0) {
+              return
+            }
+            strategyIndicatorOverlays.push({
+              type: overlay.type || indicatorMeta?.type || 'default',
+              payload: payloadObject,
+              ind_id: overlay.ind_id || indicatorId,
+              source: 'strategy-indicator',
               strategyId: selectedStrategy.id,
-              type: 'strategy',
-              payload: { markers: combinedMarkers },
-            },
-          ]
-        : remaining
+            })
+          })
+        })
+      }
+
+      const colouredIndicatorOverlays = strategyIndicatorOverlays.length
+        ? applyIndicatorColors(strategyIndicatorOverlays, indicatorColors)
+        : []
+
+      const coveredIndicatorIds = new Set(strategyIndicatorOverlays.map((overlay) => overlay.ind_id))
+
+      const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
+      const hasFreshIndicatorOverlays = coveredIndicatorIds.size > 0
+      const remaining = existing.filter((overlay) => {
+        if (!overlay) return false
+        if (overlay.source === 'strategy' && overlay.strategyId === selectedStrategy.id) {
+          return false
+        }
+        if (overlay.source === 'strategy-indicator' && overlay.strategyId === selectedStrategy.id) {
+          if (!hasFreshIndicatorOverlays) {
+            return true
+          }
+          if (overlay.ind_id && coveredIndicatorIds.has(overlay.ind_id)) {
+            return false
+          }
+          return true
+        }
+        if (overlay.ind_id && coveredIndicatorIds.has(overlay.ind_id)) {
+          return false
+        }
+        return true
+      })
+
+      let overlays = remaining
+      if (colouredIndicatorOverlays.length) {
+        overlays = [...overlays, ...colouredIndicatorOverlays]
+      }
+
+      if (combinedMarkers.length) {
+        overlays = [
+          ...overlays,
+          {
+            id: `strategy-${selectedStrategy.id}-signals`,
+            source: 'strategy',
+            strategyId: selectedStrategy.id,
+            type: 'strategy',
+            payload: { markers: combinedMarkers },
+          },
+        ]
+      }
 
       const appliedDateRange = Array.isArray(window.dateRange)
         && window.dateRange[0] instanceof Date

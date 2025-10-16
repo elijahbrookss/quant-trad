@@ -240,6 +240,7 @@ def _evaluate_condition(
         "direction": condition.direction,
         "matched": False,
         "signal": None,
+        "signals": [],
         "reason": None,
     }
 
@@ -261,6 +262,7 @@ def _evaluate_condition(
     desired_rule = str(condition.rule_id or "").lower()
     desired_direction = _normalise_direction(condition.direction)
 
+    matched_candidates: List[Dict[str, Any]] = []
     for candidate in signals:
         if not isinstance(candidate, dict):
             continue
@@ -276,9 +278,14 @@ def _evaluate_condition(
         if desired_direction and cand_direction != desired_direction:
             continue
 
+        matched_candidates.append(candidate)
+
+    if matched_candidates:
+        terminal_signal = matched_candidates[-1]
         info["matched"] = True
-        info["signal"] = candidate
-        info["direction_detected"] = cand_direction
+        info["signal"] = terminal_signal
+        info["signals"] = matched_candidates
+        info["direction_detected"] = _infer_signal_direction(terminal_signal)
         info["reason"] = None
         return info
 
@@ -297,6 +304,7 @@ def _build_markers_for_results(
 
     for res in results:
         rule_name = str(res.get("rule_name") or res.get("rule_id") or action.title())
+        seen_keys = set()
         for signal in res.get("signals") or []:
             if not isinstance(signal, Mapping):
                 continue
@@ -306,6 +314,10 @@ def _build_markers_for_results(
                 continue
             direction = _infer_signal_direction(signal) or ("long" if action == "buy" else "short")
             label = f"{rule_name} ({direction})" if direction else rule_name
+            dedupe_key = (epoch, price, res.get("rule_id"), direction)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
             markers.append(
                 {
                     "time": epoch,
@@ -317,6 +329,7 @@ def _build_markers_for_results(
                     "subtype": "strategy_signal",
                     "direction": direction,
                     "rule_id": res.get("rule_id"),
+                    "position": "belowBar" if action == "buy" else "aboveBar",
                 }
             )
 
@@ -391,8 +404,12 @@ class StrategyRule:
                 result = _evaluate_condition(condition, indicator_payloads)
                 condition_results.append(result)
                 match_results.append(result["matched"])
-                if result["matched"] and result.get("signal"):
-                    trigger_signals.append(result["signal"])
+                if result["matched"]:
+                    signals = result.get("signals") or []
+                    if signals:
+                        trigger_signals.extend(signals)
+                    elif result.get("signal"):
+                        trigger_signals.append(result["signal"])
 
             if self.match == "any":
                 matched = any(match_results)
