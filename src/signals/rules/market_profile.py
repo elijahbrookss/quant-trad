@@ -845,6 +845,7 @@ _BREAKOUT_PATTERN = SignalPattern(
     description="Price leaves the active value area after closing inside it on the prior bar.",
     signal_type="breakout",
     evaluator=_value_area_breakout_evaluator,
+    rule_id="market_profile_breakout",
 )
 
 _RETEST_PATTERN = SignalPattern(
@@ -853,6 +854,7 @@ _RETEST_PATTERN = SignalPattern(
     description="Price revisits a recently broken value area boundary without invalidating the breakout.",
     signal_type="retest",
     evaluator=_value_area_retest_evaluator,
+    rule_id="market_profile_retest",
 )
 
 

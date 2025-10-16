@@ -19,6 +19,7 @@ class SignalPattern:
     description: str
     signal_type: str
     evaluator: PatternEvaluator
+    rule_id: Optional[str] = None
 
     def evaluate(self, context: Mapping[str, Any], payload: Any) -> List[PatternResult]:
         """Run the pattern evaluator and normalise its results."""
@@ -66,8 +67,14 @@ def evaluate_signal_patterns(
             enriched.setdefault("type", pattern.signal_type)
             enriched.setdefault("confidence", default_confidence)
             enriched.setdefault("pattern_id", pattern.pattern_id)
+            enriched.setdefault("rule_id", pattern.rule_id or pattern.pattern_id)
             enriched.setdefault("pattern_label", pattern.label)
             enriched.setdefault("pattern_description", pattern.description)
+            # Ensure metadata mirrors both identifiers for downstream matching.
+            metadata = enriched.get("metadata")
+            if isinstance(metadata, MutableMapping):
+                metadata.setdefault("pattern_id", enriched["pattern_id"])
+                metadata.setdefault("rule_id", enriched["rule_id"])
             results.append(enriched)
     return results
 
