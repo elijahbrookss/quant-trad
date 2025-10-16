@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -91,9 +92,46 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _promote_signal_metadata(signal: MutableMapping[str, Any]) -> None:
+    """Lift useful metadata fields to the top level for easier inspection."""
+
+    metadata = signal.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return
+
+    preferred_keys = ("rule_id", "pattern_id", "signal_id", "pattern", "id")
+    for key in preferred_keys:
+        if signal.get(key) in (None, "", []):
+            value = metadata.get(key)
+            if value not in (None, "", []):
+                signal[key] = value
+
+    alias_keys = ("aliases", "rule_aliases", "pattern_aliases")
+    alias_values: list[str] = []
+
+    def _ingest(value: Any) -> None:
+        if isinstance(value, str):
+            normalised = value.strip()
+            if normalised and normalised not in alias_values:
+                alias_values.append(normalised)
+        elif isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
+            for item in value:
+                _ingest(item)
+
+    for key in alias_keys:
+        _ingest(signal.get(key))
+    for key in alias_keys:
+        _ingest(metadata.get(key))
+
+    if alias_values:
+        signal["rule_aliases"] = alias_values
+
+
 def _ensure_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(signal, dict):
         return None
+
+    _promote_signal_metadata(signal)
 
     direction = _infer_signal_direction(signal)
     if not direction:
@@ -112,6 +150,42 @@ def _ensure_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     return direction
 
 
+def _summarise_signal_population(signals: Iterable[Mapping[str, Any]]) -> Dict[str, Counter]:
+    """Return aggregated counts for signal types, rules, and directions."""
+
+    type_counter: Counter[str] = Counter()
+    rule_counter: Counter[str] = Counter()
+    direction_counter: Counter[str] = Counter()
+
+    for candidate in signals:
+        if not isinstance(candidate, Mapping):
+            continue
+
+        signal_type = str(candidate.get("type", "")).strip().lower()
+        if signal_type:
+            type_counter[signal_type] += 1
+
+        for identifier in _collect_rule_identifiers(candidate):
+            rule_counter[identifier] += 1
+
+        direction = _infer_signal_direction(dict(candidate))
+        if direction:
+            direction_counter[direction] += 1
+
+    return {
+        "types": type_counter,
+        "rules": rule_counter,
+        "directions": direction_counter,
+    }
+
+
+def _format_counter(counter: Counter[str]) -> str:
+    if not counter:
+        return "-"
+    parts = [f"{key}:{counter[key]}" for key in sorted(counter)]
+    return ", ".join(parts)
+
+
 def _collect_rule_identifiers(signal: Mapping[str, Any]) -> List[str]:
     """Return all rule identifier aliases embedded within *signal*."""
 
@@ -125,6 +199,9 @@ def _collect_rule_identifiers(signal: Mapping[str, Any]) -> List[str]:
         elif isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
             for item in value:
                 _append(item)
+
+    if isinstance(signal, MutableMapping):
+        _promote_signal_metadata(signal)
 
     sources: List[Mapping[str, Any]] = [signal]
     metadata = signal.get("metadata")
@@ -862,6 +939,16 @@ class StrategyRegistry:
                     for signal in signals_obj:
                         if isinstance(signal, dict):
                             _ensure_signal_direction(signal)
+                    summary = _summarise_signal_population(signals_obj)
+                    logger.debug(
+                        "strategy_indicator_signal_summary | strategy=%s indicator=%s total=%d types=[%s] rules=[%s] directions=[%s]",
+                        strategy_id,
+                        inst_id,
+                        len(signals_obj),
+                        _format_counter(summary["types"]),
+                        _format_counter(summary["rules"]),
+                        _format_counter(summary["directions"]),
+                    )
             except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
                 logger.warning(
                     "strategy_indicator_signal_failed | strategy=%s indicator=%s error=%s",

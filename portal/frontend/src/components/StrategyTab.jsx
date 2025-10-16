@@ -648,7 +648,7 @@ const StrategyList = ({ strategies, selectedId, onSelect }) => {
               onClick={() => onSelect(strategy.id)}
               className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
                 isActive
-                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-15)] text-white ring-1 ring-[color:var(--accent-alpha-30)] ring-inset'
+                  ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-08)] text-white shadow-inner'
                   : 'border-white/10 bg-white/5 text-slate-200 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
               }`}
             >

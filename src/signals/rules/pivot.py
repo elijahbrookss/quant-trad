@@ -383,12 +383,6 @@ def _evaluate_level(
             detected_level_kind = "resistance"
         elif prior_confirmed_side is None:
             if not has_opposite_history:
-                log.debug(
-                    "pivotbrk | level_skip | level=%s | reason=no_prior_flip | "
-                    "active_side=%s",
-                    level_id,
-                    active_side,
-                )
                 continue
             if active_side == "above":
                 if source_kind_key in {"resistance", "pivot", "na", "none", ""}:
