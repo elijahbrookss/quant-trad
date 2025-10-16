@@ -16,7 +16,6 @@ import { fetchIndicators, fetchIndicator } from '../adapters/indicator.adapter.j
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
-import { applyIndicatorColors } from './indicatorSignals.js'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -43,17 +42,6 @@ const RULE_FORM_DEFAULT = {
   enabled: true,
 }
 
-const DEFAULT_INDICATOR_COLOR = '#60a5fa'
-
-const buildIndicatorColorMap = (list = []) => {
-  if (!Array.isArray(list)) return {}
-  return list.reduce((acc, indicator) => {
-    if (!indicator?.id) return acc
-    const raw = typeof indicator?.color === 'string' ? indicator.color.trim() : ''
-    acc[indicator.id] = raw || DEFAULT_INDICATOR_COLOR
-    return acc
-  }, {})
-}
 
 const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   const base =
@@ -472,11 +460,21 @@ function RuleFormModal({
                           required
                         >
                           <option value="">Select indicator</option>
-                          {indicators.map((indicator) => (
-                            <option key={indicator.id} value={indicator.id}>
-                              {indicator.name || indicator.type}
-                            </option>
-                          ))}
+                          {indicators.map((indicator) => {
+                            const hasSignals = Array.isArray(indicator.signal_rules)
+                              && indicator.signal_rules.length > 0
+                            const label = indicator.name || indicator.type
+                            return (
+                              <option
+                                key={indicator.id}
+                                value={indicator.id}
+                                disabled={!hasSignals && indicator.id !== condition.indicator_id}
+                                title={hasSignals ? label : `${label} (no signals registered)`}
+                              >
+                                {hasSignals ? label : `${label} • No signals registered`}
+                              </option>
+                            )
+                          })}
                         </select>
                       </div>
 
@@ -511,7 +509,7 @@ function RuleFormModal({
                           </select>
                           {condition.indicator_id && !ruleOptions.length && (
                             <p className="mt-1 text-[11px] text-amber-300/80">
-                              No registered signals were found for this indicator.
+                              This indicator has no registered signals yet. Configure signal rules on the Indicators tab first.
                             </p>
                           )}
                           {selectedRule?.description && (
@@ -829,6 +827,9 @@ function SignalSummary({ result }) {
     rule_results: rules = [],
   } = result
 
+  const matchedRules = rules.filter((entry) => entry?.matched).length
+  const totalRules = rules.length
+
   return (
     <div className="space-y-4 rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-sm text-slate-200">
       <div>
@@ -841,7 +842,7 @@ function SignalSummary({ result }) {
         </p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-3">
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
           <p className="text-xs uppercase tracking-[0.3em] text-emerald-200/80">Buy</p>
           <p className="text-lg font-semibold">{buys.length} matches</p>
@@ -850,91 +851,13 @@ function SignalSummary({ result }) {
           <p className="text-xs uppercase tracking-[0.3em] text-rose-200/80">Sell</p>
           <p className="text-lg font-semibold">{sells.length} matches</p>
         </div>
-      </div>
-
-      <div className="space-y-2">
-        <h5 className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-          Rule breakdown
-        </h5>
-        <ul className="space-y-2">
-          {rules.map((entry) => (
-            <li
-              key={entry.rule_id}
-              className="rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs text-slate-200"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-medium text-white">{entry.rule_name}</span>
-                <span
-                  className={`rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${
-                    entry.matched
-                      ? 'bg-[color:var(--accent-alpha-40)] text-[color:var(--accent-text-strong)]'
-                      : 'bg-slate-700/70 text-slate-300'
-                  }`}
-                >
-                  {entry.matched ? 'Matched' : 'Skipped'}
-                </span>
-              </div>
-              <div className="mt-2 space-y-2">
-                {Array.isArray(entry.conditions) && entry.conditions.length > 0 && (
-                  <div>
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Conditions</p>
-                    <ul className="mt-1 space-y-1">
-                      {entry.conditions.map((condition, idx) => (
-                        <li key={`${entry.rule_id}-condition-${idx}`} className="rounded-lg border border-white/10 bg-black/50 px-3 py-2">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-white">{condition.indicator_id}</span>
-                            <span className={`text-[10px] uppercase tracking-[0.2em] ${condition.matched ? 'text-emerald-200' : 'text-slate-400'}`}>
-                              {condition.matched ? 'Matched' : 'Missed'}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {condition.signal_type?.toUpperCase()}
-                            {condition.direction ? ` • ${condition.direction.toUpperCase()}` : ''}
-                            {condition.direction_detected ? ` → ${condition.direction_detected.toUpperCase()}` : ''}
-                          </p>
-                          {!condition.matched && condition.reason && (
-                            <p className="text-[11px] text-slate-500">{condition.reason}</p>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {Array.isArray(entry.signals) && entry.signals.length > 0 && (
-                  <div>
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Signals</p>
-                    <ul className="mt-1 space-y-1">
-                      {entry.signals.map((signal, idx) => {
-                        const rawPrice = signal.metadata?.retest_close
-                          ?? signal.metadata?.price
-                          ?? signal.metadata?.level_price
-                          ?? signal.metadata?.POC
-                        const price = Number(rawPrice)
-                        return (
-                          <li key={`${entry.rule_id}-signal-${idx}`} className="rounded-lg border border-white/10 bg-black/60 px-3 py-2">
-                            <p className="text-[11px] text-slate-300">
-                              {signal.type?.toUpperCase()} • {signal.time}
-                            </p>
-                            {Number.isFinite(price) && (
-                              <p className="text-[11px] text-slate-400">Price {price.toFixed(2)}</p>
-                            )}
-                            {signal.metadata?.direction && (
-                              <p className="text-[11px] text-slate-400">Direction {signal.metadata.direction}</p>
-                            )}
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </div>
-                )}
-              </div>
-              {!entry.matched && entry.reason && (
-                <p className="mt-1 text-[11px] text-slate-400">{entry.reason}</p>
-              )}
-            </li>
-          ))}
-        </ul>
+        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3 text-indigo-100">
+          <p className="text-xs uppercase tracking-[0.3em] text-indigo-200/80">Rules</p>
+          <p className="text-lg font-semibold">
+            {matchedRules}
+            <span className="text-sm text-indigo-200/80">/{totalRules || 0}</span>
+          </p>
+        </div>
       </div>
     </div>
   )
@@ -1142,8 +1065,6 @@ const StrategyTab = ({ chartId }) => {
     }
     return map
   }, [indicators])
-
-  const indicatorColors = useMemo(() => buildIndicatorColorMap(indicators), [indicators])
 
   const ensureIndicatorDetails = useCallback(
     async (indicatorId) => {
@@ -1436,81 +1357,19 @@ const StrategyTab = ({ chartId }) => {
       const sellMarkers = Array.isArray(result?.chart_markers?.sell) ? result.chart_markers.sell : []
       const combinedMarkers = [...buyMarkers, ...sellMarkers]
 
-      const indicatorResults = result && typeof result === 'object' ? result.indicator_results || {} : {}
-      const strategyIndicatorOverlays = []
-      if (indicatorResults && typeof indicatorResults === 'object') {
-        Object.entries(indicatorResults).forEach(([indicatorId, payload]) => {
-          if (!payload || typeof payload !== 'object') return
-          const overlayList = Array.isArray(payload.overlays) ? payload.overlays : []
-          if (!overlayList.length) return
-          const indicatorMeta = indicatorLookup.get(indicatorId)
-          overlayList.forEach((entry) => {
-            if (!entry || typeof entry !== 'object') return
-            const overlay = { ...entry }
-            const hasPayload = overlay.payload && typeof overlay.payload === 'object'
-            const payloadObject = hasPayload
-              ? overlay.payload
-              : Object.fromEntries(
-                  Object.entries(overlay).filter(([key]) => !['type', 'ind_id', 'source', 'strategyId'].includes(key)),
-                )
-            if (!hasPayload && Object.keys(payloadObject).length === 0) {
-              return
-            }
-            strategyIndicatorOverlays.push({
-              type: overlay.type || indicatorMeta?.type || 'default',
-              payload: payloadObject,
-              ind_id: overlay.ind_id || indicatorId,
-              source: 'strategy-indicator',
-              strategyId: selectedStrategy.id,
-            })
-          })
-        })
-      }
-
-      const colouredIndicatorOverlays = strategyIndicatorOverlays.length
-        ? applyIndicatorColors(strategyIndicatorOverlays, indicatorColors)
-        : []
-
-      const coveredIndicatorIds = new Set(strategyIndicatorOverlays.map((overlay) => overlay.ind_id))
-
       const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
-      const hasFreshIndicatorOverlays = coveredIndicatorIds.size > 0
-      const remaining = existing.filter((overlay) => {
-        if (!overlay) return false
-        if (overlay.source === 'strategy' && overlay.strategyId === selectedStrategy.id) {
-          return false
-        }
-        if (overlay.source === 'strategy-indicator' && overlay.strategyId === selectedStrategy.id) {
-          if (!hasFreshIndicatorOverlays) {
-            return true
-          }
-          if (overlay.ind_id && coveredIndicatorIds.has(overlay.ind_id)) {
-            return false
-          }
-          return true
-        }
-        if (overlay.ind_id && coveredIndicatorIds.has(overlay.ind_id)) {
-          return false
-        }
-        return true
-      })
-
-      let overlays = remaining
-      if (colouredIndicatorOverlays.length) {
-        overlays = [...overlays, ...colouredIndicatorOverlays]
-      }
+      const overlays = existing
+        .filter((overlay) => !(overlay && overlay.source === 'strategy'))
+        .filter(Boolean)
 
       if (combinedMarkers.length) {
-        overlays = [
-          ...overlays,
-          {
-            id: `strategy-${selectedStrategy.id}-signals`,
-            source: 'strategy',
-            strategyId: selectedStrategy.id,
-            type: 'strategy',
-            payload: { markers: combinedMarkers },
-          },
-        ]
+        overlays.push({
+          id: `strategy-${selectedStrategy.id}-signals`,
+          source: 'strategy',
+          strategyId: selectedStrategy.id,
+          type: 'strategy',
+          payload: { markers: combinedMarkers },
+        })
       }
 
       const appliedDateRange = Array.isArray(window.dateRange)
