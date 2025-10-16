@@ -91,6 +91,27 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _ensure_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(signal, dict):
+        return None
+
+    direction = _infer_signal_direction(signal)
+    if not direction:
+        return None
+
+    existing = _normalise_direction(signal.get("direction"))
+    if existing is None:
+        signal["direction"] = direction
+
+    metadata = signal.get("metadata")
+    if isinstance(metadata, MutableMapping):
+        meta_direction = _normalise_direction(metadata.get("direction"))
+        if meta_direction is None:
+            metadata["direction"] = direction
+
+    return direction
+
+
 def _collect_rule_identifiers(signal: Mapping[str, Any]) -> List[str]:
     """Return all rule identifier aliases embedded within *signal*."""
 
@@ -799,6 +820,10 @@ class StrategyRegistry:
                     signal_count,
                     error_hint,
                 )
+                if isinstance(signals_obj, list):
+                    for signal in signals_obj:
+                        if isinstance(signal, dict):
+                            _ensure_signal_direction(signal)
             except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
                 logger.warning(
                     "strategy_indicator_signal_failed | strategy=%s indicator=%s error=%s",
