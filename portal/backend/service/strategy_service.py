@@ -91,6 +91,37 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _collect_rule_identifiers(signal: Mapping[str, Any]) -> List[str]:
+    """Return all rule identifier aliases embedded within *signal*."""
+
+    identifiers: List[str] = []
+
+    def _append(value: Any) -> None:
+        if isinstance(value, str):
+            normalised = value.strip().lower()
+            if normalised and normalised not in identifiers:
+                identifiers.append(normalised)
+        elif isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
+            for item in value:
+                _append(item)
+
+    sources: List[Mapping[str, Any]] = [signal]
+    metadata = signal.get("metadata")
+    if isinstance(metadata, Mapping):
+        sources.append(metadata)
+
+    keys = ("rule_id", "pattern_id", "signal_id", "pattern", "id")
+    alias_keys = ("aliases", "rule_aliases", "pattern_aliases")
+
+    for source in sources:
+        for key in keys:
+            _append(source.get(key))
+        for alias_key in alias_keys:
+            _append(source.get(alias_key))
+
+    return identifiers
+
+
 def _extract_signal_price(signal: Optional[Dict[str, Any]]) -> Optional[float]:
     if not isinstance(signal, dict):
         return None
@@ -237,9 +268,8 @@ def _evaluate_condition(
         if desired_type and cand_type != desired_type:
             continue
 
-        metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
-        pattern_id = str(metadata.get("pattern_id", "")).lower()
-        if desired_rule and pattern_id != desired_rule:
+        candidate_rules = _collect_rule_identifiers(candidate)
+        if desired_rule and desired_rule not in candidate_rules:
             continue
 
         cand_direction = _infer_signal_direction(candidate)
