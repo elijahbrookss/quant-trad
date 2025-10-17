@@ -49,6 +49,8 @@ class StrategyOut(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     indicator_ids: List[str]
+    indicators: List[Dict[str, Any]]
+    missing_indicators: List[str]
     rules: List[StrategyRuleOut]
     created_at: str
     updated_at: str
@@ -128,6 +130,25 @@ class StrategySignalRequest(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SymbolPresetRequest(BaseModel):
+    """Payload describing a datasource/exchange/timeframe/symbol combination."""
+
+    id: Optional[str] = None
+    label: str
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
+    timeframe: str
+    symbol: str
+
+
+class SymbolPresetOut(SymbolPresetRequest):
+    """Response payload for stored symbol presets."""
+
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @router.get("/", response_model=List[StrategyOut])
@@ -281,4 +302,35 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_signal_failed")
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/presets/symbols", response_model=List[SymbolPresetOut])
+async def list_symbol_presets() -> List[Dict[str, Any]]:
+    """Return saved symbol presets."""
+
+    return strategy_service.list_symbol_presets_service()
+
+
+@router.post("/presets/symbols", response_model=SymbolPresetOut, status_code=201)
+async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
+    """Create or update a symbol preset."""
+
+    try:
+        return strategy_service.save_symbol_preset_service(
+            preset_id=body.id,
+            label=body.label,
+            datasource=body.datasource,
+            exchange=body.exchange,
+            timeframe=body.timeframe,
+            symbol=body.symbol,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.delete("/presets/symbols/{preset_id}", status_code=204)
+async def delete_symbol_preset(preset_id: str) -> None:
+    """Delete a stored symbol preset."""
+
+    strategy_service.delete_symbol_preset_service(preset_id)
 

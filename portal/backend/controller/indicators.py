@@ -6,10 +6,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..service.indicator_service import (
-    list_types, get_type_details,
-    list_instances_meta, get_instance_meta, delete_instance,
-    create_instance, update_instance, overlays_for_instance,
+    list_types,
+    get_type_details,
+    list_instances_meta,
+    get_instance_meta,
+    delete_instance,
+    create_instance,
+    update_instance,
+    overlays_for_instance,
     generate_signals_for_instance,
+    list_indicator_strategies,
 )
 
 router = APIRouter()
@@ -89,6 +95,16 @@ async def get_one(inst_id: str):
         return get_instance_meta(inst_id)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
+
+
+@router.get("/{inst_id}/strategies")
+async def get_indicator_strategies(inst_id: str):
+    try:
+        get_instance_meta(inst_id)
+    except KeyError:
+        raise HTTPException(404, "Indicator not found")
+    return list_indicator_strategies(inst_id)
+
 
 @router.delete("/{inst_id}", status_code=204)
 async def delete(inst_id: str):

@@ -140,3 +140,8 @@ export async function generateIndicatorSignals(
 
   return handleResponse(res);
 }
+
+export async function fetchIndicatorStrategies(id) {
+  const res = await fetch(`${BASE}/api/indicators/${id}/strategies`, { mode: 'cors' })
+  return handleResponse(res)
+}
