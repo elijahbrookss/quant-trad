@@ -141,3 +141,26 @@ export async function generateStrategySignals(strategyId, payload) {
   return handleResponse(res)
 }
 
+export async function fetchSymbolPresets() {
+  const res = await fetch(`${BASE}/api/strategies/presets/symbols`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+export async function saveSymbolPreset(preset) {
+  const res = await fetch(`${BASE}/api/strategies/presets/symbols`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preset),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function deleteSymbolPreset(presetId) {
+  const res = await fetch(`${BASE}/api/strategies/presets/symbols/${presetId}`, {
+    method: 'DELETE',
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+

@@ -9,10 +9,13 @@ import {
   detachStrategyIndicator,
   fetchStrategies,
   generateStrategySignals,
+  fetchSymbolPresets,
+  saveSymbolPreset,
+  deleteSymbolPreset,
   updateStrategy,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
-import { fetchIndicators, fetchIndicator } from '../adapters/indicator.adapter.js'
+import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
@@ -648,8 +651,8 @@ const StrategyList = ({ strategies, selectedId, onSelect }) => {
               onClick={() => onSelect(strategy.id)}
               className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
                 isActive
-                  ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-08)] text-white shadow-inner'
-                  : 'border-white/10 bg-white/5 text-slate-200 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
+                  ? 'border-white/30 bg-white/10 text-white'
+                  : 'border-white/10 bg-[#111726] text-slate-200 hover:border-white/20 hover:bg-[#1a2133]'
               }`}
             >
               <div className="flex items-center justify-between">
@@ -671,20 +674,12 @@ const StrategyList = ({ strategies, selectedId, onSelect }) => {
   )
 }
 
-function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
+function AttachedIndicators({ strategy, attached, availableIndicators, onAttach, onDetach }) {
   const [selected, setSelected] = useState('')
 
   useEffect(() => {
     setSelected('')
   }, [strategy?.id])
-
-  const indicatorById = useMemo(() => {
-    const map = new Map()
-    for (const indicator of indicators) {
-      map.set(indicator.id, indicator)
-    }
-    return map
-  }, [indicators])
 
   const handleAttach = async (event) => {
     event.preventDefault()
@@ -693,8 +688,10 @@ function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
     setSelected('')
   }
 
+  const entries = Array.isArray(attached) ? attached : []
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div className="flex items-center gap-2">
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <select
@@ -703,7 +700,7 @@ function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
             onChange={(event) => setSelected(event.target.value)}
           >
             <option value="">Attach indicator…</option>
-            {indicators.map((indicator) => (
+            {availableIndicators.map((indicator) => (
               <option key={indicator.id} value={indicator.id}>
                 {indicator.name || indicator.type}
               </option>
@@ -715,30 +712,90 @@ function AttachedIndicators({ strategy, indicators, onAttach, onDetach }) {
         </form>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {(!Array.isArray(strategy.indicator_ids) || strategy.indicator_ids.length === 0) && (
-          <span className="text-sm text-slate-400">No indicators linked yet.</span>
-        )}
-        {(Array.isArray(strategy.indicator_ids) ? strategy.indicator_ids : []).map((indicatorId) => {
-          const meta = indicatorById.get(indicatorId)
-          const label = meta?.name || meta?.type || indicatorId
-          return (
-            <span
-              key={indicatorId}
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200"
-            >
-              {label}
-              <button
-                className="rounded-full border border-white/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-300 hover:border-rose-400/70 hover:text-rose-200"
-                onClick={() => onDetach(indicatorId)}
-                type="button"
+      {entries.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
+          No indicators linked yet.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {entries.map((entry) => {
+            const isMissing = entry.status !== 'active'
+            const params = entry.params || entry.snapshot?.params || {}
+            const symbol = params.symbol || strategy.symbols?.[0] || '—'
+            const interval = params.interval || strategy.timeframe || '—'
+            const datasource = entry.datasource || params.datasource || strategy.datasource || '—'
+            const exchange = entry.exchange || params.exchange || strategy.exchange || '—'
+            const related = Array.isArray(entry.strategies) ? entry.strategies : []
+            const otherStrategies = related.filter((s) => s.id && s.id !== strategy.id)
+            return (
+              <div
+                key={entry.id}
+                className={`rounded-2xl border p-4 transition ${
+                  isMissing
+                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-100'
+                    : 'border-white/10 bg-white/5 text-slate-100'
+                }`}
               >
-                Remove
-              </button>
-            </span>
-          )
-        })}
-      </div>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h5 className="text-sm font-semibold text-white">
+                      {entry.name || entry.type || entry.id}
+                    </h5>
+                    <p className="text-xs text-slate-300">
+                      {entry.type || entry.snapshot?.meta?.type || 'Custom'} • {symbol} • {interval}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${
+                        isMissing
+                          ? 'border border-rose-400/60 bg-rose-500/20 text-rose-100'
+                          : 'border border-white/15 bg-black/40 text-slate-200'
+                      }`}
+                    >
+                      {isMissing ? 'Missing' : 'Active'}
+                    </span>
+                    <button
+                      className="rounded-full border border-white/20 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-200 hover:border-rose-400/70 hover:text-rose-200"
+                      type="button"
+                      onClick={() => onDetach(entry.id)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+
+                <dl className="mt-3 grid gap-3 text-[11px] text-slate-300 md:grid-cols-2">
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Datasource</dt>
+                    <dd className="mt-1 font-semibold text-slate-100">{datasource}</dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Exchange</dt>
+                    <dd className="mt-1 font-semibold text-slate-100">{exchange}</dd>
+                  </div>
+                </dl>
+
+                {otherStrategies.length > 0 && (
+                  <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-300">
+                    <p className="font-semibold text-slate-200">Also used in:</p>
+                    <ul className="mt-1 space-y-1">
+                      {otherStrategies.map((item) => (
+                        <li key={`${entry.id}-strategy-${item.id}`} className="flex items-center justify-between">
+                          <span className="truncate text-[11px] text-slate-300">{item.name || item.id}</span>
+                          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
+                            {Array.isArray(item.rules) ? item.rules.length : 0} rules
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -777,6 +834,101 @@ const ConditionBadge = ({ label, signalType, direction, ruleId }) => {
           {directionLabel}
         </span>
       </div>
+    </div>
+  )
+}
+
+function SymbolPresetManager({ presets, current, onSave, onDelete, onApply, message }) {
+  const [label, setLabel] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [errorMessage, setErrorMessage] = useState(null)
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const trimmed = label.trim()
+    if (!trimmed) {
+      setErrorMessage('Preset name is required')
+      return
+    }
+    try {
+      setSaving(true)
+      setErrorMessage(null)
+      await onSave(trimmed)
+      setLabel('')
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to save preset')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const renderPreset = (preset) => (
+    <div
+      key={preset.id}
+      className="flex flex-col gap-3 rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-slate-200"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-white">{preset.label}</p>
+          <p className="text-xs text-slate-400">
+            {preset.symbol} • {preset.timeframe} • {preset.datasource || '—'}
+            {preset.exchange ? ` (${preset.exchange})` : ''}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <ActionButton variant="ghost" onClick={() => onApply(preset)}>
+            Apply
+          </ActionButton>
+          <ActionButton variant="danger" onClick={() => onDelete(preset.id)}>
+            Delete
+          </ActionButton>
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4 text-sm">
+        <div>
+          <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+            Preset name
+          </label>
+          <input
+            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="e.g. CL 15m Futures"
+          />
+        </div>
+        <p className="text-xs text-slate-400">
+          Current selection: {current.symbol || '—'} • {current.interval || '—'} • {current.datasource || '—'}
+          {current.exchange ? ` (${current.exchange})` : ''}
+        </p>
+        <div className="flex items-center justify-end">
+          <ActionButton type="submit" disabled={saving}>
+            {saving ? 'Saving…' : 'Save preset'}
+          </ActionButton>
+        </div>
+        {errorMessage && <p className="text-xs text-rose-300">{errorMessage}</p>}
+        {message && (
+          <p
+            className={`text-xs ${
+              message.type === 'error' ? 'text-rose-300' : 'text-emerald-300'
+            }`}
+          >
+            {message.text}
+          </p>
+        )}
+      </form>
+
+      {presets.length ? (
+        <div className="space-y-3">
+          {presets.map(renderPreset)}
+        </div>
+      ) : (
+        <p className="text-xs text-slate-400">No presets saved yet.</p>
+      )}
     </div>
   )
 }
@@ -868,10 +1020,15 @@ function SignalSummary({ result }) {
     buy_signals: buys = [],
     sell_signals: sells = [],
     rule_results: rules = [],
+    status,
+    missing_indicators: missingIndicatorsRaw = [],
   } = result
 
   const matchedRules = rules.filter((entry) => entry?.matched).length
   const totalRules = rules.length
+  const missingIndicators = Array.isArray(missingIndicatorsRaw)
+    ? missingIndicatorsRaw.filter(Boolean)
+    : []
   const buySignalCount = buys.reduce((total, entry) => {
     if (!entry) return total
     const signalCount = Array.isArray(entry.signals) && entry.signals.length
@@ -892,6 +1049,11 @@ function SignalSummary({ result }) {
   }, 0)
   const buyRuleMatches = buys.length
   const sellRuleMatches = sells.length
+  const statusLabel = status === 'missing_indicators' ? 'Missing indicators' : 'Complete'
+  const statusClasses =
+    status === 'missing_indicators'
+      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+      : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
 
   return (
     <div className="space-y-4 rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-sm text-slate-200">
@@ -903,6 +1065,9 @@ function SignalSummary({ result }) {
           {window?.datasource ? ` • ${window.datasource}` : ''}
           {window?.exchange ? ` (${window.exchange})` : ''}
         </p>
+        <span className={`mt-2 inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${statusClasses}`}>
+          {statusLabel}
+        </span>
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">
@@ -928,13 +1093,30 @@ function SignalSummary({ result }) {
           </p>
         </div>
       </div>
+
+      {missingIndicators.length > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+          <p className="font-semibold text-amber-200">Indicators unavailable</p>
+          <p className="mt-1 text-amber-100/90">
+            Recreate or reattach the following indicators before running live checks:
+          </p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {missingIndicators.map((identifier) => (
+              <li key={`missing-${identifier}`} className="text-amber-100">
+                {identifier}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }
 
 const StrategyDetails = ({
   strategy,
-  indicators,
+  attachedIndicators,
+  availableIndicators,
   indicatorLookup,
   onEdit,
   onDelete,
@@ -948,6 +1130,11 @@ const StrategyDetails = ({
   setSignalWindow,
   signalResult,
   signalsLoading,
+  symbolPresets,
+  onSavePreset,
+  onDeletePreset,
+  onApplyPreset,
+  presetMessage,
 }) => {
   if (!strategy) {
     return (
@@ -990,13 +1177,47 @@ const StrategyDetails = ({
         </div>
       </header>
 
+      {Array.isArray(strategy.missing_indicators) && strategy.missing_indicators.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+          <p className="font-semibold text-amber-200">{strategy.missing_indicators.length} indicator(s) unavailable</p>
+          <p className="mt-1 text-amber-100/90">
+            Recreate these indicators or detach them from the strategy to restore evaluations:
+          </p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {strategy.missing_indicators.map((identifier) => (
+              <li key={`strategy-missing-${identifier}`} className="text-amber-100">
+                {identifier}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <section className="space-y-4">
         <h4 className="text-sm font-semibold text-white">Indicators</h4>
         <AttachedIndicators
           strategy={strategy}
-          indicators={indicators}
+          attached={attachedIndicators}
+          availableIndicators={availableIndicators}
           onAttach={onAttachIndicator}
           onDetach={onDetachIndicator}
+        />
+      </section>
+
+      <section className="space-y-4">
+        <h4 className="text-sm font-semibold text-white">Symbol presets</h4>
+        <SymbolPresetManager
+          presets={symbolPresets}
+          current={{
+            symbol: signalWindow.symbol || strategy.symbols?.[0] || '',
+            interval: signalWindow.interval || strategy.timeframe || '',
+            datasource: signalWindow.datasource || strategy.datasource || '',
+            exchange: signalWindow.exchange || strategy.exchange || '',
+          }}
+          onSave={onSavePreset}
+          onDelete={onDeletePreset}
+          onApply={onApplyPreset}
+          message={presetMessage}
         />
       </section>
 
@@ -1126,6 +1347,8 @@ const StrategyTab = ({ chartId }) => {
       exchange: '',
     }
   })
+  const [symbolPresets, setSymbolPresets] = useState([])
+  const [presetMessage, setPresetMessage] = useState(null)
 
   const indicatorLookup = useMemo(() => {
     const map = new Map()
@@ -1149,17 +1372,24 @@ const StrategyTab = ({ chartId }) => {
         return existing
       }
       try {
-        const payload = await fetchIndicator(trimmed)
+        const [payload, relatedStrategies] = await Promise.all([
+          fetchIndicator(trimmed),
+          fetchIndicatorStrategies(trimmed).catch(() => []),
+        ])
         if (!payload) {
           return existing || null
         }
+        const enriched = {
+          ...payload,
+          strategies: Array.isArray(relatedStrategies) ? relatedStrategies : [],
+        }
         setIndicators((prev) => {
           const map = new Map(prev.map((indicator) => [indicator.id, indicator]))
-          const merged = { ...(map.get(payload.id) || {}), ...payload }
-          map.set(payload.id, merged)
+          const merged = { ...(map.get(enriched.id) || {}), ...enriched }
+          map.set(enriched.id, merged)
           return Array.from(map.values())
         })
-        return payload
+        return enriched
       } catch (err) {
         warn('indicator_detail_fetch_failed', { indicatorId: trimmed }, err)
         return existing || null
@@ -1168,18 +1398,104 @@ const StrategyTab = ({ chartId }) => {
     [indicatorLookup, setIndicators, warn],
   )
 
+  const handleSavePreset = useCallback(
+    async (label) => {
+      const symbol = signalWindow.symbol || selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
+      const interval = signalWindow.interval || selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
+      const datasource = signalWindow.datasource || selectedStrategy?.datasource || chartSnapshot?.datasource || ''
+      const exchange = signalWindow.exchange || selectedStrategy?.exchange || chartSnapshot?.exchange || ''
+      setPresetMessage(null)
+      try {
+        await saveSymbolPreset({
+          label,
+          symbol,
+          timeframe: interval,
+          datasource: datasource || null,
+          exchange: exchange || null,
+        })
+        setPresetMessage({ type: 'success', text: `Saved preset "${label}"` })
+        await loadPresets()
+      } catch (err) {
+        setPresetMessage({ type: 'error', text: err?.message || 'Failed to save preset' })
+        throw err
+      }
+    },
+    [signalWindow, selectedStrategy, chartSnapshot, loadPresets],
+  )
+
+  const handleDeletePreset = useCallback(
+    async (presetId) => {
+      setPresetMessage(null)
+      try {
+        await deleteSymbolPreset(presetId)
+        setPresetMessage({ type: 'success', text: 'Preset removed' })
+        await loadPresets()
+      } catch (err) {
+        setPresetMessage({ type: 'error', text: err?.message || 'Failed to remove preset' })
+      }
+    },
+    [loadPresets],
+  )
+
+  const handleApplyPreset = useCallback(
+    (preset) => {
+      if (!preset) {
+        return
+      }
+      const nextSymbol = preset.symbol || signalWindow.symbol || selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
+      const nextInterval = preset.timeframe || signalWindow.interval || selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
+      const nextDatasource = preset.datasource || signalWindow.datasource || selectedStrategy?.datasource || chartSnapshot?.datasource || ''
+      const nextExchange = preset.exchange || signalWindow.exchange || selectedStrategy?.exchange || chartSnapshot?.exchange || ''
+      setPresetMessage({ type: 'success', text: `Applied preset "${preset.label}"` })
+      setSignalWindow((prev) => ({
+        ...prev,
+        symbol: nextSymbol,
+        interval: nextInterval,
+        datasource: nextDatasource,
+        exchange: nextExchange,
+      }))
+      updateChart(chartId, {
+        symbol: nextSymbol,
+        interval: nextInterval,
+        datasource: nextDatasource || null,
+        exchange: nextExchange || null,
+      })
+    },
+    [signalWindow, selectedStrategy, chartSnapshot, updateChart, chartId],
+  )
+
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
     [strategies, selectedId],
   )
 
+  useEffect(() => {
+    setPresetMessage(null)
+  }, [selectedStrategy?.id])
+
   const attachedIndicators = useMemo(() => {
-    if (!selectedStrategy || !Array.isArray(selectedStrategy.indicator_ids)) {
+    if (!selectedStrategy) {
       return []
     }
-    const allowed = new Set(selectedStrategy.indicator_ids)
-    return indicators.filter((indicator) => allowed.has(indicator.id))
-  }, [selectedStrategy, indicators])
+    const entries = Array.isArray(selectedStrategy.indicators)
+      ? selectedStrategy.indicators
+      : []
+    return entries.map((entry) => {
+      const lookupMeta = indicatorLookup.get(entry.id) || {}
+      const mergedMeta = {
+        ...entry.snapshot,
+        ...entry.meta,
+        ...lookupMeta,
+      }
+      return {
+        ...mergedMeta,
+        id: entry.id,
+        status: entry.status || 'active',
+        snapshot: entry.snapshot || {},
+        strategies: lookupMeta.strategies || entry.meta?.strategies || [],
+      }
+    })
+  }, [selectedStrategy, indicatorLookup])
 
   const indicatorsForRuleModal = useMemo(() => {
     if (!ruleModal?.rule) {
@@ -1276,6 +1592,15 @@ const StrategyTab = ({ chartId }) => {
     }
   }, [warn])
 
+  const loadPresets = useCallback(async () => {
+    try {
+      const payload = await fetchSymbolPresets()
+      setSymbolPresets(Array.isArray(payload) ? payload : [])
+    } catch (err) {
+      warn('symbol_presets_load_failed', err)
+    }
+  }, [warn])
+
   useEffect(() => {
     refreshStrategies()
   }, [refreshStrategies])
@@ -1283,6 +1608,10 @@ const StrategyTab = ({ chartId }) => {
   useEffect(() => {
     loadIndicators()
   }, [loadIndicators])
+
+  useEffect(() => {
+    loadPresets()
+  }, [loadPresets])
 
   const openCreateStrategy = () => setStrategyModal({ open: true, strategy: null })
   const openEditStrategy = (strategy) => setStrategyModal({ open: true, strategy })
@@ -1488,7 +1817,8 @@ const StrategyTab = ({ chartId }) => {
         <div className="flex-1">
           <StrategyDetails
             strategy={selectedStrategy}
-            indicators={indicators}
+            attachedIndicators={attachedIndicators}
+            availableIndicators={indicators}
             indicatorLookup={indicatorLookup}
             onEdit={() => openEditStrategy(selectedStrategy)}
             onDelete={() => handleDeleteStrategy(selectedStrategy)}
@@ -1502,6 +1832,11 @@ const StrategyTab = ({ chartId }) => {
             setSignalWindow={setSignalWindow}
             signalResult={signalResult}
             signalsLoading={signalsLoading}
+            symbolPresets={symbolPresets}
+            onSavePreset={handleSavePreset}
+            onDeletePreset={handleDeletePreset}
+            onApplyPreset={handleApplyPreset}
+            presetMessage={presetMessage}
           />
         </div>
       </div>
