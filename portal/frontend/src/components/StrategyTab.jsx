@@ -1403,6 +1403,15 @@ const StrategyTab = ({ chartId }) => {
     [indicatorLookup, setIndicators, warn],
   )
 
+  const loadPresets = useCallback(async () => {
+    try {
+      const payload = await fetchSymbolPresets()
+      setSymbolPresets(Array.isArray(payload) ? payload : [])
+    } catch (err) {
+      warn('symbol_presets_load_failed', err)
+    }
+  }, [warn])
+
   const handleSavePreset = useCallback(
     async (label) => {
       const symbol = signalWindow.symbol || selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
@@ -1589,15 +1598,6 @@ const StrategyTab = ({ chartId }) => {
       setIndicators(Array.isArray(payload) ? payload : [])
     } catch (err) {
       warn('indicator_fetch_failed', err)
-    }
-  }, [warn])
-
-  const loadPresets = useCallback(async () => {
-    try {
-      const payload = await fetchSymbolPresets()
-      setSymbolPresets(Array.isArray(payload) ? payload : [])
-    } catch (err) {
-      warn('symbol_presets_load_failed', err)
     }
   }, [warn])
 
