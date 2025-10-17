@@ -1350,6 +1350,11 @@ const StrategyTab = ({ chartId }) => {
   const [symbolPresets, setSymbolPresets] = useState([])
   const [presetMessage, setPresetMessage] = useState(null)
 
+  const selectedStrategy = useMemo(
+    () => strategies.find((strategy) => strategy.id === selectedId) || null,
+    [strategies, selectedId],
+  )
+
   const indicatorLookup = useMemo(() => {
     const map = new Map()
     for (const indicator of indicators) {
@@ -1462,11 +1467,6 @@ const StrategyTab = ({ chartId }) => {
       })
     },
     [signalWindow, selectedStrategy, chartSnapshot, updateChart, chartId],
-  )
-
-  const selectedStrategy = useMemo(
-    () => strategies.find((strategy) => strategy.id === selectedId) || null,
-    [strategies, selectedId],
   )
 
   useEffect(() => {
