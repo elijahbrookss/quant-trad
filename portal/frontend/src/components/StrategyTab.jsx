@@ -19,6 +19,7 @@ import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../ad
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
+import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -301,10 +302,9 @@ function RuleFormModal({
     })
   }
 
-  const handleConditionIndicatorChange = (index) => (event) => {
-    const indicatorId = event.target.value
+  const handleConditionIndicatorChange = (index) => (indicatorId) => {
     updateCondition(index, {
-      indicator_id: indicatorId,
+      indicator_id: indicatorId || '',
       rule_id: '',
       signal_type: '',
       direction: '',
@@ -314,8 +314,7 @@ function RuleFormModal({
     }
   }
 
-  const handleConditionRuleChange = (index) => (event) => {
-    const ruleId = event.target.value
+  const handleConditionRuleChange = (index) => (ruleId) => {
     setForm((prev) => {
       const nextConditions = [...prev.conditions]
       const current = nextConditions[index]
@@ -327,7 +326,7 @@ function RuleFormModal({
         : ''
       nextConditions[index] = {
         ...current,
-        rule_id: ruleId,
+        rule_id: ruleId || '',
         signal_type: selectedRule?.signal_type || '',
         direction: defaultDirection || '',
       }
@@ -335,9 +334,8 @@ function RuleFormModal({
     })
   }
 
-  const handleConditionDirectionChange = (index) => (event) => {
-    const direction = event.target.value
-    updateCondition(index, { direction })
+  const handleConditionDirectionChange = (index) => (direction) => {
+    updateCondition(index, { direction: direction || '' })
   }
 
   const addCondition = () => {
@@ -357,8 +355,16 @@ function RuleFormModal({
     })
   }
 
-  const handleFieldChange = (field) => (event) => {
-    const value = field === 'enabled' ? event.target.checked : event.target.value
+  const handleFieldChange = (field) => (input) => {
+    let value = input
+    if (input && typeof input === 'object' && 'target' in input) {
+      const target = input.target
+      if (target.type === 'checkbox') {
+        value = target.checked
+      } else {
+        value = target.value
+      }
+    }
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
@@ -452,49 +458,35 @@ function RuleFormModal({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 space-y-3">
-                      <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
-                          Indicator
-                        </label>
-                        <select
-                          className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                          value={condition.indicator_id}
-                          onChange={handleConditionIndicatorChange(index)}
-                          required
-                        >
-                          <option value="">Select indicator</option>
-                          {indicators.map((indicator) => {
-                            const hasSignals = Array.isArray(indicator.signal_rules)
-                              && indicator.signal_rules.length > 0
-                            const label = indicator.name || indicator.type
-                            return (
-                              <option
-                                key={indicator.id}
-                                value={indicator.id}
-                                disabled={!hasSignals && indicator.id !== condition.indicator_id}
-                                title={hasSignals ? label : `${label} (no signals registered)`}
-                              >
-                                {hasSignals ? label : `${label} • No signals registered`}
-                              </option>
-                            )
-                          })}
-                        </select>
-                      </div>
+                      <DropdownSelect
+                        label="Indicator"
+                        value={condition.indicator_id}
+                        onChange={handleConditionIndicatorChange(index)}
+                        placeholder="Select indicator"
+                        options={indicators.map((indicator) => {
+                          const hasSignals = Array.isArray(indicator.signal_rules)
+                            && indicator.signal_rules.length > 0
+                          const label = indicator.name || indicator.type
+                          return {
+                            value: indicator.id,
+                            label,
+                            description: hasSignals ? undefined : 'No signals registered',
+                            disabled: !hasSignals && indicator.id !== condition.indicator_id,
+                          }
+                        })}
+                        disabled={!indicators.length}
+                        className="mt-1 w-full"
+                      />
 
                       <div className="grid gap-3 md:grid-cols-2">
                         <div>
-                          <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
-                            Signal type
-                          </label>
-                          <select
-                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          <DropdownSelect
+                            label="Signal type"
                             value={condition.rule_id}
                             onChange={handleConditionRuleChange(index)}
-                            required
+                            placeholder="Select signal"
                             disabled={!condition.indicator_id}
-                          >
-                            <option value="">Select signal</option>
-                            {ruleOptions.map((rule) => {
+                            options={ruleOptions.map((rule) => {
                               const parts = []
                               if (rule.signal_type) {
                                 parts.push(rule.signal_type.toUpperCase())
@@ -502,14 +494,14 @@ function RuleFormModal({
                               if (rule.label && rule.label.toLowerCase() !== (rule.signal_type || '').toLowerCase()) {
                                 parts.push(rule.label)
                               }
-                              const optionLabel = parts.length ? parts.join(' – ') : rule.id
-                              return (
-                                <option key={rule.id} value={rule.id}>
-                                  {optionLabel}
-                                </option>
-                              )
+                              return {
+                                value: rule.id,
+                                label: parts.length ? parts.join(' – ') : rule.id,
+                                description: rule.description,
+                              }
                             })}
-                          </select>
+                            className="mt-1 w-full"
+                          />
                           {condition.indicator_id && !ruleOptions.length && (
                             <p className="mt-1 text-[11px] text-amber-300/80">
                               This indicator has no registered signals yet. Configure signal rules on the Indicators tab first.
@@ -527,22 +519,21 @@ function RuleFormModal({
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
-                            Direction filter
-                          </label>
-                          <select
-                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          <DropdownSelect
+                            label="Direction filter"
                             value={condition.direction || ''}
                             onChange={handleConditionDirectionChange(index)}
                             disabled={!directionOptions.length}
-                          >
-                            <option value="">Any direction</option>
-                            {directionOptions.map((direction) => (
-                              <option key={direction.id} value={direction.id}>
-                                {direction.label || direction.id}
-                              </option>
-                            ))}
-                          </select>
+                            options={[
+                              { value: '', label: 'Any direction', description: 'Match all biases' },
+                              ...directionOptions.map((direction) => ({
+                                value: direction.id,
+                                label: direction.label || direction.id,
+                                description: direction.description,
+                              })),
+                            ]}
+                            className="mt-1 w-full"
+                          />
                           {directionOptions.length > 0 && (
                             <ul className="mt-1 space-y-1 text-[11px] text-slate-400">
                               {directionOptions.map((direction) => (
@@ -573,33 +564,27 @@ function RuleFormModal({
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Action
-              </label>
-              <select
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.action}
-                onChange={handleFieldChange('action')}
-              >
-                <option value="buy">Buy</option>
-                <option value="sell">Sell</option>
-              </select>
-            </div>
+            <DropdownSelect
+              label="Action"
+              value={form.action}
+              onChange={handleFieldChange('action')}
+              options={[
+                { value: 'buy', label: 'Buy' },
+                { value: 'sell', label: 'Sell' },
+              ]}
+              className="w-full"
+            />
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Confluence logic
-              </label>
-              <select
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.match}
-                onChange={handleFieldChange('match')}
-              >
-                <option value="all">All conditions must match</option>
-                <option value="any">Any condition can trigger</option>
-              </select>
-            </div>
+            <DropdownSelect
+              label="Confluence logic"
+              value={form.match}
+              onChange={handleFieldChange('match')}
+              options={[
+                { value: 'all', label: 'All conditions must match' },
+                { value: 'any', label: 'Any condition can trigger' },
+              ]}
+              className="w-full"
+            />
           </div>
 
           <label className="mt-1 flex items-center gap-2 text-sm text-slate-300">
@@ -694,18 +679,20 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
-          <select
-            className="flex-1 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-            value={selected}
-            onChange={(event) => setSelected(event.target.value)}
-          >
-            <option value="">Attach indicator…</option>
-            {availableIndicators.map((indicator) => (
-              <option key={indicator.id} value={indicator.id}>
-                {indicator.name || indicator.type}
-              </option>
-            ))}
-          </select>
+          <div className="flex-1">
+            <DropdownSelect
+              label="Indicator"
+              value={selected}
+              onChange={setSelected}
+              placeholder="Attach indicator…"
+              options={availableIndicators.map((indicator) => ({
+                value: indicator.id,
+                label: indicator.name || indicator.type,
+              }))}
+              disabled={!availableIndicators.length}
+              className="w-full"
+            />
+          </div>
           <ActionButton type="submit" disabled={!selected}>
             Attach
           </ActionButton>
@@ -1148,8 +1135,10 @@ const StrategyDetails = ({
     setSignalWindow((prev) => ({ ...prev, dateRange: range }))
   }
 
-  const handleWindowChange = (field) => (event) => {
-    const value = event.target.value
+  const handleWindowChange = (field) => (input) => {
+    const value = input && typeof input === 'object' && 'target' in input
+      ? input.target.value
+      : input
     setSignalWindow((prev) => ({ ...prev, [field]: value }))
   }
 
@@ -1271,20 +1260,21 @@ const StrategyDetails = ({
 
           <div className="grid gap-4 md:grid-cols-2">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Data source (market data)
-              </label>
-              <select
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              <DropdownSelect
+                label="Data source (market data)"
                 value={signalWindow.datasource || strategy.datasource || ''}
                 onChange={handleWindowChange('datasource')}
-              >
-                <option value="">
-                  Use strategy data source ({strategy.datasource || 'ALPACA'})
-                </option>
-                <option value="ALPACA">Market data • ALPACA</option>
-                <option value="CCXT">Crypto data • CCXT</option>
-              </select>
+                options={[
+                  {
+                    value: '',
+                    label: `Use strategy data source (${strategy.datasource || 'ALPACA'})`,
+                    description: 'Follow the strategy default',
+                  },
+                  { value: 'ALPACA', label: 'Market data • ALPACA' },
+                  { value: 'CCXT', label: 'Crypto data • CCXT' },
+                ]}
+                className="mt-1 w-full"
+              />
               <p className="mt-1 text-[11px] text-slate-500">
                 Choose the provider used to load candles when checking these rules.
               </p>

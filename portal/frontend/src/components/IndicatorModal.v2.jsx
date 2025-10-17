@@ -2,6 +2,7 @@ import { Dialog, DialogPanel, DialogTitle, Switch } from '@headlessui/react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { fetchIndicatorTypes, fetchIndicatorType } from '../adapters/indicator.adapter.js'
+import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const EMPTY_META = {
   required_params: [],
@@ -258,9 +259,12 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     return { primaryKeys: primary, advancedKeys: advanced }
   }, [fieldOrder, meta])
 
-  const handleParamChange = (key) => (event) => {
-    const value = event?.target?.value ?? ''
-    setParams((prev) => ({ ...prev, [key]: value }))
+  const handleParamChange = (key) => (input) => {
+    let value = input
+    if (input && typeof input === 'object' && 'target' in input) {
+      value = input.target?.value ?? ''
+    }
+    setParams((prev) => ({ ...prev, [key]: value ?? '' }))
   }
 
   const handleBooleanChange = (key) => (value) => {
@@ -310,17 +314,12 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
             <span className="text-sm text-slate-200">{value ? 'Enabled' : 'Disabled'}</span>
           </div>
         ) : enumValues ? (
-          <select
-            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+          <DropdownSelect
             value={value}
             onChange={handleParamChange(key)}
-          >
-            {enumValues.map((entry) => (
-              <option key={entry} value={entry}>
-                {entry}
-              </option>
-            ))}
-          </select>
+            options={enumValues.map((entry) => ({ value: entry, label: String(entry) }))}
+            className="w-full"
+          />
         ) : intListKeys.has(key) ? (
           <input
             className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
@@ -404,18 +403,13 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                     {typeId || '—'}
                   </div>
                 ) : (
-                  <select
-                    className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  <DropdownSelect
                     value={typeId}
-                    onChange={(event) => setTypeId(event.target.value)}
-                  >
-                    <option value="">Select type…</option>
-                    {types.map((entry) => (
-                      <option key={entry} value={entry}>
-                        {entry}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setTypeId}
+                    placeholder="Select type…"
+                    options={types.map((entry) => ({ value: entry, label: entry }))}
+                    className="mt-1 w-full"
+                  />
                 )}
               </div>
             </div>

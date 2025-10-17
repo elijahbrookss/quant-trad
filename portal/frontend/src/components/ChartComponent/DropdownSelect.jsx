@@ -70,8 +70,8 @@ export function DropdownSelect({
   const displayLabel = selectedOption?.label ?? placeholder;
   const hasSelection = Boolean(selectedOption);
 
-  const handleSelect = (optionValue) => {
-    if (disabled) return;
+  const handleSelect = (optionValue, optionDisabled = false) => {
+    if (disabled || optionDisabled) return;
     if (typeof onChange === 'function') {
       onChange(optionValue);
     }
@@ -90,11 +90,11 @@ export function DropdownSelect({
           onClick={() => setOpen((prev) => !prev)}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className={`flex w-full items-center justify-between rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+          className={`flex w-full items-center justify-between rounded-lg border border-white/15 bg-[#141824]/85 px-3 py-2 text-sm font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
             disabled
               ? 'cursor-not-allowed opacity-60'
-              : 'hover:border-[color:var(--accent-alpha-30)] hover:bg-slate-900'
-          } ${open ? 'border-[color:var(--accent-alpha-40)] shadow-lg shadow-black/30' : ''}`}
+              : 'hover:border-[color:var(--accent-alpha-30)] hover:bg-[#192236]'
+          } ${open ? 'border-[color:var(--accent-alpha-40)] bg-[#1b263c] shadow-lg shadow-black/40' : ''}`}
         >
           <span className={`${hasSelection ? 'text-slate-100' : 'text-slate-400'}`}>
             {displayLabel}
@@ -113,11 +113,11 @@ export function DropdownSelect({
 
         <div
           role="listbox"
-          className={`absolute z-20 mt-2 w-full overflow-hidden rounded-2xl border border-slate-700/70 bg-slate-950/95 shadow-[0_20px_60px_rgba(0,0,0,0.55)] backdrop-blur transition-all ${
+          className={`absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
             open ? 'max-h-96 opacity-100' : 'pointer-events-none max-h-0 opacity-0'
           }`}
         >
-          <div className="divide-y divide-slate-800/70">
+          <div className="divide-y divide-white/10">
             {groups.map((group) => (
               <div key={group.id} className="flex flex-col p-2">
                 {group.label ? (
@@ -127,17 +127,22 @@ export function DropdownSelect({
                 ) : null}
                 {group.options.map((option) => {
                   const isActive = option?.value === value;
+                  const isOptionDisabled = Boolean(option?.disabled);
                   return (
                     <button
                       key={option.value}
                       type="button"
                       role="option"
                       aria-selected={isActive}
-                      onClick={() => handleSelect(option.value)}
+                      aria-disabled={isOptionDisabled}
+                      disabled={isOptionDisabled}
+                      onClick={() => handleSelect(option.value, isOptionDisabled)}
                       className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
-                        isActive
-                          ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]'
-                          : 'text-slate-200 hover:bg-[color:var(--accent-alpha-12)] hover:text-[color:var(--accent-text-soft)]'
+                        isOptionDisabled
+                          ? 'cursor-not-allowed text-slate-500'
+                          : isActive
+                              ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]'
+                              : 'text-slate-200 hover:bg-[color:var(--accent-alpha-12)] hover:text-[color:var(--accent-text-soft)]'
                       }`}
                     >
                       <span className="flex flex-col">
