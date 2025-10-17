@@ -13,6 +13,7 @@ import LoadingOverlay from '../LoadingOverlay.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
 import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
+import DropdownSelect from './DropdownSelect.jsx';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -287,6 +288,43 @@ export const ChartComponent = ({ chartId }) => {
       }
     }
   }, []);
+
+  const exchangeSelectOptions = useMemo(() => {
+    if (datasource === 'CCXT') {
+      const centralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'CEX').map((ex) => ({
+        value: ex.id,
+        label: ex.label,
+        badge: 'CEX',
+      }));
+
+      const decentralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'DEX').map((ex) => ({
+        value: ex.id,
+        label: ex.label,
+        badge: 'DEX',
+      }));
+
+      return [
+        ...(centralized.length
+          ? [{ label: 'Centralized Exchanges', options: centralized }]
+          : []),
+        ...(decentralized.length
+          ? [{ label: 'Decentralized Exchanges', options: decentralized }]
+          : []),
+      ];
+    }
+
+    return MARKET_PROVIDERS.map((provider) => ({
+      value: provider.id,
+      label: provider.label,
+    }));
+  }, [datasource]);
+
+  const selectedExchangeValue = useMemo(() => {
+    if (datasource === 'CCXT') {
+      return exchange || DEFAULT_CRYPTO_EXCHANGE;
+    }
+    return exchange || DEFAULT_MARKET_PROVIDER;
+  }, [datasource, exchange]);
 
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -1022,41 +1060,14 @@ export const ChartComponent = ({ chartId }) => {
               </div>
             </div>
 
-            <div className="flex min-w-[15rem] flex-col gap-2">
-              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Exchange</span>
-              {datasource === 'CCXT' ? (
-                <select
-                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
-                  value={exchange || ''}
-                  onChange={(e) => handleExchangeChange(e.target.value)}
-                >
-                  {['CEX', 'DEX'].map((category) => (
-                    <optgroup
-                      key={category}
-                      label={category === 'CEX' ? 'Top Centralized Exchanges' : 'Top Decentralized Exchanges'}
-                    >
-                      {CRYPTO_EXCHANGES.filter((ex) => ex.category === category).map((ex) => (
-                        <option key={ex.id} value={ex.id}>
-                          {ex.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              ) : (
-                <select
-                  className="rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm font-semibold text-slate-100 transition focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
-                  value={exchange || DEFAULT_MARKET_PROVIDER}
-                  onChange={(e) => handleExchangeChange(e.target.value)}
-                >
-                  {MARKET_PROVIDERS.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
+            <DropdownSelect
+              className="min-w-[15rem]"
+              label="Exchange"
+              value={selectedExchangeValue}
+              onChange={handleExchangeChange}
+              options={exchangeSelectOptions}
+              placeholder={datasource === 'CCXT' ? 'Select exchange' : 'Select provider'}
+            />
 
             <TimeframeSelect selected={interval} onChange={setInterval} />
             <SymbolInput value={symbol} onChange={setSymbol} />
