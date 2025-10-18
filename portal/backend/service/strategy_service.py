@@ -8,7 +8,7 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 from .indicator_service import generate_signals_for_instance, get_instance_meta
 from .storage import (
@@ -77,6 +77,30 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
         if direct:
             return direct
 
+        bias_hint = _normalise_direction(source.get("bias"))
+        if bias_hint:
+            return bias_hint
+
+        bias_label = _normalise_direction(source.get("bias_label"))
+        if bias_label:
+            return bias_label
+
+        trade_direction = _normalise_direction(source.get("trade_direction"))
+        if trade_direction:
+            return trade_direction
+
+        pointer_direction = _normalise_direction(source.get("pointer_direction"))
+        if pointer_direction:
+            return pointer_direction
+
+        active_side = _normalise_direction(source.get("active_side"))
+        if active_side:
+            return active_side
+
+        side_hint = _normalise_direction(source.get("side"))
+        if side_hint:
+            return side_hint
+
         breakout_direction = _normalise_direction(source.get("breakout_direction"))
         if breakout_direction:
             return breakout_direction
@@ -129,7 +153,18 @@ def _promote_signal_metadata(signal: MutableMapping[str, Any]) -> None:
     if not isinstance(metadata, Mapping):
         return
 
-    preferred_keys = ("rule_id", "pattern_id", "signal_id", "pattern", "id")
+    preferred_keys = (
+        "rule_id",
+        "pattern_id",
+        "signal_id",
+        "pattern",
+        "id",
+        "direction",
+        "bias",
+        "breakout_direction",
+        "pointer_direction",
+        "retest_role",
+    )
     for key in preferred_keys:
         if signal.get(key) in (None, "", []):
             value = metadata.get(key)
@@ -1089,10 +1124,61 @@ class StrategyRegistry:
         effective_datasource = datasource or record.datasource
         effective_exchange = exchange or record.exchange
 
+        indicator_rule_map: Dict[str, List[str]] = {}
+        for rule in record.rules.values():
+            for condition in rule.conditions:
+                indicator_id = condition.indicator_id
+                rule_id = condition.rule_id
+                if not indicator_id or not rule_id:
+                    continue
+                bucket = indicator_rule_map.setdefault(indicator_id, [])
+                if rule_id not in bucket:
+                    bucket.append(rule_id)
+
+        def _merge_enabled_rules(existing: Any, extras: Iterable[str]) -> List[str]:
+            ordered: List[str] = []
+            seen: Set[str] = set()
+
+            sources: List[Any] = []
+            if existing is not None:
+                sources.append(existing)
+            sources.append(extras)
+
+            for source in sources:
+                if not source:
+                    continue
+                if isinstance(source, Mapping):
+                    iterable = source.values()
+                elif isinstance(source, (str, bytes)):
+                    iterable = [source]
+                else:
+                    iterable = source
+
+                for item in iterable:
+                    text = str(item).strip()
+                    if not text:
+                        continue
+                    key = text.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    ordered.append(text)
+
+            return ordered
+
         indicator_payloads: Dict[str, Dict[str, Any]] = {}
         missing_indicators: List[str] = []
+        base_config = dict(config or {})
         for inst_id in record.indicator_ids:
             try:
+                per_config = dict(base_config)
+                rule_filters = indicator_rule_map.get(inst_id)
+                if rule_filters:
+                    merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
+                    if merged_rules:
+                        per_config["enabled_rules"] = merged_rules
+                    else:
+                        per_config.pop("enabled_rules", None)
                 payload = generate_signals_for_instance(
                     inst_id,
                     start=start,
@@ -1101,7 +1187,7 @@ class StrategyRegistry:
                     symbol=effective_symbol,
                     datasource=effective_datasource,
                     exchange=effective_exchange,
-                    config=config or {},
+                    config=per_config,
                 )
                 indicator_payloads[inst_id] = payload
                 signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None

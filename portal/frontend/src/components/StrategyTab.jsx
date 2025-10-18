@@ -9,9 +9,6 @@ import {
   detachStrategyIndicator,
   fetchStrategies,
   generateStrategySignals,
-  fetchSymbolPresets,
-  saveSymbolPreset,
-  deleteSymbolPreset,
   updateStrategy,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
@@ -710,10 +707,41 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
             const params = entry.params || entry.snapshot?.params || {}
             const symbol = params.symbol || strategy.symbols?.[0] || '—'
             const interval = params.interval || strategy.timeframe || '—'
-            const datasource = entry.datasource || params.datasource || strategy.datasource || '—'
-            const exchange = entry.exchange || params.exchange || strategy.exchange || '—'
+            const signals = Array.isArray(entry.signal_rules)
+              ? entry.signal_rules
+              : Array.isArray(entry.meta?.signal_rules)
+                ? entry.meta.signal_rules
+                : []
             const related = Array.isArray(entry.strategies) ? entry.strategies : []
             const otherStrategies = related.filter((s) => s.id && s.id !== strategy.id)
+
+            const renderSignalBadge = (rule) => {
+              const baseLabel = rule?.label || rule?.id || 'Signal'
+              const signalType = rule?.signal_type ? rule.signal_type.toUpperCase() : null
+              const directionHint = Array.isArray(rule?.directions) && rule.directions.length === 1
+                ? String(rule.directions[0].id || '').toLowerCase()
+                : null
+              const directionIcon = directionHint === 'long' ? '↗' : directionHint === 'short' ? '↘' : null
+              const directionText = directionHint === 'long'
+                ? 'Long'
+                : directionHint === 'short'
+                  ? 'Short'
+                  : null
+              return (
+                <span
+                  key={`${entry.id}-${rule?.id || baseLabel}`}
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/12 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-200"
+                >
+                  {signalType || baseLabel}
+                  {directionText && (
+                    <span className={directionHint === 'long' ? 'text-emerald-300' : 'text-rose-300'}>
+                      {directionIcon} {directionText}
+                    </span>
+                  )}
+                </span>
+              )
+            }
+
             return (
               <div
                 key={entry.id}
@@ -724,8 +752,8 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h5 className="text-sm font-semibold text-white">
+                  <div className="min-w-0">
+                    <h5 className="text-sm font-semibold text-white truncate">
                       {entry.name || entry.type || entry.id}
                     </h5>
                     <p className="text-xs text-slate-300">
@@ -752,14 +780,24 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
                   </div>
                 </div>
 
-                <dl className="mt-3 grid gap-3 text-[11px] text-slate-300 md:grid-cols-2">
+                <dl className="mt-3 grid gap-3 text-[11px] text-slate-300 md:grid-cols-3">
                   <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Datasource</dt>
-                    <dd className="mt-1 font-semibold text-slate-100">{datasource}</dd>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Symbol</dt>
+                    <dd className="mt-1 font-semibold text-slate-100">{symbol}</dd>
                   </div>
                   <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Exchange</dt>
-                    <dd className="mt-1 font-semibold text-slate-100">{exchange}</dd>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Interval</dt>
+                    <dd className="mt-1 font-semibold text-slate-100">{interval}</dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Signals</dt>
+                    <dd className="mt-1 flex flex-wrap gap-1">
+                      {signals.length ? (
+                        signals.map(renderSignalBadge)
+                      ) : (
+                        <span className="text-slate-500">No signals registered</span>
+                      )}
+                    </dd>
                   </div>
                 </dl>
 
@@ -789,133 +827,47 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
 
 const ConditionBadge = ({ label, signalType, direction, ruleId }) => {
   const normalizedDirection = typeof direction === 'string' ? direction.toLowerCase() : ''
-  let directionLabel = 'Any direction'
-  let directionClasses = 'border-white/10 bg-white/10 text-slate-200'
   const ruleLabel = typeof ruleId === 'string' && ruleId.trim().length
     ? ruleId.replace(/_/g, ' ').toUpperCase()
     : ''
 
+  const directionConfig = {
+    label: 'Any bias',
+    icon: '•',
+    classes: 'border-white/12 bg-white/5 text-slate-200',
+  }
+
   if (normalizedDirection === 'long') {
-    directionLabel = 'Long bias'
-    directionClasses = 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+    directionConfig.label = 'Long bias'
+    directionConfig.icon = '↗'
+    directionConfig.classes = 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
   } else if (normalizedDirection === 'short') {
-    directionLabel = 'Short bias'
-    directionClasses = 'border-rose-500/40 bg-rose-500/15 text-rose-200'
+    directionConfig.label = 'Short bias'
+    directionConfig.icon = '↘'
+    directionConfig.classes = 'border-rose-500/40 bg-rose-500/15 text-rose-200'
   }
 
   return (
-    <div className="min-w-[200px] rounded-xl border border-white/10 bg-black/40 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-white">{label}</span>
-        {ruleLabel ? (
-          <span className="max-w-[140px] truncate rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] uppercase tracking-[0.2em] text-slate-400">
-            {ruleLabel}
-          </span>
-        ) : null}
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-slate-200">
-          {signalType ? signalType.toUpperCase() : 'SIGNAL'}
-        </span>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] ${directionClasses}`}>
-          {directionLabel}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-function SymbolPresetManager({ presets, current, onSave, onDelete, onApply, message }) {
-  const [label, setLabel] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [errorMessage, setErrorMessage] = useState(null)
-
-  const handleSubmit = async (event) => {
-    event.preventDefault()
-    const trimmed = label.trim()
-    if (!trimmed) {
-      setErrorMessage('Preset name is required')
-      return
-    }
-    try {
-      setSaving(true)
-      setErrorMessage(null)
-      await onSave(trimmed)
-      setLabel('')
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to save preset')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const renderPreset = (preset) => (
-    <div
-      key={preset.id}
-      className="flex flex-col gap-3 rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-slate-200"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-white">{preset.label}</p>
-          <p className="text-xs text-slate-400">
-            {preset.symbol} • {preset.timeframe} • {preset.datasource || '—'}
-            {preset.exchange ? ` (${preset.exchange})` : ''}
-          </p>
-        </div>
+    <div className="flex min-w-[220px] items-stretch gap-3 rounded-2xl border border-white/12 bg-[#141a26] px-3 py-2">
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <ActionButton variant="ghost" onClick={() => onApply(preset)}>
-            Apply
-          </ActionButton>
-          <ActionButton variant="danger" onClick={() => onDelete(preset.id)}>
-            Delete
-          </ActionButton>
+          <span className="truncate text-xs font-semibold text-white">{label}</span>
+          {ruleLabel ? (
+            <span className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.25em] text-slate-400">
+              {ruleLabel}
+            </span>
+          ) : null}
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-300">
+          <span className="inline-flex items-center rounded-md border border-white/10 bg-white/5 px-2 py-0.5 uppercase tracking-[0.25em]">
+            {signalType ? signalType.toUpperCase() : 'SIGNAL'}
+          </span>
+          <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold ${directionConfig.classes}`}>
+            <span>{directionConfig.icon}</span>
+            {directionConfig.label}
+          </span>
         </div>
       </div>
-    </div>
-  )
-
-  return (
-    <div className="space-y-4">
-      <form onSubmit={handleSubmit} className="space-y-3 rounded-xl border border-white/10 bg-black/30 p-4 text-sm">
-        <div>
-          <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-            Preset name
-          </label>
-          <input
-            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-            value={label}
-            onChange={(event) => setLabel(event.target.value)}
-            placeholder="e.g. CL 15m Futures"
-          />
-        </div>
-        <p className="text-xs text-slate-400">
-          Current selection: {current.symbol || '—'} • {current.interval || '—'} • {current.datasource || '—'}
-          {current.exchange ? ` (${current.exchange})` : ''}
-        </p>
-        <div className="flex items-center justify-end">
-          <ActionButton type="submit" disabled={saving}>
-            {saving ? 'Saving…' : 'Save preset'}
-          </ActionButton>
-        </div>
-        {errorMessage && <p className="text-xs text-rose-300">{errorMessage}</p>}
-        {message && (
-          <p
-            className={`text-xs ${
-              message.type === 'error' ? 'text-rose-300' : 'text-emerald-300'
-            }`}
-          >
-            {message.text}
-          </p>
-        )}
-      </form>
-
-      {presets.length ? (
-        <div className="space-y-3">
-          {presets.map(renderPreset)}
-        </div>
-      ) : (
-        <p className="text-xs text-slate-400">No presets saved yet.</p>
-      )}
     </div>
   )
 }
@@ -981,7 +933,7 @@ function RuleList({ rules, onEdit, onDelete, indicatorLookup }) {
                         ruleId={condition.rule_id || condition.signal_type}
                       />
                       {index < rule.conditions.length - 1 && (
-                        <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                        <span className="rounded-md border border-white/10 bg-[#111622] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-400">
                           {connectorLabel}
                         </span>
                       )}
@@ -1117,11 +1069,6 @@ const StrategyDetails = ({
   setSignalWindow,
   signalResult,
   signalsLoading,
-  symbolPresets,
-  onSavePreset,
-  onDeletePreset,
-  onApplyPreset,
-  presetMessage,
 }) => {
   if (!strategy) {
     return (
@@ -1190,23 +1137,6 @@ const StrategyDetails = ({
           availableIndicators={availableIndicators}
           onAttach={onAttachIndicator}
           onDetach={onDetachIndicator}
-        />
-      </section>
-
-      <section className="space-y-4">
-        <h4 className="text-sm font-semibold text-white">Symbol presets</h4>
-        <SymbolPresetManager
-          presets={symbolPresets}
-          current={{
-            symbol: signalWindow.symbol || strategy.symbols?.[0] || '',
-            interval: signalWindow.interval || strategy.timeframe || '',
-            datasource: signalWindow.datasource || strategy.datasource || '',
-            exchange: signalWindow.exchange || strategy.exchange || '',
-          }}
-          onSave={onSavePreset}
-          onDelete={onDeletePreset}
-          onApply={onApplyPreset}
-          message={presetMessage}
         />
       </section>
 
@@ -1337,8 +1267,6 @@ const StrategyTab = ({ chartId }) => {
       exchange: '',
     }
   })
-  const [symbolPresets, setSymbolPresets] = useState([])
-  const [presetMessage, setPresetMessage] = useState(null)
 
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
@@ -1392,85 +1320,6 @@ const StrategyTab = ({ chartId }) => {
     },
     [indicatorLookup, setIndicators, warn],
   )
-
-  const loadPresets = useCallback(async () => {
-    try {
-      const payload = await fetchSymbolPresets()
-      setSymbolPresets(Array.isArray(payload) ? payload : [])
-    } catch (err) {
-      warn('symbol_presets_load_failed', err)
-    }
-  }, [warn])
-
-  const handleSavePreset = useCallback(
-    async (label) => {
-      const symbol = signalWindow.symbol || selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
-      const interval = signalWindow.interval || selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
-      const datasource = signalWindow.datasource || selectedStrategy?.datasource || chartSnapshot?.datasource || ''
-      const exchange = signalWindow.exchange || selectedStrategy?.exchange || chartSnapshot?.exchange || ''
-      setPresetMessage(null)
-      try {
-        await saveSymbolPreset({
-          label,
-          symbol,
-          timeframe: interval,
-          datasource: datasource || null,
-          exchange: exchange || null,
-        })
-        setPresetMessage({ type: 'success', text: `Saved preset "${label}"` })
-        await loadPresets()
-      } catch (err) {
-        setPresetMessage({ type: 'error', text: err?.message || 'Failed to save preset' })
-        throw err
-      }
-    },
-    [signalWindow, selectedStrategy, chartSnapshot, loadPresets],
-  )
-
-  const handleDeletePreset = useCallback(
-    async (presetId) => {
-      setPresetMessage(null)
-      try {
-        await deleteSymbolPreset(presetId)
-        setPresetMessage({ type: 'success', text: 'Preset removed' })
-        await loadPresets()
-      } catch (err) {
-        setPresetMessage({ type: 'error', text: err?.message || 'Failed to remove preset' })
-      }
-    },
-    [loadPresets],
-  )
-
-  const handleApplyPreset = useCallback(
-    (preset) => {
-      if (!preset) {
-        return
-      }
-      const nextSymbol = preset.symbol || signalWindow.symbol || selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
-      const nextInterval = preset.timeframe || signalWindow.interval || selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
-      const nextDatasource = preset.datasource || signalWindow.datasource || selectedStrategy?.datasource || chartSnapshot?.datasource || ''
-      const nextExchange = preset.exchange || signalWindow.exchange || selectedStrategy?.exchange || chartSnapshot?.exchange || ''
-      setPresetMessage({ type: 'success', text: `Applied preset "${preset.label}"` })
-      setSignalWindow((prev) => ({
-        ...prev,
-        symbol: nextSymbol,
-        interval: nextInterval,
-        datasource: nextDatasource,
-        exchange: nextExchange,
-      }))
-      updateChart(chartId, {
-        symbol: nextSymbol,
-        interval: nextInterval,
-        datasource: nextDatasource || null,
-        exchange: nextExchange || null,
-      })
-    },
-    [signalWindow, selectedStrategy, chartSnapshot, updateChart, chartId],
-  )
-
-  useEffect(() => {
-    setPresetMessage(null)
-  }, [selectedStrategy?.id])
 
   const attachedIndicators = useMemo(() => {
     if (!selectedStrategy) {
@@ -1598,10 +1447,6 @@ const StrategyTab = ({ chartId }) => {
   useEffect(() => {
     loadIndicators()
   }, [loadIndicators])
-
-  useEffect(() => {
-    loadPresets()
-  }, [loadPresets])
 
   const openCreateStrategy = () => setStrategyModal({ open: true, strategy: null })
   const openEditStrategy = (strategy) => setStrategyModal({ open: true, strategy })
@@ -1822,11 +1667,6 @@ const StrategyTab = ({ chartId }) => {
             setSignalWindow={setSignalWindow}
             signalResult={signalResult}
             signalsLoading={signalsLoading}
-            symbolPresets={symbolPresets}
-            onSavePreset={handleSavePreset}
-            onDeletePreset={handleDeletePreset}
-            onApplyPreset={handleApplyPreset}
-            presetMessage={presetMessage}
           />
         </div>
       </div>
