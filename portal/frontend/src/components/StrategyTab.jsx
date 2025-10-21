@@ -17,6 +17,10 @@ import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
+import {
+  DATASOURCE_OPTIONS,
+  DEFAULT_DATASOURCE,
+} from '../constants/datasources.js'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -73,7 +77,7 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         name: initialValues.name || '',
         description: initialValues.description || '',
         timeframe: initialValues.timeframe || '15m',
-        datasource: initialValues.datasource || '',
+        datasource: (initialValues.datasource || '').toUpperCase(),
         exchange: initialValues.exchange || '',
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
@@ -86,9 +90,17 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
 
   if (!open) return null
 
-  const handleChange = (field) => (event) => {
-    const value = event.target.value
-    setForm((prev) => ({ ...prev, [field]: value }))
+  const handleChange = (field) => (input) => {
+    let value = input
+    if (input && typeof input === 'object' && 'target' in input) {
+      value = input.target?.value ?? ''
+    }
+
+    if (field === 'datasource' && typeof value === 'string') {
+      value = value.toUpperCase()
+    }
+
+    setForm((prev) => ({ ...prev, [field]: value ?? '' }))
   }
 
   const handleSubmit = async (event) => {
@@ -159,14 +171,12 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Datasource
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.datasource}
+              <DropdownSelect
+                label="Datasource"
+                value={form.datasource || ''}
                 onChange={handleChange('datasource')}
-                placeholder="optional"
+                options={[{ value: '', label: 'Use chart defaults' }, ...DATASOURCE_OPTIONS]}
+                className="mt-1 w-full"
               />
             </div>
           </div>
@@ -1129,9 +1139,14 @@ const StrategyDetails = ({
   }
 
   const handleWindowChange = (field) => (input) => {
-    const value = input && typeof input === 'object' && 'target' in input
+    let value = input && typeof input === 'object' && 'target' in input
       ? input.target.value
       : input
+
+    if (field === 'datasource' && typeof value === 'string') {
+      value = value.toUpperCase()
+    }
+
     setSignalWindow((prev) => ({ ...prev, [field]: value }))
   }
 
@@ -1243,10 +1258,11 @@ const StrategyDetails = ({
                 options={[
                   {
                     value: '',
-                    label: `Use strategy data source (${strategy.datasource || 'ALPACA'})`,
+                    label: `Use strategy data source (${strategy.datasource || DEFAULT_DATASOURCE})`,
                     description: 'Follow the strategy default',
                   },
                   { value: 'ALPACA', label: 'Market data • ALPACA' },
+                  { value: 'IBKR', label: 'Interactive Brokers • IBKR' },
                   { value: 'CCXT', label: 'Crypto data • CCXT' },
                 ]}
                 className="mt-1 w-full"

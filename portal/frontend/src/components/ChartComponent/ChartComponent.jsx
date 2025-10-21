@@ -14,35 +14,20 @@ import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
 import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
+import {
+  DATASOURCE_OPTIONS,
+  DATASOURCE_IDS,
+  MARKET_PROVIDERS,
+  CRYPTO_EXCHANGES,
+  IB_EXCHANGES,
+  DEFAULT_DATASOURCE,
+  DEFAULT_MARKET_PROVIDER,
+  DEFAULT_CRYPTO_EXCHANGE,
+  DEFAULT_IB_EXCHANGE,
+} from '../../constants/datasources.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
-
-const DATASOURCE_OPTIONS = [
-  { id: 'ALPACA', label: 'Markets' },
-  { id: 'CCXT', label: 'Crypto' },
-];
-
-const MARKET_PROVIDERS = [
-  { id: 'alpaca', label: 'Alpaca (Equities)' },
-  { id: 'yfinance', label: 'Yahoo Finance' },
-];
-
-const CRYPTO_EXCHANGES = [
-  { id: 'binanceus', label: 'Binance US', category: 'CEX' },
-  { id: 'coinbase', label: 'Coinbase Advanced', category: 'CEX' },
-  { id: 'kraken', label: 'Kraken', category: 'CEX' },
-  { id: 'gemini', label: 'Gemini', category: 'CEX' },
-  { id: 'kucoin', label: 'KuCoin', category: 'CEX' },
-  { id: 'apex', label: 'Apex', category: 'DEX' },
-  { id: 'defx', label: 'DefX', category: 'DEX' },
-  { id: 'hyperliquid', label: 'Hyperliquid', category: 'DEX' },
-  { id: 'woofipro', label: 'woofipro', category: 'DEX' },
-  { id: 'wavesexchange', label: 'Waves Exchange', category: 'DEX' },
-];
-
-const DEFAULT_CRYPTO_EXCHANGE = 'binanceus';
-const DEFAULT_MARKET_PROVIDER = 'alpaca';
 
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
@@ -202,7 +187,7 @@ export const ChartComponent = ({ chartId }) => {
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
   const [interval, setInterval] = useState('15m');
-  const [datasource, setDatasource] = useState('ALPACA');
+  const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
   const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
@@ -262,6 +247,7 @@ export const ChartComponent = ({ chartId }) => {
   const exchangeRef = useRef(exchange);
   const lastCryptoExchangeRef = useRef(DEFAULT_CRYPTO_EXCHANGE);
   const lastMarketProviderRef = useRef(DEFAULT_MARKET_PROVIDER);
+  const lastIbExchangeRef = useRef(DEFAULT_IB_EXCHANGE);
 
   const handleDatasourceChange = useCallback((nextId) => {
     setDatasource((prev) => {
@@ -269,11 +255,16 @@ export const ChartComponent = ({ chartId }) => {
       return nextId;
     });
 
-    if (nextId === 'CCXT') {
+    if (nextId === DATASOURCE_IDS.CCXT) {
       lastMarketProviderRef.current = exchangeRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
       setExchange(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
+    } else if (nextId === DATASOURCE_IDS.IBKR) {
+      lastMarketProviderRef.current = exchangeRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
+      lastCryptoExchangeRef.current = exchangeRef.current || lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE;
+      setExchange(lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE);
     } else {
       lastCryptoExchangeRef.current = exchangeRef.current || lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE;
+      lastIbExchangeRef.current = exchangeRef.current || lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
       setExchange(lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER);
     }
   }, []);
@@ -281,8 +272,10 @@ export const ChartComponent = ({ chartId }) => {
   const handleExchangeChange = useCallback((nextId) => {
     setExchange(nextId);
     if (nextId) {
-      if (datasourceRef.current === 'CCXT') {
+      if (datasourceRef.current === DATASOURCE_IDS.CCXT) {
         lastCryptoExchangeRef.current = nextId;
+      } else if (datasourceRef.current === DATASOURCE_IDS.IBKR) {
+        lastIbExchangeRef.current = nextId;
       } else {
         lastMarketProviderRef.current = nextId;
       }
@@ -290,15 +283,15 @@ export const ChartComponent = ({ chartId }) => {
   }, []);
 
   const exchangeSelectOptions = useMemo(() => {
-    if (datasource === 'CCXT') {
+    if (datasource === DATASOURCE_IDS.CCXT) {
       const centralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'CEX').map((ex) => ({
-        value: ex.id,
+        value: ex.value,
         label: ex.label,
         badge: 'CEX',
       }));
 
       const decentralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'DEX').map((ex) => ({
-        value: ex.id,
+        value: ex.value,
         label: ex.label,
         badge: 'DEX',
       }));
@@ -313,15 +306,26 @@ export const ChartComponent = ({ chartId }) => {
       ];
     }
 
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      return IB_EXCHANGES.map((entry) => ({
+        value: entry.value,
+        label: entry.label,
+        description: entry.description,
+      }));
+    }
+
     return MARKET_PROVIDERS.map((provider) => ({
-      value: provider.id,
+      value: provider.value,
       label: provider.label,
     }));
   }, [datasource]);
 
   const selectedExchangeValue = useMemo(() => {
-    if (datasource === 'CCXT') {
+    if (datasource === DATASOURCE_IDS.CCXT) {
       return exchange || DEFAULT_CRYPTO_EXCHANGE;
+    }
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      return exchange || DEFAULT_IB_EXCHANGE;
     }
     return exchange || DEFAULT_MARKET_PROVIDER;
   }, [datasource, exchange]);
@@ -365,7 +369,7 @@ export const ChartComponent = ({ chartId }) => {
     const effectiveSymbol = targetSymbol ?? symbolRef.current;
     const effectiveInterval = targetInterval ?? intervalRef.current;
     const effectiveRange = targetRange ?? dateRangeRef.current;
-    const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || 'ALPACA';
+    const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || DEFAULT_DATASOURCE;
     const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
     const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
     const [startDate, endDate] = effectiveRange || [];
@@ -1045,12 +1049,12 @@ export const ChartComponent = ({ chartId }) => {
               <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
               <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
                 {DATASOURCE_OPTIONS.map((option) => {
-                  const isActive = datasource === option.id;
+                  const isActive = datasource === option.value;
                   return (
                     <button
-                      key={option.id}
+                      key={option.value}
                       type="button"
-                      onClick={() => handleDatasourceChange(option.id)}
+                      onClick={() => handleDatasourceChange(option.value)}
                       className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner' : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'}`}
                     >
                       {option.label}
