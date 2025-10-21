@@ -30,6 +30,7 @@ mapping whenever required.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import math
@@ -75,6 +76,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
         self._default_exchange = parsed_exchange or default_exchange
 
         self._ib = IB()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._symbol_overrides = self._load_symbol_overrides()
 
     # ------------------------------------------------------------------
@@ -186,6 +188,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
             return
 
         try:
+            self._ensure_event_loop()
             self._ib.connect(
                 self._host,
                 self._port,
@@ -201,6 +204,22 @@ class InteractiveBrokersProvider(BaseDataProvider):
                 exc,
             )
             raise
+
+    def _ensure_event_loop(self) -> None:
+        """Ensure the current thread has an asyncio event loop."""
+
+        try:
+            asyncio.get_running_loop()
+            return
+        except RuntimeError:
+            pass
+
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+
+        asyncio.set_event_loop(loop)
 
     def _parse_exchange(self, exchange: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """Split ``SEC:EXCHANGE`` style hints into components."""
