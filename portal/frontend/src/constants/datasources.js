@@ -1,18 +1,19 @@
 export const DATASOURCE_IDS = {
   ALPACA: 'ALPACA',
+  YFINANCE: 'YFINANCE',
   IBKR: 'IBKR',
   CCXT: 'CCXT',
 };
 
 export const DATASOURCE_OPTIONS = [
-  { value: DATASOURCE_IDS.ALPACA, label: 'Markets (Alpaca)' },
-  { value: DATASOURCE_IDS.IBKR, label: 'Interactive Brokers (TWS)' },
-  { value: DATASOURCE_IDS.CCXT, label: 'Crypto (CCXT)' },
+  { value: DATASOURCE_IDS.ALPACA, label: 'Markets' },
+  { value: DATASOURCE_IDS.CCXT, label: 'Crypto' },
 ];
 
 export const MARKET_PROVIDERS = [
   { value: 'alpaca', label: 'Alpaca (Equities)' },
   { value: 'yfinance', label: 'Yahoo Finance' },
+  { value: 'ibkr', label: 'Interactive Brokers (TWS)' },
 ];
 
 export const IB_EXCHANGES = [
