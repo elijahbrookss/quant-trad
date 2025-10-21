@@ -324,6 +324,32 @@ def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_v
     assert bars_since == [1, 1]
 
 
+def test_retest_rule_sets_canonical_rule_identifiers(sample_context, sample_value_area):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
+    market_profile_breakout_rule(sample_context, sample_value_area)
+    retests = market_profile_retest_rule(sample_context, sample_value_area)
+    assert retests, "Expected retest signals"
+
+    for signal in retests:
+        assert signal.get("rule_id") == "market_profile_retest"
+        assert signal.get("pattern_id") == "value_area_retest"
+        aliases = set()
+        for key in ("rule_aliases", "pattern_aliases", "aliases"):
+            value = signal.get(key)
+            if isinstance(value, (list, tuple, set)):
+                aliases.update(str(item).strip().lower() for item in value if isinstance(item, str))
+        metadata = signal.get("metadata") or {}
+        aliases.update(
+            str(metadata.get(key, "")).strip().lower()
+            for key in ("rule_id", "pattern_id")
+            if isinstance(metadata.get(key), str)
+        )
+        assert "market_profile_retest" in aliases
+        assert "value_area_retest" in aliases
+        assert "pivot_retest" in aliases
+
+
 def test_retest_rule_ignores_distant_closes():
     index = pd.date_range("2025-02-01 09:30", periods=6, freq="30min", tz="UTC")
     data = {
