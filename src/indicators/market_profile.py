@@ -109,8 +109,20 @@ class MarketProfileIndicator(BaseIndicator):
         return mantissa * (10 ** exponent)
 
     def _select_bin_size(self, df: pd.DataFrame, provided: Optional[float]) -> float:
-        if provided and provided > 0:
-            return float(provided)
+        """Return a sane bin size, coercing user supplied values before fallback."""
+
+        candidate = provided
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if not candidate:
+                candidate = None
+        if candidate is not None:
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                numeric = None
+            if numeric is not None and numeric > 0:
+                return numeric
         return self._infer_bin_size(df)
 
     def _infer_bin_size(self, df: pd.DataFrame) -> float:

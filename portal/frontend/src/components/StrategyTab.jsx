@@ -705,8 +705,6 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
           {entries.map((entry) => {
             const isMissing = entry.status !== 'active'
             const params = entry.params || entry.snapshot?.params || {}
-            const symbol = params.symbol || strategy.symbols?.[0] || '—'
-            const interval = params.interval || strategy.timeframe || '—'
             const signals = Array.isArray(entry.signal_rules)
               ? entry.signal_rules
               : Array.isArray(entry.meta?.signal_rules)
@@ -714,6 +712,36 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
                 : []
             const related = Array.isArray(entry.strategies) ? entry.strategies : []
             const otherStrategies = related.filter((s) => s.id && s.id !== strategy.id)
+
+            const highlightTokens = []
+            const pivotConfirm = params.pivot_breakout_confirmation_bars
+            const marketProfileConfirm = params.market_profile_breakout_confirmation_bars
+            const retestTolerance = params.market_profile_retest_tolerance_pct
+            const binSize = params.bin_size
+            const merged = params.market_profile_use_merged_value_areas
+
+            if (pivotConfirm != null && pivotConfirm !== '') {
+              highlightTokens.push(`Pivot confirm: ${pivotConfirm} bar${Number(pivotConfirm) === 1 ? '' : 's'}`)
+            }
+            if (marketProfileConfirm != null && marketProfileConfirm !== '') {
+              highlightTokens.push(
+                `MP confirm: ${marketProfileConfirm} bar${Number(marketProfileConfirm) === 1 ? '' : 's'}`,
+              )
+            }
+            if (retestTolerance != null && retestTolerance !== '') {
+              const numeric = Number(retestTolerance)
+              const pctLabel = Number.isFinite(numeric) ? `${(numeric * 100).toFixed(2)}%` : String(retestTolerance)
+              highlightTokens.push(`Retest tolerance: ${pctLabel}`)
+            }
+            if (binSize != null && binSize !== '') {
+              highlightTokens.push(`Bin size: ${binSize}`)
+            }
+            if (merged != null && merged !== '') {
+              const mergedLabel = merged === true || String(merged).toLowerCase() === 'true'
+                ? 'Merged value areas'
+                : 'Session value areas'
+              highlightTokens.push(mergedLabel)
+            }
 
             const renderSignalBadge = (rule) => {
               const baseLabel = rule?.label || rule?.id || 'Signal'
@@ -757,7 +785,8 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
                       {entry.name || entry.type || entry.id}
                     </h5>
                     <p className="text-xs text-slate-300">
-                      {entry.type || entry.snapshot?.meta?.type || 'Custom'} • {symbol} • {interval}
+                      {entry.type || entry.snapshot?.meta?.type || 'Custom'} • {signals.length}{' '}
+                      signal{signals.length === 1 ? '' : 's'} available
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -782,14 +811,6 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
 
                 <dl className="mt-3 grid gap-3 text-[11px] text-slate-300 md:grid-cols-3">
                   <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Symbol</dt>
-                    <dd className="mt-1 font-semibold text-slate-100">{symbol}</dd>
-                  </div>
-                  <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Interval</dt>
-                    <dd className="mt-1 font-semibold text-slate-100">{interval}</dd>
-                  </div>
-                  <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Signals</dt>
                     <dd className="mt-1 flex flex-wrap gap-1">
                       {signals.length ? (
@@ -797,6 +818,31 @@ function AttachedIndicators({ strategy, attached, availableIndicators, onAttach,
                       ) : (
                         <span className="text-slate-500">No signals registered</span>
                       )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Configuration</dt>
+                    <dd className="mt-1 flex flex-wrap gap-1">
+                      {highlightTokens.length ? (
+                        highlightTokens.map((token) => (
+                          <span
+                            key={`${entry.id}-${token}`}
+                            className="rounded-lg border border-white/12 bg-white/5 px-2 py-0.5 font-semibold text-[10px] uppercase tracking-[0.15em] text-slate-200"
+                          >
+                            {token}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-slate-500">Default parameters</span>
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Usage</dt>
+                    <dd className="mt-1 font-semibold text-slate-100">
+                      {otherStrategies.length
+                        ? `${otherStrategies.length} other strateg${otherStrategies.length === 1 ? 'y' : 'ies'}`
+                        : 'Only used here'}
                     </dd>
                   </div>
                 </dl>

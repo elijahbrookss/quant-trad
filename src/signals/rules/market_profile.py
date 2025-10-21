@@ -7,7 +7,7 @@ import math
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 import pandas as pd
 
@@ -776,6 +776,46 @@ def _detect_value_area_retest(
         0.15,
         min(1.0, 1.0 - float(enriched.get("bars_since_breakout", 0)) * 0.05),
     )
+
+    canonical_rule = "market_profile_retest"
+    canonical_pattern = "value_area_retest"
+
+    alias_values: Set[str] = set()
+
+    def _ingest_aliases(source: Mapping[str, Any]) -> None:
+        for key in ("rule_id", "pattern_id"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                alias_values.add(value.strip())
+        for alias_key in ("aliases", "rule_aliases", "pattern_aliases"):
+            value = source.get(alias_key)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        alias_values.add(item.strip())
+
+    _ingest_aliases(enriched)
+
+    metadata = enriched.get("metadata")
+    if isinstance(metadata, Mapping):
+        metadata = dict(metadata)
+        _ingest_aliases(metadata)
+    else:
+        metadata = {}
+
+    alias_values.update({canonical_rule, canonical_pattern})
+
+    enriched["rule_id"] = canonical_rule
+    enriched["pattern_id"] = canonical_pattern
+    enriched["rule_aliases"] = sorted(alias_values)
+    enriched["pattern_aliases"] = sorted(alias_values)
+
+    metadata["rule_id"] = canonical_rule
+    metadata["pattern_id"] = canonical_pattern
+    metadata["rule_aliases"] = sorted(alias_values)
+    metadata["pattern_aliases"] = sorted(alias_values)
+    enriched["metadata"] = metadata
+
     return enriched
 
 
