@@ -63,7 +63,10 @@ class InteractiveBrokersProvider(BaseDataProvider):
 
     def __init__(self, *, exchange: Optional[str] = None):
         self._host = os.getenv("IB_HOST", "127.0.0.1")
-        self._port = int(os.getenv("IB_PORT", "7497"))
+        # The IB Gateway paper-trading endpoint defaults to 4002 while the
+        # production endpoint listens on 4001. Users can override the port via
+        # ``IB_PORT`` when connecting to a standalone TWS installation.
+        self._port = int(os.getenv("IB_PORT", "4002"))
         self._client_id = int(os.getenv("IB_CLIENT_ID", "1"))
 
         # Resolve default contract hints.
@@ -194,6 +197,12 @@ class InteractiveBrokersProvider(BaseDataProvider):
                 self._port,
                 clientId=self._client_id,
                 readonly=True,
+            )
+            logger.info(
+                "ibkr_connect_success | host=%s | port=%s | client_id=%s",
+                self._host,
+                self._port,
+                self._client_id,
             )
         except Exception as exc:  # pragma: no cover - network interaction
             logger.exception(

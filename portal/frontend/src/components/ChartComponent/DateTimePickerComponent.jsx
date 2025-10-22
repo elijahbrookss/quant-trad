@@ -7,6 +7,7 @@ export function DateRangePickerComponent({
   setDateRange,
   defaultStart,
   defaultEnd,
+  disabled = false,
 }) {
   const today = new Date();
   const fortyFiveDaysAgo = new Date();
@@ -21,7 +22,7 @@ export function DateRangePickerComponent({
   useEffect(() => {
     if (!startDate || !endDate) return;
     if (startDate > endDate) setDateRange([startDate, startDate]);
-  }, [startDate, endDate]);
+  }, [startDate, endDate, setDateRange]);
 
   return (
     <div className="flex flex-col gap-2 min-w-[19rem]">
@@ -33,7 +34,10 @@ export function DateRangePickerComponent({
             id="startDatePicker"
             ref={datePickerRef}
             value={startDate}
-            onChange={([date]) => setDateRange([date, endDate])}
+            onChange={([date]) => {
+              if (disabled) return;
+              setDateRange([date, endDate]);
+            }}
             options={{
               dateFormat: "Y-m-d H:i",
               maxDate: "today",
@@ -43,7 +47,8 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+            disabled={disabled}
+            className={`w-48 rounded-md border border-neutral-800 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)] ${disabled ? 'bg-neutral-900/40 text-neutral-500 cursor-not-allowed' : 'bg-neutral-900/70'}`}
           />
         </div>
 
@@ -57,7 +62,10 @@ export function DateRangePickerComponent({
             id="endDatePicker"
             ref={datePickerRef}
             value={endDate}
-            onChange={([date]) => setDateRange([startDate, date])}
+            onChange={([date]) => {
+              if (disabled) return;
+              setDateRange([startDate, date]);
+            }}
             options={{
               dateFormat: "Y-m-d H:i",
               minDate: "2020-01-01",
@@ -67,7 +75,8 @@ export function DateRangePickerComponent({
               allowInput: true,
               enableTime: true,
             }}
-            className="w-48 rounded-md border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)]"
+            disabled={disabled}
+            className={`w-48 rounded-md border border-neutral-800 px-3 py-2 text-sm text-neutral-100 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring)] ${disabled ? 'bg-neutral-900/40 text-neutral-500 cursor-not-allowed' : 'bg-neutral-900/70'}`}
           />
         </div>
       </div>

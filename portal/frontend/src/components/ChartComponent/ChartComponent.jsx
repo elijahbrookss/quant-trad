@@ -14,6 +14,8 @@ import HotkeyHint from '../HotkeyHint.jsx';
 import SymbolPalette from '../SymbolPalette.jsx';
 import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
+import DataModeToggle from './DataModeToggle.jsx';
+import { useLiveDataMode } from './hooks/useLiveDataMode.js';
 import {
   DATASOURCE_OPTIONS,
   DATASOURCE_IDS,
@@ -28,6 +30,7 @@ import {
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
+const LIVE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
 
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
@@ -198,6 +201,10 @@ export const ChartComponent = ({ chartId }) => {
   const [dataLoading, setDataLoading] = useState(false);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
+  const [lastRefreshAt, setLastRefreshAt] = useState(null);
+
+  const modeRef = useRef('historical');
+  const dataLoadingRef = useRef(false);
 
   const connection = useConnectionMonitor({ name: 'QuantLab API' });
   const {
@@ -384,6 +391,15 @@ export const ChartComponent = ({ chartId }) => {
     lastIbExchangeRef.current = venue;
   }, []);
 
+  const supportsLive = useMemo(() => datasource === DATASOURCE_IDS.IBKR, [datasource]);
+  const liveDisabledReason = useMemo(() => {
+    if (supportsLive) return null;
+    if (datasource === DATASOURCE_IDS.CCXT) {
+      return 'Switch to the Markets datasource and choose Interactive Brokers to stream live data.';
+    }
+    return 'Live updates require the Interactive Brokers datasource.';
+  }, [supportsLive, datasource]);
+
     // Overlay resource handles.
   const overlayHandlesRef = useRef({ priceLines: [] });
 
@@ -398,6 +414,10 @@ export const ChartComponent = ({ chartId }) => {
   useEffect(() => {
     dateRangeRef.current = dateRange;
   }, [dateRange]);
+
+  useEffect(() => {
+    dataLoadingRef.current = dataLoading;
+  }, [dataLoading]);
 
   useEffect(() => {
     datasourceRef.current = datasource;
@@ -430,30 +450,37 @@ export const ChartComponent = ({ chartId }) => {
     const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || DEFAULT_DATASOURCE;
     const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
     const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
-    const [startDate, endDate] = effectiveRange || [];
-    const startISO = startDate?.toISOString();
-    const endISO = endDate?.toISOString();
 
+    const [rangeStartRaw, rangeEndRaw] = effectiveRange || [];
+    const startDate = rangeStartRaw instanceof Date ? rangeStartRaw : rangeStartRaw ? new Date(rangeStartRaw) : null;
+    let endDate = rangeEndRaw instanceof Date ? rangeEndRaw : rangeEndRaw ? new Date(rangeEndRaw) : null;
+    if (modeRef.current === 'live' && !(Array.isArray(targetRange) && targetRange.length >= 2)) {
+      endDate = new Date();
+    }
+
+    if (!effectiveSymbol || !effectiveInterval || !startDate || !endDate) {
+      warn('chart_load_missing_inputs', {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        startISO: startDate?.toISOString(),
+        endISO: endDate?.toISOString(),
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
+      });
+      return false;
+    }
+
+    if (effectiveDatasource === DATASOURCE_IDS.CCXT && !effectiveExchange) {
+      warn('chart_load_missing_exchange', { symbol: effectiveSymbol, interval: effectiveInterval });
+      showWarning('Select a crypto exchange before loading data.');
+      return false;
+    }
+
+    const startISO = startDate.toISOString();
+    const endISO = endDate.toISOString();
+
+    setDataLoading(true);
     try {
-      setDataLoading(true);
-      if (!effectiveSymbol || !effectiveInterval || !startISO || !endISO) {
-        warn('chart_load_missing_inputs', {
-          symbol: effectiveSymbol,
-          interval: effectiveInterval,
-          startISO,
-          endISO,
-          datasource: effectiveDatasource,
-          exchange: effectiveExchange,
-        });
-        return;
-      }
-
-      if (effectiveDatasource === 'CCXT' && !effectiveExchange) {
-        warn('chart_load_missing_exchange', { symbol: effectiveSymbol, interval: effectiveInterval });
-        showWarning('Select a crypto exchange before loading data.');
-        return;
-      }
-
       markAttempt();
       info('candles_fetch_start', {
         symbol: effectiveSymbol,
@@ -476,12 +503,12 @@ export const ChartComponent = ({ chartId }) => {
         warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
         markSuccess();
         showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
-        return;
+        return false;
       }
 
       const data = resp
-        .filter(c => c && typeof c.time === 'number')
-        .map(c => ({
+        .filter((c) => c && typeof c.time === 'number')
+        .map((c) => ({
           time: c.time,
           open: c.open,
           high: c.high,
@@ -491,11 +518,11 @@ export const ChartComponent = ({ chartId }) => {
 
       if (!seriesRef.current) {
         warn('series missing');
-        return;
+        return false;
       }
 
       if (seriesRef.current) {
-        if (effectiveDatasource === 'CCXT') {
+        if (effectiveDatasource === DATASOURCE_IDS.CCXT) {
           const format = deriveCcxtPriceFormat(resp);
           if (format) {
             seriesRef.current.applyOptions({ priceFormat: format });
@@ -545,6 +572,7 @@ export const ChartComponent = ({ chartId }) => {
         debug('price_scale_autoscale_failed', scaleErr);
       }
 
+      const refreshAt = new Date();
       info('candles_fetch_success', {
         points: data.length,
         first: data[0]?.time,
@@ -552,21 +580,80 @@ export const ChartComponent = ({ chartId }) => {
       });
 
       markSuccess();
+      setLastRefreshAt(refreshAt);
       updateChart?.(chartId, {
         symbol: effectiveSymbol,
         interval: effectiveInterval,
-        dateRange: effectiveRange,
+        dateRange: [startDate, endDate],
         datasource: effectiveDatasource,
         exchange: effectiveExchange,
-        lastUpdatedAt: new Date().toISOString(),
+        lastUpdatedAt: refreshAt.toISOString(),
       });
+      return true;
     } catch (e) {
       markError(e);
       error('candles_fetch_failed', e);
     } finally {
       setDataLoading(false);
     }
-  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug]);
+
+    return false;
+  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt]);
+
+  const refreshLive = useCallback(async () => {
+    if (!supportsLive) {
+      return false;
+    }
+
+    if (dataLoadingRef.current) {
+      debug('live_refresh_skipped_busy');
+      return false;
+    }
+
+    const [rangeStartRaw] = dateRangeRef.current || [];
+    const startDate = rangeStartRaw instanceof Date
+      ? rangeStartRaw
+      : rangeStartRaw
+        ? new Date(rangeStartRaw)
+        : new Date(Date.now() - LIVE_LOOKBACK_MS);
+    const now = new Date();
+
+    setDateRange((prev) => {
+      if (!Array.isArray(prev) || prev.length !== 2) {
+        return [startDate, now];
+      }
+      const prevStart = prev[0] instanceof Date ? prev[0] : startDate;
+      return [prevStart, now];
+    });
+
+    return loadChartData({
+      targetSymbol: symbolRef.current,
+      targetInterval: intervalRef.current,
+      targetRange: [startDate, now],
+      targetDatasource: datasourceRef.current,
+      targetExchange: exchangeRef.current,
+    });
+  }, [supportsLive, loadChartData, debug, setDateRange]);
+
+  const { mode, setMode } = useLiveDataMode({ supportsLive, onRefresh: refreshLive, logger });
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  const lastModeRef = useRef('historical');
+  useEffect(() => {
+    if (lastModeRef.current === 'live' && mode !== 'live' && !supportsLive) {
+      showWarning('Live mode is only available with Interactive Brokers. Reverting to historical mode.');
+    }
+    lastModeRef.current = mode;
+  }, [mode, supportsLive, showWarning]);
+
+  useEffect(() => {
+    if (mode === 'live') {
+      setRangeWarning(null);
+    }
+  }, [mode]);
 
   // Create chart once.
   useEffect(() => {
@@ -1061,25 +1148,41 @@ export const ChartComponent = ({ chartId }) => {
   const loaderActive = useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading);
   const loaderMessage = chartState?.signalsLoading ? 'Generating signals…'
     : chartState?.overlayLoading ? 'Loading overlays…'
-      : 'Loading chart…';
+      : mode === 'live' ? 'Streaming latest data…'
+        : 'Loading chart…';
 
   const statusTextClass = statusStyles.text ?? 'text-slate-300';
 
   const lastRefreshCopy = useMemo(() => {
-    if (dataLoading) return 'Refreshing data…';
-    const iso = chartState?.lastUpdatedAt;
-    if (!iso) return 'No data fetched yet.';
+    if (dataLoading) {
+      return mode === 'live' ? 'Streaming latest data…' : 'Refreshing data…';
+    }
+
+    if (!lastRefreshAt) {
+      return mode === 'live'
+        ? 'Live mode armed — awaiting first tick.'
+        : 'No data fetched yet.';
+    }
+
     try {
-      return `Last refreshed ${new Intl.DateTimeFormat(undefined, {
+      const formatted = new Intl.DateTimeFormat(undefined, {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
         hour12: false,
-      }).format(new Date(iso))}`;
+      }).format(lastRefreshAt);
+      return mode === 'live'
+        ? `Live mode — last update ${formatted}`
+        : `Last refreshed ${formatted}`;
     } catch {
-      return `Last refreshed ${new Date(iso).toLocaleTimeString()}`;
+      const fallback = lastRefreshAt instanceof Date
+        ? lastRefreshAt.toLocaleTimeString()
+        : new Date(lastRefreshAt).toLocaleTimeString();
+      return mode === 'live'
+        ? `Live mode — last update ${fallback}`
+        : `Last refreshed ${fallback}`;
     }
-  }, [chartState?.lastUpdatedAt, dataLoading]);
+  }, [dataLoading, lastRefreshAt, mode]);
 
   return (
     <div className="space-y-5">
@@ -1149,10 +1252,21 @@ export const ChartComponent = ({ chartId }) => {
               />
             ) : null}
 
+            <DataModeToggle
+              mode={mode}
+              onChange={setMode}
+              supportsLive={supportsLive}
+              disabledReason={liveDisabledReason}
+            />
+
             <TimeframeSelect selected={interval} onChange={setInterval} />
             <SymbolInput value={symbol} onChange={setSymbol} />
             <div className="flex items-end gap-2">
-              <DateRangePickerComponent dateRange={dateRange} setDateRange={setDateRange} />
+              <DateRangePickerComponent
+                dateRange={dateRange}
+                setDateRange={setDateRange}
+                disabled={mode === 'live'}
+              />
               <button
                 type="button"
                 onClick={() => handleApply()}
