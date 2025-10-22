@@ -74,6 +74,8 @@ Docker Compose publishes the services on the same ports listed in the local work
 
 The core profile now bundles an Interactive Brokers (IBKR) gateway container that runs IB Gateway in headless mode using Xvfb and IBC. When you start the stack the backend can immediately reach `ibkr-gateway.quanttrad` on the internal network; no local TWS instance is required. The container exposes port `4002` for paper trading and `4001` for live trading, forwarding credentials and login automation parameters from `secrets.env`.
 
+The image is built locally from an Ubuntu base—no external container registry access is required. During the build Docker downloads the IBC bundle and the IB Gateway installer from their public release URLs; the defaults track IBC `3.19.1` and IB Gateway `10.25.2`. If Interactive Brokers publishes a newer build (or retires the defaults) override the URLs and versions via the optional environment variables surfaced in `docker/docker-compose.yml` (for example `IBKR_GATEWAY_DOWNLOAD_URL` or `IBKR_IBC_VERSION`) before running `make stack-build`.
+
 > **Weekly 2FA reminder** – IBKR still requires a mobile approval every seven days. Launch the mobile app and confirm the login prompt after the container boots or restarts, otherwise historical and live data requests will fail.
 
 ### When to rebuild containers
