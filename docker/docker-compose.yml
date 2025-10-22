@@ -136,10 +136,39 @@ services:
     networks:
       - quanttrad
 
+  ibkr-gateway:
+    profiles: [brokers]
+    image: ghcr.io/ibkrcanada/ibgateway:stable
+    hostname: ibkr-gateway.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: ibkr-gateway
+    environment:
+      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME}
+      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD}
+      IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
+      IBC_TWS_VERSION: ${IBKR_TWS_VERSION:-latest}
+      IBC_LOG_LEVEL: ${IBKR_LOG_LEVEL:-info}
+      IBC_ACCEPT_SSL_CERTS: "yes"
+      IBC_SAVELAYOUT: "no"
+      IBC_READONLY_API: "yes"
+      TWS_CONFIG_PATH: /config/jts.ini
+    ports:
+      - "${IBKR_GATEWAY_PORT:-7497}:7497"
+    volumes:
+      - ibkr-gateway-config:/config
+      - ibkr-gateway-logs:/home/ibgateway/logs
+    networks:
+      quanttrad:
+        aliases:
+          - ibkr-gateway.quanttrad
+
 volumes:
   tsdb-data:
   pgadmin-data:
   grafana-data:
+  ibkr-gateway-config:
+  ibkr-gateway-logs:
 
 networks:
   quanttrad:
