@@ -7,6 +7,7 @@ ARG IBC_VERSION=3.19.1
 ARG IBC_DOWNLOAD_URL=https://github.com/IbcAlpha/IBC/releases/download/${IBC_VERSION}/IBC-${IBC_VERSION}-linux-x64.zip
 ARG IB_GATEWAY_VERSION=10.25.2
 ARG IB_GATEWAY_DOWNLOAD_URL=https://download2.interactivebrokers.com/portal/DownloadController?action=downloadNew&path=IBGateway/${IB_GATEWAY_VERSION}/IBGatewayLinux-${IB_GATEWAY_VERSION}-x64.sh
+ARG IBG_DIR=/opt/ibgateway/ibgateway/${IB_GATEWAY_VERSION}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -17,8 +18,9 @@ RUN apt-get update \
         wget \
         xvfb \
         x11vnc \
-        openjdk-17-jre-headless \
+        openjdk-17-jre \
         x11-utils \
+        openjfx \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
@@ -36,20 +38,24 @@ RUN wget -O ibgateway-installer.sh "${IB_GATEWAY_DOWNLOAD_URL}"
 
 # Fix line endings if needed & set execute permissions
 RUN chmod +x ibgateway-installer.sh \
-    && mkdir -p /opt/ibgateway/ibgateway/${IB_GATEWAY_VERSION} \
+    && mkdir -p ${IBG_DIR} \
     && mkdir -p /home/ibkr/Jts && chmod -R 777 /home/ibkr/Jts \
-    && ./ibgateway-installer.sh -q -dir /opt/ibgateway/ibgateway/${IB_GATEWAY_VERSION} \
-    && rm ibgateway-installer.sh 
+    && ./ibgateway-installer.sh -q -dir ${IBG_DIR} \
+    && rm ibgateway-installer.sh
 
 COPY docker/ibkr-gateway/entrypoint.sh /usr/local/bin/ibkr-entrypoint.sh
 RUN chmod +x /usr/local/bin/ibkr-entrypoint.sh
 
 ENV DISPLAY=:0 \
-    XVFB_WHD=1280x720x16 \
+    XVFB_WHD=1280x720x24 \
     IBC_CONFIG_DIR=/config \
     LOG_PATH=/var/log/ibgateway \
     IBC_PATH=/opt/ibc \
-    TWS_PATH=/opt/ibgateway \
-    JAVA_PATH=/usr/bin/java
+    TWS_PATH=/opt/ibgateway/ibgateway \
+    JAVA_PATH=/usr/bin/java \
+    JFX_PATH=/usr/share/openjfx/lib
+
+RUN echo "--module-path=${JFX_PATH}" >> ${IBG_DIR}/ibgateway.vmoptions && \
+    echo "--add-modules=javafx.controls,javafx.fxml,javafx.swing,javafx.web,javafx.graphics" >> ${IBG_DIR}/ibgateway.vmoptions 
 
 ENTRYPOINT ["/usr/local/bin/ibkr-entrypoint.sh"]

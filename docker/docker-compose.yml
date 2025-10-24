@@ -163,6 +163,8 @@ services:
       IBC_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-4002}
       IBC_GATEWAY_LIVE_PORT: ${IBKR_GATEWAY_LIVE_PORT:-4001}
       TWS_CONFIG_PATH: /config/jts.ini
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     ports:
       - "${IBKR_GATEWAY_PORT:-4002}:4002"
       - "${IBKR_GATEWAY_LIVE_PORT:-4001}:4001"

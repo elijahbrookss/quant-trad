@@ -61,6 +61,7 @@ TwsSettingsDir=/home/ibkr/Jts
 CommandServerStart=yes
 CommandServerPort=7462
 CommandServerHost=127.0.0.1
+LoginTimeoutSeconds=180
 [LogSettings]
 LogLevel=debug
 CONFIG
@@ -99,10 +100,26 @@ log "  JAVA_DIR=${JAVA_DIR}"
 log "  MODE=${IBC_TRADING_MODE:-paper}"
 log "  LOG_DIR=${LOG_DIR}"
 
+
+# -------- VM options symlinks -----------------------------------------------
+VER_DIR="${TWS_PATH}/${IB_GATEWAY_VERSION}"
+PARENT="${TWS_PATH}"
+
+if [ -f "${VER_DIR}/ibgateway.vmoptions" ]; then
+  ln -sf "${VER_DIR}/ibgateway.vmoptions" "${VER_DIR}/tws.vmoptions"
+  ln -sf "${VER_DIR}/ibgateway.vmoptions" "${PARENT}/ibgateway.vmoptions"
+  ln -sf "${VER_DIR}/ibgateway.vmoptions" "${PARENT}/tws.vmoptions"
+else
+  log "ERROR: ${VER_DIR}/ibgateway.vmoptions not found"
+  find "${TWS_PATH}" -maxdepth 3 -type f -name '*vmoptions' -printf '  %p\n' || true
+  exit 1
+fi
+
+
 # -------- Build command (version first, flags as key=value) ------------------
 CMD=( "${IBC_PATH}/scripts/ibcstart.sh" "${IB_GATEWAY_VERSION}" --gateway
   "--tws-path=${TWS_PATH}"
-  # "--tws-settings-path=${CONFIG_DIR}"
+  "--tws-settings-path=/home/ibkr/Jts"
   "--ibc-path=${IBC_PATH}"
   "--ibc-ini=${INI_PATH}"
   "--java-path=${JAVA_DIR}"
