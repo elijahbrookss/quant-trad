@@ -62,7 +62,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
     _lock = threading.Lock()
 
     def __init__(self, *, exchange: Optional[str] = None):
-        self._host = os.getenv("IB_HOST", "127.0.0.1")
+        self._host = os.getenv("IB_HOST", "ibkr-gateway")
         # The IB Gateway paper-trading endpoint defaults to 4002 while the
         # production endpoint listens on 4001. Users can override the port via
         # ``IB_PORT`` when connecting to a standalone TWS installation.
