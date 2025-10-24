@@ -44,6 +44,9 @@ def _find_touch_markers(df, level: float, start_ts: pd.Timestamp, label: str, fm
             })
     return mks
 
+DEFAULT_BREAKOUT_CONFIRMATION_BARS = 3
+
+
 class MarketProfileIndicator(BaseIndicator):
     """
     Computes daily market profile (TPO) to identify Point of Control (POC),
@@ -62,6 +65,7 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+        market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
     ):
         super().__init__(df)
         self.bin_size = self._select_bin_size(df, bin_size)
@@ -76,6 +80,17 @@ class MarketProfileIndicator(BaseIndicator):
         self.use_merged_value_areas = bool(use_merged_value_areas)
         self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
         self.min_merge_sessions = int(min_merge_sessions)
+        self.market_profile_breakout_confirmation_bars = self._normalise_confirmation_bars(
+            market_profile_breakout_confirmation_bars
+        )
+
+    @staticmethod
+    def _normalise_confirmation_bars(value: Any) -> int:
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_BREAKOUT_CONFIRMATION_BARS
+        return numeric if numeric >= 1 else 1
 
     @staticmethod
     def _normalize_step(value: float) -> float:
@@ -94,8 +109,20 @@ class MarketProfileIndicator(BaseIndicator):
         return mantissa * (10 ** exponent)
 
     def _select_bin_size(self, df: pd.DataFrame, provided: Optional[float]) -> float:
-        if provided and provided > 0:
-            return float(provided)
+        """Return a sane bin size, coercing user supplied values before fallback."""
+
+        candidate = provided
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if not candidate:
+                candidate = None
+        if candidate is not None:
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                numeric = None
+            if numeric is not None and numeric > 0:
+                return numeric
         return self._infer_bin_size(df)
 
     def _infer_bin_size(self, df: pd.DataFrame) -> float:
@@ -208,6 +235,7 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+        market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -229,6 +257,7 @@ class MarketProfileIndicator(BaseIndicator):
             use_merged_value_areas=use_merged_value_areas,
             merge_threshold=merge_threshold,
             min_merge_sessions=min_merge_sessions,
+            market_profile_breakout_confirmation_bars=market_profile_breakout_confirmation_bars,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:

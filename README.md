@@ -72,6 +72,12 @@ make stack-down              # remove containers
 
 Docker Compose publishes the services on the same ports listed in the local workflow. Override `TSDB_PORT` if you need a different TimescaleDB port on the host.
 
+The core profile now bundles an Interactive Brokers (IBKR) gateway container that runs IB Gateway in headless mode using Xvfb and IBC. When you start the stack the backend can immediately reach `ibkr-gateway.quanttrad` on the internal network; no local TWS instance is required. The container exposes port `4002` for paper trading and `4001` for live trading, forwarding credentials and login automation parameters from `secrets.env`.
+
+The image is built locally from an Ubuntu base—no external container registry access is required. During the build Docker downloads the IBC bundle and the IB Gateway installer from their public release URLs; the defaults track IBC `3.19.1` and IB Gateway `10.25.2`. If Interactive Brokers publishes a newer build (or retires the defaults) override the URLs and versions via the optional environment variables surfaced in `docker/docker-compose.yml` (for example `IBKR_GATEWAY_DOWNLOAD_URL` or `IBKR_IBC_VERSION`) before running `make stack-build`.
+
+> **Weekly 2FA reminder** – IBKR still requires a mobile approval every seven days. Launch the mobile app and confirm the login prompt after the container boots or restarts, otherwise historical and live data requests will fail.
+
 ### When to rebuild containers
 
 Use the rebuild flow whenever you need fresh Docker images that include new dependencies or base image updates:
@@ -94,6 +100,17 @@ Trigger this after changing `requirements.txt`, updating frontend dependencies i
 | `CCXT_API_SECRET` | Optional | Shared CCXT secret |
 | `CCXT_PASSWORD` | Optional | Some exchanges (e.g., BitMEX) require an API password |
 | `CCXT_<EXCHANGE>_*` | Optional | Exchange-specific overrides (e.g., `CCXT_BINANCE_API_KEY`) |
+| `IB_HOST` | Optional | Hostname or IP for the Interactive Brokers gateway (defaults to `ibkr-gateway.quanttrad`) |
+| `IB_PORT` | Optional | IBKR API port (defaults to `4002` when using the managed gateway) |
+| `IB_CLIENT_ID` | Optional | Client identifier used when establishing the IBKR session |
+| `IBKR_TWS_USERNAME` | Optional | Username forwarded to the managed IB Gateway container |
+| `IBKR_TWS_PASSWORD` | Optional | Password forwarded to the managed IB Gateway container |
+| `IBKR_TRADING_MODE` | Optional | `paper` or `live`; forwarded to the Gateway container and backend |
+| `IBKR_READONLY_API` | Optional | `yes`/`no` toggle passed to the gateway controller (defaults to `yes`) |
+| `IBKR_ACCEPT_INCOMING_ACTION` | Optional | Duplicate session handling strategy (`accept` by default) |
+| `IBKR_EXISTING_SESSION_ACTION` | Optional | Action when another session is active (`primary` by default) |
+| `IBKR_GATEWAY_PORT` | Optional | Host port to expose for the paper gateway (defaults to `4002`) |
+| `IBKR_GATEWAY_LIVE_PORT` | Optional | Host port to expose for the live gateway (defaults to `4001`) |
 
 The file is mounted into the backend container automatically when you use Docker Compose.
 

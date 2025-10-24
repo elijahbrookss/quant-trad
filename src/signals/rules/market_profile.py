@@ -7,7 +7,7 @@ import math
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 import pandas as pd
 
@@ -449,6 +449,15 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 denominator = abs(active_level_price) if active_level_price else 1.0
                 distance_pct = clearance / denominator if denominator else 0.0
 
+                trade_direction = None
+                pointer_direction = None
+                if direction == "above":
+                    trade_direction = "long"
+                    pointer_direction = "up"
+                elif direction == "below":
+                    trade_direction = "short"
+                    pointer_direction = "down"
+
                 enriched.update(
                     {
                         "source": "MarketProfile",
@@ -467,7 +476,8 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                         "VAH": float(vah),
                         "VAL": float(val),
                         "POC": poc,
-                        "direction": bubble_direction,
+                        "direction": trade_direction or enriched.get("direction"),
+                        "pointer_direction": pointer_direction or bubble_direction,
                         "breakout_clearance": round(clearance, 5),
                         "distance_pct": round(distance_pct, 5),
                         "confidence": _compute_confidence(distance_pct),
@@ -745,11 +755,67 @@ def _detect_value_area_retest(
         }
     )
     direction = str(enriched.get("breakout_direction", "")).lower()
+    trade_direction = None
+    pointer_direction = None
+    if direction in {"above", "up"}:
+        trade_direction = "long"
+        pointer_direction = "up"
+    elif direction in {"below", "down"}:
+        trade_direction = "short"
+        pointer_direction = "down"
+
+    if trade_direction:
+        existing_direction = str(enriched.get("direction", "")).strip().lower()
+        if existing_direction not in {"long", "short"}:
+            enriched["direction"] = trade_direction
+    if pointer_direction and not enriched.get("pointer_direction"):
+        enriched["pointer_direction"] = pointer_direction
+
     enriched.setdefault("retest_role", "support" if direction == "above" else "resistance")
     enriched["confidence"] = max(
         0.15,
         min(1.0, 1.0 - float(enriched.get("bars_since_breakout", 0)) * 0.05),
     )
+
+    canonical_rule = "market_profile_retest"
+    canonical_pattern = "value_area_retest"
+
+    alias_values: Set[str] = set()
+
+    def _ingest_aliases(source: Mapping[str, Any]) -> None:
+        for key in ("rule_id", "pattern_id"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                alias_values.add(value.strip())
+        for alias_key in ("aliases", "rule_aliases", "pattern_aliases"):
+            value = source.get(alias_key)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        alias_values.add(item.strip())
+
+    _ingest_aliases(enriched)
+
+    metadata = enriched.get("metadata")
+    if isinstance(metadata, Mapping):
+        metadata = dict(metadata)
+        _ingest_aliases(metadata)
+    else:
+        metadata = {}
+
+    alias_values.update({canonical_rule, canonical_pattern})
+
+    enriched["rule_id"] = canonical_rule
+    enriched["pattern_id"] = canonical_pattern
+    enriched["rule_aliases"] = sorted(alias_values)
+    enriched["pattern_aliases"] = sorted(alias_values)
+
+    metadata["rule_id"] = canonical_rule
+    metadata["pattern_id"] = canonical_pattern
+    metadata["rule_aliases"] = sorted(alias_values)
+    metadata["pattern_aliases"] = sorted(alias_values)
+    enriched["metadata"] = metadata
+
     return enriched
 
 
@@ -823,9 +889,21 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
             mode=mode,
         )
         if retest is not None:
-            retest.setdefault(
-                "direction", "up" if retest.get("breakout_direction") == "above" else "down"
-            )
+            breakout_direction = str(retest.get("breakout_direction", "")).lower()
+            pointer_direction = None
+            trade_direction = None
+            if breakout_direction == "above":
+                pointer_direction = "up"
+                trade_direction = "long"
+            elif breakout_direction == "below":
+                pointer_direction = "down"
+                trade_direction = "short"
+
+            existing_direction = str(retest.get("direction", "")).strip().lower()
+            if trade_direction and existing_direction not in {"long", "short"}:
+                retest["direction"] = trade_direction
+            if pointer_direction and not retest.get("pointer_direction"):
+                retest["pointer_direction"] = pointer_direction
             retest.setdefault("VAH", breakout_meta.get("VAH"))
             retest.setdefault("VAL", breakout_meta.get("VAL"))
             retest.setdefault("POC", breakout_meta.get("POC"))
@@ -845,6 +923,7 @@ _BREAKOUT_PATTERN = SignalPattern(
     description="Price leaves the active value area after closing inside it on the prior bar.",
     signal_type="breakout",
     evaluator=_value_area_breakout_evaluator,
+    rule_id="market_profile_breakout",
 )
 
 _RETEST_PATTERN = SignalPattern(
@@ -853,6 +932,7 @@ _RETEST_PATTERN = SignalPattern(
     description="Price revisits a recently broken value area boundary without invalidating the breakout.",
     signal_type="retest",
     evaluator=_value_area_retest_evaluator,
+    rule_id="market_profile_retest",
 )
 
 

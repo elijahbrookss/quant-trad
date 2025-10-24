@@ -300,6 +300,21 @@ _RETEST_COLORS = {
 }
 
 
+def _bias_label_from_direction(direction: Optional[str], fallback: Optional[str] = None) -> Optional[str]:
+    """Translate raw direction hints into a Long/Short bias label."""
+
+    hint = direction or fallback
+    if not hint:
+        return None
+
+    text = str(hint).strip().lower()
+    if text in {"above", "up", "long", "buy", "support"}:
+        return "Long"
+    if text in {"below", "down", "short", "sell", "resistance"}:
+        return "Short"
+    return None
+
+
 def _hex_to_rgb(color: str) -> Optional[Tuple[int, int, int]]:
     if not isinstance(color, str):
         return None
@@ -504,9 +519,20 @@ def _market_profile_overlay_adapter(
                 detail = f"Retest near {level_label} {float(level_price):.2f}"
 
             meta_label = _confidence_meta(metadata)
-            direction = metadata.get("direction") or (
-                "up" if str(metadata.get("breakout_direction")).lower() == "above" else "down"
-            )
+            pointer_hint = str(
+                metadata.get("pointer_direction")
+                or metadata.get("breakout_direction")
+                or metadata.get("direction")
+                or ""
+            ).lower()
+            if pointer_hint in {"above", "up"}:
+                bubble_direction = "above"
+            elif pointer_hint in {"below", "down"}:
+                bubble_direction = "below"
+            else:
+                bubble_direction = "above" if retest_role == "resistance" else "below"
+
+            bias_label = _bias_label_from_direction(metadata.get("direction"), fallback=pointer_hint or retest_role)
 
             bubbles.append(
                 {
@@ -518,7 +544,8 @@ def _market_profile_overlay_adapter(
                     "accentColor": color,
                     "backgroundColor": _rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
                     "textColor": "#ffffff",
-                    "direction": direction,
+                    "direction": metadata.get("pointer_direction") or bubble_direction,
+                    "bias": bias_label,
                     "subtype": "bubble",
                 }
             )
@@ -561,6 +588,9 @@ def _market_profile_overlay_adapter(
             meta_bits.append(str(value_area_id))
         meta_text = " · ".join(meta_bits) if meta_bits else None
 
+        bias_label = _bias_label_from_direction(breakout_direction or metadata.get("direction"))
+
+        pointer_hint = metadata.get("pointer_direction") or breakout_direction or metadata.get("direction")
         bubbles.append(
             {
                 "time": marker_time,
@@ -571,7 +601,8 @@ def _market_profile_overlay_adapter(
                 "accentColor": color,
                 "backgroundColor": _rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
                 "textColor": "#ffffff",
-                "direction": breakout_direction or metadata.get("direction"),
+                "direction": pointer_hint,
+                "bias": bias_label,
                 "subtype": "bubble",
             }
         )
