@@ -153,8 +153,8 @@ services:
     env_file:
       - ../secrets.env
     environment:
-      IBC_TWS_USERNAME: elijahcbrooks
-      IBC_TWS_PASSWORD: lizardBreath34$7
+      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME}
+      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD}
       IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
       IBC_READONLY_API: ${IBKR_READONLY_API:-yes}
       IBC_ACCEPT_INCOMING_ACTION: ${IBKR_ACCEPT_INCOMING_ACTION:-accept}
