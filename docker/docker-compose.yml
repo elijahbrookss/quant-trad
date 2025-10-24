@@ -142,10 +142,10 @@ services:
       context: ..
       dockerfile: docker/ibkr-gateway/Dockerfile
       args:
-        IBC_VERSION: ${IBKR_IBC_VERSION:-3.19.1}
-        IBC_DOWNLOAD_URL: ${IBKR_IBC_DOWNLOAD_URL:-https://github.com/IbcAlpha/IBC/releases/download/3.19.1/IBC-3.19.1-linux-x64.zip}
-        IB_GATEWAY_VERSION: ${IBKR_GATEWAY_VERSION:-10.25.2}
-        IB_GATEWAY_DOWNLOAD_URL: ${IBKR_GATEWAY_DOWNLOAD_URL:-https://download2.interactivebrokers.com/portal/DownloadController?action=downloadNew&path=IBGateway/10.25.2/IBGatewayLinux-10.25.2-x64.sh}
+        IBC_VERSION: ${IBKR_IBC_VERSION:-3.23.0}
+        IBC_DOWNLOAD_URL: ${IBKR_IBC_DOWNLOAD_URL:-https://github.com/IbcAlpha/IBC/releases/download/3.23.0/IBCLinux-3.23.0.zip}
+        IB_GATEWAY_VERSION: ${IBKR_GATEWAY_VERSION:-1037} # 10.37.1l is the latest as of June 2024 - 1037 is how the script refers to it
+        IB_GATEWAY_DOWNLOAD_URL: ${IBKR_GATEWAY_DOWNLOAD_URL:-https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/ibgateway-stable-standalone-linux-x64.sh}
     hostname: ibkr-gateway.quanttrad
     labels:
       loki.job: quanttrad
@@ -153,8 +153,8 @@ services:
     env_file:
       - ../secrets.env
     environment:
-      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME}
-      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD}
+      IBC_TWS_USERNAME: elijahcbrooks
+      IBC_TWS_PASSWORD: lizardBreath34$7
       IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
       IBC_READONLY_API: ${IBKR_READONLY_API:-yes}
       IBC_ACCEPT_INCOMING_ACTION: ${IBKR_ACCEPT_INCOMING_ACTION:-accept}
