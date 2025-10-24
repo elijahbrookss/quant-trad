@@ -36,6 +36,7 @@ import json
 import math
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
@@ -43,6 +44,21 @@ from ib_insync import IB, Contract, util
 
 from core.logger import logger
 from .base_provider import BaseDataProvider, DataSource
+
+
+@dataclass(frozen=True)
+class _DurationRule:
+    """Container describing how to express a duration window."""
+
+    upper_bound: Optional[int]
+    unit: str
+    unit_seconds: int
+
+    def format(self, seconds: int) -> str:
+        """Return the IB duration string for *seconds* within this rule."""
+
+        value = math.ceil(seconds / self.unit_seconds)
+        return f"{value} {self.unit}"
 
 
 _KNOWN_SEC_TYPES = {
@@ -81,6 +97,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
         self._ib = IB()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._symbol_overrides = self._load_symbol_overrides()
+        self._duration_rules = self._build_duration_rules()
 
     # ------------------------------------------------------------------
     # BaseDataProvider API
@@ -301,28 +318,29 @@ class InteractiveBrokersProvider(BaseDataProvider):
         }
         return mapping.get(interval.lower())
 
+    def _build_duration_rules(self) -> Iterable[_DurationRule]:
+        """Return duration formatting rules in ascending order of window size."""
+
+        return (
+            _DurationRule(upper_bound=3600, unit="S", unit_seconds=1),
+            _DurationRule(upper_bound=86400, unit="H", unit_seconds=3600),
+            _DurationRule(upper_bound=604800, unit="D", unit_seconds=86400),
+            _DurationRule(upper_bound=2592000, unit="W", unit_seconds=604800),
+            _DurationRule(upper_bound=31536000, unit="M", unit_seconds=2592000),
+            _DurationRule(upper_bound=None, unit="Y", unit_seconds=31536000),
+        )
+
     def _derive_duration(self, start: dt.datetime, end: dt.datetime) -> str:
         """Derive an IB-compatible duration string from *start* and *end*."""
 
         seconds = max(int((end - start).total_seconds()), 60)
 
-        if seconds < 3600:
-            minutes = math.ceil(seconds / 60)
-            return f"{minutes} M"
-        if seconds < 86400:
-            hours = math.ceil(seconds / 3600)
-            return f"{hours} H"
-        if seconds < 604800:
-            days = math.ceil(seconds / 86400)
-            return f"{days} D"
-        if seconds < 2592000:
-            weeks = math.ceil(seconds / 604800)
-            return f"{weeks} W"
-        if seconds < 31536000:
-            months = math.ceil(seconds / 2592000)
-            return f"{months} M"
-        years = math.ceil(seconds / 31536000)
-        return f"{years} Y"
+        for rule in self._duration_rules:
+            if rule.upper_bound is None or seconds < rule.upper_bound:
+                return rule.format(seconds)
+
+        # Fallback should never trigger because the last rule has no bound.
+        return _DurationRule(upper_bound=None, unit="S", unit_seconds=1).format(seconds)
 
     def _apply_override(self, symbol: str) -> Optional[Contract]:
         """Return an override contract if the user supplied one."""
