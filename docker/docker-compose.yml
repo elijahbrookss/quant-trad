@@ -171,6 +171,7 @@ services:
     volumes:
       - ibkr-gateway-config:/config
       - ibkr-gateway-logs:/var/log/ibgateway
+      - ../secrets.env:/app/secrets.env:ro
     networks:
       quanttrad:
         aliases:
