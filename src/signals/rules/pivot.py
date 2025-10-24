@@ -53,6 +53,11 @@ _DEFAULT_RETEST_CONFIRMATION_BARS = 1
 _DEFAULT_CONFIG = PivotBreakoutConfig()
 _PIVOT_BREAKOUT_READY_FLAG = "_pivot_breakouts_ready"
 
+_PIVOT_BREAKOUT_RULE_ID = "pivot_breakout"
+_PIVOT_BREAKOUT_ALIASES = ("pivot_level_breakout",)
+_PIVOT_RETEST_RULE_ID = "pivot_retest"
+_PIVOT_RETEST_ALIASES = ("pivot_level_retest",)
+
 
 def _maybe_mutable_context(context: Mapping[str, Any]) -> Optional[MutableMapping[str, Any]]:
     if isinstance(context, MutableMapping):
@@ -203,11 +208,6 @@ def _evaluate_level(
         required_bars = confirmation_bars + 1
 
     if len(df) < required_bars:
-        log.debug(
-            "pivotbrk | level_skip | reason=insufficient_bars | required=%d | available=%d",
-            required_bars,
-            len(df),
-        )
         return []
 
     closes = df["close"]
@@ -378,12 +378,6 @@ def _evaluate_level(
             detected_level_kind = "resistance"
         elif prior_confirmed_side is None:
             if not has_opposite_history:
-                log.debug(
-                    "pivotbrk | level_skip | level=%s | reason=no_prior_flip | "
-                    "active_side=%s",
-                    level_id,
-                    active_side,
-                )
                 continue
             if active_side == "above":
                 if source_kind_key in {"resistance", "pivot", "na", "none", ""}:
@@ -397,14 +391,14 @@ def _evaluate_level(
                     detected_level_kind = "support"
 
         if detected_level_kind is None:
-            log.debug(
-                "pivotbrk | level_skip | level=%s | reason=unconfirmed_prior_state | "
-                "prior_side=%s | active_side=%s",
-                level_id,
-                prior_confirmed_side,
-                active_side,
-            )
             continue
+
+        if active_side == "above":
+            trade_direction = "long"
+        elif active_side == "below":
+            trade_direction = "short"
+        else:
+            trade_direction = None
 
         meta: Dict[str, Any] = {
             "level_kind": detected_level_kind,
@@ -429,6 +423,18 @@ def _evaluate_level(
             if column in df.columns:
                 meta[f"trigger_{column}"] = float(last_bar[column])
 
+        if trade_direction:
+            meta["direction"] = trade_direction
+
+        meta.setdefault("rule_id", _PIVOT_BREAKOUT_RULE_ID)
+        meta.setdefault("pattern_id", _PIVOT_BREAKOUT_RULE_ID)
+        existing_aliases = list(meta.get("rule_aliases", ())) if meta.get("rule_aliases") else []
+        for alias in _PIVOT_BREAKOUT_ALIASES:
+            if alias not in existing_aliases:
+                existing_aliases.append(alias)
+        if existing_aliases:
+            meta["rule_aliases"] = existing_aliases
+
         log.debug(
             "pivotbrk | level_breakout | level=%s | direction=%s | trigger_close=%.5f",
             level_id,
@@ -439,13 +445,6 @@ def _evaluate_level(
         results.append(meta)
         mark_breakout_emitted(state)
         current_run_prior_confirmed_side = result.active_side
-
-    if not results:
-        log.debug(
-            "pivotbrk | level_skip | level=%s | reason=no_breakout | confirmation_bars=%d",
-            level_id,
-            confirmation_bars,
-        )
 
     return results
 
@@ -642,7 +641,20 @@ def _detect_retest(
 
         ts = df.index[idx]
         bars_since = idx - start_idx
-        return {
+        if breakout_direction == "above":
+            direction = "long"
+        elif breakout_direction == "below":
+            direction = "short"
+        else:
+            direction = None
+
+        retest_role = None
+        if breakout_direction == "above":
+            retest_role = "support"
+        elif breakout_direction == "below":
+            retest_role = "resistance"
+
+        payload = {
             "type": "retest",
             "symbol": breakout_meta.get("symbol"),
             "time": _to_datetime(ts),
@@ -651,7 +663,7 @@ def _detect_retest(
             "breakout_time": breakout_meta.get("trigger_time"),
             "breakout_direction": breakout_direction,
             "level_kind": breakout_meta.get("level_kind"),
-            "retest_role": "support" if breakout_direction == "above" else "resistance",
+            "retest_role": retest_role or "resistance",
             "bars_since_breakout": bars_since,
             "confirmation_bars_required": confirmation_bars_required,
             "retest_close": close,
@@ -660,6 +672,20 @@ def _detect_retest(
             "level_timeframe": breakout_meta.get("level_timeframe"),
             "level_lookback": breakout_meta.get("level_lookback"),
         }
+
+        if direction:
+            payload["direction"] = direction
+
+        payload.setdefault("rule_id", _PIVOT_RETEST_RULE_ID)
+        payload.setdefault("pattern_id", _PIVOT_RETEST_RULE_ID)
+        aliases = list(payload.get("rule_aliases", ())) if payload.get("rule_aliases") else []
+        for alias in _PIVOT_RETEST_ALIASES:
+            if alias not in aliases:
+                aliases.append(alias)
+        if aliases:
+            payload["rule_aliases"] = aliases
+
+        return payload
 
     return None
 
@@ -861,6 +887,16 @@ def pivot_signals_to_overlays(
                 meta_label = f"TF {tf}"
             elif lookback:
                 meta_label = f"LB {lookback}"
+
+            direction_hint = str(metadata.get("direction", "")).strip().lower()
+            if direction_hint not in {"long", "short"}:
+                breakout_dir = str(metadata.get("breakout_direction", "")).lower()
+                if breakout_dir == "above":
+                    direction_hint = "long"
+                elif breakout_dir == "below":
+                    direction_hint = "short"
+            bias_label = "Long" if direction_hint == "long" else "Short" if direction_hint == "short" else None
+
             bubble_payload = {
                 "time": marker_time,
                 "price": anchor_price,
@@ -873,6 +909,8 @@ def pivot_signals_to_overlays(
                 "direction": metadata.get("breakout_direction"),
                 "subtype": "bubble",
             }
+            if bias_label:
+                bubble_payload["bias"] = bias_label
             bubbles.append(bubble_payload)
             continue
 
@@ -937,6 +975,15 @@ def pivot_signals_to_overlays(
             "direction": breakout_direction,
             "subtype": "bubble",
         }
+        direction_hint = str(metadata.get("direction", "")).strip().lower()
+        if direction_hint not in {"long", "short"}:
+            if breakout_direction == "above":
+                direction_hint = "long"
+            elif breakout_direction == "below":
+                direction_hint = "short"
+        if direction_hint in {"long", "short"}:
+            bubble_payload["bias"] = "Long" if direction_hint == "long" else "Short"
+
         bubbles.append(bubble_payload)
         if breakout_direction in {"above", "below"}:
             shape = "triangleUp" if breakout_direction == "above" else "triangleDown"

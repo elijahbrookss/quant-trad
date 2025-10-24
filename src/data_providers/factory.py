@@ -7,6 +7,7 @@ from core.logger import logger
 from .base_provider import BaseDataProvider, DataSource
 from .alpaca_provider import AlpacaProvider
 from .yahoo_provider import YahooFinanceProvider
+from .interactive_brokers_provider import InteractiveBrokersProvider
 from .ccxt_provider import CCXTProvider
 
 
@@ -42,6 +43,8 @@ def get_provider(datasource: Optional[str] = None, *, exchange: Optional[str] = 
             provider = AlpacaProvider()
     elif ds == DataSource.YFINANCE.value:
         provider = YahooFinanceProvider()
+    elif ds == DataSource.IBKR.value:
+        provider = InteractiveBrokersProvider(exchange=exchange)
     elif ds in {DataSource.CCXT.value, "CRYPTO", "CRYPTOCURRENCY"}:
         if not ex:
             raise ValueError("CCXT datasource requires an exchange identifier")

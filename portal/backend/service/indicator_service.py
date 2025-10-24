@@ -27,6 +27,13 @@ from signals.engine.signal_generator import (
     describe_indicator_rules,
     run_indicator_rules,
 )
+from .storage import (
+    delete_indicator as storage_delete_indicator,
+    load_indicators as storage_load_indicators,
+    strategies_for_indicator as storage_strategies_for_indicator,
+    upsert_indicator as storage_upsert_indicator,
+    upsert_strategy_indicator as storage_upsert_strategy_indicator,
+)
 from signals.base import BaseSignal
 from signals.engine import market_profile_generator  # noqa: F401
 from signals.engine import pivot_level_generator  # noqa: F401
@@ -56,6 +63,101 @@ _INDICATOR_MAP = {
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 
+def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
+    """Instantiate an indicator from persisted metadata and register it."""
+
+    inst_id = str(meta.get("id") or "").strip()
+    if not inst_id:
+        return
+    type_str = str(meta.get("type") or "").strip()
+    Cls = _INDICATOR_MAP.get(type_str)
+    if not Cls:
+        logger.warning("indicator_restore_unknown_type | id=%s type=%s", inst_id, type_str)
+        return
+
+    params = deepcopy(meta.get("params") or {})
+    ctx_kwargs: Dict[str, Any] = {}
+    for key in ("symbol", "start", "end", "interval"):
+        if key in params:
+            ctx_kwargs[key] = params.pop(key)
+    if len(ctx_kwargs) != 4:
+        logger.warning("indicator_restore_missing_context | id=%s keys=%s", inst_id, sorted(ctx_kwargs))
+        return
+
+    datasource = _normalize_datasource(meta.get("datasource"))
+    exchange = _normalize_exchange(meta.get("exchange"))
+    if exchange and not datasource:
+        datasource = DataSource.CCXT.value
+
+    try:
+        ctx = DataContext(**ctx_kwargs)
+        ctx.validate()
+        provider = _resolve_data_provider(datasource, exchange=exchange)
+        inst = Cls.from_context(provider=provider, ctx=ctx, **params)
+    except Exception as exc:  # noqa: BLE001 - restoration guard
+        logger.warning("indicator_restore_failed | id=%s | error=%s", inst_id, exc)
+        return
+
+    runtime_params = _extract_ctor_params(inst)
+    if datasource:
+        runtime_params["datasource"] = datasource
+    if exchange:
+        runtime_params["exchange"] = exchange
+
+    meta_payload = {
+        "id": inst_id,
+        "type": type_str,
+        "name": meta.get("name") or type_str.replace("_", " ").title(),
+        "params": _scrub_runtime_params(runtime_params),
+        "enabled": bool(meta.get("enabled", True)),
+        "datasource": datasource or meta.get("datasource"),
+    }
+    if exchange:
+        meta_payload["exchange"] = exchange
+    elif meta.get("exchange"):
+        meta_payload["exchange"] = meta.get("exchange")
+    if meta.get("color"):
+        meta_payload["color"] = meta.get("color")
+
+    _REGISTRY[inst_id] = {"meta": _ensure_color(meta_payload), "instance": inst}
+
+
+def _bootstrap_from_storage() -> None:
+    """Hydrate the in-memory registry from persisted records."""
+
+    records = storage_load_indicators()
+    for record in records:
+        try:
+            _restore_indicator_from_meta(record)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            logger.warning(
+                "indicator_bootstrap_failed | id=%s | error=%s",
+                record.get("id"),
+                exc,
+            )
+
+
+_bootstrap_from_storage()
+
+
+def _refresh_strategy_links(inst_id: str, meta: Mapping[str, Any]) -> None:
+    """Update stored strategy indicator snapshots after metadata changes."""
+
+    strategies = storage_strategies_for_indicator(inst_id)
+    if not strategies:
+        return
+    snapshot = deepcopy(meta)
+    for strategy in strategies:
+        strategy_id = strategy.get("id")
+        if not strategy_id:
+            continue
+        storage_upsert_strategy_indicator(
+            strategy_id=strategy_id,
+            indicator_id=inst_id,
+            snapshot=snapshot,
+        )
+
+
 @dataclass(frozen=True)
 class BreakoutCacheSpec:
     breakout_rule_id: str
@@ -81,6 +183,59 @@ _BREAKOUT_CACHE_SPECS: Dict[str, BreakoutCacheSpec] = {}
 _BREAKOUT_SIGNAL_CACHE: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
 
 
+_RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "market_profile": {
+        "market_profile_breakout": {
+            "signal_type": "breakout",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long breakout",
+                    "description": "Breakout above the active value area high (VAH) that confirms continuation.",
+                },
+                {
+                    "id": "short",
+                    "label": "Short breakdown",
+                    "description": "Breakdown below the active value area low (VAL) signalling downside momentum.",
+                },
+            ],
+        },
+        "market_profile_retest": {
+            "signal_type": "retest",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long retest",
+                    "description": (
+                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
+                        " favouring continuation to the upside."
+                    ),
+                },
+                {
+                    "id": "short",
+                    "label": "Short retest",
+                    "description": (
+                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds," \
+                        " signalling continuation lower."
+                    ),
+                },
+            ],
+        },
+    },
+    "pivot_level": {
+        "pivot_breakout": {
+            "signal_type": "breakout",
+        },
+        "pivot_retest": {
+            "signal_type": "retest",
+        },
+    },
+}
+
+
+_RUNTIME_PARAM_KEYS = {"datasource", "exchange"}
+
+
 def _purge_breakout_cache(inst_id: str) -> None:
     if not inst_id:
         return
@@ -104,6 +259,17 @@ def _hashable_signature(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(_hashable_signature(v) for v in value)
     return str(value)
+
+
+def _scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(params, Mapping):
+        return {}
+    cleaned: Dict[str, Any] = {}
+    for key, value in params.items():
+        if key in _RUNTIME_PARAM_KEYS:
+            continue
+        cleaned[key] = value
+    return cleaned
 
 
 def _coerce_int(value: Any, default: int, *, minimum: Optional[int] = None) -> int:
@@ -274,6 +440,76 @@ _BREAKOUT_CACHE_SPECS.update(
 )
 
 
+def _guess_signal_type(indicator_type: str, rule_id: str) -> str:
+    hints = _RULE_HINTS.get(indicator_type.lower(), {}).get(rule_id.lower(), {})
+    if hints.get("signal_type"):
+        return str(hints["signal_type"])
+
+    rule_key = rule_id.lower()
+    if "retest" in rule_key:
+        return "retest"
+    if "breakout" in rule_key or "break" in rule_key:
+        return "breakout"
+    if "touch" in rule_key:
+        return "touch"
+    if "trend" in rule_key:
+        return "trend"
+    return rule_key or "signal"
+
+
+def _default_direction_hints(signal_type: str) -> List[Dict[str, str]]:
+    normalized = (signal_type or "").lower()
+    if normalized in {"breakout", "retest", "touch", "trend"}:
+        return [
+            {
+                "id": "long",
+                "label": "Long",
+                "description": "Setup that supports a long bias.",
+            },
+            {
+                "id": "short",
+                "label": "Short",
+                "description": "Setup that supports a short bias.",
+            },
+        ]
+    return []
+
+
+def _build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
+    rule_meta = describe_indicator_rules(indicator_type) or []
+    if not rule_meta:
+        return []
+
+    catalog: List[Dict[str, Any]] = []
+    indicator_key = indicator_type.lower()
+    hints_for_indicator = _RULE_HINTS.get(indicator_key, {})
+
+    for entry in rule_meta:
+        rule_id = str(entry.get("id", "")).strip()
+        if not rule_id:
+            continue
+        hint = hints_for_indicator.get(rule_id.lower(), {})
+        signal_type = hint.get("signal_type") or _guess_signal_type(indicator_key, rule_id)
+        directions = hint.get("directions") or _default_direction_hints(signal_type)
+        enriched = dict(entry)
+        enriched["signal_type"] = signal_type
+        if directions:
+            enriched["directions"] = directions
+        catalog.append(enriched)
+
+    return catalog
+
+
+def _attach_signal_catalog(meta: Dict[str, Any]) -> Dict[str, Any]:
+    indicator_type = meta.get("type") or meta.get("name")
+    if not indicator_type:
+        return meta
+    catalog = _build_signal_catalog(str(indicator_type))
+    if catalog:
+        meta["signal_rules"] = catalog
+    return meta
+
+
 def _normalize_color(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -286,7 +522,8 @@ def _normalize_color(value: Optional[str]) -> Optional[str]:
 def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
     if "color" not in meta:
         meta["color"] = None
-    return meta
+    meta["params"] = _scrub_runtime_params(meta.get("params") or {})
+    return _attach_signal_catalog(meta)
 
 
 def _normalize_datasource(value: Optional[str]) -> Optional[str]:
@@ -377,15 +614,17 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
             required.append(name)
         else:
             defaults[name] = param.default
+    indicator_name = getattr(Cls, "NAME", type_id)
+
     details = {
         "id": type_id,
-        "name": getattr(Cls, "NAME", type_id),
+        "name": indicator_name,
         "required_params": required,
         "default_params": defaults,
         "field_types": field_types,
     }
 
-    rule_meta = describe_indicator_rules(getattr(Cls, "NAME", type_id))
+    rule_meta = _build_signal_catalog(indicator_name)
     if rule_meta:
         details["signal_rules"] = rule_meta
 
@@ -402,11 +641,18 @@ def get_instance_meta(inst_id: str) -> Dict[str, Any]:
         raise KeyError("Indicator not found")
     return _ensure_color(entry["meta"])
 
+
+def list_indicator_strategies(inst_id: str) -> List[Dict[str, Any]]:
+    """Return persisted strategies referencing the indicator."""
+
+    return storage_strategies_for_indicator(inst_id)
+
 def delete_instance(inst_id: str) -> None:
     if inst_id not in _REGISTRY:
         raise KeyError("Indicator not found")
     del _REGISTRY[inst_id]
     _purge_breakout_cache(inst_id)
+    storage_delete_indicator(inst_id)
 
 def create_instance(
     type_str: str,
@@ -441,15 +687,16 @@ def create_instance(
         raise RuntimeError(f"Failed to instantiate indicator: {e}")
 
     captured = _extract_ctor_params(inst)
+    runtime_params = dict(captured)
     if datasource:
-        captured["datasource"] = datasource
+        runtime_params["datasource"] = datasource
     if exchange:
-        captured["exchange"] = exchange
+        runtime_params["exchange"] = exchange
     inst_id = str(uuid.uuid4())
     meta = {
         "id": inst_id,
         "type": type_str,
-        "params": captured,
+        "params": _scrub_runtime_params(runtime_params),
         "enabled": True,
         "name": name or type_str.replace("_", " ").title(),
     }
@@ -457,8 +704,10 @@ def create_instance(
     if exchange:
         meta["exchange"] = exchange
     meta["color"] = _normalize_color(color)
-    _ensure_color(meta)
+    meta = _ensure_color(meta)
     _REGISTRY[inst_id] = {"meta": meta, "instance": inst}
+    storage_upsert_indicator(meta)
+    _refresh_strategy_links(inst_id, meta)
     return meta
 
 def update_instance(
@@ -507,14 +756,15 @@ def update_instance(
         raise RuntimeError(f"Failed to re-instantiate indicator: {e}")
 
     captured = _extract_ctor_params(new_inst)
+    runtime_params = dict(captured)
     if datasource:
-        captured["datasource"] = datasource
+        runtime_params["datasource"] = datasource
     if exchange:
-        captured["exchange"] = exchange
+        runtime_params["exchange"] = exchange
     entry["instance"] = new_inst
     _purge_breakout_cache(inst_id)
-    meta = _ensure_color(entry["meta"])
-    meta["params"] = captured
+    meta = entry["meta"]
+    meta["params"] = _scrub_runtime_params(runtime_params)
     if name:
         meta["name"] = name
     if color_provided:
@@ -524,6 +774,9 @@ def update_instance(
         meta["exchange"] = exchange
     elif "exchange" in meta:
         meta.pop("exchange", None)
+    meta = _ensure_color(meta)
+    storage_upsert_indicator(meta)
+    _refresh_strategy_links(inst_id, meta)
     return meta
 
 def overlays_for_instance(
@@ -704,14 +957,28 @@ def generate_signals_for_instance(
         raise LookupError("No candles available for given window")
 
     rule_config: Dict[str, Any] = dict(config or {})
-    rule_config.setdefault(
-        "pivot_breakout_confirmation_bars",
-        _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
-    )
-    rule_config.setdefault(
-        "market_profile_breakout_confirmation_bars",
-        _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
-    )
+    stored_params = meta.get("params", {}) if isinstance(meta, Mapping) else {}
+
+    if "pivot_breakout_confirmation_bars" not in rule_config:
+        pivot_bars = stored_params.get("pivot_breakout_confirmation_bars")
+        if pivot_bars is None and hasattr(inst, "pivot_breakout_confirmation_bars"):
+            pivot_bars = getattr(inst, "pivot_breakout_confirmation_bars")
+        rule_config["pivot_breakout_confirmation_bars"] = _coerce_int(
+            pivot_bars,
+            _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
+            minimum=1,
+        )
+
+    if "market_profile_breakout_confirmation_bars" not in rule_config:
+        mp_bars = stored_params.get("market_profile_breakout_confirmation_bars")
+        if mp_bars is None and hasattr(inst, "market_profile_breakout_confirmation_bars"):
+            mp_bars = getattr(inst, "market_profile_breakout_confirmation_bars")
+        rule_config["market_profile_breakout_confirmation_bars"] = _coerce_int(
+            mp_bars,
+            _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
+            minimum=1,
+        )
+
     rule_config.setdefault("symbol", sym)
 
     if isinstance(inst, MarketProfileIndicator) and "rule_payloads" not in rule_config:

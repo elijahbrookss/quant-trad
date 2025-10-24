@@ -15,6 +15,7 @@ import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
+import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
 import { createLogger } from '../utils/logger.js';
 import LoadingOverlay from './LoadingOverlay.jsx';
 
@@ -663,21 +664,16 @@ export const IndicatorSection = ({ chartId }) => {
                 Show enabled only
               </label>
 
-              <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200">
-                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Type</span>
-                <select
-                  value={typeFilter}
-                  onChange={(event) => setTypeFilter(event.target.value)}
-                  className="min-w-[8rem] rounded-md border border-white/10 bg-[#0d0f18] px-2 py-1 text-xs text-slate-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                >
-                  <option value="all">All types</option>
-                  {typeOptions.map((type) => (
-                    <option key={type} value={type}>
-                      {formatIndicatorType(type)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <DropdownSelect
+                label="Type"
+                value={typeFilter}
+                onChange={(next) => setTypeFilter(next)}
+                options={[
+                  { value: 'all', label: 'All types' },
+                  ...typeOptions.map((type) => ({ value: type, label: formatIndicatorType(type) })),
+                ]}
+                className="min-w-[10rem]"
+              />
 
               <div className="flex min-w-[12rem] flex-1 items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200 md:max-w-xs">
                 <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Search</span>

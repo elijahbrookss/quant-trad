@@ -126,6 +126,17 @@ def test_build_tpo_histogram_and_extract_value_area(dummy_df):
 
 
 @pytest.mark.unit
+def test_select_bin_size_accepts_string(dummy_df):
+    """String bin sizes coming from UI forms should coerce cleanly."""
+
+    indicator = MarketProfileIndicator(dummy_df, bin_size="0.5")
+    assert indicator.bin_size == pytest.approx(0.5)
+
+    fallback = MarketProfileIndicator(dummy_df, bin_size="")
+    assert fallback.bin_size > 0
+
+
+@pytest.mark.unit
 def test_calculate_overlap():
     """
     Unit test for _calculate_overlap:
