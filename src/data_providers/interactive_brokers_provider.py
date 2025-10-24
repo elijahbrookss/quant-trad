@@ -62,11 +62,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
     _lock = threading.Lock()
 
     def __init__(self, *, exchange: Optional[str] = None):
-        # Default to the Docker Compose network alias for the managed gateway
-        # container so local stacks can connect without additional
-        # configuration. Developers running TWS directly on their host can
-        # still override this via ``IB_HOST``.
-        self._host = os.getenv("IB_HOST", "ibkr-gateway.quanttrad")
+        self._host = os.getenv("IB_HOST", "127.0.0.1")
         # The IB Gateway paper-trading endpoint defaults to 4002 while the
         # production endpoint listens on 4001. Users can override the port via
         # ``IB_PORT`` when connecting to a standalone TWS installation.
