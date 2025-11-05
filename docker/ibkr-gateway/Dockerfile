@@ -78,3 +78,6 @@ RUN echo "--module-path=${JFX_PATH}" >> ${IBG_DIR}/ibgateway.vmoptions && \
     echo "--add-modules=javafx.controls,javafx.fxml,javafx.swing,javafx.web,javafx.graphics" >> ${IBG_DIR}/ibgateway.vmoptions 
 
 ENTRYPOINT ["/usr/local/bin/ibkr-entrypoint.sh"]
+
+# Start VNC server attached to that display
+# x11vnc -display :0 -nopw -forever -shared -rfbport 5900 &
