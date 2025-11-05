@@ -10,6 +10,7 @@ export default function DataModeToggle({
   onChange,
   supportsLive,
   disabledReason,
+  liveDescription,
 }) {
   return (
     <div className="flex min-w-[12rem] flex-col gap-2">
@@ -42,9 +43,9 @@ export default function DataModeToggle({
         })}
       </div>
       {supportsLive ? (
-        <p className="text-[10px] text-slate-400/80">Streaming refreshes every ~15s when connected to Interactive Brokers.</p>
+        <p className="text-[10px] text-slate-400/80">{liveDescription || 'Live updates poll the selected datasource roughly every ~10s.'}</p>
       ) : (
-        <p className="text-[10px] text-slate-400/60">{disabledReason || 'Live updates require the Interactive Brokers datasource.'}</p>
+        <p className="text-[10px] text-slate-400/60">{disabledReason || 'Live updates require a supported real-time datasource.'}</p>
       )}
     </div>
   );
