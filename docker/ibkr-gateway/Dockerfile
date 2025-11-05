@@ -40,8 +40,13 @@ RUN wget -O ibc.zip "${IBC_DOWNLOAD_URL}" \
     && rm ibc.zip
 
 # Install IB Gateway silently | separate for caching (file takes 3+ mins to download)
-# curl -L -o ibgateway-installer.sh "${IB_GATEWAY_DOWNLOAD_URL}" I copied this locally due to download speeds
-# RUN wget -O ibgateway-installer.sh "${IB_GATEWAY_DOWNLOAD_URL}" 
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fL "$IB_GATEWAY_DOWNLOAD_URL" -o /tmp/ibgateway-installer.sh \
+ && chmod +x /tmp/ibgateway-installer.sh \
+ && /tmp/ibgateway-installer.sh -q -dir /opt/ibgateway || /tmp/ibgateway-installer.sh -q \
+ && rm -f /tmp/ibgateway-installer.sh \
+ && rm -rf /var/lib/apt/lists/*
+
 
 COPY docker/ibkr-gateway/ibgateway-installer.sh ibgateway-installer.sh
 
