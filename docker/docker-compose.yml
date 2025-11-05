@@ -168,6 +168,7 @@ services:
     ports:
       - "${IBKR_GATEWAY_PORT:-4002}:4002"
       - "${IBKR_GATEWAY_LIVE_PORT:-4001}:4001"
+      - "5900:5900"  # VNC port
     volumes:
       - ibkr-gateway-config:/config
       - ibkr-gateway-logs:/var/log/ibgateway

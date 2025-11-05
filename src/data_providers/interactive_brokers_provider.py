@@ -160,6 +160,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
         with self._lock:
             self._ensure_connection()
             try:
+                logger.debug("ibkr_fetch_before_request | connected=%s", self._ib.isConnected())
                 bars = self._ib.reqHistoricalData(
                     contract,
                     endDateTime=end_dt,
@@ -170,6 +171,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
                     formatDate=1,
                     keepUpToDate=False,
                 )
+                logger.debug("ibkr_fetch_after_request | bar_count=%s", len(bars) if bars else 0)
             except Exception as exc:  # pragma: no cover - network interaction
                 logger.exception(
                     "ibkr_fetch_failed | symbol=%s | interval=%s | error=%s",
@@ -203,33 +205,45 @@ class InteractiveBrokersProvider(BaseDataProvider):
     # ------------------------------------------------------------------
     def _ensure_connection(self) -> None:
         """Open an IB connection if we are not already connected."""
-
         if self._ib.isConnected():
+            logger.debug("ibkr_already_connected | host=%s | port=%s | client_id=%s",
+                        self._host, self._port, self._client_id)
             return
+
+        logger.info("ibkr_connect_start | host=%s | port=%s | client_id=%s",
+                    self._host, self._port, self._client_id)
 
         try:
             self._ensure_event_loop()
+            logger.debug("ibkr_event_loop_ready | loop=%s | loop_is_closed=%s | thread=%s",
+                        self._loop, getattr(self._loop, 'is_closed', lambda: None)(),
+                        threading.current_thread().name)
+
             self._ib.connect(
                 self._host,
                 self._port,
                 clientId=self._client_id,
                 readonly=True,
             )
+
             logger.info(
-                "ibkr_connect_success | host=%s | port=%s | client_id=%s",
+                "ibkr_connect_success | host=%s | port=%s | client_id=%s | isConnected=%s",
                 self._host,
                 self._port,
                 self._client_id,
+                self._ib.isConnected(),
             )
-        except Exception as exc:  # pragma: no cover - network interaction
+        except Exception as exc:
             logger.exception(
-                "ibkr_connect_failed | host=%s | port=%s | client_id=%s | error=%s",
+                "ibkr_connect_failed | host=%s | port=%s | client_id=%s | exc_type=%s | exc_repr=%r",
                 self._host,
                 self._port,
                 self._client_id,
+                type(exc).__name__,
                 exc,
             )
             raise
+
 
     def _ensure_event_loop(self) -> None:
         """Ensure the current thread has an asyncio event loop."""

@@ -127,9 +127,12 @@ CMD=( "${IBC_PATH}/scripts/ibcstart.sh" "${IB_GATEWAY_VERSION}" --gateway
 )
 
 log "Executing: ${CMD[*]}"
-# exec "${CMD[@]}"
 
-# # With:
-"${CMD[@]}" || true
-log "IBC exited — keeping container alive for debugging..."
+GATEWAY_LOG="${LOG_DIR}/gateway_stdout.log"
+"${CMD[@]}" 2>&1 | tee "${GATEWAY_LOG}"
+IBC_EXIT_CODE=${PIPESTATUS[0]}
+
+echo "ibkr-entrypoint | IBC exited with code ${IBC_EXIT_CODE}" | tee -a "${GATEWAY_LOG}"
+ps aux | tee -a "${GATEWAY_LOG}"
+
 tail -f /dev/null
