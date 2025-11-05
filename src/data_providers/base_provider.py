@@ -3,9 +3,12 @@ from enum import Enum
 import datetime as dt
 import pandas as pd
 import os
+from typing import Iterable, List, Tuple
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError, ProgrammingError
+
 from core.logger import logger
 from indicators.config import DataContext
 from core.chart_plotter import ChartPlotter
@@ -78,6 +81,109 @@ class BaseDataProvider(ABC):
             logger.exception("Failed to ensure schema for '%s': %s", self._table, e)
             raise
 
+    @staticmethod
+    def _interval_to_timedelta(interval: str) -> dt.timedelta:
+        unit = interval.lower()
+
+        if unit.endswith("ms"):
+            return dt.timedelta(milliseconds=max(1, int(unit[:-2])))
+        if unit.endswith("s"):
+            return dt.timedelta(seconds=max(1, int(unit[:-1])))
+        if unit.endswith("m"):
+            return dt.timedelta(minutes=max(1, int(unit[:-1])))
+        if unit.endswith("h"):
+            return dt.timedelta(hours=max(1, int(unit[:-1])))
+        if unit.endswith("d"):
+            return dt.timedelta(days=max(1, int(unit[:-1])))
+        if unit.endswith("w"):
+            return dt.timedelta(weeks=max(1, int(unit[:-1])))
+        if unit.endswith("mo"):
+            return dt.timedelta(days=max(1, int(unit[:-2])) * 30)
+        if unit.endswith("y"):
+            return dt.timedelta(days=max(1, int(unit[:-1])) * 365)
+
+        raise ValueError(f"Unsupported interval string: {interval}")
+
+    @staticmethod
+    def _collect_missing_ranges(
+        timestamps: Iterable[pd.Timestamp],
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+        interval: str,
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        ordered = sorted(set(pd.to_datetime(list(timestamps), utc=True)))
+        if not ordered:
+            return []
+
+        try:
+            step = BaseDataProvider._interval_to_timedelta(interval)
+        except Exception:
+            step = None
+
+        if step is None and len(ordered) >= 2:
+            deltas = pd.Series(ordered).diff().dropna()
+            if not deltas.empty:
+                step = deltas.median()
+
+        if step is None:
+            step = pd.Timedelta(0)
+
+        has_step = step > pd.Timedelta(0)
+        tolerance = step / 2 if has_step else pd.Timedelta(0)
+        missing: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+
+        first = ordered[0]
+        if first - requested_start > tolerance:
+            missing.append((requested_start, min(first, requested_end)))
+
+        if has_step:
+            for previous, current in zip(ordered, ordered[1:]):
+                gap = current - previous
+                if gap > step * 1.5 and previous + step < current:
+                    gap_start = previous + step
+                    gap_end = current
+                    missing.append((gap_start, gap_end))
+
+        last = ordered[-1]
+        if requested_end - last > tolerance:
+            start = max(last, requested_start)
+            missing.append((start, requested_end))
+
+        filtered: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        for start, end in missing:
+            if end <= start:
+                continue
+            filtered.append((start, end))
+
+        return filtered
+
+    def _write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
+        if df.empty:
+            return 0
+
+        if not self._engine:
+            logger.warning("Database engine unavailable; skipping ingestion for %s [%s].", ctx.symbol, ctx.interval)
+            return 0
+
+        try:
+            with self._engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {self._table}) ON COMMIT DROP;"))
+                    try:
+                        df.to_sql("tmp", conn, if_exists="append", index=False, method="multi")
+                    except Exception as exc:
+                        logger.exception("Failed to write to temp table 'tmp': %s", exc)
+                        raise
+
+                    conn.execute(text(f"INSERT INTO {self._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;"))
+
+            logger.info("Ingested %d rows for %s [%s].", len(df), ctx.symbol, ctx.interval)
+            return len(df)
+
+        except SQLAlchemyError as exc:
+            logger.exception("DB error during ingest for %s: %s", ctx.symbol, exc)
+            raise
+
     def ingest_history(self, ctx: DataContext, days: int = 30) -> int:
         start = ctx.start
         end = ctx.end
@@ -105,25 +211,8 @@ class BaseDataProvider(ABC):
             logger.exception("Data fetch failed for %s: %s", ctx.symbol, e)
             return 0
 
-        if not self._engine:
-            logger.warning("Database engine unavailable; skipping ingestion for %s [%s].", ctx.symbol, ctx.interval)
-            return 0
-
         try:
-            with self._engine.connect() as conn:
-                with conn.begin():
-                    conn.execute(text(f"CREATE TEMP TABLE tmp (LIKE {self._table}) ON COMMIT DROP;"))
-                    try:
-                        df.to_sql("tmp", conn, if_exists="append", index=False, method="multi")
-                    except Exception as e:
-                        logger.exception("Failed to write to temp table 'tmp': %s", e)
-                        raise
-
-                    conn.execute(text(f"INSERT INTO {self._table} SELECT * FROM tmp ON CONFLICT DO NOTHING;"))
-
-            logger.info("Ingested %d rows for %s [%s].", len(df), ctx.symbol, ctx.interval)
-            return len(df)
-
+            return self._write_dataframe(df, ctx)
         except SQLAlchemyError as e:
             logger.exception("DB error during ingest_history for %s: %s", ctx.symbol, e)
             raise
@@ -187,6 +276,73 @@ class BaseDataProvider(ABC):
             except Exception as e:
                 logger.exception("Auto-ingestion failed: %s", e)
                 return df
+
+        if not df.empty:
+            requested_start = pd.to_datetime(ctx.start, utc=True)
+            requested_end = pd.to_datetime(ctx.end, utc=True)
+            timestamps = pd.to_datetime(df["timestamp"], utc=True)
+            missing_ranges = self._collect_missing_ranges(
+                timestamps,
+                requested_start,
+                requested_end,
+                ctx.interval,
+            )
+
+            supplemental_frames = []
+            for start, end in missing_ranges:
+                if end <= start:
+                    continue
+
+                logger.info(
+                    "Partial cache miss for %s [%s]; fetching %s to %s via API.",
+                    ctx.symbol,
+                    ctx.interval,
+                    start.isoformat(),
+                    end.isoformat(),
+                )
+
+                try:
+                    segment = self.fetch_from_api(ctx.symbol, start, end, ctx.interval)
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to fetch %s [%s] for partial range %s -> %s: %s",
+                        ctx.symbol,
+                        ctx.interval,
+                        start.isoformat(),
+                        end.isoformat(),
+                        exc,
+                    )
+                    continue
+
+                if segment is None or segment.empty:
+                    logger.warning(
+                        "Partial fetch for %s [%s] returned no rows for %s to %s.",
+                        ctx.symbol,
+                        ctx.interval,
+                        start.isoformat(),
+                        end.isoformat(),
+                    )
+                    continue
+
+                segment = segment.copy()
+                segment["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
+                segment["datasource"] = self.get_datasource()
+                segment["interval"] = ctx.interval
+                segment["symbol"] = ctx.symbol
+
+                try:
+                    self._write_dataframe(segment, ctx)
+                except SQLAlchemyError:
+                    # _write_dataframe already logged the failure.
+                    pass
+
+                supplemental_frames.append(segment[["timestamp", "open", "high", "low", "close", "volume"]])
+
+            if supplemental_frames:
+                combined = pd.concat([df] + supplemental_frames, ignore_index=True)
+                combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
+                combined.sort_values("timestamp", inplace=True)
+                df = combined.reset_index(drop=True)
 
         return self._format_ohlcv_dataframe(df, ctx)
 
