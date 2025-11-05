@@ -113,86 +113,54 @@ class CCXTProvider(BaseDataProvider):
 
         rows = []
         next_since = since_ms
-        iteration_cap = 200
-        max_iterations = iteration_cap
+        max_iterations = 200
 
-        while next_since < until_ms and max_iterations > 0:
-            remaining_ms = until_ms - next_since
-            estimated_bars = math.ceil(remaining_ms / step_ms) + 2
-            limit = max(1, min(estimated_bars, 1500))
+        batches = []
+        cursor = since_ms
+        previous_last = None
 
+        for _ in range(1000):
             try:
                 batch = self._exchange.fetch_ohlcv(
                     symbol,
                     timeframe=interval,
-                    since=next_since,
+                    since=cursor,
                     limit=limit,
                 )
             except Exception as exc:  # pragma: no cover - network interaction
                 raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
 
-            batch_count = len(batch)
-            batch_start = pd.to_datetime(next_since, unit="ms", utc=True)
-            if not batch_count:
-                logger.info(
-                    "CCXT %s fetch returned no data for %s [%s] starting %s; stopping.",
-                    self._exchange_id,
-                    symbol,
-                    interval,
-                    batch_start.isoformat(),
-                )
+            if not batch:
                 break
 
-            rows.extend(batch)
+            batches.extend(batch)
 
-            last_ts = batch[-1][0]
-            if last_ts is None:
-                logger.warning(
-                    "CCXT %s fetch produced a batch without timestamps for %s [%s]; stopping.",
-                    self._exchange_id,
-                    symbol,
-                    interval,
-                )
+            last_ts = int(batch[-1][0])
+            if previous_last is not None and last_ts <= previous_last:
                 break
 
-            last_dt = pd.to_datetime(last_ts, unit="ms", utc=True)
-
-            # Advance the cursor to avoid duplicate bars; CCXT `since` is inclusive.
-            next_since = max(last_ts + step_ms, next_since + step_ms)
-            max_iterations -= 1
-
-            reached_end = next_since >= until_ms or last_ts >= until_ms
-            logger.info(
-                "CCXT %s fetched %d candles for %s [%s] from %s to %s (limit=%d).%s",
-                self._exchange_id,
-                batch_count,
-                symbol,
-                interval,
-                batch_start.isoformat(),
-                last_dt.isoformat(),
-                limit,
-                " Reached requested end; stopping." if reached_end else " Continuing pagination.",
-            )
-
-            if reached_end:
+            previous_last = last_ts
+            if last_ts >= until_ms:
                 break
 
-        if max_iterations == 0 and next_since < until_ms:
+            cursor = last_ts + 1
+            if cursor > until_ms:
+                break
+        else:  # pragma: no cover - defensive guard
             logger.warning(
-                "CCXT %s pagination stopped after %d iterations before reaching %s for %s [%s].",
+                "CCXT pagination limit reached for %s:%s between %s and %s",
                 self._exchange_id,
-                iteration_cap,
-                pd.to_datetime(until_ms, unit="ms", utc=True).isoformat(),
                 symbol,
-                interval,
+                start_ts.isoformat(),
+                end_ts.isoformat(),
             )
 
-        if not rows:
+        if not batches:
             return pd.DataFrame()
 
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df.drop_duplicates(subset="timestamp", keep="last", inplace=True)
+        df = pd.DataFrame(batches, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.drop_duplicates(subset="timestamp", keep="last")
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
 
         # Align with downstream expectations

@@ -137,7 +137,7 @@ services:
       - quanttrad
 
   ibkr-gateway:
-    profiles: [core, brokers]
+    profiles: [brokers]
     build:
       context: ..
       dockerfile: docker/ibkr-gateway/Dockerfile
