@@ -172,6 +172,13 @@ class BaseDataProvider(ABC):
             logger.warning("No rows found for %s [%s] from %s to %s. Attempting auto-ingestion...",
                            ctx.symbol, ctx.interval, ctx.start, ctx.end)
             try:
+                logger.info(
+                    "Auto-ingestion requesting %s [%s] candles via API from %s to %s.",
+                    ctx.symbol,
+                    ctx.interval,
+                    ctx.start,
+                    ctx.end,
+                )
                 self.ingest_history(ctx)
                 df = query_ohlcv()
                 if df.empty:

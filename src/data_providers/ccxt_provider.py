@@ -109,19 +109,50 @@ class CCXTProvider(BaseDataProvider):
         seconds = self._timeframe_to_seconds(interval)
         since_ms = int(start_ts.timestamp() * 1000)
         until_ms = int(end_ts.timestamp() * 1000)
+        step_ms = max(int(seconds * 1000), 1)
 
-        estimated_bars = math.ceil((until_ms - since_ms) / (seconds * 1000)) + 2
-        limit = max(1, min(estimated_bars, 1500))
+        rows = []
+        next_since = since_ms
+        max_iterations = 200
 
-        try:
-            raw = self._exchange.fetch_ohlcv(symbol, timeframe=interval, since=since_ms, limit=limit)
-        except Exception as exc:  # pragma: no cover - network interaction
-            raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+        while next_since < until_ms and max_iterations > 0:
+            remaining_ms = until_ms - next_since
+            estimated_bars = math.ceil(remaining_ms / step_ms) + 2
+            limit = max(1, min(estimated_bars, 1500))
 
-        if not raw:
+            try:
+                batch = self._exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=interval,
+                    since=next_since,
+                    limit=limit,
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+
+            if not batch:
+                break
+
+            rows.extend(batch)
+
+            last_ts = batch[-1][0]
+            if last_ts is None:
+                break
+
+            # Advance the cursor to avoid duplicate bars; CCXT `since` is inclusive.
+            next_since = max(last_ts + step_ms, next_since + step_ms)
+
+            # If the exchange returned fewer candles than requested we are done.
+            if len(batch) < limit:
+                break
+
+            max_iterations -= 1
+
+        if not rows:
             return pd.DataFrame()
 
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df.drop_duplicates(subset="timestamp", keep="last", inplace=True)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
 
