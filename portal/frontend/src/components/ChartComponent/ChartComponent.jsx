@@ -31,6 +31,7 @@ import {
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 const LIVE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
+const LIVE_CRYPTO_EXCHANGES = new Set(['binanceus']);
 
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
@@ -109,6 +110,8 @@ const formatPriceDisplay = (value, precision = 2) => {
   const digits = Math.min(Math.max(Number(precision) || 2, 2), 8);
   return numeric.toFixed(digits);
 };
+
+const normalizeExchangeId = (value) => (value ?? '').toString().trim().toLowerCase();
 
 const deriveCcxtPriceFormat = (candles = []) => {
   if (!Array.isArray(candles) || candles.length === 0) {
@@ -391,13 +394,41 @@ export const ChartComponent = ({ chartId }) => {
     lastIbExchangeRef.current = venue;
   }, []);
 
-  const supportsLive = useMemo(() => datasource === DATASOURCE_IDS.IBKR, [datasource]);
+  const normalizedExchange = useMemo(() => normalizeExchangeId(exchange), [exchange]);
+  const supportsLive = useMemo(() => {
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      return true;
+    }
+    if (datasource === DATASOURCE_IDS.CCXT) {
+      const fallback = normalizeExchangeId(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
+      const candidate = normalizedExchange || fallback;
+      return LIVE_CRYPTO_EXCHANGES.has(candidate);
+    }
+    return false;
+  }, [datasource, normalizedExchange]);
+
   const liveDisabledReason = useMemo(() => {
     if (supportsLive) return null;
     if (datasource === DATASOURCE_IDS.CCXT) {
-      return 'Switch to the Markets datasource and choose Interactive Brokers to stream live data.';
+      if (!normalizedExchange) {
+        return 'Select an exchange to enable live updates.';
+      }
+      if (!LIVE_CRYPTO_EXCHANGES.has(normalizedExchange)) {
+        return 'Live crypto updates are currently limited to Binance US.';
+      }
     }
-    return 'Live updates require the Interactive Brokers datasource.';
+    return 'Live updates require a supported real-time datasource.';
+  }, [supportsLive, datasource, normalizedExchange]);
+
+  const liveDescription = useMemo(() => {
+    if (!supportsLive) return null;
+    if (datasource === DATASOURCE_IDS.CCXT) {
+      return 'Polling Binance US every ~10s while live mode is active.';
+    }
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      return 'Streaming refreshes roughly every 10s using Interactive Brokers.';
+    }
+    return 'Live updates poll the selected datasource roughly every 10s.';
   }, [supportsLive, datasource]);
 
     // Overlay resource handles.
@@ -644,10 +675,12 @@ export const ChartComponent = ({ chartId }) => {
   const lastModeRef = useRef('historical');
   useEffect(() => {
     if (lastModeRef.current === 'live' && mode !== 'live' && !supportsLive) {
-      showWarning('Live mode is only available with Interactive Brokers. Reverting to historical mode.');
+      const baseReason = liveDisabledReason?.replace(/\.*$/, '');
+      const message = `${baseReason || 'Live mode is not available for the selected datasource'}. Reverting to historical mode.`;
+      showWarning(message);
     }
     lastModeRef.current = mode;
-  }, [mode, supportsLive, showWarning]);
+  }, [mode, supportsLive, showWarning, liveDisabledReason]);
 
   useEffect(() => {
     if (mode === 'live') {
@@ -1257,6 +1290,7 @@ export const ChartComponent = ({ chartId }) => {
               onChange={setMode}
               supportsLive={supportsLive}
               disabledReason={liveDisabledReason}
+              liveDescription={liveDescription}
             />
 
             <TimeframeSelect selected={interval} onChange={setInterval} />

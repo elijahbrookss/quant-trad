@@ -9,11 +9,16 @@ if not os.getenv("GITHUB_ACTIONS"):
     load_dotenv(".env")
 
 debug_mode = os.getenv("DEBUG", "false").lower() == "true"
+log_level = logging.DEBUG if debug_mode else logging.INFO
 
 LOG_FMT = "%(asctime)s %(levelname)-5s %(filename)s:%(lineno)d | %(message)s"
-logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO, format=LOG_FMT)
+logging.basicConfig(level=log_level, format=LOG_FMT)
 
 root_logger = logging.getLogger()
+root_logger.setLevel(log_level)
+
+for handler in root_logger.handlers:
+    handler.setLevel(log_level)
 
 # Loki config
 LOKI_URL = os.getenv("LOKI_URL", "").strip()
