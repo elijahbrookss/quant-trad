@@ -115,16 +115,16 @@ class CCXTProvider(BaseDataProvider):
         next_since = since_ms
         max_iterations = 200
 
-        while next_since < until_ms and max_iterations > 0:
-            remaining_ms = until_ms - next_since
-            estimated_bars = math.ceil(remaining_ms / step_ms) + 2
-            limit = max(1, min(estimated_bars, 1500))
+        batches = []
+        cursor = since_ms
+        previous_last = None
 
+        for _ in range(1000):
             try:
                 batch = self._exchange.fetch_ohlcv(
                     symbol,
                     timeframe=interval,
-                    since=next_since,
+                    since=cursor,
                     limit=limit,
                 )
             except Exception as exc:  # pragma: no cover - network interaction
@@ -133,27 +133,34 @@ class CCXTProvider(BaseDataProvider):
             if not batch:
                 break
 
-            rows.extend(batch)
+            batches.extend(batch)
 
-            last_ts = batch[-1][0]
-            if last_ts is None:
+            last_ts = int(batch[-1][0])
+            if previous_last is not None and last_ts <= previous_last:
                 break
 
-            # Advance the cursor to avoid duplicate bars; CCXT `since` is inclusive.
-            next_since = max(last_ts + step_ms, next_since + step_ms)
-
-            # If the exchange returned fewer candles than requested we are done.
-            if len(batch) < limit:
+            previous_last = last_ts
+            if last_ts >= until_ms:
                 break
 
-            max_iterations -= 1
+            cursor = last_ts + 1
+            if cursor > until_ms:
+                break
+        else:  # pragma: no cover - defensive guard
+            logger.warning(
+                "CCXT pagination limit reached for %s:%s between %s and %s",
+                self._exchange_id,
+                symbol,
+                start_ts.isoformat(),
+                end_ts.isoformat(),
+            )
 
-        if not rows:
+        if not batches:
             return pd.DataFrame()
 
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df.drop_duplicates(subset="timestamp", keep="last", inplace=True)
+        df = pd.DataFrame(batches, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.drop_duplicates(subset="timestamp", keep="last")
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
 
         # Align with downstream expectations

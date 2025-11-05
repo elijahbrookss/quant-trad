@@ -1,67 +1,47 @@
-import datetime as dt
+import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-pd = pytest.importorskip('pandas')
+pd = pytest.importorskip("pandas")
 
-import ccxt
-
-from data_providers.ccxt_provider import CCXTProvider
+from data_providers import ccxt_provider as ccxt_module
 
 
-class DummyExchange:
-    """Test double that emulates paginated CCXT OHLCV responses."""
+def test_ccxt_provider_continues_pagination_when_exchange_caps(monkeypatch):
+    """Providers should keep paging until the requested end timestamp is covered."""
 
-    instances = []
-    max_per_call = 600
-    step_ms = 15 * 60 * 1000
-    until_ms = None
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=5)
 
-    def __init__(self, _params=None):
-        self.calls = []
-        DummyExchange.instances.append(self)
+    candles = []
+    for index in range(10):
+        ts = int((start + timedelta(minutes=index)).timestamp() * 1000)
+        candles.append([ts, 100 + index, 101 + index, 99 + index, 100.5 + index, 1000 + index])
 
-    def fetch_ohlcv(self, symbol, timeframe, since, limit):
-        self.calls.append((symbol, timeframe, since, limit))
+    class LimitedBatchExchange:
+        def __init__(self, _config):
+            self.fetch_calls = []
 
-        candles = []
-        cursor = since
-        # Respect the configured per-call cap so the provider must paginate.
-        cap = min(limit, self.max_per_call)
-        while len(candles) < cap and cursor <= self.until_ms:
-            candles.append([cursor, 1, 2, 0.5, 1.5, 42])
-            cursor += self.step_ms
+        def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
+            self.fetch_calls.append({"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit})
 
-        return candles
+            target_since = since if since is not None else candles[0][0]
+            start_idx = 0
+            while start_idx < len(candles) and candles[start_idx][0] < target_since:
+                start_idx += 1
 
+            end_idx = min(start_idx + 2, len(candles))
+            return candles[start_idx:end_idx]
 
-@pytest.fixture(autouse=True)
-def patch_binanceus(monkeypatch):
-    DummyExchange.instances.clear()
-    monkeypatch.setattr(ccxt, 'binanceus', DummyExchange)
-    yield
+    monkeypatch.setattr(ccxt_module, "ccxt", types.SimpleNamespace(binanceus=LimitedBatchExchange))
 
+    provider = ccxt_module.CCXTProvider("binanceus")
+    frame = provider.fetch_from_api("BTC/USDT", start, end, "1m")
 
-def test_fetch_from_api_handles_multi_batch_range():
-    provider = CCXTProvider('binanceus')
-
-    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    end = start + dt.timedelta(days=30)
-    DummyExchange.until_ms = int(end.timestamp() * 1000)
-
-    frame = provider.fetch_from_api('LINK/USDT', start, end, '15m')
-
-    # More than one exchange call should be required due to the per-call cap.
-    exchange = DummyExchange.instances[0]
-    assert len(exchange.calls) > 1
-
-    assert isinstance(frame, pd.DataFrame)
-    assert not frame.empty
-    # Ensure the dataframe spans the requested interval and is deduplicated.
-    assert frame['timestamp'].is_unique
-    assert frame['timestamp'].min() >= pd.Timestamp(start)
-    assert frame['timestamp'].max() <= pd.Timestamp(end)
-
-    # Roughly verify the expected row count for a 30 day window of 15 minute candles.
-    expected = int((end - start).total_seconds() // (15 * 60)) + 1
-    assert abs(len(frame) - expected) <= 1
+    exchange = provider._exchange
+    assert len(exchange.fetch_calls) >= 3  # Limited batches required several pages.
+    assert len(frame) == 6
+    assert frame["timestamp"].iloc[0] == pd.Timestamp(start)
+    assert frame["timestamp"].iloc[-1] == pd.Timestamp(end)
+    assert frame["timestamp"].is_monotonic_increasing
