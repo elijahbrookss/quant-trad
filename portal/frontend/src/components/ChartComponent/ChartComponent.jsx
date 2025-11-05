@@ -474,6 +474,7 @@ export const ChartComponent = ({ chartId }) => {
     targetRange,
     targetDatasource,
     targetExchange,
+    behavior = 'auto',
   } = {}) => {
     const effectiveSymbol = targetSymbol ?? symbolRef.current;
     const effectiveInterval = targetInterval ?? intervalRef.current;
@@ -488,6 +489,12 @@ export const ChartComponent = ({ chartId }) => {
     if (modeRef.current === 'live' && !(Array.isArray(targetRange) && targetRange.length >= 2)) {
       endDate = new Date();
     }
+
+    const previousLastBar = lastBarRef.current;
+    const canStreamAppend =
+      behavior === 'append'
+        || (behavior === 'auto' && modeRef.current === 'live' && Boolean(previousLastBar));
+    const hasStreamingBaseline = canStreamAppend && previousLastBar?.time != null;
 
     if (!effectiveSymbol || !effectiveInterval || !startDate || !endDate) {
       warn('chart_load_missing_inputs', {
@@ -510,7 +517,11 @@ export const ChartComponent = ({ chartId }) => {
     const startISO = startDate.toISOString();
     const endISO = endDate.toISOString();
 
-    setDataLoading(true);
+    dataLoadingRef.current = true;
+    const shouldShowLoader = !hasStreamingBaseline;
+    if (shouldShowLoader) {
+      setDataLoading(true);
+    }
     try {
       markAttempt();
       info('candles_fetch_start', {
@@ -531,10 +542,14 @@ export const ChartComponent = ({ chartId }) => {
       });
 
       if (!Array.isArray(resp) || resp.length === 0) {
-        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval });
+        warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval, behavior });
         markSuccess();
-        showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
-        return false;
+        if (!canStreamAppend) {
+          showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
+        } else {
+          debug('live_refresh_empty_batch', { startISO, endISO });
+        }
+        return { ok: false, reason: 'empty' };
       }
 
       const data = resp
@@ -549,65 +564,104 @@ export const ChartComponent = ({ chartId }) => {
 
       if (!seriesRef.current) {
         warn('series missing');
-        return false;
+        return { ok: false, reason: 'series_missing' };
       }
 
-      if (seriesRef.current) {
-        if (effectiveDatasource === DATASOURCE_IDS.CCXT) {
-          const format = deriveCcxtPriceFormat(resp);
-          if (format) {
-            seriesRef.current.applyOptions({ priceFormat: format });
-          }
+      const shouldApplyPriceFormat = effectiveDatasource === DATASOURCE_IDS.CCXT && !hasStreamingBaseline;
+      if (shouldApplyPriceFormat) {
+        const format = deriveCcxtPriceFormat(resp);
+        if (format) {
+          seriesRef.current.applyOptions({ priceFormat: format });
         }
-        seriesRef.current.setData(data);
       }
 
-      lastBarRef.current = data.at(-1);
+      let appendedBars = 0;
+      let touchedBars = 0;
+      let minStep = canStreamAppend ? barSpacingRef.current ?? Infinity : Infinity;
 
-      if (data.length > 1) {
-        let minStep = Infinity;
-        for (let i = 1; i < data.length; i += 1) {
-          const step = data[i].time - data[i - 1].time;
-          if (Number.isFinite(step) && step > 0 && step < minStep) {
-            minStep = step;
-          }
+      if (hasStreamingBaseline) {
+        const prevTimeBaseline = previousLastBar.time;
+        const incremental = data.filter((candle) => candle.time >= prevTimeBaseline);
+        if (incremental.length === 0) {
+          debug('live_refresh_no_changes', { symbol: effectiveSymbol, interval: effectiveInterval, prevTime: prevTimeBaseline });
         }
-        barSpacingRef.current = Number.isFinite(minStep) && minStep > 0 ? minStep : null;
+        for (const candle of incremental) {
+          const priorTime = lastBarRef.current?.time ?? prevTimeBaseline;
+          seriesRef.current.update(candle);
+          if (Number.isFinite(priorTime)) {
+            const step = candle.time - priorTime;
+            if (Number.isFinite(step) && step > 0 && step < minStep) {
+              minStep = step;
+            }
+          }
+          if (Number.isFinite(priorTime) && candle.time > priorTime) {
+            appendedBars += 1;
+          } else if (Number.isFinite(priorTime) && candle.time === priorTime) {
+            touchedBars += 1;
+          }
+          lastBarRef.current = candle;
+        }
+        chartRef.current?.timeScale().scrollToRealTime();
       } else {
-        barSpacingRef.current = null;
+        seriesRef.current.setData(data);
+        lastBarRef.current = data.at(-1) ?? null;
+
+        if (data.length > 1) {
+          for (let i = 1; i < data.length; i += 1) {
+            const step = data[i].time - data[i - 1].time;
+            if (Number.isFinite(step) && step > 0 && step < minStep) {
+              minStep = step;
+            }
+          }
+        } else {
+          minStep = Infinity;
+        }
+
+        const first = data[0]?.time;
+        const last = data.at(-1)?.time;
+        if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+          const span = Math.max(1, last - first);
+          const pad = Math.max(1, Math.floor(span * 0.05));
+          const scaleApi = chartRef.current.timeScale();
+          scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
+          scaleApi.scrollToPosition(0, false);
+        } else {
+          chartRef.current?.timeScale().scrollToRealTime();
+        }
+
+        try {
+          const priceScaleApi = typeof seriesRef.current?.priceScale === 'function'
+            ? seriesRef.current.priceScale()
+            : null;
+          priceScaleApi?.applyOptions?.({ autoScale: true });
+          priceScaleApi?.setAutoScale?.(true);
+        } catch (scaleErr) {
+          debug('price_scale_autoscale_failed', scaleErr);
+        }
       }
+
+      let nextSpacing = barSpacingRef.current;
+      if (Number.isFinite(minStep) && minStep > 0 && minStep !== Infinity) {
+        nextSpacing = minStep;
+      } else if (!hasStreamingBaseline) {
+        nextSpacing = data.length > 1 ? nextSpacing : null;
+      }
+      barSpacingRef.current = nextSpacing;
 
       pvMgrRef.current?.updateVABlockContext({
         lastSeriesTime: lastBarRef.current?.time,
         barSpacing: barSpacingRef.current,
       });
-      const first = data[0]?.time;
-      const last = data.at(-1)?.time;
-      if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
-        const span = Math.max(1, last - first);
-        const pad = Math.max(1, Math.floor(span * 0.05));
-        const scaleApi = chartRef.current.timeScale();
-        scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
-        scaleApi.scrollToPosition(0, false);
-      } else {
-        chartRef.current?.timeScale().scrollToRealTime();
-      }
-
-      try {
-        const priceScaleApi = typeof seriesRef.current?.priceScale === 'function'
-          ? seriesRef.current.priceScale()
-          : null;
-        priceScaleApi?.applyOptions?.({ autoScale: true });
-        priceScaleApi?.setAutoScale?.(true);
-      } catch (scaleErr) {
-        debug('price_scale_autoscale_failed', scaleErr);
-      }
 
       const refreshAt = new Date();
       info('candles_fetch_success', {
         points: data.length,
         first: data[0]?.time,
         last: data.at(-1)?.time,
+        appendedBars,
+        touchedBars,
+        behavior,
+        streaming: hasStreamingBaseline,
       });
 
       markSuccess();
@@ -620,15 +674,24 @@ export const ChartComponent = ({ chartId }) => {
         exchange: effectiveExchange,
         lastUpdatedAt: refreshAt.toISOString(),
       });
-      return true;
+
+      return {
+        ok: true,
+        appended: appendedBars > 0,
+        touched: touchedBars > 0,
+        replaced: !(canStreamAppend && previousLastBar?.time != null),
+        points: data.length,
+      };
     } catch (e) {
       markError(e);
       error('candles_fetch_failed', e);
+      return { ok: false, reason: 'error' };
     } finally {
-      setDataLoading(false);
+      dataLoadingRef.current = false;
+      if (shouldShowLoader) {
+        setDataLoading(false);
+      }
     }
-
-    return false;
   }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt]);
 
   const refreshLive = useCallback(async () => {
@@ -649,22 +712,28 @@ export const ChartComponent = ({ chartId }) => {
         : new Date(Date.now() - LIVE_LOOKBACK_MS);
     const now = new Date();
 
-    setDateRange((prev) => {
-      if (!Array.isArray(prev) || prev.length !== 2) {
-        return [startDate, now];
-      }
-      const prevStart = prev[0] instanceof Date ? prev[0] : startDate;
-      return [prevStart, now];
-    });
+    dateRangeRef.current = [startDate, now];
 
-    return loadChartData({
+    const result = await loadChartData({
       targetSymbol: symbolRef.current,
       targetInterval: intervalRef.current,
       targetRange: [startDate, now],
       targetDatasource: datasourceRef.current,
       targetExchange: exchangeRef.current,
+      behavior: 'append',
     });
-  }, [supportsLive, loadChartData, debug, setDateRange]);
+
+    if (result?.ok) {
+      if (result?.appended) {
+        debug('live_refresh_appended', { appended: result.appended, touched: result.touched });
+      }
+      if (result?.replaced || result?.appended) {
+        bumpRefresh?.(chartId);
+      }
+    }
+
+    return Boolean(result?.ok);
+  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId]);
 
   const { mode, setMode } = useLiveDataMode({ supportsLive, onRefresh: refreshLive, logger });
 
@@ -719,7 +788,7 @@ export const ChartComponent = ({ chartId }) => {
       get series() { return seriesRef.current; }
     });
 
-    loadChartData();
+    void loadChartData();
 
     if (!seededRef.current) {
       updateChart?.(chartId, {
@@ -1121,33 +1190,48 @@ export const ChartComponent = ({ chartId }) => {
   }, [chartState, syncOverlays]);
 
   // Apply handler.
-  const handleApply = useCallback((overrides = {}) => {
+  const handleApply = useCallback(async (overrides = {}, options = {}) => {
     const nextSymbol = overrides.symbol ?? symbol;
     const nextInterval = overrides.interval ?? interval;
-    const nextRange = overrides.dateRange ?? dateRange;
+    const fallbackRange = modeRef.current === 'live' ? dateRangeRef.current : dateRange;
+    const rawRange = overrides.dateRange ?? fallbackRange;
+    const normalizedRange = Array.isArray(rawRange)
+      ? rawRange.map((value) => (value instanceof Date ? value : value ? new Date(value) : value))
+      : [];
     const nextDatasource = overrides.datasource ?? datasource;
     const nextExchange = overrides.exchange ?? exchange;
-    const [start, end] = nextRange || [];
+    const start = normalizedRange[0] instanceof Date && !Number.isNaN(normalizedRange[0]?.getTime())
+      ? normalizedRange[0]
+      : null;
+    const end = normalizedRange[1] instanceof Date && !Number.isNaN(normalizedRange[1]?.getTime())
+      ? normalizedRange[1]
+      : null;
     const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
     const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
     if (windowMs > maxWindowMs) {
       warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
       showWarning('Please choose a window of 90 days or less before applying.');
-      return;
+      return null;
     }
 
     if (nextDatasource === 'CCXT' && !nextExchange) {
       warn('apply_missing_exchange', { chartId, symbol: nextSymbol });
       showWarning('Select a crypto exchange before loading data.');
-      return;
+      return null;
     }
+
+    if (start && end) {
+      dateRangeRef.current = [start, end];
+    }
+
+    const effectiveRange = start && end ? [start, end] : normalizedRange;
 
     setRangeWarning(null);
     info('apply', {
       chartId,
       symbol: nextSymbol,
       interval: nextInterval,
-      dateRange: nextRange,
+      dateRange: effectiveRange,
       datasource: nextDatasource,
       exchange: nextExchange,
     });
@@ -1155,19 +1239,84 @@ export const ChartComponent = ({ chartId }) => {
     updateChart?.(chartId, {
       symbol: nextSymbol,
       interval: nextInterval,
-      dateRange: nextRange,
+      dateRange: effectiveRange,
       datasource: nextDatasource,
       exchange: nextExchange || null,
     });
-    loadChartData({
+
+    const behavior = options.behavior ?? 'replace';
+    const result = await loadChartData({
       targetSymbol: nextSymbol,
       targetInterval: nextInterval,
-      targetRange: nextRange,
+      targetRange: effectiveRange,
       targetDatasource: nextDatasource,
       targetExchange: nextExchange,
+      behavior,
     });
-    bumpRefresh?.(chartId);
+
+    if (result?.ok && (result.replaced || result.appended)) {
+      bumpRefresh?.(chartId);
+    }
+
+    return result;
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
+
+  const lastAppliedParamsRef = useRef({ symbol, interval, datasource, exchange });
+
+  useEffect(() => {
+    const prev = lastAppliedParamsRef.current;
+    const changed =
+      prev.symbol !== symbol
+      || prev.interval !== interval
+      || prev.datasource !== datasource
+      || prev.exchange !== exchange;
+
+    if (!changed) {
+      return;
+    }
+
+    lastAppliedParamsRef.current = { symbol, interval, datasource, exchange };
+
+    if (mode !== 'live' || !supportsLive) {
+      return;
+    }
+
+    const liveRange = Array.isArray(dateRangeRef.current) && dateRangeRef.current.length === 2
+      ? dateRangeRef.current
+      : dateRange;
+
+    void handleApply({
+      symbol,
+      interval,
+      datasource,
+      exchange,
+      dateRange: liveRange,
+    }, { behavior: 'replace' });
+  }, [mode, symbol, interval, datasource, exchange, handleApply, dateRange, supportsLive]);
+
+  useEffect(() => {
+    if (mode === 'live') {
+      return;
+    }
+
+    const current = dateRangeRef.current;
+    if (!Array.isArray(current) || current.length !== 2) {
+      return;
+    }
+    const [start, end] = current;
+    if (!(start instanceof Date) || !(end instanceof Date)) {
+      return;
+    }
+
+    setDateRange((prev) => {
+      const prevStart = prev?.[0] instanceof Date ? prev[0].getTime() : null;
+      const prevEnd = prev?.[1] instanceof Date ? prev[1].getTime() : null;
+      if (prevStart === start.getTime() && prevEnd === end.getTime()) {
+        return prev;
+      }
+      return [start, end];
+    });
+  }, [mode, setDateRange]);
 
   function useBusyDelay(busy, ms=250){
     const [show,setShow]=useState(false);
@@ -1296,14 +1445,20 @@ export const ChartComponent = ({ chartId }) => {
             <TimeframeSelect selected={interval} onChange={setInterval} />
             <SymbolInput value={symbol} onChange={setSymbol} />
             <div className="flex items-end gap-2">
-              <DateRangePickerComponent
-                dateRange={dateRange}
-                setDateRange={setDateRange}
-                disabled={mode === 'live'}
-              />
+              {mode !== 'live' ? (
+                <DateRangePickerComponent
+                  dateRange={dateRange}
+                  setDateRange={setDateRange}
+                  disabled={mode === 'live'}
+                />
+              ) : (
+                <div className="mb-[6px] inline-flex h-9 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[11px] font-medium uppercase tracking-[0.32em] text-slate-200">
+                  Live window · trailing 90 days
+                </div>
+              )}
               <button
                 type="button"
-                onClick={() => handleApply()}
+                onClick={() => { void handleApply(); }}
                 className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 aria-label="Reload chart data"
                 title="Reload chart data"
