@@ -109,19 +109,89 @@ class CCXTProvider(BaseDataProvider):
         seconds = self._timeframe_to_seconds(interval)
         since_ms = int(start_ts.timestamp() * 1000)
         until_ms = int(end_ts.timestamp() * 1000)
+        step_ms = max(int(seconds * 1000), 1)
 
-        estimated_bars = math.ceil((until_ms - since_ms) / (seconds * 1000)) + 2
-        limit = max(1, min(estimated_bars, 1500))
+        rows = []
+        next_since = since_ms
+        iteration_cap = 200
+        max_iterations = iteration_cap
 
-        try:
-            raw = self._exchange.fetch_ohlcv(symbol, timeframe=interval, since=since_ms, limit=limit)
-        except Exception as exc:  # pragma: no cover - network interaction
-            raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+        while next_since < until_ms and max_iterations > 0:
+            remaining_ms = until_ms - next_since
+            estimated_bars = math.ceil(remaining_ms / step_ms) + 2
+            limit = max(1, min(estimated_bars, 1500))
 
-        if not raw:
+            try:
+                batch = self._exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=interval,
+                    since=next_since,
+                    limit=limit,
+                )
+            except Exception as exc:  # pragma: no cover - network interaction
+                raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+
+            batch_count = len(batch)
+            batch_start = pd.to_datetime(next_since, unit="ms", utc=True)
+            if not batch_count:
+                logger.info(
+                    "CCXT %s fetch returned no data for %s [%s] starting %s; stopping.",
+                    self._exchange_id,
+                    symbol,
+                    interval,
+                    batch_start.isoformat(),
+                )
+                break
+
+            rows.extend(batch)
+
+            last_ts = batch[-1][0]
+            if last_ts is None:
+                logger.warning(
+                    "CCXT %s fetch produced a batch without timestamps for %s [%s]; stopping.",
+                    self._exchange_id,
+                    symbol,
+                    interval,
+                )
+                break
+
+            last_dt = pd.to_datetime(last_ts, unit="ms", utc=True)
+
+            # Advance the cursor to avoid duplicate bars; CCXT `since` is inclusive.
+            next_since = max(last_ts + step_ms, next_since + step_ms)
+            max_iterations -= 1
+
+            reached_end = next_since >= until_ms or last_ts >= until_ms
+            logger.info(
+                "CCXT %s fetched %d candles for %s [%s] from %s to %s (limit=%d).%s",
+                self._exchange_id,
+                batch_count,
+                symbol,
+                interval,
+                batch_start.isoformat(),
+                last_dt.isoformat(),
+                limit,
+                " Reached requested end; stopping." if reached_end else " Continuing pagination.",
+            )
+
+            if reached_end:
+                break
+
+        if max_iterations == 0 and next_since < until_ms:
+            logger.warning(
+                "CCXT %s pagination stopped after %d iterations before reaching %s for %s [%s].",
+                self._exchange_id,
+                iteration_cap,
+                pd.to_datetime(until_ms, unit="ms", utc=True).isoformat(),
+                symbol,
+                interval,
+            )
+
+        if not rows:
             return pd.DataFrame()
 
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df.drop_duplicates(subset="timestamp", keep="last", inplace=True)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
 
