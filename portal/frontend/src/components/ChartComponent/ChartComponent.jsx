@@ -251,6 +251,12 @@ export const ChartComponent = ({ chartId }) => {
   const lastBarRef = useRef(null);
   const barSpacingRef = useRef(null);
   const timeframeWarningRef = useRef(null);
+  const activeSeriesKeyRef = useRef({
+    symbol: null,
+    interval: null,
+    datasource: null,
+    exchange: null,
+  });
   const symbolRef = useRef(symbol);
   const intervalRef = useRef(interval);
   const dateRangeRef = useRef(dateRange);
@@ -601,7 +607,7 @@ export const ChartComponent = ({ chartId }) => {
           }
           lastBarRef.current = candle;
         }
-        chartRef.current?.timeScale().scrollToRealTime();
+        // Preserve the current viewport position so incremental updates feel seamless.
       } else {
         seriesRef.current.setData(data);
         lastBarRef.current = data.at(-1) ?? null;
@@ -617,16 +623,16 @@ export const ChartComponent = ({ chartId }) => {
           minStep = Infinity;
         }
 
-        const first = data[0]?.time;
-        const last = data.at(-1)?.time;
-        if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
-          const span = Math.max(1, last - first);
-          const pad = Math.max(1, Math.floor(span * 0.05));
-          const scaleApi = chartRef.current.timeScale();
-          scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
-          scaleApi.scrollToPosition(0, false);
-        } else {
-          chartRef.current?.timeScale().scrollToRealTime();
+        if (!previousLastBar) {
+          const first = data[0]?.time;
+          const last = data.at(-1)?.time;
+          if (chartRef.current && Number.isFinite(first) && Number.isFinite(last)) {
+            const span = Math.max(1, last - first);
+            const pad = Math.max(1, Math.floor(span * 0.05));
+            const scaleApi = chartRef.current.timeScale();
+            scaleApi.setVisibleRange({ from: first - pad, to: last + pad });
+            scaleApi.scrollToPosition(0, false);
+          }
         }
 
         try {
@@ -674,6 +680,13 @@ export const ChartComponent = ({ chartId }) => {
         exchange: effectiveExchange,
         lastUpdatedAt: refreshAt.toISOString(),
       });
+
+      activeSeriesKeyRef.current = {
+        symbol: effectiveSymbol,
+        interval: effectiveInterval,
+        datasource: effectiveDatasource,
+        exchange: effectiveExchange,
+      };
 
       return {
         ok: true,
@@ -1206,14 +1219,6 @@ export const ChartComponent = ({ chartId }) => {
     const end = normalizedRange[1] instanceof Date && !Number.isNaN(normalizedRange[1]?.getTime())
       ? normalizedRange[1]
       : null;
-    const maxWindowMs = 90 * 24 * 60 * 60 * 1000;
-    const windowMs = start && end ? Math.abs(end.getTime() - start.getTime()) : 0;
-    if (windowMs > maxWindowMs) {
-      warn('apply_blocked_range', { chartId, symbol: nextSymbol, interval: nextInterval, windowMs });
-      showWarning('Please choose a window of 90 days or less before applying.');
-      return null;
-    }
-
     if (nextDatasource === 'CCXT' && !nextExchange) {
       warn('apply_missing_exchange', { chartId, symbol: nextSymbol });
       showWarning('Select a crypto exchange before loading data.');
@@ -1235,6 +1240,22 @@ export const ChartComponent = ({ chartId }) => {
       datasource: nextDatasource,
       exchange: nextExchange,
     });
+    const prevKey = activeSeriesKeyRef.current;
+    const isSeriesChange =
+      prevKey.symbol !== nextSymbol
+      || prevKey.interval !== nextInterval
+      || prevKey.datasource !== nextDatasource
+      || prevKey.exchange !== nextExchange;
+
+    if (isSeriesChange) {
+      lastBarRef.current = null;
+      barSpacingRef.current = null;
+      try {
+        seriesRef.current?.setData?.([]);
+      } catch {
+        // ignore failures caused by interim series resets
+      }
+    }
     syncOverlays([]); // clear overlays on apply
     updateChart?.(chartId, {
       symbol: nextSymbol,
