@@ -35,6 +35,8 @@ services:
       PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
       OHLC_TABLE: ohlc_raw
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
+      DEBUG: ${DEBUG:-true}
+      ENV: ${ENV:-dev}
     ports:
       - "8000:8000"
     depends_on:
