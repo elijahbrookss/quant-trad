@@ -26,7 +26,7 @@ TSDB_PORT ?= 15432
 export TSDB_PORT
 
 # Docker stack profile helpers
-STACK_PRESET_all           := core,database,observability
+STACK_PRESET_all           := core,database,observability # ,brokers removed brokers
 STACK_PRESET_core          := core,database
 STACK_PRESET_database      := database
 STACK_PRESET_observability := observability
