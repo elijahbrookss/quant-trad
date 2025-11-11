@@ -37,7 +37,7 @@ export function TimeframeSelect({ selected, onChange }) {
   };
 
   return (
-    <div className="flex min-w-[13rem] flex-col gap-2">
+    <div className="flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]">
       <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-300">Timeframe</span>
       <div className="relative">
         <button
@@ -105,25 +105,29 @@ export function TimeframeSelect({ selected, onChange }) {
 }
 
 
-export function SymbolInput({ value, onRequestPick, placeholder = 'Symbol' }) {
-  const displayValue = (value || '').toString().trim().toUpperCase();
+export function SymbolInput({ value, onChange, onRequestPick, placeholder = 'Symbol' }) {
+  const displayValue = (value || '').toString();
 
   return (
-    <div className="flex min-w-[12rem] flex-col gap-2">
+    <div className="flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]">
       <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Symbol</span>
-      <button
-        type="button"
-        onClick={() => onRequestPick?.()}
-        className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-100 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-      >
-        <span className={displayValue ? 'text-slate-100' : 'text-slate-400'}>
-          {displayValue || placeholder}
-        </span>
-        <span className="inline-flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.4em] text-slate-400">
-          <span className="rounded border border-slate-600 px-1 py-0.5 text-[9px] leading-none">/</span>
-          Browse
-        </span>
-      </button>
+      <div className="flex items-center gap-2 rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 shadow-[0_12px_32px_-24px_rgba(0,0,0,0.75)]">
+        <input
+          type="text"
+          value={displayValue}
+          onChange={(event) => onChange?.(event.target.value)}
+          placeholder={placeholder}
+          className="flex-1 border-none bg-transparent text-sm font-semibold uppercase tracking-[0.28em] text-slate-100 placeholder:text-slate-500 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => onRequestPick?.()}
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-600/70 bg-slate-800/60 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+        >
+          <span className="rounded border border-slate-500/70 px-1 py-[1px] text-[9px]">/</span>
+          Presets
+        </button>
+      </div>
       <span className="text-[11px] text-neutral-500">
         Press <kbd className="rounded border border-neutral-600 bg-neutral-800 px-1 py-0.5 text-[10px]">/</kbd> to search
       </span>

@@ -13,7 +13,7 @@ export default function DataModeToggle({
   liveDescription,
 }) {
   return (
-    <div className="flex min-w-[14rem] flex-col gap-2">
+    <div className="flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]">
       <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Data mode</span>
       <div className="inline-flex w-full gap-1 rounded-lg border border-white/12 bg-[#141824]/85 p-1 shadow-sm shadow-black/20">
         {MODES.map(({ value, label }) => {

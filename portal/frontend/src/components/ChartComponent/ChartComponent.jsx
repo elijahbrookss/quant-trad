@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
 import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
+import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
@@ -34,6 +35,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_LOOKBACK_DAYS = 365;
 const DEFAULT_LOOKBACK_DAYS = 90;
 const LIVE_CRYPTO_EXCHANGES = new Set(['binanceus']);
+const HISTORICAL_WINDOW_MODES = {
+  LOOKBACK: 'lookback',
+  RANGE: 'range',
+};
 
 const clampLookbackDays = (value) => {
   const numeric = Number(value);
@@ -212,6 +217,9 @@ export const ChartComponent = ({ chartId }) => {
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
     new Date(),
   ]);
+  const [historicalWindowMode, setHistoricalWindowMode] = useState(
+    HISTORICAL_WINDOW_MODES.LOOKBACK,
+  );
   const [historicalLookbackDays, setHistoricalLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
   const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
   const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
@@ -783,13 +791,16 @@ export const ChartComponent = ({ chartId }) => {
     if (mode === 'live') {
       return;
     }
+    if (historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) {
+      return;
+    }
     const now = new Date();
     const normalized = clampLookbackDays(historicalLookbackDays);
     const start = new Date(now.getTime() - normalized * DAY_MS);
     const nextRange = [start, now];
     dateRangeRef.current = nextRange;
     setDateRange(nextRange);
-  }, [mode, historicalLookbackDays]);
+  }, [mode, historicalLookbackDays, historicalWindowMode]);
 
   useEffect(() => {
     if (mode !== 'live') {
@@ -951,11 +962,18 @@ export const ChartComponent = ({ chartId }) => {
   }, []);
 
   const applySymbol = (sym) => {
-    setSymbol(sym);
+    const sanitized = (sym ?? '').toString().trim().toUpperCase();
+    setSymbol(sanitized);
     setPalOpen(false);
   };
 
+  const handleSymbolInputChange = useCallback((raw) => {
+    const next = (raw ?? '').toString().toUpperCase();
+    setSymbol(next.trim());
+  }, []);
+
   const handleHistoricalLookbackChange = useCallback((days) => {
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
     setHistoricalLookbackDays(clampLookbackDays(days));
   }, []);
 
@@ -963,6 +981,27 @@ export const ChartComponent = ({ chartId }) => {
     const raw = event?.target?.value ?? '';
     const sanitized = raw.replace(/[^0-9]/g, '');
     setLiveLookbackInput(sanitized);
+  }, []);
+
+  const handleDateRangeSelection = useCallback((nextRange) => {
+    if (!Array.isArray(nextRange)) return;
+    const normalized = nextRange.map((value) => {
+      if (value instanceof Date) return value;
+      if (!value) return value;
+      const converted = new Date(value);
+      return Number.isNaN(converted.getTime()) ? null : converted;
+    });
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
+    dateRangeRef.current = normalized;
+    setDateRange(normalized);
+  }, []);
+
+  const handleHistoricalModeToggle = useCallback((nextMode) => {
+    if (nextMode === HISTORICAL_WINDOW_MODES.RANGE) {
+      setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
+      return;
+    }
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
   }, []);
 
   // Overlay refs and syncer.
@@ -1465,8 +1504,12 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [dataLoading, lastRefreshAt, mode]);
 
+  const isLookbackMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.LOOKBACK;
+  const isRangeMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.RANGE;
+
   return (
-    <div className="space-y-5">
+    <>
+      <div className="space-y-5">
       {connectionNotice && (
         <div className="flex items-start gap-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
           <span className="mt-0.5 text-lg">⚠️</span>
@@ -1484,111 +1527,189 @@ export const ChartComponent = ({ chartId }) => {
         </div>
       )}
 
-      <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-6 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
-        <div className="flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end md:justify-between">
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-            <div className="flex min-w-[13rem] flex-col gap-2">
-              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
-              <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
-                {DATASOURCE_OPTIONS.map((option) => {
-                  const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
-                  const isActive = isCryptoOption
-                    ? datasource === DATASOURCE_IDS.CCXT
-                    : datasource !== DATASOURCE_IDS.CCXT;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => handleDatasourceChange(option.value)}
-                      className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner' : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'}`}
-                    >
-                      {option.label}
-                    </button>
-                  );
-                })}
+      <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-8 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
+        <div className="flex flex-col gap-8">
+          <div className="flex flex-col gap-6">
+            <div className="flex flex-wrap gap-6">
+              <div className="flex min-w-[15rem] flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]">
+                <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
+                <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
+                  {DATASOURCE_OPTIONS.map((option) => {
+                    const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
+                    const isActive = isCryptoOption
+                      ? datasource === DATASOURCE_IDS.CCXT
+                      : datasource !== DATASOURCE_IDS.CCXT;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleDatasourceChange(option.value)}
+                        className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                          isActive
+                            ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner'
+                            : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
+
+              <DropdownSelect
+                className="min-w-[17rem] rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]"
+                label="Exchange"
+                value={selectedExchangeValue}
+                onChange={handleExchangeChange}
+                options={exchangeSelectOptions}
+                placeholder={exchangePlaceholder}
+              />
+
+              {marketProvider === 'ibkr' ? (
+                <DropdownSelect
+                  className="min-w-[17rem] rounded-2xl border border-slate-700/60 bg-slate-900/50 p-4 shadow-[0_18px_50px_-30px_rgba(0,0,0,0.85)]"
+                  label="IB Venue"
+                  value={exchange || DEFAULT_IB_EXCHANGE}
+                  onChange={handleIbVenueChange}
+                  options={IB_EXCHANGES.map((entry) => ({
+                    value: entry.value,
+                    label: entry.label,
+                    description: entry.description,
+                  }))}
+                  placeholder="Select venue"
+                />
+              ) : null}
             </div>
 
-            <DropdownSelect
-              className="min-w-[15rem]"
-              label="Exchange"
-              value={selectedExchangeValue}
-              onChange={handleExchangeChange}
-              options={exchangeSelectOptions}
-              placeholder={exchangePlaceholder}
-            />
-
-            {marketProvider === 'ibkr' ? (
-              <DropdownSelect
-                className="min-w-[14rem]"
-                label="IB Venue"
-                value={exchange || DEFAULT_IB_EXCHANGE}
-                onChange={handleIbVenueChange}
-                options={IB_EXCHANGES.map((entry) => ({
-                  value: entry.value,
-                  label: entry.label,
-                  description: entry.description,
-                }))}
-                placeholder="Select venue"
+            <div className="flex flex-wrap gap-6">
+              <TimeframeSelect selected={interval} onChange={setInterval} />
+              <SymbolInput
+                value={symbol}
+                onChange={handleSymbolInputChange}
+                onRequestPick={() => setPalOpen(true)}
               />
-            ) : null}
+              <div className="min-w-[14rem] flex-1">
+                <DataModeToggle
+                  mode={mode}
+                  onChange={setMode}
+                  supportsLive={supportsLive}
+                  disabledReason={liveDisabledReason}
+                  liveDescription={liveDescription}
+                />
+              </div>
+            </div>
+          </div>
 
-            <DataModeToggle
-              mode={mode}
-              onChange={setMode}
-              supportsLive={supportsLive}
-              disabledReason={liveDisabledReason}
-              liveDescription={liveDescription}
-            />
+          <div className="rounded-2xl border border-white/10 bg-[#141824]/80 p-6 shadow-[0_24px_80px_-60px_rgba(0,0,0,0.85)]">
+            <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Data window</span>
+                <p className="text-sm text-slate-300">Refine the slice of history you want to analyse.</p>
+              </div>
 
-            <TimeframeSelect selected={interval} onChange={setInterval} />
-            <SymbolInput value={symbol} onRequestPick={() => setPalOpen(true)} />
-            <div className="flex items-end gap-2">
               {mode !== 'live' ? (
-                <HistoricalLookbackControl
-                  value={historicalLookbackDays}
-                  onSelect={handleHistoricalLookbackChange}
-                  maxDays={MAX_LOOKBACK_DAYS}
-                />
+                <div className="ml-auto inline-flex items-center gap-1 rounded-full border border-slate-600/70 bg-slate-900/60 p-1">
+                  <button
+                    type="button"
+                    onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE)}
+                    className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition ${
+                      isRangeMode
+                        ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner'
+                        : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'
+                    }`}
+                  >
+                    Calendar Range
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.LOOKBACK)}
+                    className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition ${
+                      isLookbackMode
+                        ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner'
+                        : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'
+                    }`}
+                  >
+                    Days Back
+                  </button>
+                </div>
               ) : (
-                <LiveLookbackControl
-                  value={liveLookbackInput}
-                  onChange={handleLiveLookbackInputChange}
-                  onCommit={handleLiveLookbackCommit}
-                  maxDays={MAX_LOOKBACK_DAYS}
-                />
+                <span className="ml-auto text-[11px] uppercase tracking-[0.3em] text-slate-400">
+                  Live streaming
+                </span>
               )}
+
               <button
                 type="button"
                 onClick={() => { void handleApply(); }}
-                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                className="ml-auto inline-flex h-10 w-10 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-25)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 aria-label="Reload chart data"
                 title="Reload chart data"
               >
                 <RotateCcw className="size-4" />
               </button>
             </div>
+
+            {mode !== 'live' ? (
+              <div className="mt-6 grid gap-5 lg:grid-cols-2">
+                <div
+                  className={`cursor-pointer rounded-2xl border px-4 py-4 transition ${
+                    isRangeMode
+                      ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)] shadow-[0_12px_32px_-24px_rgba(0,0,0,0.75)]'
+                      : 'border-slate-700/60 bg-slate-900/40 hover:border-slate-600/70'
+                  }`}
+                  onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE)}
+                >
+                  <DateRangePickerComponent
+                    dateRange={dateRange}
+                    setDateRange={handleDateRangeSelection}
+                    disabled={!isRangeMode}
+                  />
+                </div>
+
+                <HistoricalLookbackControl
+                  value={historicalLookbackDays}
+                  onSelect={handleHistoricalLookbackChange}
+                  maxDays={MAX_LOOKBACK_DAYS}
+                  active={isLookbackMode}
+                  onActivate={handleHistoricalModeToggle}
+                />
+              </div>
+            ) : (
+              <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-start">
+                <LiveLookbackControl
+                  value={liveLookbackInput}
+                  onChange={handleLiveLookbackInputChange}
+                  onCommit={handleLiveLookbackCommit}
+                  maxDays={MAX_LOOKBACK_DAYS}
+                  className="sm:max-w-xs"
+                />
+                <p className="text-sm text-slate-300 sm:max-w-md">
+                  Stream real-time candles while preserving a trailing window for overlays, signals, and annotations.
+                </p>
+              </div>
+            )}
           </div>
-        </div>
-
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-xs text-slate-400">{lastRefreshCopy}</p>
-          {connectionStatus === 'error' && connectionMessage ? (
-            <p className={`text-xs ${statusTextClass} sm:text-right`}>{connectionMessage}</p>
-          ) : null}
-        </div>
-
-        <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-[#222430] to-[#151720]">
-          <div className="pointer-events-none absolute right-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
-            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
-          </div>
-          <div ref={chartContainerRef} className="h-full w-full" />
-
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          <LoadingOverlay show={loaderActive} message={loaderMessage} />
         </div>
       </div>
-    </div>
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-xs text-slate-400">{lastRefreshCopy}</p>
+        {connectionStatus === 'error' && connectionMessage ? (
+          <p className={`text-xs ${statusTextClass} sm:text-right`}>{connectionMessage}</p>
+        ) : null}
+      </div>
+
+      <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-[#222430] to-[#151720]">
+        <div className="pointer-events-none absolute right-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
+          Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
+        </div>
+        <div ref={chartContainerRef} className="h-full w-full" />
+
+        <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+        <HotkeyHint />
+        <LoadingOverlay show={loaderActive} message={loaderMessage} />
+      </div>
+      </div>
+    </>
   )
 };
