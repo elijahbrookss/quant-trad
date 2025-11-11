@@ -184,6 +184,55 @@ class BaseDataProvider(ABC):
             logger.exception("DB error during ingest for %s: %s", ctx.symbol, exc)
             raise
 
+    @staticmethod
+    def _history_segment_target() -> int:
+        raw = os.getenv("HISTORY_SEGMENT_POINTS")
+        if raw is None:
+            return 1000
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1000
+
+    @classmethod
+    def _split_history_range(
+        cls,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        interval: str,
+        *,
+        max_points: int = None,
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        if max_points is None:
+            max_points = cls._history_segment_target()
+
+        try:
+            step = cls._interval_to_timedelta(interval)
+        except Exception:
+            step = dt.timedelta(minutes=1)
+
+        if step <= dt.timedelta(0):
+            step = dt.timedelta(minutes=1)
+
+        span = step * max_points
+        if span <= dt.timedelta(0):
+            span = dt.timedelta(minutes=1)
+
+        segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        cursor = start
+
+        while cursor < end:
+            segment_end = min(cursor + span, end)
+            if segment_end <= cursor:
+                break
+            segments.append((cursor, segment_end))
+            cursor = segment_end
+
+        if not segments:
+            segments.append((start, end))
+
+        return segments
+
     def ingest_history(self, ctx: DataContext, days: int = 30) -> int:
         start = ctx.start
         end = ctx.end
@@ -193,26 +242,87 @@ class BaseDataProvider(ABC):
             start_dt = end_dt - dt.timedelta(days=days)
             ctx.start = start_dt.isoformat()
             ctx.end = end_dt.isoformat()
+            start = ctx.start
+            end = ctx.end
 
         try:
-            logger.debug("Fetching data for %s [%s] from %s to %s", ctx.symbol, ctx.interval, ctx.start, ctx.end)
-            df = self.fetch_from_api(ctx.symbol, ctx.start, ctx.end, ctx.interval)
-
-            if df is None or df.empty:
-                logger.warning("No data returned for %s (%s).", ctx.symbol, ctx.interval)
-                return 0
-
-            df["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
-            df["datasource"] = self.get_datasource()
-            df["interval"] = ctx.interval
-            df["symbol"] = ctx.symbol
-
-        except Exception as e:
-            logger.exception("Data fetch failed for %s: %s", ctx.symbol, e)
+            start_ts = pd.to_datetime(start, utc=True)
+            end_ts = pd.to_datetime(end, utc=True)
+        except Exception as exc:
+            logger.exception("Failed to parse history range for %s: %s", ctx.symbol, exc)
             return 0
 
+        if start_ts >= end_ts:
+            logger.warning(
+                "History ingest skipped for %s [%s]; start %s is not before end %s.",
+                ctx.symbol,
+                ctx.interval,
+                start_ts,
+                end_ts,
+            )
+            return 0
+
+        segments = self._split_history_range(start_ts, end_ts, ctx.interval)
+        total_segments = len(segments)
+
+        frames: List[pd.DataFrame] = []
+        for index, (segment_start, segment_end) in enumerate(segments, start=1):
+            logger.info(
+                "History ingest segment %d/%d for %s [%s]: %s -> %s",
+                index,
+                total_segments,
+                ctx.symbol,
+                ctx.interval,
+                segment_start.isoformat(),
+                segment_end.isoformat(),
+            )
+
+            try:
+                df = self.fetch_from_api(
+                    ctx.symbol,
+                    segment_start.to_pydatetime(),
+                    segment_end.to_pydatetime(),
+                    ctx.interval,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "History segment fetch failed for %s [%s] (%s -> %s): %s",
+                    ctx.symbol,
+                    ctx.interval,
+                    segment_start.isoformat(),
+                    segment_end.isoformat(),
+                    exc,
+                )
+                continue
+
+            if df is None or df.empty:
+                logger.warning(
+                    "History segment returned no data for %s [%s] (%s -> %s).",
+                    ctx.symbol,
+                    ctx.interval,
+                    segment_start.isoformat(),
+                    segment_end.isoformat(),
+                )
+                continue
+
+            frames.append(df.copy())
+
+        if not frames:
+            logger.warning("No history data fetched for %s [%s].", ctx.symbol, ctx.interval)
+            return 0
+
+        combined = pd.concat(frames, ignore_index=True)
+        combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
+        combined.sort_values("timestamp", inplace=True)
+
+        now_ts = dt.datetime.now(dt.timezone.utc)
+        combined["data_ingested_ts"] = now_ts
+        combined["datasource"] = self.get_datasource()
+        combined["interval"] = ctx.interval
+        combined["symbol"] = ctx.symbol
+
         try:
-            return self._write_dataframe(df, ctx)
+            return self._write_dataframe(combined, ctx)
         except SQLAlchemyError as e:
             logger.exception("DB error during ingest_history for %s: %s", ctx.symbol, e)
             raise

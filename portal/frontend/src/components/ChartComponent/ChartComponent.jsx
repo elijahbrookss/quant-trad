@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
 import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
-import { DateRangePickerComponent } from './DateTimePickerComponent';
 import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
@@ -16,6 +15,7 @@ import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
 import DataModeToggle from './DataModeToggle.jsx';
 import { useLiveDataMode } from './hooks/useLiveDataMode.js';
+import { HistoricalLookbackControl, LiveLookbackControl } from './LookbackControls.jsx';
 import {
   DATASOURCE_OPTIONS,
   DATASOURCE_IDS,
@@ -30,8 +30,19 @@ import {
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
-const LIVE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_LOOKBACK_DAYS = 365;
+const DEFAULT_LOOKBACK_DAYS = 90;
 const LIVE_CRYPTO_EXCHANGES = new Set(['binanceus']);
+
+const clampLookbackDays = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_LOOKBACK_DAYS;
+  }
+  const rounded = Math.round(numeric);
+  return Math.max(1, Math.min(MAX_LOOKBACK_DAYS, rounded));
+};
 
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
@@ -198,13 +209,21 @@ export const ChartComponent = ({ chartId }) => {
   const [marketProvider, setMarketProvider] = useState(DEFAULT_MARKET_PROVIDER);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
-    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
-    new Date()
+    new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
+    new Date(),
   ]);
+  const [historicalLookbackDays, setHistoricalLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
   const [dataLoading, setDataLoading] = useState(false);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
+
+  useEffect(() => {
+    const normalized = String(clampLookbackDays(liveLookbackDays));
+    setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
+  }, [liveLookbackDays]);
 
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
@@ -717,13 +736,19 @@ export const ChartComponent = ({ chartId }) => {
       return false;
     }
 
+    const now = new Date();
+    const lookbackMs = clampLookbackDays(liveLookbackDays) * DAY_MS;
+    const fallbackStart = new Date(now.getTime() - lookbackMs);
+
     const [rangeStartRaw] = dateRangeRef.current || [];
-    const startDate = rangeStartRaw instanceof Date
+    const candidateStart = rangeStartRaw instanceof Date
       ? rangeStartRaw
       : rangeStartRaw
         ? new Date(rangeStartRaw)
-        : new Date(Date.now() - LIVE_LOOKBACK_MS);
-    const now = new Date();
+        : null;
+    const startDate = candidateStart && candidateStart <= now
+      ? (candidateStart < fallbackStart ? fallbackStart : candidateStart)
+      : fallbackStart;
 
     dateRangeRef.current = [startDate, now];
 
@@ -746,13 +771,37 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     return Boolean(result?.ok);
-  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId]);
+  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId, liveLookbackDays]);
 
   const { mode, setMode } = useLiveDataMode({ supportsLive, onRefresh: refreshLive, logger });
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    if (mode === 'live') {
+      return;
+    }
+    const now = new Date();
+    const normalized = clampLookbackDays(historicalLookbackDays);
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+  }, [mode, historicalLookbackDays]);
+
+  useEffect(() => {
+    if (mode !== 'live') {
+      return;
+    }
+    const now = new Date();
+    const normalized = clampLookbackDays(liveLookbackDays);
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+  }, [mode, liveLookbackDays]);
 
   const lastModeRef = useRef('historical');
   useEffect(() => {
@@ -905,6 +954,16 @@ export const ChartComponent = ({ chartId }) => {
     setSymbol(sym);
     setPalOpen(false);
   };
+
+  const handleHistoricalLookbackChange = useCallback((days) => {
+    setHistoricalLookbackDays(clampLookbackDays(days));
+  }, []);
+
+  const handleLiveLookbackInputChange = useCallback((event) => {
+    const raw = event?.target?.value ?? '';
+    const sanitized = raw.replace(/[^0-9]/g, '');
+    setLiveLookbackInput(sanitized);
+  }, []);
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
@@ -1282,6 +1341,25 @@ export const ChartComponent = ({ chartId }) => {
     return result;
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
 
+  const handleLiveLookbackCommit = useCallback(() => {
+    const parsed = Number.parseInt(liveLookbackInput, 10);
+    const normalized = clampLookbackDays(Number.isNaN(parsed) ? liveLookbackDays : parsed);
+    const changed = normalized !== liveLookbackDays;
+
+    setLiveLookbackDays(normalized);
+    setLiveLookbackInput(String(normalized));
+
+    const now = new Date();
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+
+    if (modeRef.current === 'live' && supportsLive && changed) {
+      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+    }
+  }, [liveLookbackInput, liveLookbackDays, supportsLive, handleApply]);
+
   const lastAppliedParamsRef = useRef({ symbol, interval, datasource, exchange });
 
   useEffect(() => {
@@ -1464,18 +1542,21 @@ export const ChartComponent = ({ chartId }) => {
             />
 
             <TimeframeSelect selected={interval} onChange={setInterval} />
-            <SymbolInput value={symbol} onChange={setSymbol} />
+            <SymbolInput value={symbol} onRequestPick={() => setPalOpen(true)} />
             <div className="flex items-end gap-2">
               {mode !== 'live' ? (
-                <DateRangePickerComponent
-                  dateRange={dateRange}
-                  setDateRange={setDateRange}
-                  disabled={mode === 'live'}
+                <HistoricalLookbackControl
+                  value={historicalLookbackDays}
+                  onSelect={handleHistoricalLookbackChange}
+                  maxDays={MAX_LOOKBACK_DAYS}
                 />
               ) : (
-                <div className="mb-[6px] inline-flex h-9 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[11px] font-medium uppercase tracking-[0.32em] text-slate-200">
-                  Live window · trailing 90 days
-                </div>
+                <LiveLookbackControl
+                  value={liveLookbackInput}
+                  onChange={handleLiveLookbackInputChange}
+                  onCommit={handleLiveLookbackCommit}
+                  maxDays={MAX_LOOKBACK_DAYS}
+                />
               )}
               <button
                 type="button"

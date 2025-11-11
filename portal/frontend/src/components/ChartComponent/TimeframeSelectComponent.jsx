@@ -105,28 +105,28 @@ export function TimeframeSelect({ selected, onChange }) {
 }
 
 
-export function SymbolInput({ value, onChange, placeholder = 'Symbol' }) {
+export function SymbolInput({ value, onRequestPick, placeholder = 'Symbol' }) {
+  const displayValue = (value || '').toString().trim().toUpperCase();
+
   return (
-    <div className="flex flex-col gap-2 min-w-[10rem]">
+    <div className="flex min-w-[12rem] flex-col gap-2">
       <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Symbol</span>
-      <div className="relative flex items-center">
-        <span className="pointer-events-none absolute left-3 text-neutral-500">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-4 w-4">
-            <path strokeLinecap="round" strokeLinejoin="round" d="m19 19-3.5-3.5m1-4.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0Z" />
-          </svg>
+      <button
+        type="button"
+        onClick={() => onRequestPick?.()}
+        className="flex w-full items-center justify-between rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-100 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+      >
+        <span className={displayValue ? 'text-slate-100' : 'text-slate-400'}>
+          {displayValue || placeholder}
         </span>
-        <input
-          type="text"
-          inputMode="text"
-          spellCheck={false}
-          autoCapitalize="characters"
-          autoComplete="off"
-          className="w-40 rounded-md border border-neutral-800 bg-neutral-900/70 py-2 pl-9 pr-3 text-sm font-semibold uppercase tracking-wide text-neutral-100 outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-1 focus:ring-[color:var(--accent-ring)]"
-          value={value}
-          onChange={(e) => onChange(e.target.value.toUpperCase())}
-          placeholder={placeholder}
-        />
-      </div>
+        <span className="inline-flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.4em] text-slate-400">
+          <span className="rounded border border-slate-600 px-1 py-0.5 text-[9px] leading-none">/</span>
+          Browse
+        </span>
+      </button>
+      <span className="text-[11px] text-neutral-500">
+        Press <kbd className="rounded border border-neutral-600 bg-neutral-800 px-1 py-0.5 text-[10px]">/</kbd> to search
+      </span>
     </div>
   );
 }
