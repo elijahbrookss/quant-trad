@@ -15,7 +15,7 @@ export default function DataModeToggle({
 }) {
   return (
     <div
-      className={`flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-5 shadow-lg shadow-black/30 ${className}`}
+      className={`flex min-w-[14rem] flex-col gap-2.5 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-4 shadow-lg shadow-black/25 ${className}`}
     >
       <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Data mode</span>
       <div className="inline-flex w-full gap-1 rounded-xl border border-white/10 bg-[#0b1324]/90 p-1 shadow-sm shadow-black/20">

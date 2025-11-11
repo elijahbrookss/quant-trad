@@ -39,7 +39,7 @@ export function TimeframeSelect({ selected, onChange, className = '' }) {
 
   return (
     <div
-      className={`flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-5 shadow-lg shadow-black/30 ${className}`}
+      className={`flex min-w-[14rem] flex-col gap-2.5 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-4 shadow-lg shadow-black/25 ${className}`}
     >
       <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Timeframe</span>
       <div className="relative">
@@ -133,10 +133,10 @@ export function SymbolInput({
 
   return (
     <div
-      className={`flex min-w-[14rem] flex-col gap-3 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-5 shadow-lg shadow-black/30 ${className}`}
+      className={`flex min-w-[14rem] flex-col gap-2.5 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-4 shadow-lg shadow-black/25 ${className}`}
     >
       <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Symbol</span>
-      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-2">
+      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-1.5">
         <input
           type="text"
           value={displayValue}
@@ -154,7 +154,7 @@ export function SymbolInput({
           <span>Palette</span>
         </button>
       </div>
-      <span className="text-[11px] text-slate-500">
+      <span className="text-[10px] text-slate-500">
         Press <kbd className="rounded border border-white/15 bg-white/5 px-1 py-0.5 text-[10px] text-slate-200">/</kbd> to search
       </span>
     </div>

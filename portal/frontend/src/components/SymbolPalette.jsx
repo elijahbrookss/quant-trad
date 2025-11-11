@@ -70,10 +70,10 @@ export default function SymbolPalette({ open, onClose, onPick }) {
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-4xl overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-br from-[#080b14]/95 via-[#060a12]/95 to-[#04060c]/95 shadow-[0_60px_160px_-90px_rgba(0,0,0,0.9)]"
+        className="relative w-full max-w-[1120px] overflow-hidden rounded-[26px] border border-white/12 bg-gradient-to-br from-[#080b14]/95 via-[#060a12]/95 to-[#04060c]/95 shadow-[0_60px_160px_-90px_rgba(0,0,0,0.9)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex flex-col gap-2 border-b border-white/10 bg-[#0b1324]/70 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+        <header className="flex flex-col gap-1.5 border-b border-white/10 bg-[#0b1324]/70 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-semibold tracking-tight text-slate-100">Symbol library</h2>
             <p className="text-sm text-slate-400">
@@ -89,8 +89,8 @@ export default function SymbolPalette({ open, onClose, onPick }) {
           </button>
         </header>
 
-        <div className="flex flex-col gap-4 px-6 py-5">
-          <div className="flex flex-col gap-3 rounded-2xl border border-white/12 bg-[#0b1324]/70 px-4 py-4 shadow-inner shadow-black/20">
+        <div className="flex flex-col gap-4 px-6 py-4">
+          <div className="flex flex-col gap-2.5 rounded-2xl border border-white/12 bg-[#0b1324]/70 px-4 py-4 shadow-inner shadow-black/20">
             <label className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">
               Find a symbol
             </label>
