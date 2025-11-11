@@ -21,26 +21,28 @@ export function HistoricalLookbackControl({
 
   return (
     <div
-      className={`flex min-w-[16rem] flex-col gap-3 rounded-2xl border px-4 py-3 transition ${
+      className={`flex min-w-[16rem] flex-col gap-4 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 px-5 py-4 transition ${
         active
-          ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)] shadow-[0_12px_32px_-24px_rgba(0,0,0,0.75)]'
-          : 'border-slate-700/60 bg-slate-900/40 text-slate-400 hover:border-slate-500/70 hover:text-slate-200'
+          ? 'ring-1 ring-[color:var(--accent-ring-strong)]'
+          : 'opacity-75 hover:border-[color:var(--accent-alpha-30)] hover:opacity-100'
       } ${className}`}
       onClick={() => onActivate?.('lookback')}
       role="group"
     >
       <div className="flex items-center justify-between gap-2">
         <div>
-          <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Days Back</span>
-          <p className="text-sm font-semibold text-slate-100">
-            Rolling lookback presets
-          </p>
+          <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Days Back</span>
+          <p className="text-sm font-semibold text-slate-100 tracking-tight">Rolling lookback presets</p>
         </div>
-        <span className={`text-[10px] font-semibold uppercase tracking-[0.3em] ${active ? 'text-[color:var(--accent-text-strong)]' : 'text-slate-500'}`}>
+        <span
+          className={`text-[10px] font-semibold uppercase tracking-[0.32em] ${
+            active ? 'text-[color:var(--accent-text-strong)]' : 'text-slate-500'
+          }`}
+        >
           {active ? 'Active' : 'Tap to activate'}
         </span>
       </div>
-      <div className="flex flex-wrap gap-1.5 rounded-xl border border-slate-600/60 bg-slate-900/60 p-1.5">
+      <div className="flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-[#0b1324]/90 p-1.5">
         {presets.map((preset) => {
           const isActive = clamped === preset.days;
           return (
@@ -52,10 +54,10 @@ export function HistoricalLookbackControl({
                 onActivate?.('lookback');
                 onSelect?.(preset.days);
               }}
-              className={`rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
                 isActive
-                  ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner'
-                  : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'
+                  ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
+                  : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
               }`}
             >
               {preset.label}
@@ -63,7 +65,7 @@ export function HistoricalLookbackControl({
           );
         })}
       </div>
-      <span className="text-[11px] uppercase tracking-[0.25em] text-slate-500">
+      <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">
         Last {clamped} day{clamped === 1 ? '' : 's'}
       </span>
     </div>
@@ -75,9 +77,11 @@ export function LiveLookbackControl({ value, onChange, onCommit, maxDays = 365, 
   const showClampNotice = Number.isFinite(numeric) && numeric > maxDays;
 
   return (
-    <div className={`flex min-w-[13rem] flex-col gap-3 rounded-2xl border border-slate-700/60 bg-slate-900/40 px-4 py-3 shadow-[0_12px_32px_-24px_rgba(0,0,0,0.75)] ${className}`}>
-      <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Live Window</span>
-      <div className="flex items-center gap-2 rounded-lg border border-slate-600/60 bg-slate-900/50 px-3 py-2">
+    <div
+      className={`flex min-w-[13rem] flex-col gap-3 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 px-5 py-4 shadow-lg shadow-black/30 ${className}`}
+    >
+      <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Live Window</span>
+      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-2">
         <input
           type="text"
           inputMode="numeric"
@@ -92,11 +96,11 @@ export function LiveLookbackControl({ value, onChange, onCommit, maxDays = 365, 
             }
           }}
           placeholder="90"
-          className="w-20 rounded-md border border-transparent bg-transparent text-sm font-semibold uppercase tracking-[0.3em] text-slate-100 outline-none focus:border-[color:var(--accent-alpha-40)] focus:ring-0"
+          className="w-24 rounded-md border border-transparent bg-transparent text-sm font-semibold uppercase tracking-[0.32em] text-slate-100 outline-none focus:border-[color:var(--accent-alpha-40)] focus:ring-0"
         />
-        <span className="text-xs uppercase tracking-[0.25em] text-slate-400">Days</span>
+        <span className="text-xs uppercase tracking-[0.28em] text-slate-400">Days</span>
       </div>
-      <span className="text-[11px] text-neutral-500">
+      <span className="text-[11px] text-slate-500">
         Max {maxDays} days{showClampNotice ? ` · using ${maxDays}` : ''}
       </span>
     </div>
