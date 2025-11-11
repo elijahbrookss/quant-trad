@@ -184,7 +184,10 @@ export const IndicatorSection = ({ chartId }) => {
   const refreshEnabledOverlays = async (list = indicators) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
-    if (!chartState) return;
+    if (!chartState) {
+      updateChart(chartId, { overlays: [], overlayLoading: false });
+      return;
+    }
 
     // if list is empty/undefined, try one fetch to seed; otherwise use provided/current list
     let working = Array.isArray(list) && list.length ? list : indicators;
@@ -195,7 +198,7 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { indicators: working });
       } catch (e) {
         logError('indicator_seed_failed', e);
-        updateChart(chartId, { overlays: [] });
+        updateChart(chartId, { overlays: [], overlayLoading: false });
         return;
       }
     }
@@ -308,50 +311,62 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Handlers for modal save/delete
   const handleSave = async (meta) => {
-    try {
-      const core = normalizeParams(meta.params);
+    const core = normalizeParams(meta.params);
 
-      if ('lookbacks' in core) {
-        if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
-          setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
-          return;
-        }
+    if ('lookbacks' in core) {
+      if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
+        setError('Lookbacks must be a comma/space-separated list of integers, e.g., "5, 10, 20".');
+        return;
       }
+    }
 
-      const params = {
-        ...core,
-        start: startISO,
-        end: endISO,
-        symbol: chartState?.symbol,
-        interval: chartState?.interval,
-        datasource: chartState?.datasource,
-        exchange: chartState?.exchange,
-      };
+    const params = {
+      ...core,
+      start: startISO,
+      end: endISO,
+      symbol: chartState?.symbol,
+      interval: chartState?.interval,
+      datasource: chartState?.datasource,
+      exchange: chartState?.exchange,
+    };
 
-      let result;
-      let indicatorId = meta.id;
+    setError(null);
+    setModalOpen(false);
+    setEditing(null);
+    setIsLoading(true);
+    updateChart(chartId, { overlays: [], overlayLoading: true });
+
+    try {
+      let nextIndicators = indicators;
+      let indicatorId = meta.id ?? null;
+
       if (meta.id) {
-        const existing = indicators.find((i) => i.id === meta.id);
-        result = await updateIndicator(meta.id, {
+        const existing = indicators.find((i) => i.id === meta.id) || null;
+        const payload = await updateIndicator(meta.id, {
           type: meta.type,
           params,
           name: meta.name,
           color: existing?.color ?? null,
         });
-        indicatorId = result?.id ?? meta.id;
-        setIndicators((prev) => {
-          const next = prev.map((i) => (i.id === result.id ? result : i));
-          queueMicrotask(() => { void refreshEnabledOverlays(next); });
-          return next;
-        });
+        const updated = payload || (existing ? { ...existing, type: meta.type, params, name: meta.name } : null);
+        indicatorId = updated?.id ?? meta.id;
+        if (updated) {
+          const normalizedColor = updated.color ?? existing?.color ?? null;
+          nextIndicators = indicators.map((item) => (
+            item.id === indicatorId ? { ...updated, color: normalizedColor } : item
+          ));
+        }
       } else {
-        result = await createIndicator({ type: meta.type, params, name: meta.name });
-        indicatorId = result?.id ?? null;
-        setIndicators((prev) => {
-          const next = [...prev, result];
-          queueMicrotask(() => { void refreshEnabledOverlays(next); });
-          return next;
-        });
+        const created = await createIndicator({ type: meta.type, params, name: meta.name });
+        indicatorId = created?.id ?? null;
+        if (created) {
+          nextIndicators = [...indicators, created];
+        }
+      }
+
+      if (nextIndicators !== indicators) {
+        setIndicators(nextIndicators);
+        updateChart(chartId, { indicators: nextIndicators });
       }
 
       if (indicatorId) {
@@ -369,11 +384,13 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
-      setModalOpen(false);
-      setError(null);
+      await refreshEnabledOverlays(nextIndicators);
     } catch (e) {
       setError(e.message);
       logError('indicator_save_failed', e);
+      updateChart(chartId, { overlayLoading: false });
+    } finally {
+      setIsLoading(false);
     }
   };
 

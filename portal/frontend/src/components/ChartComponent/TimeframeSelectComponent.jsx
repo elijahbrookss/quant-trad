@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { Palette } from 'lucide-react';
 
 /**
  * Available timeframes:
@@ -147,9 +148,10 @@ export function SymbolInput({
           type="button"
           onClick={() => onRequestPick?.()}
           className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-[#10192d]/90 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)] hover:text-[color:var(--accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+          aria-label="Open symbol palette"
         >
-          <span className="rounded border border-white/20 bg-white/5 px-1 py-[1px] text-[9px]">/</span>
-          Presets
+          <Palette className="size-4 text-slate-200" aria-hidden="true" />
+          <span>Palette</span>
         </button>
       </div>
       <span className="text-[11px] text-slate-500">

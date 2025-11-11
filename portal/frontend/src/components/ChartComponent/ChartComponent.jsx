@@ -1361,6 +1361,8 @@ export const ChartComponent = ({ chartId }) => {
       dateRange: effectiveRange,
       datasource: nextDatasource,
       exchange: nextExchange || null,
+      overlays: [],
+      overlayLoading: false,
     });
 
     const behavior = options.behavior ?? 'replace';
@@ -1730,7 +1732,7 @@ export const ChartComponent = ({ chartId }) => {
 
         <div className="relative h-[700px] overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]">
           <div className="pointer-events-none absolute right-6 top-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
-            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
+            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> to search
           </div>
           <div ref={chartContainerRef} className="h-full w-full" />
 
