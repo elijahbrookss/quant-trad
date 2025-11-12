@@ -6,26 +6,46 @@ const DEFAULT_FAVORITES = ['BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'LINK/USDT'];
 
 const normalizeSymbol = (value) => (value ?? '').toString().trim().toUpperCase();
 
-const loadFavs = () => {
+const hasLocalStorage = () => {
   try {
-    const raw = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch {
+    return false;
+  }
+};
+
+const loadFavs = () => {
+  if (!hasLocalStorage()) {
+    return [...DEFAULT_FAVORITES];
+  }
+
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(FAV_KEY) || '[]');
     if (Array.isArray(raw) && raw.length) {
       return [...new Set(raw.map(normalizeSymbol))];
     }
   } catch {
-    // ignore
+    // ignore parsing/storage errors and fall back to defaults
   }
+
   return [...DEFAULT_FAVORITES];
 };
+
 const saveFavs = (arr) => {
-  try { localStorage.setItem(FAV_KEY, JSON.stringify(arr)); } catch {
+  if (!hasLocalStorage()) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(FAV_KEY, JSON.stringify(arr));
+  } catch {
     // ignore persistence issues (private browsing, etc.)
   }
 };
 
 export default function SymbolPalette({ open, onClose, onPick }) {
   const [q, setQ] = useState('');
-  const [favs, setFavs] = useState(loadFavs());
+  const [favs, setFavs] = useState(() => loadFavs());
 
   useEffect(() => { if (!open) setQ(''); }, [open]);
 
