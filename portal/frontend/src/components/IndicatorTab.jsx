@@ -675,16 +675,19 @@ export const IndicatorSection = ({ chartId }) => {
                   {enabledCount} enabled · {totalCount} total
                 </span>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <label className="inline-flex items-center gap-2 rounded-xl border border-white/12 bg-[#0b1324]/85 px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-slate-200 shadow-inner shadow-black/20">
-                  <input
-                    type="checkbox"
-                    className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                    checked={showEnabledOnly}
-                    onChange={(event) => setShowEnabledOnly(event.target.checked)}
-                  />
-                  Show enabled only
-                </label>
+              <div className="mt-3 grid w-full gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="flex flex-col gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Visibility</span>
+                  <label className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 text-sm font-medium text-slate-200 shadow-inner shadow-black/20">
+                    <span className="tracking-tight text-slate-200">Show enabled only</span>
+                    <input
+                      type="checkbox"
+                      className="size-4 shrink-0 rounded border border-slate-600/70 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                      checked={showEnabledOnly}
+                      onChange={(event) => setShowEnabledOnly(event.target.checked)}
+                    />
+                  </label>
+                </div>
 
                 <DropdownSelect
                   label="Type"
@@ -697,9 +700,9 @@ export const IndicatorSection = ({ chartId }) => {
                   className="min-w-[12rem]"
                 />
 
-                <div className="flex min-w-[15rem] flex-1 flex-col gap-2 sm:max-w-xs">
+                <div className="flex min-w-[15rem] flex-col gap-2 sm:max-w-none">
                   <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Search</span>
-                  <div className="flex items-center gap-2 rounded-xl border border-white/12 bg-[#0b1324]/85 px-3 py-2 shadow-inner shadow-black/20">
+                  <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 shadow-inner shadow-black/18">
                     <input
                       type="search"
                       value={searchQuery}

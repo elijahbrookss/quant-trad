@@ -5,6 +5,7 @@ pd = pytest.importorskip("pandas")
 from indicators.market_profile import MarketProfileIndicator
 from portal.backend.service.indicator_service import (
     _build_market_profile_overlay_indicator,
+    _extract_ctor_params,
 )
 
 
@@ -111,3 +112,15 @@ def test_market_profile_overlay_respects_explicit_bin_size_on_symbol_change():
     )
 
     assert overlay.bin_size == pytest.approx(5.0)
+
+
+def test_extract_ctor_params_omits_auto_bin_size():
+    df = _make_df("2025-08-02 19:30:00+00:00")
+
+    auto_indicator = MarketProfileIndicator(df, interval="15m")
+    auto_capture = _extract_ctor_params(auto_indicator)
+    assert "bin_size" not in auto_capture
+
+    manual_indicator = MarketProfileIndicator(df, interval="15m", bin_size=2.5)
+    manual_capture = _extract_ctor_params(manual_indicator)
+    assert manual_capture["bin_size"] == pytest.approx(2.5)
