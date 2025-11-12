@@ -1009,22 +1009,6 @@ export const ChartComponent = ({ chartId }) => {
     setLiveLookbackInput(sanitized);
   }, []);
 
-  const handleLiveLookbackPresetSelect = useCallback((days) => {
-    const normalized = clampLookbackDays(days);
-    setLiveLookbackDays(normalized);
-    setLiveLookbackInput(String(normalized));
-
-    const now = new Date();
-    const start = new Date(now.getTime() - normalized * DAY_MS);
-    const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    setDateRange(nextRange);
-
-    if (modeRef.current === 'live' && supportsLive) {
-      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
-    }
-  }, [handleApply, supportsLive]);
-
   const handleDateRangeSelection = useCallback((nextRange) => {
     if (!Array.isArray(nextRange)) return;
     const normalized = nextRange.map((value) => {
@@ -1442,6 +1426,22 @@ export const ChartComponent = ({ chartId }) => {
       void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
     }
   }, [liveLookbackInput, liveLookbackDays, supportsLive, handleApply]);
+
+  const handleLiveLookbackPresetSelect = useCallback((days) => {
+    const normalized = clampLookbackDays(days);
+    setLiveLookbackDays(normalized);
+    setLiveLookbackInput(String(normalized));
+
+    const now = new Date();
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+
+    if (modeRef.current === 'live' && supportsLive) {
+      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+    }
+  }, [supportsLive, handleApply]);
 
   const lastAppliedParamsRef = useRef({ symbol, interval, datasource, exchange });
 
