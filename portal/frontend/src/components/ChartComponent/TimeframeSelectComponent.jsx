@@ -136,22 +136,21 @@ export function SymbolInput({
       className={`flex min-w-[14rem] flex-col gap-2.5 rounded-2xl border border-white/12 bg-gradient-to-br from-[#0f172a]/95 via-[#0b1220]/95 to-[#060a12]/95 p-4 shadow-lg shadow-black/25 ${className}`}
     >
       <span className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400/80">Symbol</span>
-      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-1.5">
+      <div className="relative">
         <input
           type="text"
           value={displayValue}
           onChange={(event) => onChange?.(event.target.value)}
           placeholder={placeholder}
-          className="flex-1 border-none bg-transparent text-sm font-semibold uppercase tracking-[0.28em] text-slate-100 placeholder:text-slate-600 focus:outline-none"
+          className="w-full rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-2 pr-14 text-sm font-semibold uppercase tracking-[0.28em] text-slate-100 placeholder:text-slate-600 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring-strong)]"
         />
         <button
           type="button"
           onClick={() => onRequestPick?.()}
-          className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-[#10192d]/90 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)] hover:text-[color:var(--accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+          className="absolute right-1.5 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg border border-white/12 bg-[#10192d]/90 text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)] hover:text-[color:var(--accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
           aria-label="Open symbol palette"
         >
-          <Palette className="size-4 text-slate-200" aria-hidden="true" />
-          <span>Palette</span>
+          <Palette className="size-4" aria-hidden="true" />
         </button>
       </div>
       <span className="text-[10px] text-slate-500">

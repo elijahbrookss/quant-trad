@@ -227,6 +227,7 @@ export const ChartComponent = ({ chartId }) => {
   const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
   const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
   const [dataLoading, setDataLoading] = useState(false);
+  const [dataLoaderContext, setDataLoaderContext] = useState(null);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
@@ -514,6 +515,7 @@ export const ChartComponent = ({ chartId }) => {
     targetDatasource,
     targetExchange,
     behavior = 'auto',
+    loaderReason,
   } = {}) => {
     const effectiveSymbol = targetSymbol ?? symbolRef.current;
     const effectiveInterval = targetInterval ?? intervalRef.current;
@@ -557,9 +559,12 @@ export const ChartComponent = ({ chartId }) => {
     const endISO = endDate.toISOString();
 
     dataLoadingRef.current = true;
-    const shouldShowLoader = !hasStreamingBaseline;
-    if (shouldShowLoader) {
+    const loaderContext = loaderReason ?? (!hasStreamingBaseline ? 'default' : null);
+    if (loaderContext) {
+      setDataLoaderContext(loaderContext);
       setDataLoading(true);
+    } else {
+      setDataLoaderContext(null);
     }
     try {
       markAttempt();
@@ -734,8 +739,9 @@ export const ChartComponent = ({ chartId }) => {
       return { ok: false, reason: 'error' };
     } finally {
       dataLoadingRef.current = false;
-      if (shouldShowLoader) {
+      if (loaderContext) {
         setDataLoading(false);
+        setDataLoaderContext(null);
       }
     }
   }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt]);
@@ -867,7 +873,7 @@ export const ChartComponent = ({ chartId }) => {
       get series() { return seriesRef.current; }
     });
 
-    void loadChartData();
+    void loadChartData({ loaderReason: 'initial' });
 
     if (!seededRef.current) {
       updateChart?.(chartId, {
@@ -1365,8 +1371,9 @@ export const ChartComponent = ({ chartId }) => {
       exchange: nextExchange,
     });
     const prevKey = activeSeriesKeyRef.current;
+    const symbolChanged = prevKey.symbol !== nextSymbol;
     const isSeriesChange =
-      prevKey.symbol !== nextSymbol
+      symbolChanged
       || prevKey.interval !== nextInterval
       || prevKey.datasource !== nextDatasource
       || prevKey.exchange !== nextExchange;
@@ -1399,6 +1406,7 @@ export const ChartComponent = ({ chartId }) => {
       targetDatasource: nextDatasource,
       targetExchange: nextExchange,
       behavior,
+      loaderReason: symbolChanged ? 'symbol-change' : undefined,
     });
 
     if (result?.ok && (result.replaced || result.appended)) {
@@ -1500,20 +1508,34 @@ export const ChartComponent = ({ chartId }) => {
     });
   }, [mode, setDateRange]);
 
-  function useBusyDelay(busy, ms=250){
-    const [show,setShow]=useState(false);
-    useEffect(()=>{
-      if(busy){ const t=setTimeout(()=>setShow(true), ms); return ()=>clearTimeout(t); }
+  function useBusyDelay(busy, ms = 250) {
+    const [show, setShow] = useState(false);
+    useEffect(() => {
+      if (busy) {
+        const t = setTimeout(() => setShow(true), ms);
+        return () => clearTimeout(t);
+      }
       setShow(false);
-    },[busy,ms]);
+      return undefined;
+    }, [busy, ms]);
     return show;
   }
 
-  const loaderActive = useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading);
-  const loaderMessage = chartState?.signalsLoading ? 'Generating signals…'
-    : chartState?.overlayLoading ? 'Loading overlays…'
-      : mode === 'live' ? 'Streaming latest data…'
-        : 'Loading chart…';
+  const busyState = chartState?.overlayLoading || chartState?.signalsLoading || dataLoading;
+  const loaderActive = useBusyDelay(busyState, dataLoaderContext === 'symbol-change' ? 0 : 250);
+  const loaderMessage = chartState?.signalsLoading
+    ? 'Generating signals…'
+    : chartState?.overlayLoading
+      ? 'Loading overlays…'
+      : dataLoading
+        ? dataLoaderContext === 'symbol-change'
+          ? 'Loading new instrument…'
+          : dataLoaderContext === 'initial'
+            ? 'Preparing chart…'
+            : 'Loading chart…'
+        : mode === 'live'
+          ? 'Streaming latest data…'
+          : 'Loading chart…';
 
   const statusTextClass = statusStyles.text ?? 'text-slate-300';
 
