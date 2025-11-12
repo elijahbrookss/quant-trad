@@ -1612,6 +1612,50 @@ export const ChartComponent = ({ chartId }) => {
   const liveMode = mode === 'live';
   const symbolDisplay = (symbol || '—').toString().toUpperCase();
   const intervalDisplay = (interval ? interval.toString() : '—').toUpperCase();
+  const datasourceDisplay = useMemo(() => {
+    const map = {
+      [DATASOURCE_IDS.ALPACA]: 'Markets data',
+      [DATASOURCE_IDS.YFINANCE]: 'Yahoo Finance',
+      [DATASOURCE_IDS.IBKR]: 'Interactive Brokers',
+      [DATASOURCE_IDS.CCXT]: 'Crypto data',
+    };
+    return map[datasource] || 'Markets data';
+  }, [datasource]);
+
+  const venueDisplay = useMemo(() => {
+    if (datasource === DATASOURCE_IDS.CCXT) {
+      const entry = CRYPTO_EXCHANGES.find((ex) => ex.value === exchange);
+      if (entry?.label) {
+        return entry.category ? `${entry.label} (${entry.category})` : entry.label;
+      }
+      return 'Crypto venue';
+    }
+
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      const entry = IB_EXCHANGES.find((ex) => ex.value === exchange);
+      return entry?.label || exchange || 'IBKR routing';
+    }
+
+    if (datasource === DATASOURCE_IDS.YFINANCE) {
+      return 'Yahoo Finance';
+    }
+
+    const providerEntry = MARKET_PROVIDERS.find((provider) => provider.value === marketProvider);
+    if (providerEntry?.label) {
+      return providerEntry.label;
+    }
+
+    if (typeof exchange === 'string' && exchange.trim()) {
+      return exchange.trim().toUpperCase();
+    }
+
+    return null;
+  }, [datasource, exchange, marketProvider]);
+
+  const instrumentMeta = useMemo(() => {
+    const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
+    return parts.join(' • ');
+  }, [datasourceDisplay, venueDisplay]);
 
   return (
     <>
@@ -1837,6 +1881,19 @@ export const ChartComponent = ({ chartId }) => {
         </div>
 
         <div className="relative h-[700px] overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]">
+          <div className="pointer-events-none absolute left-6 top-6 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
+              <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
+                {intervalDisplay}
+              </span>
+            </div>
+            {instrumentMeta ? (
+              <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
+                {instrumentMeta}
+              </div>
+            ) : null}
+          </div>
           <div className="pointer-events-none absolute right-6 top-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
             Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> to search
           </div>
