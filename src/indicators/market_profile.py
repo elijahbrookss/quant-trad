@@ -28,21 +28,44 @@ def _to_unix_s(ts):
     return int(pd.Timestamp(ts).tz_convert("UTC").timestamp())
 
 def _find_touch_markers(df, level: float, start_ts: pd.Timestamp, label: str, fmt_time):
-    mks = []
+    start_ts = pd.Timestamp(start_ts)
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize("UTC")
+    else:
+        start_ts = start_ts.tz_convert("UTC")
+
     if df.index.tz is None:
         df = df.tz_localize("UTC")
+    else:
+        df = df.tz_convert("UTC")
+
     window = df.loc[df.index >= start_ts]
-    for t, row in window.iterrows():
-        lo, hi = float(row["low"]), float(row["high"])
-        if lo <= level <= hi:
-            mks.append({
-                "time": int(pd.Timestamp(t).timestamp()),      # <-- 'YYYY-MM-DD'
-                "shape": "circle",
-                "color": "#6b7280", # default color, will be recolored on client,
-                "subtype": "touch",
-                "price": float(level)
-            })
-    return mks
+    if window.empty:
+        return []
+
+    lows = pd.to_numeric(window.get("low"), errors="coerce")
+    highs = pd.to_numeric(window.get("high"), errors="coerce")
+    if lows is None or highs is None:
+        return []
+
+    touches = (lows <= level) & (highs >= level)
+    if not touches.any():
+        return []
+
+    touch_index = window.index[touches]
+    # Convert tz-aware index to epoch seconds in bulk to avoid per-row allocations
+    times = (touch_index.view("int64") // 10**9).astype(int)
+
+    return [
+        {
+            "time": int(ts),
+            "shape": "circle",
+            "color": "#6b7280",
+            "subtype": "touch",
+            "price": float(level),
+        }
+        for ts in times
+    ]
 
 DEFAULT_BREAKOUT_CONFIRMATION_BARS = 3
 
@@ -68,6 +91,7 @@ class MarketProfileIndicator(BaseIndicator):
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
     ):
         super().__init__(df)
+        self._bin_size_locked = False
         self.bin_size = self._select_bin_size(df, bin_size)
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
@@ -122,7 +146,9 @@ class MarketProfileIndicator(BaseIndicator):
             except (TypeError, ValueError):
                 numeric = None
             if numeric is not None and numeric > 0:
+                self._bin_size_locked = True
                 return numeric
+        self._bin_size_locked = False
         return self._infer_bin_size(df)
 
     def _infer_bin_size(self, df: pd.DataFrame) -> float:
@@ -525,6 +551,9 @@ class MarketProfileIndicator(BaseIndicator):
             use_merged,
             extend_to_chart_end,
         )
+        poc_series = pd.Series(np.nan, index=full_idx, dtype=float)
+        has_poc_values = False
+
         for idx, prof in enumerate(profiles):
             try:
                 start_ts = prof.get("start")
@@ -582,21 +611,22 @@ class MarketProfileIndicator(BaseIndicator):
             )
 
             if poc is not None:
-                poc_series = pd.Series(index=full_idx, dtype=float)
                 mask = full_idx >= start_ts
                 if not extend_to_chart_end:
                     mask = mask & (full_idx <= end_ts)
                 poc_series.loc[mask] = float(poc)
-
-                ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
-                overlays.append({"kind": "addplot", "plot": ap})
-                legend_entries.add(("POC", "orange"))
+                has_poc_values = True
                 logger.debug(
                     "event=market_profile_poc start=%s end=%s poc=%.4f",
                     start_ts,
                     end_ts,
                     float(poc),
                 )
+
+        if has_poc_values and poc_series.notna().any():
+            ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
+            overlays.append({"kind": "addplot", "plot": ap})
+            legend_entries.add(("POC", "orange"))
 
         logger.info("event=market_profile_overlay_complete overlays=%d", len(overlays))
         return overlays, legend_entries

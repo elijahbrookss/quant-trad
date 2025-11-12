@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
 import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
-import { DateRangePickerComponent } from './DateTimePickerComponent';
+import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
 import { fetchCandleData } from '../../adapters/candle.adapter';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
@@ -16,6 +16,7 @@ import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
 import DataModeToggle from './DataModeToggle.jsx';
 import { useLiveDataMode } from './hooks/useLiveDataMode.js';
+import { HistoricalLookbackControl } from './LookbackControls.jsx';
 import {
   DATASOURCE_OPTIONS,
   DATASOURCE_IDS,
@@ -30,8 +31,23 @@ import {
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
-const LIVE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_LOOKBACK_DAYS = 365;
+const DEFAULT_LOOKBACK_DAYS = 90;
 const LIVE_CRYPTO_EXCHANGES = new Set(['binanceus']);
+const HISTORICAL_WINDOW_MODES = {
+  LOOKBACK: 'lookback',
+  RANGE: 'range',
+};
+
+const clampLookbackDays = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_LOOKBACK_DAYS;
+  }
+  const rounded = Math.round(numeric);
+  return Math.max(1, Math.min(MAX_LOOKBACK_DAYS, rounded));
+};
 
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
@@ -192,19 +208,38 @@ export const ChartComponent = ({ chartId }) => {
 
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
+  const [symbolDraft, setSymbolDraft] = useState('CL');
   const [interval, setInterval] = useState('15m');
   const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
   const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
   const [marketProvider, setMarketProvider] = useState(DEFAULT_MARKET_PROVIDER);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
-    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
-    new Date()
+    new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
+    new Date(),
   ]);
+  const [historicalWindowMode, setHistoricalWindowMode] = useState(
+    HISTORICAL_WINDOW_MODES.LOOKBACK,
+  );
+  const [historicalLookbackDays, setHistoricalLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [historicalLookbackInput, setHistoricalLookbackInput] = useState(
+    String(DEFAULT_LOOKBACK_DAYS),
+  );
+  const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
   const [dataLoading, setDataLoading] = useState(false);
+  const [dataLoaderContext, setDataLoaderContext] = useState(null);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
+
+  useEffect(() => {
+    const normalizedHistorical = String(clampLookbackDays(historicalLookbackDays));
+    setHistoricalLookbackInput((prev) => (prev === normalizedHistorical ? prev : normalizedHistorical));
+
+    const normalized = String(clampLookbackDays(liveLookbackDays));
+    setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
+  }, [historicalLookbackDays, liveLookbackDays]);
 
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
@@ -445,6 +480,10 @@ export const ChartComponent = ({ chartId }) => {
   }, [symbol]);
 
   useEffect(() => {
+    setSymbolDraft((prev) => (prev === symbol ? prev : symbol));
+  }, [symbol]);
+
+  useEffect(() => {
     intervalRef.current = interval;
   }, [interval]);
 
@@ -481,6 +520,7 @@ export const ChartComponent = ({ chartId }) => {
     targetDatasource,
     targetExchange,
     behavior = 'auto',
+    loaderReason,
   } = {}) => {
     const effectiveSymbol = targetSymbol ?? symbolRef.current;
     const effectiveInterval = targetInterval ?? intervalRef.current;
@@ -524,9 +564,12 @@ export const ChartComponent = ({ chartId }) => {
     const endISO = endDate.toISOString();
 
     dataLoadingRef.current = true;
-    const shouldShowLoader = !hasStreamingBaseline;
-    if (shouldShowLoader) {
+    const loaderContext = loaderReason ?? (!hasStreamingBaseline ? 'default' : null);
+    if (loaderContext) {
+      setDataLoaderContext(loaderContext);
       setDataLoading(true);
+    } else {
+      setDataLoaderContext(null);
     }
     try {
       markAttempt();
@@ -701,8 +744,9 @@ export const ChartComponent = ({ chartId }) => {
       return { ok: false, reason: 'error' };
     } finally {
       dataLoadingRef.current = false;
-      if (shouldShowLoader) {
+      if (loaderContext) {
         setDataLoading(false);
+        setDataLoaderContext(null);
       }
     }
   }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt]);
@@ -717,13 +761,19 @@ export const ChartComponent = ({ chartId }) => {
       return false;
     }
 
+    const now = new Date();
+    const lookbackMs = clampLookbackDays(liveLookbackDays) * DAY_MS;
+    const fallbackStart = new Date(now.getTime() - lookbackMs);
+
     const [rangeStartRaw] = dateRangeRef.current || [];
-    const startDate = rangeStartRaw instanceof Date
+    const candidateStart = rangeStartRaw instanceof Date
       ? rangeStartRaw
       : rangeStartRaw
         ? new Date(rangeStartRaw)
-        : new Date(Date.now() - LIVE_LOOKBACK_MS);
-    const now = new Date();
+        : null;
+    const startDate = candidateStart && candidateStart <= now
+      ? (candidateStart < fallbackStart ? fallbackStart : candidateStart)
+      : fallbackStart;
 
     dateRangeRef.current = [startDate, now];
 
@@ -746,13 +796,40 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     return Boolean(result?.ok);
-  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId]);
+  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId, liveLookbackDays]);
 
   const { mode, setMode } = useLiveDataMode({ supportsLive, onRefresh: refreshLive, logger });
 
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    if (mode === 'live') {
+      return;
+    }
+    if (historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) {
+      return;
+    }
+    const now = new Date();
+    const normalized = clampLookbackDays(historicalLookbackDays);
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+  }, [mode, historicalLookbackDays, historicalWindowMode]);
+
+  useEffect(() => {
+    if (mode !== 'live') {
+      return;
+    }
+    const now = new Date();
+    const normalized = clampLookbackDays(liveLookbackDays);
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+  }, [mode, liveLookbackDays]);
 
   const lastModeRef = useRef('historical');
   useEffect(() => {
@@ -801,7 +878,7 @@ export const ChartComponent = ({ chartId }) => {
       get series() { return seriesRef.current; }
     });
 
-    void loadChartData();
+    void loadChartData({ loaderReason: 'initial' });
 
     if (!seededRef.current) {
       updateChart?.(chartId, {
@@ -901,10 +978,62 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, []);
 
-  const applySymbol = (sym) => {
-    setSymbol(sym);
-    setPalOpen(false);
-  };
+  const handleSymbolInputChange = useCallback((raw) => {
+    const next = (raw ?? '').toString().toUpperCase();
+    setSymbolDraft(next);
+  }, []);
+
+  const handleHistoricalLookbackChange = useCallback((days) => {
+    const normalized = clampLookbackDays(days);
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
+    setHistoricalLookbackDays(normalized);
+    setHistoricalLookbackInput(String(normalized));
+  }, []);
+
+  const handleHistoricalLookbackInputChange = useCallback((event) => {
+    const raw = event?.target?.value ?? '';
+    const sanitized = raw.replace(/[^0-9]/g, '');
+    setHistoricalLookbackInput(sanitized);
+  }, []);
+
+  const handleHistoricalLookbackCommit = useCallback(() => {
+    const parsed = Number.parseInt(historicalLookbackInput, 10);
+    const normalized = clampLookbackDays(
+      Number.isNaN(parsed) ? historicalLookbackDays : parsed,
+    );
+    if (normalized !== historicalLookbackDays) {
+      handleHistoricalLookbackChange(normalized);
+    } else {
+      setHistoricalLookbackInput(String(normalized));
+    }
+  }, [handleHistoricalLookbackChange, historicalLookbackInput, historicalLookbackDays]);
+
+  const handleLiveLookbackInputChange = useCallback((event) => {
+    const raw = event?.target?.value ?? '';
+    const sanitized = raw.replace(/[^0-9]/g, '');
+    setLiveLookbackInput(sanitized);
+  }, []);
+
+  const handleDateRangeSelection = useCallback((nextRange) => {
+    if (!Array.isArray(nextRange)) return;
+    const normalized = nextRange.map((value) => {
+      if (value instanceof Date) return value;
+      if (!value) return value;
+      const converted = new Date(value);
+      return Number.isNaN(converted.getTime()) ? null : converted;
+    });
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
+    dateRangeRef.current = normalized;
+    setDateRange(normalized);
+  }, []);
+
+  const handleHistoricalModeToggle = useCallback((nextMode) => {
+    if (nextMode === HISTORICAL_WINDOW_MODES.RANGE) {
+      setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
+      return;
+    }
+    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
+  }, []);
 
   // Overlay refs and syncer.
   const syncOverlays = useCallback((overlays = []) => {
@@ -1241,8 +1370,9 @@ export const ChartComponent = ({ chartId }) => {
       exchange: nextExchange,
     });
     const prevKey = activeSeriesKeyRef.current;
+    const symbolChanged = prevKey.symbol !== nextSymbol;
     const isSeriesChange =
-      prevKey.symbol !== nextSymbol
+      symbolChanged
       || prevKey.interval !== nextInterval
       || prevKey.datasource !== nextDatasource
       || prevKey.exchange !== nextExchange;
@@ -1263,6 +1393,8 @@ export const ChartComponent = ({ chartId }) => {
       dateRange: effectiveRange,
       datasource: nextDatasource,
       exchange: nextExchange || null,
+      overlays: [],
+      overlayLoading: false,
     });
 
     const behavior = options.behavior ?? 'replace';
@@ -1273,6 +1405,7 @@ export const ChartComponent = ({ chartId }) => {
       targetDatasource: nextDatasource,
       targetExchange: nextExchange,
       behavior,
+      loaderReason: symbolChanged ? 'symbol-change' : undefined,
     });
 
     if (result?.ok && (result.replaced || result.appended)) {
@@ -1281,6 +1414,79 @@ export const ChartComponent = ({ chartId }) => {
 
     return result;
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
+
+  const handleSymbolInputCommit = useCallback(() => {
+    const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
+    if (!sanitized) {
+      setSymbolDraft(symbol);
+      return;
+    }
+
+    const changed = sanitized !== symbol;
+    setSymbolDraft(sanitized);
+
+    if (!changed) {
+      return;
+    }
+
+    setSymbol(sanitized);
+
+    if (modeRef.current !== 'live') {
+      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+    }
+  }, [symbolDraft, symbol, handleApply]);
+
+  const applySymbol = useCallback((sym) => {
+    const sanitized = (sym ?? '').toString().trim().toUpperCase();
+    if (!sanitized) {
+      setPalOpen(false);
+      return;
+    }
+
+    const changed = sanitized !== symbol;
+    setSymbolDraft(sanitized);
+    setSymbol(sanitized);
+    setPalOpen(false);
+
+    if (changed && modeRef.current !== 'live') {
+      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+    }
+  }, [symbol, handleApply]);
+
+  const handleLiveLookbackCommit = useCallback(() => {
+    const parsed = Number.parseInt(liveLookbackInput, 10);
+    const normalized = clampLookbackDays(Number.isNaN(parsed) ? liveLookbackDays : parsed);
+    const changed = normalized !== liveLookbackDays;
+
+    setLiveLookbackDays(normalized);
+    setLiveLookbackInput(String(normalized));
+
+    const now = new Date();
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+
+    if (modeRef.current === 'live' && supportsLive && changed) {
+      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+    }
+  }, [liveLookbackInput, liveLookbackDays, supportsLive, handleApply]);
+
+  const handleLiveLookbackPresetSelect = useCallback((days) => {
+    const normalized = clampLookbackDays(days);
+    setLiveLookbackDays(normalized);
+    setLiveLookbackInput(String(normalized));
+
+    const now = new Date();
+    const start = new Date(now.getTime() - normalized * DAY_MS);
+    const nextRange = [start, now];
+    dateRangeRef.current = nextRange;
+    setDateRange(nextRange);
+
+    if (modeRef.current === 'live' && supportsLive) {
+      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+    }
+  }, [supportsLive, handleApply]);
 
   const lastAppliedParamsRef = useRef({ symbol, interval, datasource, exchange });
 
@@ -1339,20 +1545,34 @@ export const ChartComponent = ({ chartId }) => {
     });
   }, [mode, setDateRange]);
 
-  function useBusyDelay(busy, ms=250){
-    const [show,setShow]=useState(false);
-    useEffect(()=>{
-      if(busy){ const t=setTimeout(()=>setShow(true), ms); return ()=>clearTimeout(t); }
+  function useBusyDelay(busy, ms = 250) {
+    const [show, setShow] = useState(false);
+    useEffect(() => {
+      if (busy) {
+        const t = setTimeout(() => setShow(true), ms);
+        return () => clearTimeout(t);
+      }
       setShow(false);
-    },[busy,ms]);
+      return undefined;
+    }, [busy, ms]);
     return show;
   }
 
-  const loaderActive = useBusyDelay(chartState?.overlayLoading || chartState?.signalsLoading || dataLoading);
-  const loaderMessage = chartState?.signalsLoading ? 'Generating signals…'
-    : chartState?.overlayLoading ? 'Loading overlays…'
-      : mode === 'live' ? 'Streaming latest data…'
-        : 'Loading chart…';
+  const busyState = chartState?.overlayLoading || chartState?.signalsLoading || dataLoading;
+  const loaderActive = useBusyDelay(busyState, dataLoaderContext === 'symbol-change' ? 0 : 250);
+  const loaderMessage = chartState?.signalsLoading
+    ? 'Generating signals…'
+    : chartState?.overlayLoading
+      ? 'Loading overlays…'
+      : dataLoading
+        ? dataLoaderContext === 'symbol-change'
+          ? 'Loading new instrument…'
+          : dataLoaderContext === 'initial'
+            ? 'Preparing chart…'
+            : 'Loading chart…'
+        : mode === 'live'
+          ? 'Streaming latest data…'
+          : 'Loading chart…';
 
   const statusTextClass = statusStyles.text ?? 'text-slate-300';
 
@@ -1387,119 +1607,238 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [dataLoading, lastRefreshAt, mode]);
 
+  const isLookbackMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.LOOKBACK;
+  const isRangeMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.RANGE;
+  const liveMode = mode === 'live';
+  const symbolDisplay = (symbol || '—').toString().toUpperCase();
+  const intervalDisplay = (interval ? interval.toString() : '—').toUpperCase();
+
   return (
-    <div className="space-y-5">
-      {connectionNotice && (
-        <div className="flex items-start gap-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
-          <span className="mt-0.5 text-lg">⚠️</span>
-          <div>
-            <p className="font-semibold tracking-tight">Connection issue</p>
-            <p className="text-xs text-rose-100/80">{connectionNotice}</p>
-          </div>
-        </div>
-      )}
-
-      {rangeWarning && (
-        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 shadow-lg shadow-amber-900/30">
-          <span className="text-lg">⚠️</span>
-          <span className="font-medium">{rangeWarning}</span>
-        </div>
-      )}
-
-      <div className="rounded-3xl border border-white/8 bg-[#1b1d26]/85 p-6 shadow-[0_50px_140px_-80px_rgba(0,0,0,0.85)]">
-        <div className="flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end md:justify-between">
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-            <div className="flex min-w-[13rem] flex-col gap-2">
-              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Datasource</span>
-              <div className="inline-flex rounded-lg border border-slate-600/60 bg-slate-900/60 p-1">
-                {DATASOURCE_OPTIONS.map((option) => {
-                  const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
-                  const isActive = isCryptoOption
-                    ? datasource === DATASOURCE_IDS.CCXT
-                    : datasource !== DATASOURCE_IDS.CCXT;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => handleDatasourceChange(option.value)}
-                      className={`min-w-[5.5rem] rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${isActive ? 'bg-[color:var(--accent-alpha-30)] text-[color:var(--accent-text-strong)] shadow-inner' : 'text-slate-300 hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-soft)]'}`}
-                    >
-                      {option.label}
-                    </button>
-                  );
-                })}
-              </div>
+    <>
+      <div className="space-y-6">
+        {connectionNotice && (
+          <div className="flex items-start gap-3 rounded-[22px] border border-rose-500/40 bg-rose-500/10 px-5 py-4 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
+            <span className="mt-0.5 text-lg">⚠️</span>
+            <div>
+              <p className="font-semibold tracking-tight">Connection issue</p>
+              <p className="text-xs text-rose-100/80">{connectionNotice}</p>
             </div>
+          </div>
+        )}
 
-            <DropdownSelect
-              className="min-w-[15rem]"
-              label="Exchange"
-              value={selectedExchangeValue}
-              onChange={handleExchangeChange}
-              options={exchangeSelectOptions}
-              placeholder={exchangePlaceholder}
-            />
+        {rangeWarning && (
+          <div className="flex items-center gap-2 rounded-[22px] border border-amber-400/35 bg-amber-500/10 px-5 py-4 text-sm text-amber-100 shadow-lg shadow-amber-900/30">
+            <span className="text-lg">⚠️</span>
+            <span className="font-medium tracking-tight">{rangeWarning}</span>
+          </div>
+        )}
 
-            {marketProvider === 'ibkr' ? (
-              <DropdownSelect
-                className="min-w-[14rem]"
-                label="IB Venue"
-                value={exchange || DEFAULT_IB_EXCHANGE}
-                onChange={handleIbVenueChange}
-                options={IB_EXCHANGES.map((entry) => ({
-                  value: entry.value,
-                  label: entry.label,
-                  description: entry.description,
-                }))}
-                placeholder="Select venue"
-              />
-            ) : null}
-
-            <DataModeToggle
-              mode={mode}
-              onChange={setMode}
-              supportsLive={supportsLive}
-              disabledReason={liveDisabledReason}
-              liveDescription={liveDescription}
-            />
-
-            <TimeframeSelect selected={interval} onChange={setInterval} />
-            <SymbolInput value={symbol} onChange={setSymbol} />
-            <div className="flex items-end gap-2">
-              {mode !== 'live' ? (
-                <DateRangePickerComponent
-                  dateRange={dateRange}
-                  setDateRange={setDateRange}
-                  disabled={mode === 'live'}
-                />
-              ) : (
-                <div className="mb-[6px] inline-flex h-9 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[11px] font-medium uppercase tracking-[0.32em] text-slate-200">
-                  Live window · trailing 90 days
-                </div>
-              )}
+        <section className="rounded-[28px] border border-white/8 bg-gradient-to-br from-[#080b14]/95 via-[#070a13]/95 to-[#04060c]/95 p-6 shadow-[0_50px_150px_-90px_rgba(0,0,0,0.85)]">
+          <div className="flex flex-col gap-6">
+            <header className="flex flex-col gap-2.5 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 className="text-base font-semibold tracking-tight text-slate-100">Workspace controls</h2>
+                <p className="text-sm text-slate-400">Set up your instrument, venue, and data horizon.</p>
+              </div>
               <button
                 type="button"
                 onClick={() => { void handleApply(); }}
-                className="mb-[6px] inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-25)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
                 aria-label="Reload chart data"
                 title="Reload chart data"
               >
                 <RotateCcw className="size-4" />
               </button>
+            </header>
+
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.75fr)_minmax(0,1.1fr)]">
+              <div className="space-y-5">
+                <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-4 shadow-lg shadow-black/25">
+                  <div className="flex items-start justify-between gap-2.5">
+                    <div>
+                      <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Instrument</span>
+                      <p className="text-sm text-slate-400">Choose the asset, timeframe, and streaming mode.</p>
+                    </div>
+                    <span className="hidden text-[11px] uppercase tracking-[0.3em] text-slate-500/80 sm:block">
+                      {symbolDisplay} · {intervalDisplay || '—'}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <SymbolInput
+                      value={symbolDraft}
+                      onChange={handleSymbolInputChange}
+                      onCommit={handleSymbolInputCommit}
+                      onRequestPick={() => setPalOpen(true)}
+                      className="md:col-span-2 xl:col-span-1"
+                    />
+                    <TimeframeSelect selected={interval} onChange={setInterval} className="xl:col-span-1" />
+                    <DataModeToggle
+                      mode={mode}
+                      onChange={setMode}
+                      supportsLive={supportsLive}
+                      disabledReason={liveDisabledReason}
+                      liveDescription={liveDescription}
+                      className="md:col-span-2 xl:col-span-1"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-5">
+                <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-4 shadow-lg shadow-black/25">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Market access</span>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Toggle between exchanges or providers to route historical and live data.
+                  </p>
+                  <div className="mt-3 flex flex-col gap-3.5">
+                    <div className="inline-flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-[#050912]/80 p-1">
+                      {DATASOURCE_OPTIONS.map((option) => {
+                        const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
+                        const isActive = isCryptoOption
+                          ? datasource === DATASOURCE_IDS.CCXT
+                          : datasource !== DATASOURCE_IDS.CCXT;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => handleDatasourceChange(option.value)}
+                            className={`min-w-[5.5rem] rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                              isActive
+                                ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
+                                : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <DropdownSelect
+                      className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
+                      label="Exchange"
+                      value={selectedExchangeValue}
+                      onChange={handleExchangeChange}
+                      options={exchangeSelectOptions}
+                      placeholder={exchangePlaceholder}
+                    />
+
+                    {marketProvider === 'ibkr' ? (
+                      <DropdownSelect
+                        className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
+                        label="IB Venue"
+                        value={exchange || DEFAULT_IB_EXCHANGE}
+                        onChange={handleIbVenueChange}
+                        options={IB_EXCHANGES.map((entry) => ({
+                          value: entry.value,
+                          label: entry.label,
+                          description: entry.description,
+                        }))}
+                        placeholder="Select venue"
+                      />
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-5 shadow-lg shadow-black/25">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <div>
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Data window</span>
+                  <p className="text-sm text-slate-400">Control how much history to load for studies.</p>
+                </div>
+
+                {!liveMode ? (
+                  <div className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-[#050912]/80 p-1">
+                    <button
+                      type="button"
+                      onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE)}
+                      className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] transition ${
+                        isRangeMode
+                          ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
+                          : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
+                      }`}
+                    >
+                      Calendar range
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.LOOKBACK)}
+                      className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] transition ${
+                        isLookbackMode
+                          ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
+                          : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
+                      }`}
+                    >
+                      Days back
+                    </button>
+                  </div>
+                ) : (
+                  <span className="ml-auto text-[11px] uppercase tracking-[0.32em] text-slate-400">Live streaming</span>
+                )}
+              </div>
+
+              <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                <div
+                  className={`rounded-2xl border border-white/12 bg-[#050912]/80 p-4 transition ${
+                    isRangeMode && !liveMode
+                      ? 'ring-1 ring-[color:var(--accent-ring-strong)]'
+                      : 'opacity-65'
+                  } ${
+                    liveMode
+                      ? 'cursor-not-allowed'
+                      : 'cursor-pointer hover:border-[color:var(--accent-alpha-30)] hover:opacity-95'
+                  }`}
+                  onClick={() => {
+                    if (!isRangeMode && !liveMode) {
+                      handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE);
+                    }
+                  }}
+                >
+                  <DateRangePickerComponent
+                    dateRange={dateRange}
+                    setDateRange={handleDateRangeSelection}
+                    disabled={liveMode || !isRangeMode}
+                  />
+                </div>
+
+                <HistoricalLookbackControl
+                  value={liveMode ? liveLookbackDays : historicalLookbackDays}
+                  onSelect={liveMode ? handleLiveLookbackPresetSelect : handleHistoricalLookbackChange}
+                  maxDays={MAX_LOOKBACK_DAYS}
+                  active={liveMode ? true : isLookbackMode}
+                  onActivate={liveMode ? undefined : handleHistoricalModeToggle}
+                  inputValue={liveMode ? liveLookbackInput : historicalLookbackInput}
+                  onInputChange={liveMode ? handleLiveLookbackInputChange : handleHistoricalLookbackInputChange}
+                  onInputCommit={liveMode ? handleLiveLookbackCommit : handleHistoricalLookbackCommit}
+                  title={liveMode ? 'Live window' : 'Days back'}
+                  subtitle={
+                    liveMode
+                      ? 'Stream real-time candles with a trailing history buffer'
+                      : 'Rolling lookback presets'
+                  }
+                  footnote={
+                    liveMode
+                      ? `Streaming last ${clampLookbackDays(liveLookbackDays)} days`
+                      : undefined
+                  }
+                />
+              </div>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-xs text-slate-400">{lastRefreshCopy}</p>
+        <div className="flex flex-col gap-2 text-xs text-slate-400/80 sm:flex-row sm:items-center sm:justify-between">
+          <p>{lastRefreshCopy}</p>
           {connectionStatus === 'error' && connectionMessage ? (
-            <p className={`text-xs ${statusTextClass} sm:text-right`}>{connectionMessage}</p>
+            <p className={`${statusTextClass} sm:text-right`}>{connectionMessage}</p>
           ) : null}
         </div>
 
-        <div className="relative mt-6 h-[700px] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-[#222430] to-[#151720]">
-          <div className="pointer-events-none absolute right-5 top-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
-            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> presets
+        <div className="relative h-[700px] overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]">
+          <div className="pointer-events-none absolute right-6 top-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
+            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> to search
           </div>
           <div ref={chartContainerRef} className="h-full w-full" />
 
@@ -1508,6 +1847,6 @@ export const ChartComponent = ({ chartId }) => {
           <LoadingOverlay show={loaderActive} message={loaderMessage} />
         </div>
       </div>
-    </div>
+    </>
   )
 };

@@ -98,6 +98,9 @@ def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
         logger.warning("indicator_restore_failed | id=%s | error=%s", inst_id, exc)
         return
 
+    if isinstance(inst, MarketProfileIndicator):
+        setattr(inst, "symbol", ctx_kwargs.get("symbol"))
+
     runtime_params = _extract_ctor_params(inst)
     if datasource:
         runtime_params["datasource"] = datasource
@@ -382,9 +385,17 @@ def _build_market_profile_overlay_indicator(
 ) -> MarketProfileIndicator:
     """Create a fresh MarketProfileIndicator aligned with the overlay request window."""
 
+    base_symbol = getattr(indicator, "symbol", None)
+    sanitized_symbol = symbol or base_symbol
+    bin_size_locked = bool(getattr(indicator, "_bin_size_locked", False))
+    symbol_changed = sanitized_symbol is not None and sanitized_symbol != base_symbol
+    runtime_bin_size = getattr(indicator, "bin_size", None)
+    if not bin_size_locked and symbol_changed:
+        runtime_bin_size = None
+
     runtime = MarketProfileIndicator(
         df=df.copy(),
-        bin_size=getattr(indicator, "bin_size", 0.1),
+        bin_size=runtime_bin_size,
         mode=getattr(indicator, "mode", "tpo"),
         interval=interval or getattr(indicator, "interval", "30m"),
         extend_value_area_to_chart_end=getattr(
@@ -401,10 +412,8 @@ def _build_market_profile_overlay_indicator(
         ),
     )
 
-    if symbol is None:
-        symbol = getattr(indicator, "symbol", None)
-    if symbol is not None:
-        setattr(runtime, "symbol", symbol)
+    if sanitized_symbol is not None:
+        setattr(runtime, "symbol", sanitized_symbol)
 
     return runtime
 
@@ -563,8 +572,17 @@ def _extract_ctor_params(inst) -> Dict[str, Any]:
     for name, param in sig.parameters.items():
         if name in ("self", "df"):
             continue
-        if hasattr(inst, name):
-            out[name] = getattr(inst, name)
+        if not hasattr(inst, name):
+            continue
+        if (
+            name == "bin_size"
+            and hasattr(inst, "_bin_size_locked")
+            and not getattr(inst, "_bin_size_locked")
+        ):
+            # Auto-selected bin sizes should not be persisted so they can be
+            # recalculated when context (e.g., symbol) changes.
+            continue
+        out[name] = getattr(inst, name)
     return out
 
 def _sanitize_json(obj):
@@ -664,6 +682,7 @@ def create_instance(
     if not Cls:
         raise ValueError(f"Unknown indicator type: {type_str}")
 
+    params = dict(params)
     # Extract context → DataContext
     ctx_keys = ("symbol", "start", "end", "interval")
     try:
@@ -685,6 +704,9 @@ def create_instance(
         inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as e:
         raise RuntimeError(f"Failed to instantiate indicator: {e}")
+
+    if isinstance(inst, MarketProfileIndicator):
+        setattr(inst, "symbol", ctx.symbol)
 
     captured = _extract_ctor_params(inst)
     runtime_params = dict(captured)
@@ -725,6 +747,15 @@ def update_instance(
     if type_str != entry["meta"]["type"]:
         raise ValueError("Cannot change indicator type; create a new instance instead")
 
+    params = dict(params)
+    if (
+        type_str == MarketProfileIndicator.NAME
+        and isinstance(entry["instance"], MarketProfileIndicator)
+        and "bin_size" in params
+        and not getattr(entry["instance"], "_bin_size_locked", False)
+    ):
+        params.pop("bin_size", None)
+
     # Validate params against ctor
     Cls = _INDICATOR_MAP.get(type_str)
     sig = inspect.signature(Cls.__init__)
@@ -754,6 +785,9 @@ def update_instance(
         new_inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as e:
         raise RuntimeError(f"Failed to re-instantiate indicator: {e}")
+
+    if isinstance(new_inst, MarketProfileIndicator):
+        setattr(new_inst, "symbol", ctx.symbol)
 
     captured = _extract_ctor_params(new_inst)
     runtime_params = dict(captured)
