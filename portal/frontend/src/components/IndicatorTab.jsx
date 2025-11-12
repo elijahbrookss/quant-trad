@@ -642,68 +642,80 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       {/* List of indicators */}
-      <section className="relative rounded-2xl border border-white/10 bg-[#0d0d11]/80 shadow-inner shadow-black/30">
+      <section className="relative rounded-[28px] border border-white/8 bg-gradient-to-br from-[#080b14]/95 via-[#070a13]/95 to-[#04060c]/95 p-6 shadow-[0_50px_150px_-90px_rgba(0,0,0,0.85)]">
         <LoadingOverlay show={isLoading} message="Loading indicators…" />
         <div
-          className={`flex flex-col gap-6 p-6 transition ${
+          className={`flex flex-col gap-6 transition ${
             isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'
           }`}
         >
-          <header className="flex flex-col gap-4 border-b border-white/5 pb-4 md:flex-row md:items-start md:justify-between">
-            <div className="space-y-1">
-              <p className="text-[11px] uppercase tracking-[0.32em] text-slate-500">Indicators</p>
-              <h3 className="text-base font-semibold text-slate-100">Manage overlay configurations</h3>
-              <p className="text-xs text-slate-400">
-                Review saved indicators, toggle their availability, and open edits without leaving the console.
+          <header className="flex flex-col gap-4 border-b border-white/8 pb-5 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-500/80">Indicators</span>
+              <h3 className="text-base font-semibold tracking-tight text-slate-100">Manage overlay configurations</h3>
+              <p className="text-sm text-slate-400">
+                Review saved indicators, toggle availability, and open edits without leaving the console.
               </p>
             </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_12px_32px_-18px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-30)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-              >
-                <Plus className="size-4" aria-hidden="true" />
-                Add indicator
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => openEditModal()}
+              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+            >
+              <Plus className="size-4" aria-hidden="true" />
+              Add indicator
+            </button>
           </header>
 
-          <div className="flex flex-col gap-3 rounded-xl border border-white/5 bg-white/5 p-3 text-xs md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-1 flex-wrap items-center gap-3">
-              <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Filters</span>
-              <label className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 font-medium text-slate-200">
-                <input
-                  type="checkbox"
-                  className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                  checked={showEnabledOnly}
-                  onChange={(event) => setShowEnabledOnly(event.target.checked)}
-                />
-                Show enabled only
-              </label>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.45fr)]">
+            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Filters</span>
+                <span className="text-[11px] uppercase tracking-[0.26em] text-slate-500/70">
+                  {enabledCount} enabled · {totalCount} total
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-2 rounded-xl border border-white/12 bg-[#0b1324]/85 px-3 py-2 text-xs font-semibold uppercase tracking-[0.24em] text-slate-200 shadow-inner shadow-black/20">
+                  <input
+                    type="checkbox"
+                    className="size-4 rounded border border-slate-600/80 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                    checked={showEnabledOnly}
+                    onChange={(event) => setShowEnabledOnly(event.target.checked)}
+                  />
+                  Show enabled only
+                </label>
 
-              <DropdownSelect
-                label="Type"
-                value={typeFilter}
-                onChange={(next) => setTypeFilter(next)}
-                options={[
-                  { value: 'all', label: 'All types' },
-                  ...typeOptions.map((type) => ({ value: type, label: formatIndicatorType(type) })),
-                ]}
-                className="min-w-[10rem]"
-              />
-
-              <div className="flex min-w-[12rem] flex-1 items-center gap-2 rounded-lg border border-white/10 bg-[#11131b] px-3 py-2 text-slate-200 md:max-w-xs">
-                <span className="text-[11px] uppercase tracking-[0.24em] text-slate-500">Search</span>
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Name, type, or param"
-                  className="w-full bg-transparent text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none"
+                <DropdownSelect
+                  label="Type"
+                  value={typeFilter}
+                  onChange={(next) => setTypeFilter(next)}
+                  options={[
+                    { value: 'all', label: 'All types' },
+                    ...typeOptions.map((type) => ({ value: type, label: formatIndicatorType(type) })),
+                  ]}
+                  className="min-w-[12rem]"
                 />
+
+                <div className="flex min-w-[15rem] flex-1 flex-col gap-2 sm:max-w-xs">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Search</span>
+                  <div className="flex items-center gap-2 rounded-xl border border-white/12 bg-[#0b1324]/85 px-3 py-2 shadow-inner shadow-black/20">
+                    <input
+                      type="search"
+                      value={searchQuery}
+                      onChange={(event) => setSearchQuery(event.target.value)}
+                      placeholder="Name, type, or param"
+                      className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
-            <p className="text-xs text-slate-400">{indicatorSummary}</p>
+
+            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
+              <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400/80">Overview</span>
+              <p className="mt-2 text-sm leading-relaxed text-slate-300">{indicatorSummary}</p>
+            </div>
           </div>
 
           <div className="space-y-4">
