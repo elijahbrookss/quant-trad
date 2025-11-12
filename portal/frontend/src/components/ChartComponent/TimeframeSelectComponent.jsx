@@ -125,11 +125,27 @@ export function TimeframeSelect({ selected, onChange, className = '' }) {
 export function SymbolInput({
   value,
   onChange,
+  onCommit,
   onRequestPick,
   placeholder = 'Symbol',
   className = '',
 }) {
   const displayValue = (value || '').toString();
+
+  const handleBlur = (event) => {
+    const nextTarget = event?.relatedTarget;
+    if (nextTarget && nextTarget.dataset?.role === 'symbol-palette-trigger') {
+      return;
+    }
+    onCommit?.();
+  };
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      onCommit?.();
+    }
+  };
 
   return (
     <div
@@ -141,12 +157,15 @@ export function SymbolInput({
           type="text"
           value={displayValue}
           onChange={(event) => onChange?.(event.target.value)}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
           placeholder={placeholder}
           className="w-full rounded-xl border border-white/10 bg-[#0b1324]/90 px-3 py-2 pr-14 text-sm font-semibold uppercase tracking-[0.28em] text-slate-100 placeholder:text-slate-600 focus:border-[color:var(--accent-alpha-40)] focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-ring-strong)]"
         />
         <button
           type="button"
           onClick={() => onRequestPick?.()}
+          data-role="symbol-palette-trigger"
           className="absolute right-1.5 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg border border-white/12 bg-[#10192d]/90 text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)] hover:text-[color:var(--accent-text-strong)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
           aria-label="Open symbol palette"
         >

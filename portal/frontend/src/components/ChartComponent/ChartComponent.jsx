@@ -208,6 +208,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Local UI state.
   const [symbol, setSymbol] = useState('CL');
+  const [symbolDraft, setSymbolDraft] = useState('CL');
   const [interval, setInterval] = useState('15m');
   const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
   const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
@@ -476,6 +477,10 @@ export const ChartComponent = ({ chartId }) => {
 
   useEffect(() => {
     symbolRef.current = symbol;
+  }, [symbol]);
+
+  useEffect(() => {
+    setSymbolDraft((prev) => (prev === symbol ? prev : symbol));
   }, [symbol]);
 
   useEffect(() => {
@@ -973,15 +978,9 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, []);
 
-  const applySymbol = (sym) => {
-    const sanitized = (sym ?? '').toString().trim().toUpperCase();
-    setSymbol(sanitized);
-    setPalOpen(false);
-  };
-
   const handleSymbolInputChange = useCallback((raw) => {
     const next = (raw ?? '').toString().toUpperCase();
-    setSymbol(next.trim());
+    setSymbolDraft(next);
   }, []);
 
   const handleHistoricalLookbackChange = useCallback((days) => {
@@ -1416,6 +1415,44 @@ export const ChartComponent = ({ chartId }) => {
     return result;
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
 
+  const handleSymbolInputCommit = useCallback(() => {
+    const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
+    if (!sanitized) {
+      setSymbolDraft(symbol);
+      return;
+    }
+
+    const changed = sanitized !== symbol;
+    setSymbolDraft(sanitized);
+
+    if (!changed) {
+      return;
+    }
+
+    setSymbol(sanitized);
+
+    if (modeRef.current !== 'live') {
+      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+    }
+  }, [symbolDraft, symbol, handleApply]);
+
+  const applySymbol = useCallback((sym) => {
+    const sanitized = (sym ?? '').toString().trim().toUpperCase();
+    if (!sanitized) {
+      setPalOpen(false);
+      return;
+    }
+
+    const changed = sanitized !== symbol;
+    setSymbolDraft(sanitized);
+    setSymbol(sanitized);
+    setPalOpen(false);
+
+    if (changed && modeRef.current !== 'live') {
+      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+    }
+  }, [symbol, handleApply]);
+
   const handleLiveLookbackCommit = useCallback(() => {
     const parsed = Number.parseInt(liveLookbackInput, 10);
     const normalized = clampLookbackDays(Number.isNaN(parsed) ? liveLookbackDays : parsed);
@@ -1628,8 +1665,9 @@ export const ChartComponent = ({ chartId }) => {
                   </div>
                   <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <SymbolInput
-                      value={symbol}
+                      value={symbolDraft}
                       onChange={handleSymbolInputChange}
+                      onCommit={handleSymbolInputCommit}
                       onRequestPick={() => setPalOpen(true)}
                       className="md:col-span-2 xl:col-span-1"
                     />

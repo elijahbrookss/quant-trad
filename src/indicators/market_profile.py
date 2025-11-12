@@ -91,6 +91,7 @@ class MarketProfileIndicator(BaseIndicator):
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
     ):
         super().__init__(df)
+        self._bin_size_locked = False
         self.bin_size = self._select_bin_size(df, bin_size)
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
@@ -145,7 +146,9 @@ class MarketProfileIndicator(BaseIndicator):
             except (TypeError, ValueError):
                 numeric = None
             if numeric is not None and numeric > 0:
+                self._bin_size_locked = True
                 return numeric
+        self._bin_size_locked = False
         return self._infer_bin_size(df)
 
     def _infer_bin_size(self, df: pd.DataFrame) -> float:

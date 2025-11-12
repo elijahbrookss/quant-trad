@@ -382,9 +382,17 @@ def _build_market_profile_overlay_indicator(
 ) -> MarketProfileIndicator:
     """Create a fresh MarketProfileIndicator aligned with the overlay request window."""
 
+    base_symbol = getattr(indicator, "symbol", None)
+    sanitized_symbol = symbol or base_symbol
+    bin_size_locked = bool(getattr(indicator, "_bin_size_locked", False))
+    symbol_changed = sanitized_symbol is not None and sanitized_symbol != base_symbol
+    runtime_bin_size = getattr(indicator, "bin_size", None)
+    if not bin_size_locked and symbol_changed:
+        runtime_bin_size = None
+
     runtime = MarketProfileIndicator(
         df=df.copy(),
-        bin_size=getattr(indicator, "bin_size", 0.1),
+        bin_size=runtime_bin_size,
         mode=getattr(indicator, "mode", "tpo"),
         interval=interval or getattr(indicator, "interval", "30m"),
         extend_value_area_to_chart_end=getattr(
@@ -401,10 +409,8 @@ def _build_market_profile_overlay_indicator(
         ),
     )
 
-    if symbol is None:
-        symbol = getattr(indicator, "symbol", None)
-    if symbol is not None:
-        setattr(runtime, "symbol", symbol)
+    if sanitized_symbol is not None:
+        setattr(runtime, "symbol", sanitized_symbol)
 
     return runtime
 
