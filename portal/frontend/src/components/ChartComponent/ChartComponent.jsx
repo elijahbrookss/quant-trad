@@ -336,7 +336,12 @@ export const ChartComponent = ({ chartId }) => {
   }, [connectionStatus]);
 
   // Refs for chart and DOM.
-  const chartContainerRef = useRef(null);
+  const chartContainerElRef = useRef(null);
+  const [chartMountNode, setChartMountNode] = useState(null);
+  const attachChartContainerRef = useCallback((node) => {
+    chartContainerElRef.current = node;
+    setChartMountNode((prev) => (prev === node ? prev : node));
+  }, []);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const seededRef = useRef(false); // ensure we seed only once
@@ -911,7 +916,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Create chart once.
   useEffect(() => {
-    const el = chartContainerRef.current;
+    const el = chartMountNode;
     if (!el || chartRef.current) return;
 
     const initialInterval = intervalRef.current;
@@ -978,7 +983,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData, chartMountNode]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -993,7 +998,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Resize via ResizeObserver.
   useEffect(() => {
-    const el = chartContainerRef.current;
+    const el = chartMountNode;
     if (!el || !chartRef.current) return;
 
     const ro = new ResizeObserver(([entry]) => {
@@ -1004,7 +1009,7 @@ export const ChartComponent = ({ chartId }) => {
 
     ro.observe(el);
     return () => ro.disconnect();
-  }, [debug]);
+  }, [debug, chartMountNode]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1752,7 +1757,7 @@ export const ChartComponent = ({ chartId }) => {
           </>
         )}
       </button>
-      <div ref={chartContainerRef} className="h-full w-full" />
+      <div ref={attachChartContainerRef} className="h-full w-full" />
 
       <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
       <HotkeyHint />
