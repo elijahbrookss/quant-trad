@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { createChart } from 'lightweight-charts'
+import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 
 const chartOptions = {
@@ -56,6 +56,7 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
   const seriesRef = useRef(null)
   const resizeObserverRef = useRef(null)
   const { registerChart } = useChartState()
+  const markersApiRef = useRef(null)
 
   const candleData = useMemo(() => {
     return candles.map((candle) => ({
@@ -79,10 +80,18 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
       width: el.clientWidth,
       height: el.clientHeight || 360,
     })
-    const series = chart.addCandlestickSeries(seriesOptions)
+    const series = chart.addSeries(CandlestickSeries, seriesOptions)
     chartRef.current = chart
     seriesRef.current = series
-    registerChart?.(chartId, { chart, series })
+    markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
+    registerChart?.(chartId, {
+      get chart() {
+        return chartRef.current
+      },
+      get series() {
+        return seriesRef.current
+      },
+    })
 
     resizeObserverRef.current = new ResizeObserver(([entry]) => {
       const rect = entry?.contentRect
@@ -94,6 +103,8 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
     return () => {
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
+      markersApiRef.current?.setMarkers?.([])
+      markersApiRef.current = null
       seriesRef.current = null
       chartRef.current?.remove()
       chartRef.current = null
@@ -103,9 +114,10 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
   useEffect(() => {
     if (!seriesRef.current) return
     seriesRef.current.setData(candleData)
-    if (typeof seriesRef.current.setMarkers === 'function') {
-      seriesRef.current.setMarkers(markers)
+    if (!markersApiRef.current) {
+      markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
     }
+    markersApiRef.current?.setMarkers?.(markers)
   }, [candleData, markers])
 
   return (
