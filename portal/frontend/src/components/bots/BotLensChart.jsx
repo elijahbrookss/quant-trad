@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { createChart, CandlestickSeries } from 'lightweight-charts'
+import { createChart } from 'lightweight-charts'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 
 const chartOptions = {
@@ -79,7 +79,7 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
       width: el.clientWidth,
       height: el.clientHeight || 360,
     })
-    const series = chart.addSeries(CandlestickSeries, seriesOptions)
+    const series = chart.addCandlestickSeries(seriesOptions)
     chartRef.current = chart
     seriesRef.current = series
     registerChart?.(chartId, { chart, series })
@@ -103,7 +103,9 @@ export function BotLensChart({ chartId, candles = [], trades = [] }) {
   useEffect(() => {
     if (!seriesRef.current) return
     seriesRef.current.setData(candleData)
-    seriesRef.current.setMarkers(markers)
+    if (typeof seriesRef.current.setMarkers === 'function') {
+      seriesRef.current.setMarkers(markers)
+    }
   }, [candleData, markers])
 
   return (

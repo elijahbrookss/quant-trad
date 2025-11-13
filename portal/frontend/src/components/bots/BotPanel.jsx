@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Play, Square, Eye, PlusCircle } from 'lucide-react'
+import { Play, Square, Eye, PlusCircle, Trash2 } from 'lucide-react'
 import {
   listBots,
   createBot,
   startBot as startBotApi,
   stopBot as stopBotApi,
+  deleteBot as deleteBotApi,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
@@ -26,6 +27,7 @@ export function BotPanel() {
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
   const [strategyError, setStrategyError] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState(null)
 
   const loadBots = useCallback(async () => {
     setLoading(true)
@@ -114,6 +116,21 @@ export function BotPanel() {
       loadBots()
     } catch (err) {
       setError(err?.message || 'Unable to stop bot')
+    }
+  }
+
+  const handleDelete = async (botId) => {
+    if (!botId) return
+    if (!window.confirm('Delete this bot? This cannot be undone.')) return
+    setError(null)
+    setPendingDelete(botId)
+    try {
+      await deleteBotApi(botId)
+      setBots((prev) => prev.filter((bot) => bot.id !== botId))
+    } catch (err) {
+      setError(err?.message || 'Unable to delete bot')
+    } finally {
+      setPendingDelete(null)
     }
   }
 
@@ -295,6 +312,14 @@ export function BotPanel() {
                     className="inline-flex items-center gap-2 rounded-full border border-white/20 px-4 py-2 text-sm text-slate-200 hover:bg-white/10"
                   >
                     <Eye className="size-4" /> Lens
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(bot.id)}
+                    disabled={pendingDelete === bot.id}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/20 px-4 py-2 text-sm text-slate-200 hover:bg-white/10 disabled:opacity-40"
+                  >
+                    <Trash2 className="size-4" /> Delete
                   </button>
                 </div>
               </div>
