@@ -391,3 +391,54 @@ def test_to_lightweight_inherits_extend_flag_from_indicator(dummy_df):
     assert payload["boxes"], "Expected at least one value-area box"
     box = payload["boxes"][0]
     assert box["x2"] == int(end.timestamp())
+
+
+class _CacheProvider:
+    """In-memory provider stub used to verify MarketProfile caching."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_ohlcv(self, ctx):  # pragma: no cover - trivial stub
+        self.calls += 1
+        start = pd.Timestamp(ctx.start)
+        end = pd.Timestamp(ctx.end)
+        if start.tzinfo is None:
+            start = start.tz_localize("UTC")
+        else:
+            start = start.tz_convert("UTC")
+        if end.tzinfo is None:
+            end = end.tz_localize("UTC")
+        else:
+            end = end.tz_convert("UTC")
+        idx = pd.date_range(start=start, end=end, freq="1H", tz="UTC")
+        data = {
+            "open": pd.Series(range(len(idx)), index=idx).astype(float),
+            "high": pd.Series(range(len(idx)), index=idx).astype(float) + 0.5,
+            "low": pd.Series(range(len(idx)), index=idx).astype(float) - 0.5,
+            "close": pd.Series(range(len(idx)), index=idx).astype(float),
+        }
+        return pd.DataFrame(data, index=idx)
+
+
+@pytest.mark.unit
+def test_fetch_with_cache_reuses_historical_window():
+    provider = _CacheProvider()
+    ctx = DataContext(
+        symbol="ES",
+        start="2025-01-10T00:00:00Z",
+        end="2025-01-12T00:00:00Z",
+        interval="1h",
+    )
+
+    MarketProfileIndicator._DATAFRAME_CACHE.clear()
+    try:
+        first = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2, mode="research")
+        assert provider.calls == 1
+        assert not first.empty
+
+        second = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2, mode="research")
+        assert provider.calls == 1, "Expected cached dataframe to be reused"
+        pd.testing.assert_frame_equal(first, second)
+    finally:
+        MarketProfileIndicator._DATAFRAME_CACHE.clear()
