@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..db import (
+    BotRecord,
     IndicatorRecord,
     StrategyIndicatorLink,
     StrategyRecord,
@@ -35,6 +36,16 @@ def load_indicators() -> List[Dict[str, Any]]:
         return []
     with db.session() as session:
         rows = session.execute(select(IndicatorRecord)).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def load_bots() -> List[Dict[str, Any]]:
+    """Return all persisted bot configurations."""
+
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = session.execute(select(BotRecord)).scalars().all()
         return [row.to_dict() for row in rows]
 
 
@@ -66,6 +77,51 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
                 record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("indicator_persist_failed | id=%s | error=%s", meta.get("id"), exc)
+
+
+def upsert_bot(payload: Dict[str, Any]) -> None:
+    """Persist a bot configuration row."""
+
+    if not db.available:
+        return
+    bot_id = payload["id"]
+    try:
+        with db.session() as session:
+            record = session.get(BotRecord, bot_id)
+            now = _utcnow()
+            if record is None:
+                record = BotRecord(id=bot_id, name=payload.get("name") or bot_id)
+                session.add(record)
+            record.name = payload.get("name") or record.name
+            record.strategy_id = payload.get("strategy_id")
+            record.datasource = payload.get("datasource")
+            record.exchange = payload.get("exchange")
+            record.timeframe = payload.get("timeframe") or record.timeframe
+            record.mode = payload.get("mode") or record.mode
+            record.fetch_seconds = int(payload.get("fetch_seconds") or record.fetch_seconds or 5)
+            record.risk = dict(payload.get("risk") or {})
+            record.status = payload.get("status") or record.status
+            record.last_run_at = payload.get("last_run_at") or record.last_run_at
+            record.last_stats = dict(payload.get("last_stats") or record.last_stats or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
+    except SQLAlchemyError as exc:
+        logger.warning("bot_persist_failed | id=%s | error=%s", bot_id, exc)
+
+
+def delete_bot(bot_id: str) -> None:
+    """Remove a bot configuration permanently."""
+
+    if not db.available:
+        return
+    try:
+        with db.session() as session:
+            record = session.get(BotRecord, bot_id)
+            if record:
+                session.delete(record)
+    except SQLAlchemyError as exc:
+        logger.warning("bot_delete_failed | id=%s | error=%s", bot_id, exc)
 
 
 def delete_indicator(indicator_id: str) -> None:

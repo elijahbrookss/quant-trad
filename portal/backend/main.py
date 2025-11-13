@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .controller import candles, indicators, strategies
+from .controller import bots, candles, indicators, strategies
 
 app = FastAPI(
     title="Quant-Trad API",
@@ -20,6 +20,7 @@ app.add_middleware(
 app.include_router(candles.router, prefix="/api/candles")
 app.include_router(indicators.router, prefix="/api/indicators")
 app.include_router(strategies.router, prefix="/api/strategies")
+app.include_router(bots.router, prefix="/api/bots")
 
 
 @app.get("/api/health")

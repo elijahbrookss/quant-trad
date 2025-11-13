@@ -2,6 +2,7 @@
 
 from .models import (
     Base,
+    BotRecord,
     IndicatorRecord,
     StrategyIndicatorLink,
     StrategyRecord,
@@ -13,6 +14,7 @@ from .session import Database, db
 __all__ = [
     "Base",
     "Database",
+    "BotRecord",
     "IndicatorRecord",
     "StrategyIndicatorLink",
     "StrategyRecord",

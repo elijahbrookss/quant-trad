@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 
@@ -170,6 +170,47 @@ class SymbolPresetRecord(Base):
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "symbol": self.symbol,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRecord(Base):
+    """Database row describing a persisted bot configuration."""
+
+    __tablename__ = "portal_bots"
+
+    id = Column(String(64), primary_key=True)
+    name = Column(String(255), nullable=False)
+    strategy_id = Column(String(64), nullable=True)
+    datasource = Column(String(64), nullable=True)
+    exchange = Column(String(64), nullable=True)
+    timeframe = Column(String(32), nullable=False, default="15m")
+    mode = Column(String(32), nullable=False, default="instant")
+    fetch_seconds = Column(Integer, nullable=False, default=5)
+    risk = Column(JSON, nullable=False, default=dict)
+    status = Column(String(32), nullable=False, default="idle")
+    last_run_at = Column(DateTime, nullable=True)
+    last_stats = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the bot configuration in API-friendly form."""
+
+        return {
+            "id": self.id,
+            "name": self.name,
+            "strategy_id": self.strategy_id,
+            "datasource": self.datasource,
+            "exchange": self.exchange,
+            "timeframe": self.timeframe,
+            "mode": self.mode,
+            "fetch_seconds": self.fetch_seconds,
+            "risk": dict(self.risk or {}),
+            "status": self.status,
+            "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
+            "last_stats": dict(self.last_stats or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

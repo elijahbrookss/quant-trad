@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
 import { TabManager } from './components/TabManager'
+import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
 import { RefreshCw } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
@@ -208,16 +209,7 @@ function AppShell({ chartId }) {
             />
 
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-              <div className="rounded-3xl border border-white/8 bg-white/5 p-6">
-                <h3 className="text-lg font-semibold text-slate-100">Bot scorecards</h3>
-                <p className="mt-2 text-sm text-slate-400">Summaries for each trading bot with win rates, exposure, risk, and anomaly detection. Integrate walk-forward stats and breakdowns per indicator.</p>
-                <div className="mt-4 grid gap-3 text-xs text-slate-400 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">Equity curve overlays with drawdown callouts.</div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">Signal attribution tree to trace decision pipelines.</div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">Monte Carlo replays to stress test execution variance.</div>
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">Export-ready PDF &amp; Notion embeds for stakeholder updates.</div>
-                </div>
-              </div>
+              <BotPanel />
 
               <div className="flex flex-col gap-4 rounded-3xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-6">
                 <h3 className="text-lg font-semibold text-[color:var(--accent-text-strong)]">Trade walkthroughs</h3>
