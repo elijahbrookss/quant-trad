@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
 import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
@@ -233,14 +234,32 @@ export const ChartComponent = ({ chartId }) => {
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenHost, setFullscreenHost] = useState(null);
 
   const chartShellClasses = useMemo(() => {
     const base =
       'relative overflow-hidden border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]';
     const size = isFullscreen
-      ? 'fixed inset-0 z-50 h-[100dvh] w-screen rounded-none'
+      ? 'h-full w-full rounded-none'
       : 'h-[700px] rounded-[28px]';
     return `${base} ${size}`;
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    if (typeof document === 'undefined') return undefined;
+
+    const node = document.createElement('div');
+    node.className = 'fixed inset-0 z-[9999] bg-[#01030e]';
+    document.body.appendChild(node);
+    setFullscreenHost(node);
+
+    return () => {
+      setFullscreenHost((current) => (current === node ? null : current));
+      if (node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+    };
   }, [isFullscreen]);
 
   useEffect(() => {
@@ -1700,6 +1719,51 @@ export const ChartComponent = ({ chartId }) => {
     return parts.join(' • ');
   }, [datasourceDisplay, venueDisplay]);
 
+  const chartSurface = (
+    <div className={chartShellClasses}>
+      <div className="pointer-events-none absolute left-6 top-6 z-20 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
+          <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
+            {intervalDisplay}
+          </span>
+        </div>
+        {instrumentMeta ? (
+          <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
+            {instrumentMeta}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        aria-pressed={isFullscreen}
+        onClick={toggleFullscreen}
+        className="pointer-events-auto absolute right-6 top-6 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+      >
+        {isFullscreen ? (
+          <>
+            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Exit Fullscreen
+          </>
+        ) : (
+          <>
+            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Fullscreen
+          </>
+        )}
+      </button>
+      <div ref={chartContainerRef} className="h-full w-full" />
+
+      <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+      <HotkeyHint />
+      <LoadingOverlay show={loaderActive} message={loaderMessage} />
+    </div>
+  );
+
+  const renderedChartSurface = isFullscreen && fullscreenHost
+    ? createPortal(chartSurface, fullscreenHost)
+    : chartSurface;
+
   return (
     <>
       <div className="space-y-6">
@@ -1923,44 +1987,7 @@ export const ChartComponent = ({ chartId }) => {
           ) : null}
         </div>
 
-        <div className={chartShellClasses}>
-          <div className="pointer-events-none absolute left-6 top-6 z-20 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
-            <div className="flex flex-wrap items-baseline gap-2">
-              <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
-              <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
-                {intervalDisplay}
-              </span>
-            </div>
-            {instrumentMeta ? (
-              <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
-                {instrumentMeta}
-              </div>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            aria-pressed={isFullscreen}
-            onClick={toggleFullscreen}
-            className="pointer-events-auto absolute right-6 top-6 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
-          >
-            {isFullscreen ? (
-              <>
-                <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
-                Exit Fullscreen
-              </>
-            ) : (
-              <>
-                <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-                Fullscreen
-              </>
-            )}
-          </button>
-          <div ref={chartContainerRef} className="h-full w-full" />
-
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          <LoadingOverlay show={loaderActive} message={loaderMessage} />
-        </div>
+        {renderedChartSurface}
       </div>
     </>
   )
