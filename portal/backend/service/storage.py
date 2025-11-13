@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..db import (
     BotRecord,
+    BotStrategyLink,
     IndicatorRecord,
     StrategyIndicatorLink,
     StrategyRecord,
@@ -46,7 +49,24 @@ def load_bots() -> List[Dict[str, Any]]:
         return []
     with db.session() as session:
         rows = session.execute(select(BotRecord)).scalars().all()
-        return [row.to_dict() for row in rows]
+        if not rows:
+            return []
+        bot_ids = [row.id for row in rows]
+        link_map: Dict[str, List[str]] = defaultdict(list)
+        links = session.execute(
+            select(BotStrategyLink).where(BotStrategyLink.bot_id.in_(bot_ids))
+        ).scalars().all()
+        for link in links:
+            link_map[link.bot_id].append(link.strategy_id)
+        payload: List[Dict[str, Any]] = []
+        for row in rows:
+            record = row.to_dict()
+            strategies = link_map.get(row.id, [])
+            if not strategies and row.strategy_id:
+                strategies = [row.strategy_id]
+            record["strategy_ids"] = strategies
+        payload.append(record)
+        return payload
 
 
 def upsert_indicator(meta: Dict[str, Any]) -> None:
@@ -79,6 +99,19 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
         logger.warning("indicator_persist_failed | id=%s | error=%s", meta.get("id"), exc)
 
 
+def _sync_bot_strategies(session, bot_id: str, strategy_ids: Iterable[str]) -> None:
+    """Replace bot strategy links with *strategy_ids*."""
+
+    session.execute(delete(BotStrategyLink).where(BotStrategyLink.bot_id == bot_id))
+    for strategy_id in strategy_ids:
+        link = BotStrategyLink(
+            id=str(uuid.uuid4()),
+            bot_id=bot_id,
+            strategy_id=strategy_id,
+        )
+        session.add(link)
+
+
 def upsert_bot(payload: Dict[str, Any]) -> None:
     """Persist a bot configuration row."""
 
@@ -93,7 +126,14 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 record = BotRecord(id=bot_id, name=payload.get("name") or bot_id)
                 session.add(record)
             record.name = payload.get("name") or record.name
-            record.strategy_id = payload.get("strategy_id")
+            strategy_ids: Optional[Iterable[str]] = payload.get("strategy_ids")
+            if strategy_ids is not None:
+                strategy_list = [sid for sid in strategy_ids]
+                _sync_bot_strategies(session, bot_id, strategy_list)
+                first_strategy = strategy_list[0] if strategy_list else None
+            else:
+                first_strategy = payload.get("strategy_id")
+            record.strategy_id = first_strategy
             record.datasource = payload.get("datasource")
             record.exchange = payload.get("exchange")
             record.timeframe = payload.get("timeframe") or record.timeframe
@@ -117,6 +157,7 @@ def delete_bot(bot_id: str) -> None:
         return
     try:
         with db.session() as session:
+            session.execute(delete(BotStrategyLink).where(BotStrategyLink.bot_id == bot_id))
             record = session.get(BotRecord, bot_id)
             if record:
                 session.delete(record)

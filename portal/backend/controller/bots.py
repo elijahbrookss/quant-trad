@@ -27,7 +27,11 @@ class BotBase(BaseModel):
     """Shared bot attributes."""
 
     name: str
-    strategy_id: Optional[str] = None
+    strategy_ids: List[str] = Field(default_factory=list)
+    strategy_id: Optional[str] = Field(
+        default=None,
+        description="Deprecated single-strategy field maintained for backwards compatibility.",
+    )
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     timeframe: str = "15m"
@@ -46,6 +50,7 @@ class BotUpdateRequest(BaseModel):
     """Patch payload for updating a bot."""
 
     name: Optional[str] = None
+    strategy_ids: Optional[List[str]] = None
     strategy_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -86,7 +91,10 @@ async def list_bots() -> List[Dict[str, Any]]:
 async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
     """Create a new bot configuration."""
 
-    return bot_service.create_bot(**body.dict())
+    try:
+        return bot_service.create_bot(**body.dict())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/{bot_id}", response_model=BotResponse)
@@ -108,6 +116,8 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
         return bot_service.update_bot(bot_id, **payload)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.delete("/{bot_id}", status_code=204)
@@ -125,6 +135,8 @@ async def start_bot(bot_id: str) -> Dict[str, Any]:
         return bot_service.start_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/{bot_id}/stop", response_model=BotResponse)

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from .bot_runtime import BotRuntime, DEFAULT_RISK
-from .storage import delete_bot, load_bots, upsert_bot
+from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
 
 _RUNTIME: Dict[str, BotRuntime] = {}
@@ -26,6 +26,38 @@ def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
     if isinstance(risk, dict):
         config.update({k: risk[k] for k in risk if risk[k] is not None})
     return config
+
+
+def _validate_strategy_ids(
+    strategy_ids: Optional[Iterable[str]],
+    fallback: Optional[str] = None,
+) -> List[str]:
+    """Ensure at least one referenced strategy exists."""
+
+    candidates: List[str] = []
+    if strategy_ids:
+        for strategy_id in strategy_ids:
+            if strategy_id:
+                candidates.append(str(strategy_id))
+    if not candidates and fallback:
+        candidates = [fallback]
+    deduped: List[str] = []
+    seen = set()
+    for strategy_id in candidates:
+        trimmed = strategy_id.strip()
+        if not trimmed or trimmed in seen:
+            continue
+        deduped.append(trimmed)
+        seen.add(trimmed)
+    if not deduped:
+        raise ValueError("Bots require at least one strategy.")
+    available = {strategy["id"] for strategy in load_strategies()}
+    missing = [strategy_id for strategy_id in deduped if strategy_id not in available]
+    if missing:
+        raise ValueError(
+            "The following strategies do not exist: " + ", ".join(sorted(missing))
+        )
+    return deduped
 
 
 def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
@@ -55,10 +87,14 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
     """Persist a new bot configuration."""
 
     bot_id = payload.get("id") or str(uuid.uuid4())
+    strategy_ids = _validate_strategy_ids(
+        payload.get("strategy_ids"), payload.get("strategy_id")
+    )
     record = {
         "id": bot_id,
         "name": name,
-        "strategy_id": payload.get("strategy_id"),
+        "strategy_id": strategy_ids[0],
+        "strategy_ids": strategy_ids,
         "datasource": payload.get("datasource"),
         "exchange": payload.get("exchange"),
         "timeframe": payload.get("timeframe") or "15m",
@@ -79,6 +115,12 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     if bot_id not in bots:
         raise KeyError(f"Bot {bot_id} was not found")
     record = bots[bot_id]
+    if "strategy_ids" in payload or "strategy_id" in payload:
+        strategy_ids = _validate_strategy_ids(
+            payload.get("strategy_ids"), payload.get("strategy_id")
+        )
+        record["strategy_ids"] = strategy_ids
+        record["strategy_id"] = strategy_ids[0]
     record.update({k: v for k, v in payload.items() if v is not None})
     if "risk" in payload:
         record["risk"] = _normalise_risk(payload.get("risk"))
@@ -105,6 +147,9 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     if bot_id not in bots:
         raise KeyError(f"Bot {bot_id} was not found")
     bot = bots[bot_id]
+    strategy_ids = bot.get("strategy_ids") or ([bot.get("strategy_id")] if bot.get("strategy_id") else [])
+    bot["strategy_ids"] = _validate_strategy_ids(strategy_ids)
+    bot["strategy_id"] = bot["strategy_ids"][0]
     runtime = _runtime_for(bot_id, bot)
     runtime.start()
     bot["status"] = "running"

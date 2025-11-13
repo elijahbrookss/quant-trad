@@ -2,14 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
 import { TabManager } from './components/TabManager'
-import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
 import { RefreshCw } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
 
 const sections = [
   { id: 'quantlab', label: 'QuantLab', description: 'Strategy workbench for indicators, charts, and overlays.' },
-  { id: 'reports', label: 'Reports', description: 'Performance intelligence and trade-by-trade walkthroughs.' },
 ]
 
 function ApiStatusPill({ chartId }) {
@@ -202,54 +200,7 @@ function AppShell({ chartId }) {
             </div>
           </section>
 
-          <section id="reports" className="space-y-10">
-            <SectionHeading
-              title="Reports"
-              description="Dive into trade-level context, compare bots, and narrate every decision path from indicator to execution."
-            />
-
-            <div className="grid gap-6 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-              <BotPanel />
-
-              <div className="flex flex-col gap-4 rounded-3xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-6">
-                <h3 className="text-lg font-semibold text-[color:var(--accent-text-strong)]">Trade walkthroughs</h3>
-                <p className="text-sm text-[color:var(--accent-text-strong-alpha)]">Replay every order with contextual overlays. Capture indicator states, signal weights, and execution metadata.</p>
-                <div className="rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-15)] p-4 text-xs text-[color:var(--accent-text-strong-alpha)]">
-                  Future UX includes: scrubbable timelines, indicator snapshots, and risk commentary sidebars for each decision point.
-                </div>
-                <ul className="space-y-2 text-sm text-[color:var(--accent-text-strong-alpha)]">
-                  <li>• Align QuantLab overlays with executed trades.</li>
-                  <li>• Annotate decisions for compliance + research sharing.</li>
-                  <li>• Integrate PnL, slippage, and volatility context.</li>
-                </ul>
-              </div>
-            </div>
-          </section>
         </main>
-
-        <footer className="border-t border-white/5 bg-[#181b25]/80 py-8">
-          <div className="mx-auto flex max-w-[1600px] flex-col gap-4 px-8 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-            <p>QuantTrad Portal — unified intelligence for research, ops, and reporting.</p>
-            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
-              <a
-                href="https://github.com/elijahbrookss/quant-trad"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
-              >
-                GitHub
-              </a>
-              <a
-                href="https://quad-trad.gitbook.io/docs/"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
-              >
-                Documentation
-              </a>
-            </div>
-          </div>
-        </footer>
     </div>
   )
 }

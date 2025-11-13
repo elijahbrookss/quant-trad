@@ -3,6 +3,7 @@
 from .models import (
     Base,
     BotRecord,
+    BotStrategyLink,
     IndicatorRecord,
     StrategyIndicatorLink,
     StrategyRecord,
@@ -15,6 +16,7 @@ __all__ = [
     "Base",
     "Database",
     "BotRecord",
+    "BotStrategyLink",
     "IndicatorRecord",
     "StrategyIndicatorLink",
     "StrategyRecord",

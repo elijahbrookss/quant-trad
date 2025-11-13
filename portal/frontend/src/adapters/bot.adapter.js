@@ -11,8 +11,19 @@ async function request(path, options = {}) {
     ...options,
   })
   if (!res.ok) {
-    const text = await res.text()
-    const message = text || res.statusText || 'Bot request failed'
+    let detail = null
+    const contentType = res.headers.get('content-type') || ''
+    try {
+      if (contentType.includes('application/json')) {
+        const payload = await res.json()
+        detail = payload?.detail || payload?.message || null
+      } else {
+        detail = await res.text()
+      }
+    } catch (err) {
+      log.warn('bot_request_parse_failed', { path, status: res.status }, err)
+    }
+    const message = detail || res.statusText || 'Bot request failed'
     throw new Error(message)
   }
   if (res.status === 204) return null

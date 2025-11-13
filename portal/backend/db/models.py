@@ -214,3 +214,36 @@ class BotRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+class BotStrategyLink(Base):
+    """Join table linking bots to one or more strategies."""
+
+    __tablename__ = "portal_bot_strategies"
+
+    id = Column(String(64), primary_key=True)
+    bot_id = Column(
+        String(64),
+        ForeignKey("portal_bots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    strategy_id = Column(
+        String(64),
+        ForeignKey("portal_strategies.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("bot_id", "strategy_id", name="uq_bot_strategy"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a serialisable mapping for the bot-strategy pair."""
+
+        return {
+            "id": self.id,
+            "bot_id": self.bot_id,
+            "strategy_id": self.strategy_id,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
