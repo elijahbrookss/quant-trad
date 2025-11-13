@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
@@ -232,6 +233,34 @@ export const ChartComponent = ({ chartId }) => {
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenHost, setFullscreenHost] = useState(null);
+
+  const chartShellClasses = useMemo(() => {
+    const base =
+      'relative overflow-hidden border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]';
+    const size = isFullscreen
+      ? 'h-full w-full rounded-none'
+      : 'h-[700px] rounded-[28px]';
+    return `${base} ${size}`;
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    if (typeof document === 'undefined') return undefined;
+
+    const node = document.createElement('div');
+    node.className = 'fixed inset-0 z-[9999] bg-[#01030e]';
+    document.body.appendChild(node);
+    setFullscreenHost(node);
+
+    return () => {
+      setFullscreenHost((current) => (current === node ? null : current));
+      if (node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+    };
+  }, [isFullscreen]);
 
   useEffect(() => {
     const normalizedHistorical = String(clampLookbackDays(historicalLookbackDays));
@@ -240,6 +269,35 @@ export const ChartComponent = ({ chartId }) => {
     const normalized = String(clampLookbackDays(liveLookbackDays));
     setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
   }, [historicalLookbackDays, liveLookbackDays]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const { body } = document;
+    if (!body) return undefined;
+
+    if (isFullscreen) {
+      body.classList.add('overflow-hidden');
+    } else {
+      body.classList.remove('overflow-hidden');
+    }
+
+    return () => {
+      body.classList.remove('overflow-hidden');
+    };
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    if (typeof window === 'undefined') return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsFullscreen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isFullscreen, setIsFullscreen]);
 
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
@@ -278,7 +336,12 @@ export const ChartComponent = ({ chartId }) => {
   }, [connectionStatus]);
 
   // Refs for chart and DOM.
-  const chartContainerRef = useRef(null);
+  const chartContainerElRef = useRef(null);
+  const [chartMountNode, setChartMountNode] = useState(null);
+  const attachChartContainerRef = useCallback((node) => {
+    chartContainerElRef.current = node;
+    setChartMountNode((prev) => (prev === node ? prev : node));
+  }, []);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const seededRef = useRef(false); // ensure we seed only once
@@ -389,6 +452,10 @@ export const ChartComponent = ({ chartId }) => {
     setExchange(resolved);
     lastMarketDatasourceRef.current = DATASOURCE_IDS.ALPACA;
   }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen((prev) => !prev);
+  }, [setIsFullscreen]);
 
   const exchangeSelectOptions = useMemo(() => {
     if (datasource === DATASOURCE_IDS.CCXT) {
@@ -849,7 +916,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Create chart once.
   useEffect(() => {
-    const el = chartContainerRef.current;
+    const el = chartMountNode;
     if (!el || chartRef.current) return;
 
     const initialInterval = intervalRef.current;
@@ -916,7 +983,7 @@ export const ChartComponent = ({ chartId }) => {
         error('cleanup failed', e);
       }
     };
-  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData]);
+  }, [chartId, registerChart, updateChart, bumpRefresh, info, error, loadChartData, chartMountNode]);
 
   useEffect(() => {
     if (!chartRef.current) return;
@@ -931,7 +998,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Resize via ResizeObserver.
   useEffect(() => {
-    const el = chartContainerRef.current;
+    const el = chartMountNode;
     if (!el || !chartRef.current) return;
 
     const ro = new ResizeObserver(([entry]) => {
@@ -942,7 +1009,7 @@ export const ChartComponent = ({ chartId }) => {
 
     ro.observe(el);
     return () => ro.disconnect();
-  }, [debug]);
+  }, [debug, chartMountNode]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1612,6 +1679,95 @@ export const ChartComponent = ({ chartId }) => {
   const liveMode = mode === 'live';
   const symbolDisplay = (symbol || '—').toString().toUpperCase();
   const intervalDisplay = (interval ? interval.toString() : '—').toUpperCase();
+  const datasourceDisplay = useMemo(() => {
+    const map = {
+      [DATASOURCE_IDS.ALPACA]: 'Markets data',
+      [DATASOURCE_IDS.YFINANCE]: 'Yahoo Finance',
+      [DATASOURCE_IDS.IBKR]: 'Interactive Brokers',
+      [DATASOURCE_IDS.CCXT]: 'Crypto data',
+    };
+    return map[datasource] || 'Markets data';
+  }, [datasource]);
+
+  const venueDisplay = useMemo(() => {
+    if (datasource === DATASOURCE_IDS.CCXT) {
+      const entry = CRYPTO_EXCHANGES.find((ex) => ex.value === exchange);
+      if (entry?.label) {
+        return entry.category ? `${entry.label} (${entry.category})` : entry.label;
+      }
+      return 'Crypto venue';
+    }
+
+    if (datasource === DATASOURCE_IDS.IBKR) {
+      const entry = IB_EXCHANGES.find((ex) => ex.value === exchange);
+      return entry?.label || exchange || 'IBKR routing';
+    }
+
+    if (datasource === DATASOURCE_IDS.YFINANCE) {
+      return 'Yahoo Finance';
+    }
+
+    const providerEntry = MARKET_PROVIDERS.find((provider) => provider.value === marketProvider);
+    if (providerEntry?.label) {
+      return providerEntry.label;
+    }
+
+    if (typeof exchange === 'string' && exchange.trim()) {
+      return exchange.trim().toUpperCase();
+    }
+
+    return null;
+  }, [datasource, exchange, marketProvider]);
+
+  const instrumentMeta = useMemo(() => {
+    const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
+    return parts.join(' • ');
+  }, [datasourceDisplay, venueDisplay]);
+
+  const chartSurface = (
+    <div className={chartShellClasses}>
+      <div className="pointer-events-none absolute left-6 top-6 z-20 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
+          <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
+            {intervalDisplay}
+          </span>
+        </div>
+        {instrumentMeta ? (
+          <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
+            {instrumentMeta}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        aria-pressed={isFullscreen}
+        onClick={toggleFullscreen}
+        className="pointer-events-auto absolute right-6 top-6 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+      >
+        {isFullscreen ? (
+          <>
+            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Exit Fullscreen
+          </>
+        ) : (
+          <>
+            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Fullscreen
+          </>
+        )}
+      </button>
+      <div ref={attachChartContainerRef} className="h-full w-full" />
+
+      <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
+      <HotkeyHint />
+      <LoadingOverlay show={loaderActive} message={loaderMessage} />
+    </div>
+  );
+
+  const renderedChartSurface = isFullscreen && fullscreenHost
+    ? createPortal(chartSurface, fullscreenHost)
+    : chartSurface;
 
   return (
     <>
@@ -1836,16 +1992,7 @@ export const ChartComponent = ({ chartId }) => {
           ) : null}
         </div>
 
-        <div className="relative h-[700px] overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]">
-          <div className="pointer-events-none absolute right-6 top-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
-            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> to search
-          </div>
-          <div ref={chartContainerRef} className="h-full w-full" />
-
-          <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-          <HotkeyHint />
-          <LoadingOverlay show={loaderActive} message={loaderMessage} />
-        </div>
+        {renderedChartSurface}
       </div>
     </>
   )
