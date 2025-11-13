@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
@@ -232,6 +232,16 @@ export const ChartComponent = ({ chartId }) => {
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const chartShellClasses = useMemo(() => {
+    const base =
+      'relative overflow-hidden border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]';
+    const size = isFullscreen
+      ? 'fixed inset-0 z-50 h-[100dvh] w-screen rounded-none'
+      : 'h-[700px] rounded-[28px]';
+    return `${base} ${size}`;
+  }, [isFullscreen]);
 
   useEffect(() => {
     const normalizedHistorical = String(clampLookbackDays(historicalLookbackDays));
@@ -240,6 +250,35 @@ export const ChartComponent = ({ chartId }) => {
     const normalized = String(clampLookbackDays(liveLookbackDays));
     setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
   }, [historicalLookbackDays, liveLookbackDays]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const { body } = document;
+    if (!body) return undefined;
+
+    if (isFullscreen) {
+      body.classList.add('overflow-hidden');
+    } else {
+      body.classList.remove('overflow-hidden');
+    }
+
+    return () => {
+      body.classList.remove('overflow-hidden');
+    };
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    if (typeof window === 'undefined') return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsFullscreen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isFullscreen, setIsFullscreen]);
 
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
@@ -389,6 +428,10 @@ export const ChartComponent = ({ chartId }) => {
     setExchange(resolved);
     lastMarketDatasourceRef.current = DATASOURCE_IDS.ALPACA;
   }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen((prev) => !prev);
+  }, [setIsFullscreen]);
 
   const exchangeSelectOptions = useMemo(() => {
     if (datasource === DATASOURCE_IDS.CCXT) {
@@ -1880,7 +1923,7 @@ export const ChartComponent = ({ chartId }) => {
           ) : null}
         </div>
 
-        <div className="relative h-[700px] overflow-hidden rounded-[28px] border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]">
+        <div className={chartShellClasses}>
           <div className="pointer-events-none absolute left-6 top-6 z-20 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
             <div className="flex flex-wrap items-baseline gap-2">
               <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
@@ -1894,9 +1937,24 @@ export const ChartComponent = ({ chartId }) => {
               </div>
             ) : null}
           </div>
-          <div className="pointer-events-none absolute right-6 top-6 z-20 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/40 px-3 py-1 text-[11px] uppercase tracking-[0.32em] text-slate-200 shadow-lg shadow-black/30">
-            Press <kbd className="rounded border border-white/20 bg-black/70 px-1 text-[10px] text-slate-100">/</kbd> to search
-          </div>
+          <button
+            type="button"
+            aria-pressed={isFullscreen}
+            onClick={toggleFullscreen}
+            className="pointer-events-auto absolute right-6 top-6 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+          >
+            {isFullscreen ? (
+              <>
+                <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Exit Fullscreen
+              </>
+            ) : (
+              <>
+                <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Fullscreen
+              </>
+            )}
+          </button>
           <div ref={chartContainerRef} className="h-full w-full" />
 
           <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
