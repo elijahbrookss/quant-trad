@@ -194,15 +194,75 @@ def runtime_status(bot_id: str) -> Dict[str, object]:
     return runtime.snapshot()
 
 
-def performance(bot_id: str) -> Dict[str, object]:
-    """Return candle, trade, and stat payloads for the lens chart."""
+def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
+    """Return indicator metadata suitable for UI display."""
 
+    indicators: List[Dict[str, object]] = []
+    for link in strategy.get("indicator_links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        snapshot = dict(link.get("indicator_snapshot") or {})
+        indicator_id = link.get("indicator_id") or snapshot.get("id")
+        indicators.append(
+            {
+                "id": indicator_id,
+                "name": snapshot.get("name") or snapshot.get("type") or indicator_id,
+                "type": snapshot.get("type"),
+                "color": snapshot.get("color"),
+                "datasource": snapshot.get("datasource"),
+                "exchange": snapshot.get("exchange"),
+                "params": dict(snapshot.get("params") or {}),
+            }
+        )
+    return indicators
+
+
+def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
+    """Assemble descriptive metadata for bot strategies and symbols."""
+
+    strategy_index = {strategy["id"]: strategy for strategy in load_strategies()}
+    selected: List[Dict[str, object]] = []
+    for strategy_id in bot.get("strategy_ids", []) or []:
+        strategy = strategy_index.get(strategy_id)
+        if not strategy:
+            continue
+        selected.append(
+            {
+                "id": strategy["id"],
+                "name": strategy.get("name"),
+                "symbols": list(strategy.get("symbols") or []),
+                "timeframe": strategy.get("timeframe"),
+                "datasource": strategy.get("datasource") or bot.get("datasource"),
+                "exchange": strategy.get("exchange") or bot.get("exchange"),
+                "indicators": _indicator_meta(strategy),
+            }
+        )
+    return {
+        "bot": {
+            "id": bot.get("id"),
+            "name": bot.get("name"),
+            "mode": bot.get("mode"),
+            "timeframe": bot.get("timeframe"),
+            "datasource": bot.get("datasource"),
+            "exchange": bot.get("exchange"),
+            "risk": bot.get("risk"),
+        },
+        "strategies": selected,
+    }
+
+
+def performance(bot_id: str) -> Dict[str, object]:
+    """Return candle, trade, stat, and metadata payloads for the lens chart."""
+
+    bot = get_bot(bot_id)
     runtime = _RUNTIME.get(bot_id)
     if not runtime:
         # allow fetching from persisted config even if runtime not initialised
-        runtime = _runtime_for(bot_id, get_bot(bot_id))
+        runtime = _runtime_for(bot_id, bot)
     runtime.warm_up()
-    return runtime.chart_payload()
+    payload = runtime.chart_payload()
+    payload["meta"] = _performance_meta(bot)
+    return payload
 
 
 __all__ = [

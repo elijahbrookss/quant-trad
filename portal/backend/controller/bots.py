@@ -78,6 +78,7 @@ class BotPerformanceResponse(BaseModel):
     candles: List[Dict[str, Any]]
     trades: List[Dict[str, Any]]
     stats: Dict[str, Any]
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("/", response_model=List[BotResponse])
