@@ -530,9 +530,6 @@ class BotRuntime:
             interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
             ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
             ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
-            options: Optional[Dict[str, Any]] = None
-            if str(indicator_type or "").lower() in {"market_profile", "mpf"}:
-                options = {"extend_value_area_to_chart_end": False}
             try:
                 payload = indicator_service.overlays_for_instance(
                     indicator_id,
@@ -542,7 +539,6 @@ class BotRuntime:
                     symbol=window_symbol,
                     datasource=ds,
                     exchange=ex,
-                    overlay_options=options,
                 )
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug(

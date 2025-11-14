@@ -87,3 +87,45 @@ def test_bot_runtime_state_callback_receives_updates():
     assert captured[0]["status"] == "completed"
     assert captured[0]["last_stats"] == {"wins": 2}
     assert "last_run_at" in captured[0]
+
+
+@pytest.mark.unit
+def test_bot_runtime_market_profile_overlays_keep_extension(monkeypatch):
+    captured = {}
+
+    def fake_overlays(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return {"boxes": [{"id": "va"}]}
+
+    monkeypatch.setattr(
+        "portal.backend.service.bot_runtime.indicator_service.overlays_for_instance",
+        fake_overlays,
+    )
+
+    strategy = {
+        "id": "strategy-1",
+        "indicator_links": [
+            {
+                "indicator_id": "mpf-1",
+                "indicator_snapshot": {
+                    "params": {"symbol": "ES", "interval": "1h"},
+                    "type": "market_profile",
+                },
+            }
+        ],
+    }
+
+    runtime = make_runtime(strategies_meta=[strategy])
+
+    overlays = runtime._indicator_overlay_entries(
+        strategy,
+        "2024-01-01T00:00:00Z",
+        "2024-01-02T00:00:00Z",
+        "1h",
+        "ES",
+        "timescale",
+        "cme",
+    )
+
+    assert overlays and overlays[0]["ind_id"] == "mpf-1"
+    assert "overlay_options" not in captured["kwargs"] or captured["kwargs"].get("overlay_options") is None
