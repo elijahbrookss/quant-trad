@@ -13,6 +13,31 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
+  const logs = payload?.logs || []
+
+  const formatTimestamp = useCallback((value) => {
+    if (!value) return '—'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return value
+    return date.toLocaleTimeString([], { hour12: false })
+  }, [])
+
+  const describeLog = useCallback((entry) => {
+    if (!entry) return '—'
+    if (entry.message) return entry.message
+    const parts = []
+    if (entry.symbol) parts.push(entry.symbol)
+    if (entry.direction) parts.push(entry.direction.toUpperCase())
+    if (entry.leg) parts.push(entry.leg)
+    if (entry.price !== undefined && entry.price !== null) {
+      const price = Number(entry.price)
+      parts.push(Number.isFinite(price) ? `@ ${price.toFixed(4)}` : `@ ${entry.price}`)
+    }
+    if (entry.targets && Array.isArray(entry.targets)) {
+      parts.push(`targets: ${entry.targets.map((t) => t.name).join(', ')}`)
+    }
+    return parts.length ? parts.join(' • ') : '—'
+  }, [])
 
   const headerDetails = useMemo(() => {
     const parts = []
@@ -255,6 +280,41 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 <p className="text-2xl font-semibold text-white">{value ?? '—'}</p>
               </div>
             ))}
+          </div>
+
+          <div className="space-y-3 rounded-3xl border border-white/5 bg-black/40 p-4">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Runtime log</p>
+              <span className="text-xs text-slate-400">Showing last {logs.length} events</span>
+            </div>
+            <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+              {logs.length ? (
+                logs
+                  .slice()
+                  .reverse()
+                  .map((entry, idx) => (
+                    <article
+                      key={entry.id || `${entry.timestamp || 'log'}-${idx}`}
+                      className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white"
+                    >
+                      <div className="flex items-center justify-between text-xs uppercase tracking-[0.3em] text-slate-400">
+                        <span>{entry.event || 'event'}</span>
+                        <span>{formatTimestamp(entry.event_time || entry.bar_time || entry.timestamp)}</span>
+                      </div>
+                      <p className="mt-1 text-base font-semibold text-white">{describeLog(entry)}</p>
+                      <div className="mt-1 flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                        {entry.trade_id ? <span>Trade {entry.trade_id.slice(0, 8)}</span> : null}
+                        {entry.bar_time ? <span>Bar {formatTimestamp(entry.bar_time)}</span> : null}
+                        {entry.symbol ? <span>{entry.symbol}</span> : null}
+                      </div>
+                    </article>
+                  ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
+                  No runtime events yet
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

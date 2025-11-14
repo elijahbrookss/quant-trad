@@ -82,8 +82,15 @@ class BotPerformanceResponse(BaseModel):
     trades: List[Dict[str, Any]]
     stats: Dict[str, Any]
     overlays: List[Dict[str, Any]] = Field(default_factory=list)
+    logs: List[Dict[str, Any]] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
     runtime: Optional[Dict[str, Any]] = None
+
+
+class BotLogsResponse(BaseModel):
+    """Runtime log payload."""
+
+    logs: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 @router.get("/", response_model=List[BotResponse])
@@ -161,6 +168,17 @@ async def get_bot_status(bot_id: str) -> Dict[str, Any]:
 
     try:
         return bot_service.runtime_status(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{bot_id}/logs", response_model=BotLogsResponse)
+async def get_bot_logs(bot_id: str, limit: int = 200) -> Dict[str, Any]:
+    """Return recent runtime logs for a bot."""
+
+    try:
+        logs = bot_service.runtime_logs(bot_id, limit=limit)
+        return {"logs": logs}
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 

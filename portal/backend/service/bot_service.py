@@ -302,6 +302,16 @@ def runtime_status(bot_id: str) -> Dict[str, object]:
     return runtime.snapshot()
 
 
+def runtime_logs(bot_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Return recent runtime log entries for a bot."""
+
+    bot = get_bot(bot_id)
+    _attach_strategy_meta(bot)
+    runtime = _runtime_for(bot_id, bot)
+    runtime.warm_up()
+    return runtime.logs(limit)
+
+
 def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
     """Return indicator metadata suitable for UI display."""
 
@@ -372,6 +382,7 @@ def performance(bot_id: str) -> Dict[str, object]:
         runtime.config.update(bot)
     runtime.warm_up()
     payload = runtime.chart_payload()
+    payload.setdefault("logs", runtime.logs())
     payload["meta"] = _performance_meta(bot)
     payload["runtime"] = runtime.snapshot()
     return payload
@@ -384,6 +395,7 @@ __all__ = [
     "list_bots",
     "pause_bot",
     "performance",
+    "runtime_logs",
     "resume_bot",
     "runtime_status",
     "start_bot",

@@ -177,7 +177,7 @@ async def get_indicator_type(type_id: str):
 
 # ===== Overlays by UUID =====
 @router.post("/{inst_id}/overlays")
-async def overlays(inst_id: str, req: OverlayRequest):
+def overlays(inst_id: str, req: OverlayRequest):
     """
     Returns TradingView Lightweight-Charts overlays for a stored indicator UUID
     over the requested chart window. Does not accept indicator params.

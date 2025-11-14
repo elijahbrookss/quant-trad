@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -27,6 +28,19 @@ DEFAULT_RISK = {
     "tick_size": 0.01,
 }
 
+MAX_LOG_ENTRIES = 500
+
+
+def _isoformat(value: Optional[datetime]) -> Optional[str]:
+    """Return a UTC ISO8601 string with Z suffix for *value*."""
+
+    if value is None:
+        return None
+    target = value
+    if target.tzinfo is None:
+        return target.replace(tzinfo=None).isoformat() + "Z"
+    return target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 @dataclass
 class Candle:
@@ -40,7 +54,7 @@ class Candle:
 
     def to_dict(self) -> Dict[str, float]:
         return {
-            "time": self.time.isoformat() + "Z",
+            "time": _isoformat(self.time),
             "open": round(self.open, 4),
             "high": round(self.high, 4),
             "low": round(self.low, 4),
@@ -91,6 +105,7 @@ class LadderPosition:
     breakeven_trigger_ticks: int = 20
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
+    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
         events: List[Dict[str, str]] = []
@@ -102,8 +117,16 @@ class LadderPosition:
                 if candle.high >= leg.target_price:
                     leg.status = "target"
                     leg.exit_price = leg.target_price
-                    leg.exit_time = candle.time.isoformat() + "Z"
-                    events.append({"type": "target", "leg": leg.name})
+                    leg.exit_time = _isoformat(candle.time)
+                    events.append(
+                        {
+                            "type": "target",
+                            "leg": leg.name,
+                            "trade_id": self.trade_id,
+                            "price": round(leg.target_price, 4),
+                            "time": leg.exit_time,
+                        }
+                    )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
                         self.stop_price = self.entry_price
                         self.moved_to_breakeven = True
@@ -114,8 +137,16 @@ class LadderPosition:
                 if candle.low <= leg.target_price:
                     leg.status = "target"
                     leg.exit_price = leg.target_price
-                    leg.exit_time = candle.time.isoformat() + "Z"
-                    events.append({"type": "target", "leg": leg.name})
+                    leg.exit_time = _isoformat(candle.time)
+                    events.append(
+                        {
+                            "type": "target",
+                            "leg": leg.name,
+                            "trade_id": self.trade_id,
+                            "price": round(leg.target_price, 4),
+                            "time": leg.exit_time,
+                        }
+                    )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
                         self.stop_price = self.entry_price
                         self.moved_to_breakeven = True
@@ -127,17 +158,27 @@ class LadderPosition:
                 if leg.status == "open":
                     leg.status = "stop"
                     leg.exit_price = self.stop_price
-                    leg.exit_time = candle.time.isoformat() + "Z"
+                    leg.exit_time = _isoformat(candle.time)
             self.closed_at = candle.time
-            return {"type": "stop"}
+            return {
+                "type": "stop",
+                "trade_id": self.trade_id,
+                "price": round(self.stop_price, 4),
+                "time": _isoformat(candle.time),
+            }
         if self.direction == "short" and candle.high >= self.stop_price:
             for leg in self.legs:
                 if leg.status == "open":
                     leg.status = "stop"
                     leg.exit_price = self.stop_price
-                    leg.exit_time = candle.time.isoformat() + "Z"
+                    leg.exit_time = _isoformat(candle.time)
             self.closed_at = candle.time
-            return {"type": "stop"}
+            return {
+                "type": "stop",
+                "trade_id": self.trade_id,
+                "price": round(self.stop_price, 4),
+                "time": _isoformat(candle.time),
+            }
         if all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
         return None
@@ -149,6 +190,14 @@ class LadderPosition:
         stop_event = self._apply_stop(candle)
         if stop_event:
             events.append(stop_event)
+        if not self.is_active():
+            events.append(
+                {
+                    "type": "close",
+                    "trade_id": self.trade_id,
+                    "time": _isoformat(self.closed_at or candle.time),
+                }
+            )
         return events
 
     def is_active(self) -> bool:
@@ -156,13 +205,14 @@ class LadderPosition:
 
     def serialize(self) -> Dict[str, object]:
         return {
-            "entry_time": self.entry_time.isoformat() + "Z",
+            "trade_id": self.trade_id,
+            "entry_time": _isoformat(self.entry_time),
             "entry_price": round(self.entry_price, 4),
             "direction": self.direction,
             "stop_price": round(self.stop_price, 4),
             "moved_to_breakeven": self.moved_to_breakeven,
             "legs": [leg.serialize() for leg in self.legs],
-            "closed_at": self.closed_at.isoformat() + "Z" if self.closed_at else None,
+            "closed_at": _isoformat(self.closed_at),
         }
 
 
@@ -204,18 +254,20 @@ class LadderRiskEngine:
         )
         return position
 
-    def maybe_enter(self, candle: Candle, direction: Optional[str]) -> None:
+    def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
         if direction is None or self.active_trade is not None:
-            return
+            return None
         self.active_trade = self._new_position(candle, direction)
         self.trades.append(self.active_trade)
+        return self.active_trade
 
-    def step(self, candle: Candle) -> None:
+    def step(self, candle: Candle) -> List[Dict[str, Any]]:
         if self.active_trade is None:
-            return
-        self.active_trade.apply_bar(candle)
+            return []
+        events = self.active_trade.apply_bar(candle)
         if not self.active_trade.is_active():
             self.active_trade = None
+        return events
 
     def serialise_trades(self) -> List[Dict[str, object]]:
         return [trade.serialize() for trade in self.trades]
@@ -283,6 +335,7 @@ class BotRuntime:
         self._last_stats: Dict[str, Any] = {}
         self._next_bar_at: Optional[datetime] = None
         self._live_mode = self.run_type == "sim_trade"
+        self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
 
     @staticmethod
     def _coerce_fetch_seconds(value: Optional[object]) -> float:
@@ -311,6 +364,7 @@ class BotRuntime:
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
+        self._log_event("prepared", total_bars=self._total_bars)
 
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
@@ -423,7 +477,7 @@ class BotRuntime:
         lookback_days = max(lookback_days, 1)
         end_dt = datetime.utcnow()
         start_dt = end_dt - timedelta(days=lookback_days)
-        return start_dt.isoformat() + "Z", end_dt.isoformat() + "Z"
+        return _isoformat(start_dt), _isoformat(end_dt)
 
     @staticmethod
     def _build_candles(df: pd.DataFrame) -> List[Candle]:
@@ -517,6 +571,7 @@ class BotRuntime:
             self.state.update({"status": "starting", "paused": False})
         self._thread = threading.Thread(target=self._run, name=f"bot-{self.bot_id}", daemon=True)
         self._thread.start()
+        self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
 
     def _run(self) -> None:
         try:
@@ -529,6 +584,7 @@ class BotRuntime:
     def _execute_loop(self) -> None:
         self._ensure_prepared()
         status = "running"
+        self._log_event("running", message="Bot execution loop started")
         while not self._stop.is_set():
             if self._bar_index >= self._total_bars:
                 if self._live_mode and self._append_live_candles_if_needed():
@@ -546,6 +602,7 @@ class BotRuntime:
         elif not self._live_mode:
             status = "completed"
         self._next_bar_at = None
+        self._log_event(status, message=f"Bot runtime {status}")
         if self._primary_series and self._primary_series.candles:
             self._update_state(self._primary_series.candles[-1], status=status)
         else:
@@ -559,9 +616,35 @@ class BotRuntime:
             candle = series.candles[index]
             epoch = int(candle.time.timestamp())
             direction = self._next_signal_for(series, epoch)
-            if direction:
-                series.risk_engine.maybe_enter(candle, direction)
-            series.risk_engine.step(candle)
+            new_trade = series.risk_engine.maybe_enter(candle, direction)
+            if new_trade is not None:
+                targets = [
+                    {"name": leg.name, "price": round(leg.target_price, 4)}
+                    for leg in new_trade.legs
+                ]
+                self._log_event(
+                    "entry",
+                    series,
+                    candle,
+                    trade_id=new_trade.trade_id,
+                    direction=direction,
+                    entry_price=round(new_trade.entry_price, 4),
+                    stop_price=round(new_trade.stop_price, 4),
+                    targets=targets,
+                    bar_index=index,
+                )
+            trade_events = series.risk_engine.step(candle)
+            for event in trade_events:
+                self._log_event(
+                    event.get("type", "event"),
+                    series,
+                    candle,
+                    trade_id=event.get("trade_id"),
+                    leg=event.get("leg"),
+                    price=event.get("price"),
+                    event_time=event.get("time"),
+                    bar_index=index,
+                )
             series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
         self._bar_index = index + 1
         primary = self._primary_series
@@ -590,12 +673,12 @@ class BotRuntime:
 
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
-        end_iso = datetime.utcnow().isoformat() + "Z"
+        end_iso = _isoformat(datetime.utcnow())
         for series in self._series:
             last_time = series.candles[-1].time if series.candles else None
             if last_time is None:
                 continue
-            start_iso = (last_time + timedelta(seconds=1)).isoformat() + "Z"
+            start_iso = _isoformat(last_time + timedelta(seconds=1))
             if self._append_series_updates(series, start_iso, end_iso):
                 updated = True
         if updated:
@@ -603,6 +686,7 @@ class BotRuntime:
             if primary:
                 self._total_bars = len(primary.candles)
             self._chart_overlays = [overlay for series in self._series for overlay in series.overlays]
+            self._log_event("live_refresh", message="Appended live candles")
         return updated
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
@@ -654,6 +738,7 @@ class BotRuntime:
         self._next_bar_at = None
         with self._lock:
             self.state.update({"status": "paused", "paused": True, "next_bar_at": None, "next_bar_in_seconds": None})
+        self._log_event("pause", message="Bot paused")
 
     def resume(self) -> None:
         if not self._prepared:
@@ -663,6 +748,7 @@ class BotRuntime:
         with self._lock:
             if self.state.get("status") == "paused":
                 self.state.update({"status": "running", "paused": False})
+        self._log_event("resume", message="Bot resumed")
 
     def stop(self) -> None:
         self._stop.set()
@@ -672,6 +758,7 @@ class BotRuntime:
         with self._lock:
             self.state.update({"status": "stopped", "paused": False})
         self._next_bar_at = None
+        self._log_event("stop", message="Bot stopped")
 
     def _aggregate_trades(self) -> List[Dict[str, Any]]:
         trades: List[Dict[str, Any]] = []
@@ -703,6 +790,39 @@ class BotRuntime:
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
         return summary
 
+    def _log_event(
+        self,
+        event: str,
+        series: Optional[StrategySeries] = None,
+        candle: Optional[Candle] = None,
+        **fields: object,
+    ) -> None:
+        entry: Dict[str, object] = {
+            "id": str(uuid.uuid4()),
+            "event": event,
+            "timestamp": _isoformat(datetime.utcnow()),
+        }
+        if series is not None:
+            entry["strategy_id"] = series.strategy_id
+            entry["symbol"] = series.symbol
+        if candle is not None:
+            entry["bar_time"] = _isoformat(candle.time)
+            entry.setdefault("price", round(candle.close, 4))
+        for key, value in fields.items():
+            if value is not None:
+                entry[key] = value
+        with self._lock:
+            self._logs.append(entry)
+
+    def logs(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return up to *limit* recent log entries."""
+
+        with self._lock:
+            entries = list(self._logs)
+        if limit and limit > 0:
+            entries = entries[-limit:]
+        return entries
+
     def _update_state(self, candle: Candle, status: str = "running") -> None:
         stats = self._aggregate_stats()
         self._last_stats = stats
@@ -713,7 +833,7 @@ class BotRuntime:
             "last_bar": candle.to_dict(),
             "stats": stats,
             "paused": self._paused,
-            "next_bar_at": self._next_bar_at.isoformat() + "Z" if self._next_bar_at else None,
+            "next_bar_at": _isoformat(self._next_bar_at),
             "next_bar_in_seconds": self._seconds_until_next_bar(),
         }
         with self._lock:
@@ -757,6 +877,7 @@ class BotRuntime:
             "trades": self._aggregate_trades(),
             "stats": self._last_stats or self._aggregate_stats(),
             "overlays": list(self._chart_overlays),
+            "logs": self.logs(),
         }
 
 

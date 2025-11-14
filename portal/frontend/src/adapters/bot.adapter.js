@@ -76,3 +76,10 @@ export async function fetchBotStatus(botId) {
 export async function fetchBotPerformance(botId) {
   return request(`/api/bots/${botId}/performance`)
 }
+
+export async function fetchBotLogs(botId, limit = 200) {
+  const params = new URLSearchParams()
+  if (limit) params.set('limit', String(limit))
+  const query = params.toString() ? `?${params.toString()}` : ''
+  return request(`/api/bots/${botId}/logs${query}`)
+}
