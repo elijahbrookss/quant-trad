@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -54,6 +54,7 @@ class Database:
                 future=True,
             )
             Base.metadata.create_all(self._engine)
+            self._apply_schema_migrations()
             self._available = True
             logger.info("portal_db_ready | dsn=%s", self.dsn)
         except SQLAlchemyError as exc:
@@ -82,6 +83,32 @@ class Database:
             raise
         finally:
             session.close()
+
+    def _apply_schema_migrations(self) -> None:
+        """Perform lightweight in-place migrations for existing installations."""
+
+        if self._engine is None:
+            return
+        inspector = inspect(self._engine)
+        if not inspector.has_table("portal_bots"):
+            return
+        existing_columns = {col["name"] for col in inspector.get_columns("portal_bots")}
+        statements = []
+        if "run_type" not in existing_columns:
+            statements.append("ALTER TABLE portal_bots ADD COLUMN run_type VARCHAR(32) NOT NULL DEFAULT 'backtest'")
+        if "backtest_start" not in existing_columns:
+            statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_start TIMESTAMP NULL")
+        if "backtest_end" not in existing_columns:
+            statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_end TIMESTAMP NULL")
+        if not statements:
+            return
+        with self._engine.begin() as conn:
+            for statement in statements:
+                conn.execute(text(statement))
+        logger.info(
+            "portal_db_migrated | table=portal_bots | statements=%s",
+            ",".join(statements),
+        )
 
     @property
     def available(self) -> bool:
