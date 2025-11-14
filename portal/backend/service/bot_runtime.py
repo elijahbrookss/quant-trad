@@ -16,6 +16,9 @@ from . import strategy_service
 from .candle_service import fetch_ohlcv
 
 
+logger = logging.getLogger(__name__)
+
+
 DEFAULT_RISK = {
     "contracts": 3,
     "targets": [20, 40, 60],

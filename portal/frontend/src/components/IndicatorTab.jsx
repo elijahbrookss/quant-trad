@@ -106,6 +106,32 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Read current chart slice
   const chartState = getChart(chartId)
+
+  useEffect(() => {
+    let cancelled = false
+    setIsLoading(true)
+    fetchIndicators()
+      .then((payload) => {
+        if (cancelled) return
+        const list = Array.isArray(payload) ? payload : []
+        setIndicators(list)
+        updateChart(chartId, { indicators: list })
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const message = err?.message || 'Unable to load indicators'
+        setError(message)
+        warn('indicator_initial_load_failed', err)
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [chartId, updateChart, warn])
   useEffect(() => {
     if (!Array.isArray(indicators)) {
       setIndColors((prev) => (Object.keys(prev).length ? {} : prev));

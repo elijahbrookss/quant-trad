@@ -11,6 +11,7 @@ import {
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
+import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 
 const defaultForm = {
   name: '',
@@ -67,8 +68,29 @@ export function BotPanel() {
 
   const handleChange = (event) => {
     const { name, value } = event.target
-    setForm((prev) => ({ ...prev, [name]: value }))
+    setForm((prev) => {
+      const next = { ...prev, [name]: value }
+      if (name === 'run_type' && value !== 'backtest') {
+        next.backtest_start = ''
+        next.backtest_end = ''
+      }
+      return next
+    })
   }
+
+  const handleBacktestRangeChange = useCallback((range) => {
+    const [start, end] = Array.isArray(range) ? range : []
+    const normalize = (value) => {
+      if (!(value instanceof Date)) return ''
+      const time = value.getTime()
+      return Number.isNaN(time) ? '' : new Date(time).toISOString()
+    }
+    setForm((prev) => ({
+      ...prev,
+      backtest_start: normalize(start),
+      backtest_end: normalize(end),
+    }))
+  }, [])
 
   const handleStrategyToggle = (strategyId) => {
     setForm((prev) => {
@@ -222,6 +244,23 @@ export function BotPanel() {
 
   const hasStrategies = strategies.length > 0
 
+  const [defaultBacktestStart, defaultBacktestEnd] = useMemo(() => {
+    const now = new Date()
+    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    return [start, now]
+  }, [])
+
+  const backtestRange = useMemo(() => {
+    const parse = (value) => {
+      if (!value) return null
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? null : date
+    }
+    const start = parse(form.backtest_start)
+    const end = parse(form.backtest_end)
+    return start && end ? [start, end] : null
+  }, [form.backtest_start, form.backtest_end])
+
   return (
     <section className="space-y-6">
       <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
@@ -285,27 +324,13 @@ export function BotPanel() {
               />
             </div>
             {form.run_type === 'backtest' ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="flex flex-col gap-1">
-                  <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Start</label>
-                  <input
-                    type="datetime-local"
-                    name="backtest_start"
-                    value={form.backtest_start}
-                    onChange={handleChange}
-                    className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">End</label>
-                  <input
-                    type="datetime-local"
-                    name="backtest_end"
-                    value={form.backtest_end}
-                    onChange={handleChange}
-                    className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-                  />
-                </div>
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                <DateRangePickerComponent
+                  dateRange={backtestRange}
+                  defaultStart={defaultBacktestStart}
+                  defaultEnd={defaultBacktestEnd}
+                  setDateRange={handleBacktestRangeChange}
+                />
               </div>
             ) : null}
           </div>
