@@ -1,8 +1,31 @@
+"""FastAPI entrypoint that wires routers and shared middleware."""
+
 from datetime import datetime
+import os
+from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from .controller import bots, candles, indicators, strategies
+
+
+def _allowed_origins() -> List[str]:
+    """Load allowed origins from env, defaulting to common dev hosts."""
+
+    raw = os.getenv("PORTAL_ALLOWED_ORIGINS", "")
+    if raw:
+        origins = [item.strip() for item in raw.split(",") if item.strip()]
+        if origins:
+            return origins
+    # default to typical local dev hosts/ports
+    return [
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1",
+        "http://127.0.0.1:5173",
+    ]
 
 app = FastAPI(
     title="Quant-Trad API",
@@ -10,9 +33,13 @@ app = FastAPI(
     version="0.1.0",
 )
 
+origins = _allowed_origins()
+allow_credentials = "*" not in origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for dev only
+    allow_origins=origins if allow_credentials else ["*"],
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
