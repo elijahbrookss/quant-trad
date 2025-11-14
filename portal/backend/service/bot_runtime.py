@@ -54,26 +54,6 @@ class StrategySignal:
 
 
 @dataclass
-class StrategySeries:
-    """Runtime payload describing a single strategy stream."""
-
-    strategy_id: str
-    name: str
-    symbol: str
-    timeframe: str
-    datasource: Optional[str]
-    exchange: Optional[str]
-    candles: List[Candle]
-    signals: Deque[StrategySignal] = field(default_factory=deque)
-    overlays: List[Dict[str, Any]] = field(default_factory=list)
-    risk_engine: LadderRiskEngine = field(default_factory=LadderRiskEngine)
-    window_start: Optional[str] = None
-    window_end: Optional[str] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
-    last_consumed_epoch: int = 0
-
-
-@dataclass
 class Leg:
     """Take-profit leg metadata."""
 
@@ -253,6 +233,26 @@ class LadderRiskEngine:
             "long_trades": long_trades,
             "short_trades": short_trades,
         }
+
+
+@dataclass
+class StrategySeries:
+    """Runtime payload describing a single strategy stream."""
+
+    strategy_id: str
+    name: str
+    symbol: str
+    timeframe: str
+    datasource: Optional[str]
+    exchange: Optional[str]
+    candles: List[Candle]
+    signals: Deque[StrategySignal] = field(default_factory=deque)
+    overlays: List[Dict[str, Any]] = field(default_factory=list)
+    risk_engine: LadderRiskEngine = field(default_factory=LadderRiskEngine)
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+    last_consumed_epoch: int = 0
 
 
 class BotRuntime:
