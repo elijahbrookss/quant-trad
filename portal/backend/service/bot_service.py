@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Dict, Iterable, List, Mapping, Optional
+from queue import Queue
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
@@ -312,6 +313,25 @@ def runtime_logs(bot_id: str, limit: int = 200) -> List[Dict[str, Any]]:
     return runtime.logs(limit)
 
 
+def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
+    """Return a release callback, queue, and initial payload for SSE streaming."""
+
+    bot = get_bot(bot_id)
+    _attach_strategy_meta(bot)
+    runtime = _runtime_for(bot_id, bot)
+    runtime.config.update(bot)
+    runtime.warm_up()
+    token, channel = runtime.subscribe()
+
+    def _release() -> None:
+        runtime.unsubscribe(token)
+
+    initial = runtime.chart_payload()
+    initial.setdefault("meta", _performance_meta(bot))
+    initial.setdefault("type", "snapshot")
+    return _release, channel, initial
+
+
 def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
     """Return indicator metadata suitable for UI display."""
 
@@ -398,6 +418,7 @@ __all__ = [
     "runtime_logs",
     "resume_bot",
     "runtime_status",
+    "stream",
     "start_bot",
     "stop_bot",
     "update_bot",

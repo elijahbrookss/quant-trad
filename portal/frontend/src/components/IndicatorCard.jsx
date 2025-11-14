@@ -106,7 +106,7 @@ export default function IndicatorCard({
   }, [indicator?.type]);
 
   return (
-    <div className={`flex items-start justify-between gap-4 rounded-2xl bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)] ${cardBorderClass}`}>
+    <div className={`group flex items-start justify-between gap-4 rounded-2xl bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)] ${cardBorderClass}`}>
       <div className="min-w-0 flex-1 space-y-3">
         <div className="flex items-start gap-3">
           <button
@@ -137,6 +137,18 @@ export default function IndicatorCard({
             </p>
           </div>
         </div>
+
+        {indicator?.id ? (
+          <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.3em] text-slate-500">
+            <span>ID</span>
+            <code
+              className="font-mono text-[11px] text-slate-400 blur-sm transition group-hover:blur-0"
+              title="Indicator ID"
+            >
+              {indicator.id}
+            </code>
+          </div>
+        ) : null}
 
         {visibleParams.length > 0 && (
           <div className="flex flex-wrap gap-1 text-xs text-slate-300">

@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import asyncio
+import json
+from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service import bot_service
 
 
 router = APIRouter()
+
+
+def _format_sse(event: str, payload: Mapping[str, Any]) -> str:
+    """Return a formatted server-sent event chunk."""
+
+    body = json.dumps(payload)
+    return f"event: {event}\ndata: {body}\n\n"
 
 
 class RiskSettings(BaseModel):
@@ -211,3 +221,36 @@ async def get_bot_performance(bot_id: str) -> Dict[str, Any]:
         return bot_service.performance(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{bot_id}/stream")
+async def stream_bot(bot_id: str) -> StreamingResponse:
+    """Stream incremental bot updates via server-sent events."""
+
+    try:
+        release, channel, initial = bot_service.stream(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    async def event_iterator():
+        try:
+            yield _format_sse(initial.get("type", "snapshot"), initial)
+            while True:
+                try:
+                    payload = await asyncio.to_thread(channel.get)
+                except asyncio.CancelledError:
+                    break
+                if not payload:
+                    continue
+                event_type = payload.get("type", "update")
+                yield _format_sse(event_type, payload)
+        finally:
+            release()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)

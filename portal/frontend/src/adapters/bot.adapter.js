@@ -83,3 +83,14 @@ export async function fetchBotLogs(botId, limit = 200) {
   const query = params.toString() ? `?${params.toString()}` : ''
   return request(`/api/bots/${botId}/logs${query}`)
 }
+
+export function openBotStream(botId) {
+  if (!botId) return null
+  try {
+    const url = new URL(`/api/bots/${botId}/stream`, BASE)
+    return new EventSource(url, { withCredentials: false })
+  } catch (err) {
+    log.warn('bot_stream_init_failed', { botId }, err)
+    return null
+  }
+}

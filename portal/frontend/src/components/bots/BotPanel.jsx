@@ -244,6 +244,23 @@ export function BotPanel() {
 
   const hasStrategies = strategies.length > 0
 
+  const describeBotMeta = useCallback(
+    (botItem, field) => {
+      if (!botItem) return ''
+      const values = new Set()
+      for (const strategyId of botItem.strategy_ids || []) {
+        const strategy = strategyLookup.get(strategyId)
+        const value = strategy?.[field]
+        if (value) values.add(value)
+      }
+      if (values.size) {
+        return Array.from(values).join(', ')
+      }
+      return botItem?.[field] || ''
+    },
+    [strategyLookup],
+  )
+
   const [defaultBacktestStart, defaultBacktestEnd] = useMemo(() => {
     const now = new Date()
     const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -413,6 +430,17 @@ export function BotPanel() {
                 : '—'
             const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
             const showResume = runtimeStatus === 'paused'
+            const timeframeLabel = describeBotMeta(bot, 'timeframe')
+            const datasourceLabel = describeBotMeta(bot, 'datasource')
+            const exchangeLabel = describeBotMeta(bot, 'exchange')
+            const summaryParts = [
+              bot.mode,
+              timeframeLabel ? `TF ${timeframeLabel}` : null,
+              datasourceLabel ? `DS ${datasourceLabel}` : null,
+              exchangeLabel ? `EX ${exchangeLabel}` : null,
+              `fetch ${bot.fetch_seconds}s`,
+              (bot.run_type || 'backtest').replace('_', ' '),
+            ].filter(Boolean)
             return (
               <div key={bot.id} className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-4 md:flex-row md:items-center md:justify-between">
                 <div>
@@ -420,9 +448,7 @@ export function BotPanel() {
                     {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
                   </p>
                   <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
-                  <p className="text-xs text-slate-400">
-                    {bot.mode} • {bot.timeframe} • fetch {bot.fetch_seconds}s • {(bot.run_type || 'backtest').replace('_', ' ')}
-                  </p>
+                  <p className="text-xs text-slate-400">{summaryParts.join(' • ')}</p>
                   <p className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{describeRange(bot)}</p>
                   <div className="mt-2 flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.25em] text-slate-500">
                     <span>Progress: <span className="text-slate-200">{progressPct}</span></span>

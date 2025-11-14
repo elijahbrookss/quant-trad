@@ -9,6 +9,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from queue import Empty, Full, Queue
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -336,6 +337,7 @@ class BotRuntime:
         self._next_bar_at: Optional[datetime] = None
         self._live_mode = self.run_type == "sim_trade"
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
+        self._subscribers: Dict[str, Queue] = {}
 
     @staticmethod
     def _coerce_fetch_seconds(value: Optional[object]) -> float:
@@ -365,6 +367,7 @@ class BotRuntime:
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
         self._log_event("prepared", total_bars=self._total_bars)
+        self._push_update("prepared")
 
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
@@ -572,6 +575,7 @@ class BotRuntime:
         self._thread = threading.Thread(target=self._run, name=f"bot-{self.bot_id}", daemon=True)
         self._thread.start()
         self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
+        self._push_update("start")
 
     def _run(self) -> None:
         try:
@@ -608,6 +612,7 @@ class BotRuntime:
         else:
             with self._lock:
                 self.state.update({"status": status})
+        self._push_update(status)
 
     def _apply_bar(self, index: int) -> None:
         for series in self._series:
@@ -651,6 +656,7 @@ class BotRuntime:
         if primary and primary.candles:
             candle = primary.candles[min(index, len(primary.candles) - 1)]
             self._update_state(candle)
+        self._push_update("bar")
 
     def _next_signal_for(self, series: StrategySeries, epoch: int) -> Optional[str]:
         direction: Optional[str] = None
@@ -687,6 +693,7 @@ class BotRuntime:
                 self._total_bars = len(primary.candles)
             self._chart_overlays = [overlay for series in self._series for overlay in series.overlays]
             self._log_event("live_refresh", message="Appended live candles")
+            self._push_update("live_refresh")
         return updated
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
@@ -739,6 +746,7 @@ class BotRuntime:
         with self._lock:
             self.state.update({"status": "paused", "paused": True, "next_bar_at": None, "next_bar_in_seconds": None})
         self._log_event("pause", message="Bot paused")
+        self._push_update("pause")
 
     def resume(self) -> None:
         if not self._prepared:
@@ -749,6 +757,7 @@ class BotRuntime:
             if self.state.get("status") == "paused":
                 self.state.update({"status": "running", "paused": False})
         self._log_event("resume", message="Bot resumed")
+        self._push_update("resume")
 
     def stop(self) -> None:
         self._stop.set()
@@ -759,6 +768,7 @@ class BotRuntime:
             self.state.update({"status": "stopped", "paused": False})
         self._next_bar_at = None
         self._log_event("stop", message="Bot stopped")
+        self._push_update("stop")
 
     def _aggregate_trades(self) -> List[Dict[str, Any]]:
         trades: List[Dict[str, Any]] = []
@@ -860,18 +870,69 @@ class BotRuntime:
         """Return the latest candle, trade, overlay, and stat data for the lens."""
 
         self._ensure_prepared()
+        payload = self._chart_state()
+        payload["runtime"] = self.snapshot()
+        return payload
+
+    def subscribe(self) -> Tuple[str, Queue]:
+        """Register a streaming subscriber and return its token/queue."""
+
+        self._ensure_prepared()
+        channel: Queue = Queue(maxsize=256)
+        token = str(uuid.uuid4())
+        with self._lock:
+            self._subscribers[token] = channel
+        return token, channel
+
+    def unsubscribe(self, token: str) -> None:
+        """Remove a streaming subscriber and drain its queue."""
+
+        with self._lock:
+            channel = self._subscribers.pop(token, None)
+        if not channel:
+            return
+        try:
+            while True:
+                channel.get_nowait()
+        except Empty:
+            pass
+
+    def _broadcast(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        message = dict(payload or {})
+        message.setdefault("type", event)
+        with self._lock:
+            channels = list(self._subscribers.values())
+        for channel in channels:
+            try:
+                channel.put_nowait(message)
+            except Full:
+                try:
+                    channel.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    channel.put_nowait(message)
+                except Full:
+                    continue
+
+    def _visible_candles(self) -> List[Dict[str, Any]]:
         primary = self._primary_series
         candles: List[Dict[str, Any]] = []
-        if primary and primary.candles:
-            status = self.state.get("status")
-            if status in {"idle", "initialising"}:
-                visible = len(primary.candles)
-            elif status in {"completed", "stopped"}:
-                visible = len(primary.candles)
-            else:
-                visible = min(self._bar_index, len(primary.candles))
-            visible = max(1, visible)
-            candles = [candle.to_dict() for candle in primary.candles[:visible]]
+        if not primary or not primary.candles:
+            return candles
+        status = self.state.get("status")
+        if status in {"idle", "initialising"}:
+            visible = len(primary.candles)
+        elif status in {"completed", "stopped"}:
+            visible = len(primary.candles)
+        else:
+            visible = min(self._bar_index, len(primary.candles))
+        visible = max(1, visible)
+        candles = [candle.to_dict() for candle in primary.candles[:visible]]
+        return candles
+
+    def _chart_state(self) -> Dict[str, Any]:
+        candles = self._visible_candles()
         return {
             "candles": candles,
             "trades": self._aggregate_trades(),
@@ -879,6 +940,11 @@ class BotRuntime:
             "overlays": list(self._chart_overlays),
             "logs": self.logs(),
         }
+
+    def _push_update(self, event: str) -> None:
+        payload = self._chart_state()
+        payload["runtime"] = self.snapshot()
+        self._broadcast(event, payload)
 
 
 __all__ = [

@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, Pause, RotateCw } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
-import { fetchBotPerformance, pauseBot, resumeBot } from '../../adapters/bot.adapter.js'
+import { fetchBotPerformance, pauseBot, resumeBot, openBotStream } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
@@ -9,6 +9,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [error, setError] = useState(null)
   const [payload, setPayload] = useState(null)
   const [action, setAction] = useState(null)
+  const [streamStatus, setStreamStatus] = useState('idle')
+  const streamRef = useRef(null)
 
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
@@ -41,25 +43,47 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const headerDetails = useMemo(() => {
     const parts = []
-    const symbols = []
-    for (const strategy of strategies) {
-      for (const symbol of strategy?.symbols || []) {
-        if (symbol && !symbols.includes(symbol)) symbols.push(symbol)
+    const collectUnique = (iterable) => {
+      const set = new Set()
+      for (const value of iterable || []) {
+        if (value) set.add(value)
       }
+      return Array.from(set)
     }
-    if (symbols.length) {
-      parts.push(`Symbols: ${symbols.join(', ')}`)
+    const strategySymbols = collectUnique(strategies.flatMap((s) => s?.symbols || []))
+    if (strategySymbols.length) {
+      parts.push(`Symbols: ${strategySymbols.join(', ')}`)
     }
-    if (botMeta.datasource) {
-      parts.push(`Datasource: ${botMeta.datasource}`)
+    const strategyTimeframes = collectUnique(strategies.map((s) => s?.timeframe))
+    const timeframes = strategyTimeframes.length
+      ? strategyTimeframes
+      : botMeta.timeframe
+        ? [botMeta.timeframe]
+        : []
+    if (timeframes.length) {
+      parts.push(`Timeframe: ${timeframes.join(', ')}`)
     }
-    if (botMeta.exchange) {
-      parts.push(`Exchange: ${botMeta.exchange}`)
+    const datasources = collectUnique(strategies.map((s) => s?.datasource || botMeta.datasource))
+    if (datasources.length) {
+      parts.push(`Datasource: ${datasources.join(', ')}`)
+    }
+    const exchanges = collectUnique(strategies.map((s) => s?.exchange || botMeta.exchange))
+    if (exchanges.length) {
+      parts.push(`Exchange: ${exchanges.join(', ')}`)
     }
     parts.push(`Mode: ${bot?.mode}`)
-    parts.push(`Timeframe: ${bot?.timeframe}`)
+    parts.push(`Run: ${(bot?.run_type || 'backtest').replace('_', ' ')}`)
     return parts.filter(Boolean).join(' • ')
-  }, [strategies, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.timeframe])
+  }, [strategies, botMeta.timeframe, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.run_type])
+
+  const applyPayload = useCallback((incoming) => {
+    if (!incoming) return
+    setPayload((prev) => {
+      const next = { ...(prev || {}), ...incoming }
+      next.meta = incoming.meta || prev?.meta || next.meta || null
+      return next
+    })
+  }, [])
 
   const loadPerformance = useCallback(async (withLoader = true) => {
     if (!bot?.id) return
@@ -67,13 +91,13 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     setError(null)
     try {
       const data = await fetchBotPerformance(bot.id)
-      setPayload(data)
+      applyPayload(data)
     } catch (err) {
       setError(err?.message || 'Unable to fetch performance')
     } finally {
       if (withLoader) setLoading(false)
     }
-  }, [bot?.id])
+  }, [bot?.id, applyPayload])
 
   useEffect(() => {
     if (open) {
@@ -82,12 +106,43 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [open, loadPerformance])
 
   useEffect(() => {
-    if (!open) return undefined
-    const id = setInterval(() => {
-      loadPerformance(false)
-    }, 4000)
-    return () => clearInterval(id)
-  }, [open, loadPerformance])
+    if (!open || !bot?.id) {
+      streamRef.current?.close?.()
+      streamRef.current = null
+      setStreamStatus('idle')
+      return undefined
+    }
+    const source = openBotStream(bot.id)
+    if (!source) return undefined
+    streamRef.current = source
+    setStreamStatus('connecting')
+    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop']
+    const handler = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        applyPayload(data)
+        setStreamStatus('open')
+      } catch (err) {
+        console.error('bot stream parse failed', err)
+      }
+    }
+    source.onmessage = handler
+    for (const evt of events) {
+      source.addEventListener(evt, handler)
+    }
+    source.onerror = () => {
+      setStreamStatus('error')
+    }
+    source.onopen = () => setStreamStatus('open')
+    return () => {
+      for (const evt of events) {
+        source.removeEventListener(evt, handler)
+      }
+      source.close()
+      streamRef.current = null
+      setStreamStatus('closed')
+    }
+  }, [open, bot?.id, applyPayload])
 
   useEffect(() => {
     const handler = (event) => {
@@ -162,7 +217,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
         </header>
 
         <div className="flex flex-1 flex-col gap-6 overflow-auto">
-          <div className="grid gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-[13px] text-slate-300 sm:grid-cols-3">
+          <div className="grid gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-[13px] text-slate-300 sm:grid-cols-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Status</p>
               <p className="text-lg font-semibold text-white">{runtimeStatus}</p>
@@ -174,6 +229,10 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             <div>
               <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Next bar</p>
               <p className="text-lg font-semibold text-white">{timerDisplay}</p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Feed</p>
+              <p className="text-lg font-semibold text-white">{streamStatus}</p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -249,15 +308,27 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                       {strategy.indicators?.length ? (
                         <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
                           {strategy.indicators.map((indicator, idx) => (
-                            <li key={`${indicator.id || idx}-${idx}`} className="flex items-center justify-between gap-3 px-3 py-2">
-                              <div className="flex items-center gap-2">
-                                <span
-                                  className="h-2 w-2 rounded-full"
-                                  style={{ backgroundColor: indicator.color || '#a5b4fc' }}
-                                />
-                                <span className="text-sm text-white">{indicator.name || indicator.id}</span>
+                            <li
+                              key={`${indicator.id || idx}-${idx}`}
+                              className="group/indicator flex items-center justify-between gap-3 px-3 py-2"
+                            >
+                              <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className="h-2 w-2 rounded-full"
+                                    style={{ backgroundColor: indicator.color || '#a5b4fc' }}
+                                  />
+                                  <span className="text-sm text-white">{indicator.name || indicator.id}</span>
+                                </div>
+                                {indicator.id ? (
+                                  <code className="font-mono text-[10px] text-slate-500/80 blur-sm transition group-hover/indicator:blur-0">
+                                    {indicator.id}
+                                  </code>
+                                ) : null}
                               </div>
-                              <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">{indicator.type || 'custom'}</span>
+                              <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">
+                                {indicator.type || 'custom'}
+                              </span>
                             </li>
                           ))}
                         </ul>
