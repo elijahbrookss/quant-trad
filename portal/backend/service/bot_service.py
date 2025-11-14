@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Mapping, Optional
 
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
@@ -26,6 +26,35 @@ def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
     if isinstance(risk, dict):
         config.update({k: risk[k] for k in risk if risk[k] is not None})
     return config
+
+
+def _coerce_isoformat(value: Optional[object]) -> Optional[str]:
+    """Normalise datetime inputs into ISO8601 strings."""
+
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).isoformat() + "Z"
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        return text
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.replace(tzinfo=None).isoformat() + "Z"
+    except ValueError:
+        return text
+
+
+def _validate_backtest_window(record: Mapping[str, object]) -> None:
+    """Ensure backtests include explicit start/end bounds."""
+
+    run_type = str(record.get("run_type") or "backtest").lower()
+    if run_type != "backtest":
+        return
+    if not record.get("backtest_start") or not record.get("backtest_end"):
+        raise ValueError("Backtests require both start and end timestamps.")
 
 
 def _validate_strategy_ids(
@@ -60,15 +89,37 @@ def _validate_strategy_ids(
     return deduped
 
 
+def _strategy_index() -> Dict[str, Dict[str, object]]:
+    """Return strategies keyed by id for quick lookup."""
+
+    return {entry["id"]: entry for entry in load_strategies() if entry.get("id")}
+
+
+def _attach_strategy_meta(bot: Dict[str, object]) -> None:
+    """Populate strategy metadata on the bot config for runtime prep."""
+
+    ids = bot.get("strategy_ids") or []
+    index = _strategy_index()
+    meta: List[Dict[str, object]] = []
+    for strategy_id in ids:
+        strategy = index.get(strategy_id)
+        if strategy:
+            meta.append(strategy)
+    if not meta:
+        raise ValueError("Bots require at least one valid strategy before starting.")
+    bot["strategies_meta"] = meta
+
+
 def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
     """Return a cached runtime for the bot, creating one if required."""
 
     runtime = _RUNTIME.get(bot_id)
+    payload = dict(config)
     if runtime is None:
-        runtime = BotRuntime(bot_id, config)
+        runtime = BotRuntime(bot_id, payload)
         _RUNTIME[bot_id] = runtime
     else:
-        runtime.config.update(config)
+        runtime.config.update(payload)
     return runtime
 
 
@@ -90,6 +141,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
     strategy_ids = _validate_strategy_ids(
         payload.get("strategy_ids"), payload.get("strategy_id")
     )
+    run_type = str(payload.get("run_type") or "backtest").lower()
     record = {
         "id": bot_id,
         "name": name,
@@ -99,11 +151,15 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "exchange": payload.get("exchange"),
         "timeframe": payload.get("timeframe") or "15m",
         "mode": (payload.get("mode") or "instant").lower(),
+        "run_type": run_type,
         "fetch_seconds": max(int(payload.get("fetch_seconds") or 1), 0),
+        "backtest_start": _coerce_isoformat(payload.get("backtest_start")),
+        "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
         "risk": _normalise_risk(payload.get("risk")),
         "status": "idle",
         "last_stats": {},
     }
+    _validate_backtest_window(record)
     upsert_bot(record)
     return record
 
@@ -121,9 +177,27 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         )
         record["strategy_ids"] = strategy_ids
         record["strategy_id"] = strategy_ids[0]
-    record.update({k: v for k, v in payload.items() if v is not None})
+    if "name" in payload and payload["name"] is not None:
+        record["name"] = payload["name"]
+    if "run_type" in payload and payload["run_type"] is not None:
+        record["run_type"] = str(payload["run_type"]).lower()
+    if "mode" in payload and payload["mode"] is not None:
+        record["mode"] = str(payload["mode"]).lower()
+    if "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
+        record["fetch_seconds"] = max(int(payload["fetch_seconds"]), 0)
+    if "datasource" in payload and payload["datasource"] is not None:
+        record["datasource"] = payload["datasource"]
+    if "exchange" in payload and payload["exchange"] is not None:
+        record["exchange"] = payload["exchange"]
+    if "timeframe" in payload and payload["timeframe"] is not None:
+        record["timeframe"] = payload["timeframe"]
+    if "backtest_start" in payload:
+        record["backtest_start"] = _coerce_isoformat(payload.get("backtest_start"))
+    if "backtest_end" in payload:
+        record["backtest_end"] = _coerce_isoformat(payload.get("backtest_end"))
     if "risk" in payload:
         record["risk"] = _normalise_risk(payload.get("risk"))
+    _validate_backtest_window(record)
     upsert_bot(record)
     runtime = _RUNTIME.get(bot_id)
     if runtime:
@@ -150,6 +224,8 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     strategy_ids = bot.get("strategy_ids") or ([bot.get("strategy_id")] if bot.get("strategy_id") else [])
     bot["strategy_ids"] = _validate_strategy_ids(strategy_ids)
     bot["strategy_id"] = bot["strategy_ids"][0]
+    _validate_backtest_window(bot)
+    _attach_strategy_meta(bot)
     runtime = _runtime_for(bot_id, bot)
     runtime.start()
     bot["status"] = "running"
@@ -169,6 +245,38 @@ def stop_bot(bot_id: str) -> Dict[str, object]:
         raise KeyError(f"Bot {bot_id} was not found")
     bot = bots[bot_id]
     bot["status"] = "stopped"
+    upsert_bot(bot)
+    return bot
+
+
+def pause_bot(bot_id: str) -> Dict[str, object]:
+    """Pause a running bot and persist status."""
+
+    runtime = _RUNTIME.get(bot_id)
+    if runtime is None:
+        raise KeyError(f"Bot {bot_id} has not been started")
+    runtime.pause()
+    bots = {bot["id"]: bot for bot in load_bots()}
+    if bot_id not in bots:
+        raise KeyError(f"Bot {bot_id} was not found")
+    bot = bots[bot_id]
+    bot["status"] = "paused"
+    upsert_bot(bot)
+    return bot
+
+
+def resume_bot(bot_id: str) -> Dict[str, object]:
+    """Resume a paused bot."""
+
+    runtime = _RUNTIME.get(bot_id)
+    if runtime is None:
+        raise KeyError(f"Bot {bot_id} has not been started")
+    runtime.resume()
+    bots = {bot["id"]: bot for bot in load_bots()}
+    if bot_id not in bots:
+        raise KeyError(f"Bot {bot_id} was not found")
+    bot = bots[bot_id]
+    bot["status"] = "running"
     upsert_bot(bot)
     return bot
 
@@ -255,13 +363,17 @@ def performance(bot_id: str) -> Dict[str, object]:
     """Return candle, trade, stat, and metadata payloads for the lens chart."""
 
     bot = get_bot(bot_id)
+    _attach_strategy_meta(bot)
     runtime = _RUNTIME.get(bot_id)
     if not runtime:
         # allow fetching from persisted config even if runtime not initialised
         runtime = _runtime_for(bot_id, bot)
+    else:
+        runtime.config.update(bot)
     runtime.warm_up()
     payload = runtime.chart_payload()
     payload["meta"] = _performance_meta(bot)
+    payload["runtime"] = runtime.snapshot()
     return payload
 
 
@@ -270,7 +382,9 @@ __all__ = [
     "delete_bot_record",
     "get_bot",
     "list_bots",
+    "pause_bot",
     "performance",
+    "resume_bot",
     "runtime_status",
     "start_bot",
     "stop_bot",

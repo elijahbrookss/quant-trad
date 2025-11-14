@@ -61,6 +61,18 @@ export async function stopBot(botId) {
   return request(`/api/bots/${botId}/stop`, { method: 'POST' })
 }
 
+export async function pauseBot(botId) {
+  return request(`/api/bots/${botId}/pause`, { method: 'POST' })
+}
+
+export async function resumeBot(botId) {
+  return request(`/api/bots/${botId}/resume`, { method: 'POST' })
+}
+
+export async function fetchBotStatus(botId) {
+  return request(`/api/bots/${botId}/status`)
+}
+
 export async function fetchBotPerformance(botId) {
   return request(`/api/bots/${botId}/performance`)
 }

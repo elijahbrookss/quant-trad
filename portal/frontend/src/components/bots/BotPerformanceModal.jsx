@@ -1,16 +1,18 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { X } from 'lucide-react'
+import { X, Pause, RotateCw } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
-import { fetchBotPerformance } from '../../adapters/bot.adapter.js'
+import { fetchBotPerformance, pauseBot, resumeBot } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
-export function BotPerformanceModal({ bot, open, onClose }) {
+export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [payload, setPayload] = useState(null)
+  const [action, setAction] = useState(null)
 
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
+  const runtime = payload?.runtime || {}
 
   const headerDetails = useMemo(() => {
     const parts = []
@@ -34,9 +36,9 @@ export function BotPerformanceModal({ bot, open, onClose }) {
     return parts.filter(Boolean).join(' • ')
   }, [strategies, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.timeframe])
 
-  const loadPerformance = useCallback(async () => {
+  const loadPerformance = useCallback(async (withLoader = true) => {
     if (!bot?.id) return
-    setLoading(true)
+    if (withLoader) setLoading(true)
     setError(null)
     try {
       const data = await fetchBotPerformance(bot.id)
@@ -44,14 +46,22 @@ export function BotPerformanceModal({ bot, open, onClose }) {
     } catch (err) {
       setError(err?.message || 'Unable to fetch performance')
     } finally {
-      setLoading(false)
+      if (withLoader) setLoading(false)
     }
   }, [bot?.id])
 
   useEffect(() => {
     if (open) {
-      loadPerformance()
+      loadPerformance(true)
     }
+  }, [open, loadPerformance])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const id = setInterval(() => {
+      loadPerformance(false)
+    }, 4000)
+    return () => clearInterval(id)
   }, [open, loadPerformance])
 
   useEffect(() => {
@@ -65,6 +75,46 @@ export function BotPerformanceModal({ bot, open, onClose }) {
     }
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
+
+  const handlePause = async () => {
+    if (!bot?.id) return
+    setAction('pause')
+    setError(null)
+    try {
+      await pauseBot(bot.id)
+      await loadPerformance(false)
+      onRefresh?.()
+    } catch (err) {
+      setError(err?.message || 'Unable to pause bot')
+    } finally {
+      setAction(null)
+    }
+  }
+
+  const handleResume = async () => {
+    if (!bot?.id) return
+    setAction('resume')
+    setError(null)
+    try {
+      await resumeBot(bot.id)
+      await loadPerformance(false)
+      onRefresh?.()
+    } catch (err) {
+      setError(err?.message || 'Unable to resume bot')
+    } finally {
+      setAction(null)
+    }
+  }
+
+  const runtimeStatus = (runtime?.status || bot?.status || 'idle').toLowerCase()
+  const progressDisplay =
+    typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
+  const timerDisplay =
+    typeof runtime?.next_bar_in_seconds === 'number'
+      ? `${Math.max(0, Math.round(runtime.next_bar_in_seconds))}s`
+      : '—'
+  const canPause = runtimeStatus === 'running' && (bot?.mode || '').toLowerCase() === 'walk-forward'
+  const canResume = runtimeStatus === 'paused'
 
   if (!open) return null
 
@@ -87,6 +137,42 @@ export function BotPerformanceModal({ bot, open, onClose }) {
         </header>
 
         <div className="flex flex-1 flex-col gap-6 overflow-auto">
+          <div className="grid gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-[13px] text-slate-300 sm:grid-cols-3">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Status</p>
+              <p className="text-lg font-semibold text-white">{runtimeStatus}</p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Progress</p>
+              <p className="text-lg font-semibold text-white">{progressDisplay}</p>
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Next bar</p>
+              <p className="text-lg font-semibold text-white">{timerDisplay}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {canPause ? (
+              <button
+                type="button"
+                onClick={handlePause}
+                disabled={action === 'pause'}
+                className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/10 disabled:opacity-40"
+              >
+                <Pause className="size-4" /> Pause walk-forward
+              </button>
+            ) : null}
+            {canResume ? (
+              <button
+                type="button"
+                onClick={handleResume}
+                disabled={action === 'resume'}
+                className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
+              >
+                <RotateCw className="size-4" /> Resume
+              </button>
+            ) : null}
+          </div>
           <div className="relative">
             {loading ? <LoadingOverlay label="Loading bot performance…" /> : null}
             {error ? (
@@ -97,6 +183,7 @@ export function BotPerformanceModal({ bot, open, onClose }) {
                 chartId={`bot-${bot?.id}`}
                 candles={payload?.candles || []}
                 trades={payload?.trades || []}
+                overlays={payload?.overlays || []}
               />
             ) : null}
           </div>

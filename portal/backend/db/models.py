@@ -187,7 +187,10 @@ class BotRecord(Base):
     exchange = Column(String(64), nullable=True)
     timeframe = Column(String(32), nullable=False, default="15m")
     mode = Column(String(32), nullable=False, default="instant")
+    run_type = Column(String(32), nullable=False, default="backtest")
     fetch_seconds = Column(Integer, nullable=False, default=5)
+    backtest_start = Column(DateTime, nullable=True)
+    backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
@@ -206,7 +209,10 @@ class BotRecord(Base):
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "mode": self.mode,
+            "run_type": self.run_type,
             "fetch_seconds": self.fetch_seconds,
+            "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
+            "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
             "status": self.status,
             "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,

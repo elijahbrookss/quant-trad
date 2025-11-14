@@ -36,7 +36,10 @@ class BotBase(BaseModel):
     exchange: Optional[str] = None
     timeframe: str = "15m"
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
+    run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade)$")
     fetch_seconds: int = Field(default=1, ge=0)
+    backtest_start: Optional[str] = None
+    backtest_end: Optional[str] = None
     risk: RiskSettings = Field(default_factory=RiskSettings)
 
 
@@ -78,7 +81,9 @@ class BotPerformanceResponse(BaseModel):
     candles: List[Dict[str, Any]]
     trades: List[Dict[str, Any]]
     stats: Dict[str, Any]
+    overlays: List[Dict[str, Any]] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
+    runtime: Optional[Dict[str, Any]] = None
 
 
 @router.get("/", response_model=List[BotResponse])
@@ -156,6 +161,26 @@ async def get_bot_status(bot_id: str) -> Dict[str, Any]:
 
     try:
         return bot_service.runtime_status(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/{bot_id}/pause", response_model=BotResponse)
+async def pause_bot(bot_id: str) -> Dict[str, Any]:
+    """Pause a running bot."""
+
+    try:
+        return bot_service.pause_bot(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/{bot_id}/resume", response_model=BotResponse)
+async def resume_bot(bot_id: str) -> Dict[str, Any]:
+    """Resume a paused bot."""
+
+    try:
+        return bot_service.resume_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
