@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
-import { Plus, X } from 'lucide-react'
+import { Plus, X, RefreshCw } from 'lucide-react'
 import {
   fetchIndicators,
   createIndicator,
@@ -90,6 +90,22 @@ const normalizeParams = (params) => {
   return p;
 };
 
+const parseTimestamp = (value) => {
+  if (!value) return 0;
+  const ts = Date.parse(value);
+  return Number.isNaN(ts) ? 0 : ts;
+};
+
+const sortIndicators = (list = []) => {
+  return [...list].sort((a, b) => {
+    const enabledDelta = Number(Boolean(b?.enabled)) - Number(Boolean(a?.enabled));
+    if (enabledDelta !== 0) return enabledDelta;
+    const createdDelta = parseTimestamp(b?.created_at) - parseTimestamp(a?.created_at);
+    if (createdDelta !== 0) return createdDelta;
+    return parseTimestamp(b?.updated_at) - parseTimestamp(a?.updated_at);
+  });
+};
+
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
@@ -106,6 +122,7 @@ export const IndicatorSection = ({ chartId }) => {
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [duplicateBusyId, setDuplicateBusyId] = useState(null);
+  const [refreshingList, setRefreshingList] = useState(false);
 
 
   const { updateChart, getChart } = useChartState()
@@ -116,31 +133,32 @@ export const IndicatorSection = ({ chartId }) => {
   // Read current chart slice
   const chartState = getChart(chartId)
 
-  useEffect(() => {
-    let cancelled = false
-    setIsLoading(true)
-    fetchIndicators()
-      .then((payload) => {
-        if (cancelled) return
-        const list = Array.isArray(payload) ? payload : []
-        setIndicators(list)
-        updateChart(chartId, { indicators: list })
-      })
-      .catch((err) => {
-        if (cancelled) return
-        const message = err?.message || 'Unable to load indicators'
-        setError(message)
-        warn('indicator_initial_load_failed', err)
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      })
-    return () => {
-      cancelled = true
+  const fetchAndSyncIndicators = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) {
+      setIsLoading(true);
     }
-  }, [chartId, updateChart, warn])
+    try {
+      const payload = await fetchIndicators();
+      const list = Array.isArray(payload) ? payload : [];
+      const sorted = sortIndicators(list);
+      setIndicators(sorted);
+      updateChart(chartId, { indicators: sorted });
+      return sorted;
+    } catch (err) {
+      const message = err?.message || 'Unable to load indicators';
+      setError(message);
+      logError('indicator_list_fetch_failed', err);
+      return [];
+    } finally {
+      if (!silent) {
+        setIsLoading(false);
+      }
+    }
+  }, [chartId, updateChart, logError]);
+
+  useEffect(() => {
+    fetchAndSyncIndicators();
+  }, [fetchAndSyncIndicators]);
   useEffect(() => {
     if (!Array.isArray(indicators)) {
       setIndColors((prev) => (Object.keys(prev).length ? {} : prev));
@@ -229,8 +247,10 @@ export const IndicatorSection = ({ chartId }) => {
     if (!Array.isArray(working) || working.length === 0) {
       try {
         working = (await fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })) || [];
-        setIndicators(working);
-        updateChart(chartId, { indicators: working });
+        const sortedWorking = sortIndicators(working);
+        working = sortedWorking;
+        setIndicators(sortedWorking);
+        updateChart(chartId, { indicators: sortedWorking });
       } catch (e) {
         logError('indicator_seed_failed', e);
         updateChart(chartId, { overlays: [], overlayLoading: false });
@@ -287,8 +307,10 @@ export const IndicatorSection = ({ chartId }) => {
     const byId = new Map(patched.map(p => [p.id, p]));
     const merged = working.map(ind => byId.get(ind.id) || ind);
     if (merged !== working) {
-      setIndicators(merged);
-      updateChart(chartId, { indicators: merged });
+      const sortedMerged = sortIndicators(merged);
+      working = sortedMerged;
+      setIndicators(sortedMerged);
+      updateChart(chartId, { indicators: sortedMerged });
     }
 
     // compute overlays for enabled indicators using current chart window
@@ -344,6 +366,19 @@ export const IndicatorSection = ({ chartId }) => {
     });
   };
 
+  const handleRefreshList = useCallback(async () => {
+    setRefreshingList(true);
+    try {
+      const latest = await fetchAndSyncIndicators({ silent: true });
+      await refreshEnabledOverlays(latest);
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_manual_refresh_failed', e);
+    } finally {
+      setRefreshingList(false);
+    }
+  }, [fetchAndSyncIndicators, refreshEnabledOverlays, logError]);
+
   // Handlers for modal save/delete
   const handleSave = async (meta) => {
     const core = normalizeParams(meta.params);
@@ -372,7 +407,6 @@ export const IndicatorSection = ({ chartId }) => {
     updateChart(chartId, { overlays: [], overlayLoading: true });
 
     try {
-      let nextIndicators = indicators;
       let indicatorId = meta.id ?? null;
 
       if (meta.id) {
@@ -383,25 +417,10 @@ export const IndicatorSection = ({ chartId }) => {
           name: meta.name,
           color: existing?.color ?? null,
         });
-        const updated = payload || (existing ? { ...existing, type: meta.type, params, name: meta.name } : null);
-        indicatorId = updated?.id ?? meta.id;
-        if (updated) {
-          const normalizedColor = updated.color ?? existing?.color ?? null;
-          nextIndicators = indicators.map((item) => (
-            item.id === indicatorId ? { ...updated, color: normalizedColor } : item
-          ));
-        }
+        indicatorId = payload?.id ?? meta.id;
       } else {
         const created = await createIndicator({ type: meta.type, params, name: meta.name });
         indicatorId = created?.id ?? null;
-        if (created) {
-          nextIndicators = [...indicators, created];
-        }
-      }
-
-      if (nextIndicators !== indicators) {
-        setIndicators(nextIndicators);
-        updateChart(chartId, { indicators: nextIndicators });
       }
 
       if (indicatorId) {
@@ -419,7 +438,8 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
-      await refreshEnabledOverlays(nextIndicators);
+      const latest = await fetchAndSyncIndicators({ silent: true });
+      await refreshEnabledOverlays(latest);
     } catch (e) {
       setError(e.message);
       logError('indicator_save_failed', e);
@@ -430,43 +450,47 @@ export const IndicatorSection = ({ chartId }) => {
   };
 
   const handleDelete = async (id) => {
+    if (!id) return;
+    setIsLoading(true);
     try {
-      await deleteIndicator(id)
+      await deleteIndicator(id);
       setSelectedIds((prev) => {
-        if (!prev || prev.size === 0) return prev;
-        if (!prev.has(id)) return prev;
+        if (!prev || prev.size === 0 || !prev.has(id)) return prev;
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
-      setIndicators(prev => prev.filter(i => i.id !== id))
-      const currentConfig = getChart(chartId)?.signalsConfig
+      const currentConfig = getChart(chartId)?.signalsConfig;
       if (currentConfig && typeof currentConfig === 'object') {
-        const nextConfig = { ...currentConfig }
-        let changed = false
+        const nextConfig = { ...currentConfig };
+        let changed = false;
 
-        const enabledRules = currentConfig.enabledRules
+        const enabledRules = currentConfig.enabledRules;
         if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
-          const nextEnabled = { ...enabledRules }
-          delete nextEnabled[id]
+          const nextEnabled = { ...enabledRules };
+          delete nextEnabled[id];
           if (Object.keys(nextEnabled).length > 0) {
-            nextConfig.enabledRules = nextEnabled
+            nextConfig.enabledRules = nextEnabled;
           } else {
-            delete nextConfig.enabledRules
+            delete nextConfig.enabledRules;
           }
-          changed = true
+          changed = true;
         }
 
         if (changed) {
-          const remainingKeys = Object.keys(nextConfig)
+          const remainingKeys = Object.keys(nextConfig);
           updateChart(chartId, {
             signalsConfig: remainingKeys.length > 0 ? nextConfig : null,
-          })
+          });
         }
       }
+      const latest = await fetchAndSyncIndicators({ silent: true });
+      await refreshEnabledOverlays(latest);
     } catch (e) {
-      setError(e.message)
-      logError('indicator_delete_failed', e)
+      setError(e.message);
+      logError('indicator_delete_failed', e);
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -488,19 +512,17 @@ export const IndicatorSection = ({ chartId }) => {
     if (!ids.length) return
     try {
       setBulkActionLoading(true)
+      setIsLoading(true)
       await bulkDeleteIndicators(ids)
-      setIndicators((prev) => {
-        const remaining = prev.filter((ind) => !ids.includes(ind.id))
-        updateChart(chartId, { indicators: remaining })
-        return remaining
-      })
-      queueMicrotask(() => { void refreshEnabledOverlays() })
       setSelectedIds(new Set())
+      const latest = await fetchAndSyncIndicators({ silent: true })
+      await refreshEnabledOverlays(latest)
     } catch (e) {
       setError(e.message)
       logError('indicator_bulk_delete_failed', e)
     } finally {
       setBulkActionLoading(false)
+      setIsLoading(false)
     }
   }
 
@@ -509,18 +531,9 @@ export const IndicatorSection = ({ chartId }) => {
     if (!ids.length) return
     try {
       setBulkActionLoading(true)
-      const updated = await bulkToggleIndicators(ids, enabled)
-      if (Array.isArray(updated) && updated.length) {
-        setIndicators((prev) => {
-          const replacements = new Map(updated.map((item) => [item.id, item]))
-          const next = prev.map((indicator) => replacements.get(indicator.id) || indicator)
-          updateChart(chartId, { indicators: next })
-          queueMicrotask(() => { void refreshEnabledOverlays(next) })
-          return next
-        })
-      } else {
-        queueMicrotask(() => { void refreshEnabledOverlays() })
-      }
+      await bulkToggleIndicators(ids, enabled)
+      const latest = await fetchAndSyncIndicators({ silent: true })
+      await refreshEnabledOverlays(latest)
     } catch (e) {
       setError(e.message)
       logError('indicator_bulk_toggle_failed', e)
@@ -536,8 +549,10 @@ export const IndicatorSection = ({ chartId }) => {
     const nextEnabled = !previousEnabled
 
     setIndicators((prev) => {
-      const next = prev.map((indicator) =>
-        indicator.id === id ? { ...indicator, enabled: nextEnabled } : indicator,
+      const next = sortIndicators(
+        prev.map((indicator) =>
+          indicator.id === id ? { ...indicator, enabled: nextEnabled } : indicator,
+        ),
       )
       updateChart(chartId, { indicators: next })
       queueMicrotask(() => { void refreshEnabledOverlays(next) })
@@ -545,20 +560,18 @@ export const IndicatorSection = ({ chartId }) => {
     })
 
     setIndicatorEnabled(id, nextEnabled)
-      .then((updated) => {
-        if (!updated) return
-        setIndicators((prev) => {
-          const next = prev.map((indicator) => (indicator.id === id ? updated : indicator))
-          updateChart(chartId, { indicators: next })
-          return next
-        })
+      .then(async () => {
+        const latest = await fetchAndSyncIndicators({ silent: true })
+        await refreshEnabledOverlays(latest)
       })
       .catch((err) => {
         setError(err.message)
         logError('indicator_toggle_failed', err)
         setIndicators((prev) => {
-          const next = prev.map((indicator) =>
-            indicator.id === id ? { ...indicator, enabled: previousEnabled } : indicator,
+          const next = sortIndicators(
+            prev.map((indicator) =>
+              indicator.id === id ? { ...indicator, enabled: previousEnabled } : indicator,
+            ),
           )
           updateChart(chartId, { indicators: next })
           return next
@@ -664,18 +677,9 @@ export const IndicatorSection = ({ chartId }) => {
     if (!id) return
     try {
       setDuplicateBusyId(id)
-      const clone = await duplicateIndicator(id)
-      if (clone) {
-        setIndicators((prev) => {
-          const next = [clone, ...prev]
-          updateChart(chartId, { indicators: next })
-          return next
-        })
-        setIndColors((prev) => ({
-          ...prev,
-          [clone.id]: clone.color?.trim() ? clone.color : DEFAULT_INDICATOR_COLOR,
-        }))
-      }
+      await duplicateIndicator(id)
+      const latest = await fetchAndSyncIndicators({ silent: true })
+      await refreshEnabledOverlays(latest)
     } catch (e) {
       setError(e.message)
       logError('indicator_duplicate_failed', e)
@@ -711,7 +715,13 @@ export const IndicatorSection = ({ chartId }) => {
       const name = (indicator?.name ?? '').toLowerCase();
       const type = (indicator?.type ?? '').toLowerCase();
       const paramsString = JSON.stringify(indicator?.params ?? {}).toLowerCase();
-      return name.includes(query) || type.includes(query) || paramsString.includes(query);
+      const id = (indicator?.id ?? '').toLowerCase();
+      return (
+        name.includes(query) ||
+        type.includes(query) ||
+        id.includes(query) ||
+        paramsString.includes(query)
+      );
     });
   }, [indicators, showEnabledOnly, trimmedSearchQuery, typeFilter]);
 
@@ -831,14 +841,29 @@ export const IndicatorSection = ({ chartId }) => {
                 Review saved indicators, toggle availability, and open edits without leaving the console.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => openEditModal()}
-              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-            >
-              <Plus className="size-4" aria-hidden="true" />
-              Add indicator
-            </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                onClick={handleRefreshList}
+                disabled={refreshingList}
+                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
+                  refreshingList
+                    ? 'border-white/10 bg-white/5 text-slate-400 cursor-wait'
+                    : 'border-white/15 bg-white/5 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)]'
+                }`}
+              >
+                <RefreshCw className={`size-4 ${refreshingList ? 'animate-spin' : ''}`} aria-hidden="true" />
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={() => openEditModal()}
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+              >
+                <Plus className="size-4" aria-hidden="true" />
+                Add indicator
+              </button>
+            </div>
           </header>
 
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.45fr)]">
@@ -881,7 +906,7 @@ export const IndicatorSection = ({ chartId }) => {
                       type="search"
                       value={searchQuery}
                       onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="Name, type, or param"
+                      placeholder="Name, ID, type, or param"
                       className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
                     />
                   </div>

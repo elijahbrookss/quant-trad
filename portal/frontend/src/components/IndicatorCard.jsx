@@ -105,6 +105,11 @@ export default function IndicatorCard({
       .join(" ");
   }, [indicator?.type]);
 
+  const decoratedName = useMemo(() => {
+    const base = indicator?.name?.trim() || typeLabel || "Indicator";
+    return indicator?.id ? `${base} - ${indicator.id}` : base;
+  }, [indicator?.name, indicator?.id, typeLabel]);
+
   return (
     <div className={`group flex items-start justify-between gap-4 rounded-2xl bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)] ${cardBorderClass}`}>
       <div className="min-w-0 flex-1 space-y-3">
@@ -129,26 +134,14 @@ export default function IndicatorCard({
             <span className="h-2.5 w-2.5 rounded-full border border-white/25" style={{ backgroundColor: color }} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
-              {indicator?.name}
+            <div className="truncate text-base font-semibold text-slate-100" title={decoratedName}>
+              {decoratedName}
             </div>
             <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-[color:var(--accent-text-soft-alpha)]">
               {typeLabel}
             </p>
           </div>
         </div>
-
-        {indicator?.id ? (
-          <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.3em] text-slate-500">
-            <span>ID</span>
-            <code
-              className="font-mono text-[11px] text-slate-400 blur-sm transition group-hover:blur-0"
-              title="Indicator ID"
-            >
-              {indicator.id}
-            </code>
-          </div>
-        ) : null}
 
         {visibleParams.length > 0 && (
           <div className="flex flex-wrap gap-1 text-xs text-slate-300">
