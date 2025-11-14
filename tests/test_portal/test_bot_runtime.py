@@ -7,6 +7,9 @@ from portal.backend.service.bot_runtime import BotRuntime
 
 
 def make_runtime(**overrides):
+    runtime_kwargs = {}
+    if "state_callback" in overrides:
+        runtime_kwargs["state_callback"] = overrides.pop("state_callback")
     config = {
         "runtime_mode": "backtest",
         "mode": "walk-forward",
@@ -23,7 +26,7 @@ def make_runtime(**overrides):
         ],
     }
     config.update(overrides)
-    return BotRuntime("bot-test", config)
+    return BotRuntime("bot-test", config, **runtime_kwargs)
 
 
 @pytest.mark.unit
@@ -53,3 +56,34 @@ def test_bot_runtime_pause_and_resume_flip_state():
     resumed_snapshot = runtime.snapshot()
     assert resumed_snapshot["paused"] is False
     assert resumed_snapshot["status"] == "running"
+
+
+@pytest.mark.unit
+def test_bot_runtime_reset_if_finished_resets_state():
+    runtime = make_runtime()
+    runtime.state["status"] = "completed"
+    runtime._total_bars = 5
+    runtime._bar_index = 5
+    runtime._chart_overlays = [{"foo": "bar"}]
+    runtime._logs.append({"id": "1"})
+
+    runtime.reset_if_finished()
+
+    assert runtime.state["status"] == "idle"
+    assert runtime._bar_index == 0
+    assert len(runtime._logs) == 0
+    assert runtime._chart_overlays == []
+
+
+@pytest.mark.unit
+def test_bot_runtime_state_callback_receives_updates():
+    captured = []
+    runtime = make_runtime(state_callback=lambda payload: captured.append(payload))
+    runtime._last_stats = {"wins": 2}
+
+    runtime._persist_runtime_state("completed")
+
+    assert captured
+    assert captured[0]["status"] == "completed"
+    assert captured[0]["last_stats"] == {"wins": 2}
+    assert "last_run_at" in captured[0]

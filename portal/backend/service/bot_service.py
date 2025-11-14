@@ -14,6 +14,23 @@ from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 _RUNTIME: Dict[str, BotRuntime] = {}
 
 
+def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
+    """Persist runtime-driven status/stat updates for *bot_id*."""
+
+    if not patch:
+        return
+    bots = {bot["id"]: bot for bot in load_bots()}
+    record = bots.get(bot_id)
+    if not record:
+        return
+    mutable = dict(record)
+    updates = {key: patch[key] for key in ("status", "last_stats", "last_run_at") if key in patch}
+    if not updates:
+        return
+    mutable.update(updates)
+    upsert_bot(mutable)
+
+
 def _now_iso() -> str:
     """Return the current UTC timestamp in ISO format."""
 
@@ -117,7 +134,11 @@ def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
     runtime = _RUNTIME.get(bot_id)
     payload = dict(config)
     if runtime is None:
-        runtime = BotRuntime(bot_id, payload)
+        runtime = BotRuntime(
+            bot_id,
+            payload,
+            state_callback=lambda patch, *, _bot_id=bot_id: _persist_runtime_patch(_bot_id, patch),
+        )
         _RUNTIME[bot_id] = runtime
     else:
         runtime.config.update(payload)
@@ -228,6 +249,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     _validate_backtest_window(bot)
     _attach_strategy_meta(bot)
     runtime = _runtime_for(bot_id, bot)
+    runtime.reset_if_finished()
     runtime.start()
     bot["status"] = "running"
     bot["last_run_at"] = _now_iso()

@@ -10,11 +10,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
-from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from . import strategy_service
+from . import indicator_service, strategy_service
 from .candle_service import fetch_ohlcv
 
 
@@ -314,7 +314,12 @@ class StrategySeries:
 class BotRuntime:
     """Simulated bot runtime that iterates over real candles and emits stats."""
 
-    def __init__(self, bot_id: str, config: Dict[str, object]):
+    def __init__(
+        self,
+        bot_id: str,
+        config: Dict[str, object],
+        state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         self.bot_id = bot_id
         self.config = dict(config)
         self.mode = (self.config.get("mode") or "instant").lower()
@@ -338,6 +343,7 @@ class BotRuntime:
         self._live_mode = self.run_type == "sim_trade"
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._subscribers: Dict[str, Queue] = {}
+        self._state_callback = state_callback
 
     @staticmethod
     def _coerce_fetch_seconds(value: Optional[object]) -> float:
@@ -452,7 +458,16 @@ class BotRuntime:
             exchange=exchange,
             candles=candles,
             signals=signals,
-            overlays=overlays,
+            overlays=overlays
+            + self._indicator_overlay_entries(
+                strategy,
+                start_iso,
+                end_iso,
+                timeframe,
+                symbol,
+                datasource,
+                exchange,
+            ),
             risk_engine=risk_engine,
             window_start=start_iso,
             window_end=end_iso,
@@ -481,6 +496,69 @@ class BotRuntime:
         end_dt = datetime.utcnow()
         start_dt = end_dt - timedelta(days=lookback_days)
         return _isoformat(start_dt), _isoformat(end_dt)
+
+    def _indicator_overlay_entries(
+        self,
+        strategy: Mapping[str, Any],
+        start_iso: str,
+        end_iso: str,
+        timeframe: Optional[str],
+        symbol: Optional[str],
+        datasource: Optional[str],
+        exchange: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        overlays: List[Dict[str, Any]] = []
+        strategy_meta = strategy or {}
+        links = list(strategy_meta.get("indicator_links") or [])
+        if not links and strategy_meta.get("indicator_ids"):
+            links = [
+                {"indicator_id": indicator_id}
+                for indicator_id in strategy_meta.get("indicator_ids")
+                if indicator_id
+            ]
+        seen: set[str] = set()
+        for link in links:
+            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
+            if not indicator_id or indicator_id in seen:
+                continue
+            seen.add(indicator_id)
+            snapshot = dict(link.get("indicator_snapshot") or {})
+            params = dict(snapshot.get("params") or {})
+            indicator_type = snapshot.get("type") or link.get("indicator_type") or "indicator"
+            color = snapshot.get("color") or link.get("color")
+            window_symbol = symbol or params.get("symbol")
+            interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
+            ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
+            ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
+            try:
+                payload = indicator_service.overlays_for_instance(
+                    indicator_id,
+                    start=start_iso,
+                    end=end_iso,
+                    interval=str(interval),
+                    symbol=window_symbol,
+                    datasource=ds,
+                    exchange=ex,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug(
+                    "bot_indicator_overlay_failed | bot=%s | strategy=%s | indicator=%s | error=%s",
+                    self.bot_id,
+                    strategy_meta.get("id"),
+                    indicator_id,
+                    exc,
+                )
+                continue
+            overlays.append(
+                {
+                    "ind_id": indicator_id,
+                    "type": indicator_type,
+                    "payload": payload,
+                    "color": color,
+                    "source": "indicator",
+                }
+            )
+        return overlays
 
     @staticmethod
     def _build_candles(df: pd.DataFrame) -> List[Candle]:
@@ -554,6 +632,41 @@ class BotRuntime:
                 overlays.extend(payload.get("overlays", []) or [])
         return overlays
 
+    def reset(self) -> None:
+        """Clear cached series so the runtime can restart fresh."""
+
+        if self._thread and self._thread.is_alive():
+            raise RuntimeError("Cannot reset a running bot runtime")
+        with self._lock:
+            self._prepared = False
+            self._series = []
+            self._primary_series = None
+            self._total_bars = 0
+            self._bar_index = 0
+            self._chart_overlays = []
+            self._last_stats = {}
+            self._next_bar_at = None
+            self._logs.clear()
+            self.state = {"status": "idle", "progress": 0.0, "paused": False}
+        self._stop.clear()
+        self._pause_event.set()
+        self._paused = False
+
+    def needs_reset(self) -> bool:
+        """Return True when the runtime finished and can be rerun."""
+
+        status = str(self.state.get("status") or "").lower()
+        finished = status in {"completed", "stopped", "error"}
+        exhausted = bool(self._total_bars) and self._bar_index >= self._total_bars
+        thread_active = self._thread and self._thread.is_alive()
+        return not thread_active and (finished or exhausted)
+
+    def reset_if_finished(self) -> None:
+        """Reset cached series if the previous run completed."""
+
+        if self.needs_reset():
+            self.reset()
+
     def warm_up(self) -> None:
         """Prepare strategy sessions so the lens can query data."""
 
@@ -584,6 +697,7 @@ class BotRuntime:
             logger.exception("bot_runtime_loop_failed | bot=%s | error=%s", self.bot_id, exc)
             with self._lock:
                 self.state.update({"status": "error", "error": str(exc)})
+            self._persist_runtime_state("error")
 
     def _execute_loop(self) -> None:
         self._ensure_prepared()
@@ -613,6 +727,7 @@ class BotRuntime:
             with self._lock:
                 self.state.update({"status": status})
         self._push_update(status)
+        self._persist_runtime_state(status)
 
     def _apply_bar(self, index: int) -> None:
         for series in self._series:
@@ -722,7 +837,19 @@ class BotRuntime:
                 exchange=series.exchange,
                 config={"mode": self.run_type},
             )
-            series.overlays = self._extract_indicator_overlays(evaluation)
+            overlays = self._extract_indicator_overlays(evaluation)
+            overlays.extend(
+                self._indicator_overlay_entries(
+                    series.meta or {},
+                    series.window_start or start_iso,
+                    end_iso,
+                    series.timeframe,
+                    series.symbol,
+                    series.datasource,
+                    series.exchange,
+                )
+            )
+            series.overlays = overlays
             signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
             while signals and signals[0].epoch <= series.last_consumed_epoch:
                 signals.popleft()
@@ -832,6 +959,25 @@ class BotRuntime:
         if limit and limit > 0:
             entries = entries[-limit:]
         return entries
+
+    def _persist_runtime_state(self, status: str) -> None:
+        """Send completion metadata back to the service layer for persistence."""
+
+        if not self._state_callback:
+            return
+        payload = {
+            "status": status,
+            "last_stats": dict(self._last_stats or {}),
+            "last_run_at": _isoformat(datetime.utcnow()),
+        }
+        try:
+            self._state_callback(payload)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "bot_runtime_state_callback_failed | bot=%s | error=%s",
+                self.bot_id,
+                exc,
+            )
 
     def _update_state(self, candle: Candle, status: str = "running") -> None:
         stats = self._aggregate_stats()
