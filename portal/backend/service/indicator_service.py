@@ -895,6 +895,8 @@ def overlays_for_instance(
     symbol: Optional[str] = None,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    *,
+    overlay_options: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Compute Lightweight-Charts-ready overlays for an existing indicator UUID,
@@ -940,6 +942,7 @@ def overlays_for_instance(
         raise LookupError("No candles available for given window")
 
     overlay_indicator = inst
+    options = dict(overlay_options or {})
     if isinstance(inst, MarketProfileIndicator) and hasattr(inst, "to_lightweight"):
         overlay_indicator = _build_market_profile_overlay_indicator(
             inst,
@@ -953,6 +956,13 @@ def overlays_for_instance(
             sym,
             interval,
         )
+
+        if "extend_value_area_to_chart_end" in options:
+            setattr(
+                overlay_indicator,
+                "extend_value_area_to_chart_end",
+                bool(options["extend_value_area_to_chart_end"]),
+            )
 
     # Expect indicator to expose one of: to_lightweight(df) | to_overlays(df)
     if hasattr(overlay_indicator, "to_lightweight"):

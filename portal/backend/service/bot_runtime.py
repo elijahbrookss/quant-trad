@@ -530,6 +530,9 @@ class BotRuntime:
             interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
             ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
             ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
+            options: Optional[Dict[str, Any]] = None
+            if str(indicator_type or "").lower() in {"market_profile", "mpf"}:
+                options = {"extend_value_area_to_chart_end": False}
             try:
                 payload = indicator_service.overlays_for_instance(
                     indicator_id,
@@ -539,6 +542,7 @@ class BotRuntime:
                     symbol=window_symbol,
                     datasource=ds,
                     exchange=ex,
+                    overlay_options=options,
                 )
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug(
@@ -623,14 +627,10 @@ class BotRuntime:
 
     @staticmethod
     def _extract_indicator_overlays(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        overlays: List[Dict[str, Any]] = []
-        indicator_results = result.get("indicator_results") if isinstance(result, Mapping) else None
-        if not isinstance(indicator_results, Mapping):
-            return overlays
-        for payload in indicator_results.values():
-            if isinstance(payload, Mapping):
-                overlays.extend(payload.get("overlays", []) or [])
-        return overlays
+        # Indicator results include overlays that visualize raw signal markers.
+        # The bot lens should only render the strategy's configured indicator
+        # overlays, so skip signal-driven visuals entirely.
+        return []
 
     def reset(self) -> None:
         """Clear cached series so the runtime can restart fresh."""
@@ -1077,13 +1077,71 @@ class BotRuntime:
         candles = [candle.to_dict() for candle in primary.candles[:visible]]
         return candles
 
+    def _current_epoch(self) -> Optional[int]:
+        primary = self._primary_series
+        if not primary or not primary.candles:
+            return None
+        if self._bar_index <= 0:
+            status = str(self.state.get("status") or "").lower()
+            if status in {"idle", "initialising"}:
+                return None
+        idx = min(max(self._bar_index - 1, 0), len(primary.candles) - 1)
+        candle = primary.candles[idx]
+        return int(candle.time.timestamp())
+
+    def _visible_overlays(self) -> List[Dict[str, Any]]:
+        overlays = list(self._chart_overlays)
+        if not overlays:
+            return []
+        current_epoch = self._current_epoch()
+        status = str(self.state.get("status") or "").lower()
+        if current_epoch is None:
+            # Hide overlays until the bot has advanced at least one bar.
+            if status in {"idle", "initialising"}:
+                return []
+            return overlays
+
+        visible: List[Dict[str, Any]] = []
+        for overlay in overlays:
+            if self._overlay_is_ready(overlay, current_epoch):
+                visible.append(overlay)
+        return visible
+
+    @staticmethod
+    def _overlay_is_ready(overlay: Mapping[str, Any], current_epoch: int) -> bool:
+        if not isinstance(overlay, Mapping):
+            return False
+        overlay_type = str(overlay.get("type") or "").lower()
+        if overlay_type not in {"market_profile", "mpf"}:
+            return True
+        payload = overlay.get("payload") if isinstance(overlay.get("payload"), Mapping) else {}
+        boxes = payload.get("boxes") if isinstance(payload, Mapping) else None
+        if not boxes:
+            return True
+        latest_needed: Optional[int] = None
+        for box in boxes:
+            if not isinstance(box, Mapping):
+                continue
+            end_epoch = BotRuntime._normalise_epoch(box.get("x2"))
+            if end_epoch is None:
+                end_epoch = BotRuntime._normalise_epoch(box.get("end"))
+            if end_epoch is None:
+                end_epoch = BotRuntime._normalise_epoch(box.get("x1"))
+            if end_epoch is None:
+                continue
+            if latest_needed is None or end_epoch > latest_needed:
+                latest_needed = end_epoch
+        if latest_needed is None:
+            return True
+        return current_epoch >= latest_needed
+
     def _chart_state(self) -> Dict[str, Any]:
         candles = self._visible_candles()
         return {
             "candles": candles,
             "trades": self._aggregate_trades(),
             "stats": self._last_stats or self._aggregate_stats(),
-            "overlays": list(self._chart_overlays),
+            "overlays": self._visible_overlays(),
             "logs": self.logs(),
         }
 
