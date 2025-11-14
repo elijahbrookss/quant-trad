@@ -363,7 +363,7 @@ class BotRuntime:
             return None
 
         try:
-            evaluation = strategy_service.evaluate(
+            evaluation = strategy_service.generate_strategy_signals(
                 strategy_id=strategy.get("id"),
                 start=start_iso,
                 end=end_iso,

@@ -29,6 +29,7 @@ from signals.engine.signal_generator import (
 )
 from .storage import (
     delete_indicator as storage_delete_indicator,
+    get_indicator as storage_get_indicator,
     load_indicators as storage_load_indicators,
     strategies_for_indicator as storage_strategies_for_indicator,
     upsert_indicator as storage_upsert_indicator,
@@ -61,6 +62,34 @@ _INDICATOR_MAP = {
 # Ensure default signal rules are registered for built-in indicators
 # In-memory registry: id -> {"meta": <pydantic-like dict>, "instance": <object>}
 _REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+
+def _coerce_record_meta(record: Mapping[str, Any]) -> Dict[str, Any]:
+    inst_id = str(record.get("id") or "").strip()
+    payload = {
+        "id": inst_id,
+        "type": record.get("type"),
+        "name": record.get("name") or record.get("type") or inst_id or "Indicator",
+        "params": deepcopy(record.get("params") or {}),
+        "color": record.get("color"),
+        "datasource": record.get("datasource"),
+        "exchange": record.get("exchange"),
+        "enabled": bool(record.get("enabled", True)),
+    }
+    return _ensure_color(payload)
+
+
+def _register_placeholder(record: Mapping[str, Any]) -> None:
+    meta = _coerce_record_meta(record)
+    inst_id = meta.get("id")
+    if not inst_id:
+        return
+    existing = _REGISTRY.get(inst_id)
+    if existing:
+        existing["meta"] = meta
+        existing.setdefault("instance", None)
+    else:
+        _REGISTRY[inst_id] = {"meta": meta, "instance": None}
 
 
 def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
@@ -96,6 +125,7 @@ def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
         inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     except Exception as exc:  # noqa: BLE001 - restoration guard
         logger.warning("indicator_restore_failed | id=%s | error=%s", inst_id, exc)
+        _register_placeholder(meta)
         return
 
     if isinstance(inst, MarketProfileIndicator):
@@ -125,19 +155,25 @@ def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
     _REGISTRY[inst_id] = {"meta": _ensure_color(meta_payload), "instance": inst}
 
 
-def _bootstrap_from_storage() -> None:
+def _bootstrap_from_storage(force: bool = False) -> None:
     """Hydrate the in-memory registry from persisted records."""
 
     records = storage_load_indicators()
     for record in records:
+        inst_id = str(record.get("id") or "").strip()
+        if not inst_id:
+            continue
+        if not force and inst_id in _REGISTRY:
+            continue
         try:
             _restore_indicator_from_meta(record)
         except Exception as exc:  # noqa: BLE001 - defensive
             logger.warning(
                 "indicator_bootstrap_failed | id=%s | error=%s",
-                record.get("id"),
+                inst_id,
                 exc,
             )
+            _register_placeholder(record)
 
 
 _bootstrap_from_storage()
@@ -650,14 +686,30 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
 
 
 def list_instances_meta() -> List[Dict[str, Any]]:
-    return [_ensure_color(entry["meta"]) for entry in _REGISTRY.values()]
+    if not _REGISTRY:
+        _bootstrap_from_storage(force=True)
+    return [_ensure_color(deepcopy(entry["meta"])) for entry in _REGISTRY.values()]
 
 
 def get_instance_meta(inst_id: str) -> Dict[str, Any]:
     entry = _REGISTRY.get(inst_id)
     if not entry:
-        raise KeyError("Indicator not found")
-    return _ensure_color(entry["meta"])
+        record = storage_get_indicator(inst_id)
+        if not record:
+            raise KeyError("Indicator not found")
+        try:
+            _restore_indicator_from_meta(record)
+        except Exception as exc:  # noqa: BLE001 - defensive logging
+            logger.warning(
+                "indicator_meta_restore_failed | id=%s | error=%s",
+                inst_id,
+                exc,
+            )
+            _register_placeholder(record)
+        entry = _REGISTRY.get(inst_id)
+        if not entry:
+            raise KeyError("Indicator not found")
+    return _ensure_color(deepcopy(entry["meta"]))
 
 
 def list_indicator_strategies(inst_id: str) -> List[Dict[str, Any]]:

@@ -70,6 +70,16 @@ def load_indicators() -> List[Dict[str, Any]]:
         return [row.to_dict() for row in rows]
 
 
+def get_indicator(indicator_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single indicator payload if it exists."""
+
+    if not db.available:
+        return None
+    with db.session() as session:
+        record = session.get(IndicatorRecord, indicator_id)
+        return record.to_dict() if record else None
+
+
 def load_bots() -> List[Dict[str, Any]]:
     """Return all persisted bot configurations."""
 
