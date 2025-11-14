@@ -16,6 +16,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
   const logs = payload?.logs || []
+  const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+  const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
+  const streamEligible = ['running', 'starting', 'paused'].includes(runtimeStatus)
+  const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
+  const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
+  const idleMessage = payload?.message || 'Start this bot to stream performance data.'
 
   const formatTimestamp = useCallback((value) => {
     if (!value) return '—'
@@ -106,7 +112,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [open, loadPerformance])
 
   useEffect(() => {
-    if (!open || !bot?.id) {
+    if (!open || !bot?.id || !streamEligible) {
       streamRef.current?.close?.()
       streamRef.current = null
       setStreamStatus('idle')
@@ -142,7 +148,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       streamRef.current = null
       setStreamStatus('closed')
     }
-  }, [open, bot?.id, applyPayload])
+  }, [open, bot?.id, applyPayload, streamEligible])
 
   useEffect(() => {
     const handler = (event) => {
@@ -186,7 +192,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
   }
 
-  const runtimeStatus = (runtime?.status || bot?.status || 'idle').toLowerCase()
   const progressDisplay =
     typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
   const timerDisplay =
@@ -261,14 +266,26 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             {loading ? <LoadingOverlay label="Loading bot performance…" /> : null}
             {error ? (
               <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-            ) : null}
-            {!error ? (
+            ) : showInactiveState ? (
+              <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                {idleMessage}
+              </div>
+            ) : chartHasData ? (
               <BotLensChart
                 chartId={`bot-${bot?.id}`}
                 candles={payload?.candles || []}
                 trades={payload?.trades || []}
                 overlays={payload?.overlays || []}
               />
+            ) : (
+              <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                Awaiting the first candle…
+              </div>
+            )}
+            {streamStatus === 'connecting' && streamEligible ? (
+              <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-xs text-slate-200">
+                Establishing live feed…
+              </div>
             ) : null}
           </div>
 
@@ -313,18 +330,18 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                               className="group/indicator flex items-center justify-between gap-3 px-3 py-2"
                             >
                               <div className="flex flex-col gap-1">
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2 text-sm text-white">
                                   <span
                                     className="h-2 w-2 rounded-full"
                                     style={{ backgroundColor: indicator.color || '#a5b4fc' }}
                                   />
-                                  <span className="text-sm text-white">{indicator.name || indicator.id}</span>
+                                  <span>{indicator.name || indicator.id || 'Indicator'}</span>
+                                  {indicator.id ? (
+                                    <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-slate-500">
+                                      {indicator.id}
+                                    </span>
+                                  ) : null}
                                 </div>
-                                {indicator.id ? (
-                                  <code className="font-mono text-[10px] text-slate-500/80 blur-sm transition group-hover/indicator:blur-0">
-                                    {indicator.id}
-                                  </code>
-                                ) : null}
                               </div>
                               <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">
                                 {indicator.type || 'custom'}

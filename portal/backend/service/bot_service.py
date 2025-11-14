@@ -340,8 +340,14 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
 
     bot = get_bot(bot_id)
     _attach_strategy_meta(bot)
-    runtime = _runtime_for(bot_id, bot)
-    runtime.config.update(bot)
+    status = str(bot.get("status") or "idle").lower()
+    runtime = _RUNTIME.get(bot_id)
+    if runtime is None:
+        if status == "idle":
+            raise ValueError("Bot has not been started yet.")
+        runtime = _runtime_for(bot_id, bot)
+    else:
+        runtime.config.update(bot)
     runtime.warm_up()
     token, channel = runtime.subscribe()
 
@@ -417,16 +423,40 @@ def performance(bot_id: str) -> Dict[str, object]:
     bot = get_bot(bot_id)
     _attach_strategy_meta(bot)
     runtime = _RUNTIME.get(bot_id)
-    if not runtime:
-        # allow fetching from persisted config even if runtime not initialised
-        runtime = _runtime_for(bot_id, bot)
-    else:
+    status = str(bot.get("status") or "idle").lower()
+    payload: Dict[str, Any]
+    if runtime is not None:
         runtime.config.update(bot)
-    runtime.warm_up()
-    payload = runtime.chart_payload()
-    payload.setdefault("logs", runtime.logs())
+        runtime.warm_up()
+        payload = runtime.chart_payload()
+        payload.setdefault("logs", runtime.logs())
+    elif status == "idle":
+        payload = {
+            "candles": [],
+            "trades": [],
+            "stats": bot.get("last_stats") or {},
+            "overlays": [],
+            "logs": [],
+            "inactive": True,
+            "message": "Start this bot to stream performance data.",
+            "runtime": {
+                "status": status,
+                "progress": 0.0,
+                "paused": False,
+                "next_bar_in_seconds": None,
+            },
+        }
+    else:
+        runtime = _runtime_for(bot_id, bot)
+        runtime.config.update(bot)
+        runtime.warm_up()
+        payload = runtime.chart_payload()
+        payload.setdefault("logs", runtime.logs())
     payload["meta"] = _performance_meta(bot)
-    payload["runtime"] = runtime.snapshot()
+    if runtime is not None:
+        payload["runtime"] = runtime.snapshot()
+    else:
+        payload.setdefault("runtime", {"status": status})
     return payload
 
 

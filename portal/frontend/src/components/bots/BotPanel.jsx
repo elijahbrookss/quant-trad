@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw } from 'lucide-react'
+import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
   createBot,
@@ -24,6 +24,18 @@ const defaultForm = {
   strategy_ids: [],
 }
 
+const STATUS_ORDER = {
+  running: 0,
+  starting: 1,
+  paused: 2,
+  completed: 3,
+  idle: 4,
+  stopped: 5,
+  error: 6,
+}
+
+const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
@@ -34,19 +46,34 @@ export function BotPanel() {
   const [strategiesLoading, setStrategiesLoading] = useState(false)
   const [strategyError, setStrategyError] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
+  const [search, setSearch] = useState('')
 
-  const loadBots = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await listBots()
-      setBots(data)
-    } catch (err) {
-      setError(err?.message || 'Unable to load bots')
-    } finally {
-      setLoading(false)
-    }
+  const upsertBot = useCallback((payload) => {
+    if (!payload?.id) return
+    setBots((prev) => {
+      const exists = prev.some((bot) => bot.id === payload.id)
+      if (exists) {
+        return prev.map((bot) => (bot.id === payload.id ? { ...bot, ...payload } : bot))
+      }
+      return [...prev, payload]
+    })
   }, [])
+
+  const loadBots = useCallback(
+    async (withSpinner = true) => {
+      if (withSpinner) setLoading(true)
+      setError(null)
+      try {
+        const data = await listBots()
+        setBots(data)
+      } catch (err) {
+        setError(err?.message || 'Unable to load bots')
+      } finally {
+        if (withSpinner) setLoading(false)
+      }
+    },
+    [],
+  )
 
   const loadStrategies = useCallback(async () => {
     setStrategiesLoading(true)
@@ -65,6 +92,11 @@ export function BotPanel() {
     loadBots()
     loadStrategies()
   }, [loadBots, loadStrategies])
+
+  useEffect(() => {
+    const id = setInterval(() => loadBots(false), 5000)
+    return () => clearInterval(id)
+  }, [loadBots])
 
   const handleChange = (event) => {
     const { name, value } = event.target
@@ -122,7 +154,7 @@ export function BotPanel() {
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
       })
-      setBots((prev) => [...prev, payload])
+      upsertBot(payload)
       setForm((prev) => ({
         ...defaultForm,
         strategy_ids: prev.strategy_ids,
@@ -141,8 +173,9 @@ export function BotPanel() {
       return
     }
     try {
-      await startBotApi(botId)
-      loadBots()
+      const payload = await startBotApi(botId)
+      upsertBot(payload)
+      loadBots(false)
     } catch (err) {
       setError(err?.message || 'Unable to start bot')
     }
@@ -151,8 +184,9 @@ export function BotPanel() {
   const handleStop = async (botId) => {
     setError(null)
     try {
-      await stopBotApi(botId)
-      loadBots()
+      const payload = await stopBotApi(botId)
+      upsertBot(payload)
+      loadBots(false)
     } catch (err) {
       setError(err?.message || 'Unable to stop bot')
     }
@@ -161,8 +195,9 @@ export function BotPanel() {
   const handlePause = async (botId) => {
     setError(null)
     try {
-      await pauseBotApi(botId)
-      loadBots()
+      const payload = await pauseBotApi(botId)
+      upsertBot(payload)
+      loadBots(false)
     } catch (err) {
       setError(err?.message || 'Unable to pause bot')
     }
@@ -171,8 +206,9 @@ export function BotPanel() {
   const handleResume = async (botId) => {
     setError(null)
     try {
-      await resumeBotApi(botId)
-      loadBots()
+      const payload = await resumeBotApi(botId)
+      upsertBot(payload)
+      loadBots(false)
     } catch (err) {
       setError(err?.message || 'Unable to resume bot')
     }
@@ -200,7 +236,9 @@ export function BotPanel() {
         ? 'bg-amber-500/10 text-amber-200 border-amber-400/30'
         : status === 'stopped'
           ? 'bg-rose-500/10 text-rose-200 border-rose-400/30'
-          : 'bg-slate-600/20 text-slate-200 border-white/10'
+          : status === 'completed'
+            ? 'bg-sky-500/10 text-sky-200 border-sky-400/30'
+            : 'bg-slate-600/20 text-slate-200 border-white/10'
     return (
       <span className={`inline-flex items-center rounded-full border px-3 py-0.5 text-[11px] uppercase tracking-[0.3em] ${tone}`}>
         {status || 'idle'}
@@ -225,7 +263,12 @@ export function BotPanel() {
   }
 
   const sortedBots = useMemo(() => {
-    return [...bots].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+    return [...bots].sort((a, b) => {
+      const sa = STATUS_ORDER[computeStatus(a)] ?? 10
+      const sb = STATUS_ORDER[computeStatus(b)] ?? 10
+      if (sa !== sb) return sa - sb
+      return (a.name || '').localeCompare(b.name || '')
+    })
   }, [bots])
 
   const sortedStrategies = useMemo(() => {
@@ -241,6 +284,29 @@ export function BotPanel() {
     }
     return map
   }, [sortedStrategies])
+
+  const filteredBots = useMemo(() => {
+    const query = search.trim().toLowerCase()
+    if (!query) return sortedBots
+    return sortedBots.filter((bot) => {
+      const assignedNames = (bot.strategy_ids || [])
+        .map((id) => strategyLookup.get(id)?.name || id)
+        .join(' ')
+      const haystack = [
+        bot.name,
+        computeStatus(bot),
+        describeRange(bot),
+        assignedNames,
+        bot.timeframe,
+        bot.datasource,
+        bot.exchange,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [search, sortedBots, strategyLookup])
 
   const hasStrategies = strategies.length > 0
 
@@ -278,6 +344,8 @@ export function BotPanel() {
     return start && end ? [start, end] : null
   }, [form.backtest_start, form.backtest_end])
 
+  const refreshSummary = `${filteredBots.length} of ${sortedBots.length} bots`
+
   return (
     <section className="space-y-6">
       <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
@@ -290,6 +358,29 @@ export function BotPanel() {
           <div className="text-xs text-slate-400">
             {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
           </div>
+        </div>
+        <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 flex-wrap items-center gap-3">
+            <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
+              <Search className="size-4 text-slate-500" />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search bots by name, status, or strategy"
+                className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => loadBots()}
+              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
+              disabled={loading}
+            >
+              <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{refreshSummary}</span>
         </div>
         <form onSubmit={handleCreate} className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
@@ -383,9 +474,7 @@ export function BotPanel() {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-slate-400">
-                Create a strategy in the Strategies tab to unlock bot creation.
-              </p>
+              <p className="text-xs text-slate-400">Create a strategy in the Strategies tab to unlock bot creation.</p>
             )}
           </div>
           <div className="lg:col-span-2">
@@ -410,20 +499,26 @@ export function BotPanel() {
       ) : null}
 
       <div className="space-y-3">
-        {loading ? (
+        {loading && sortedBots.length === 0 ? (
           <p className="text-sm text-slate-400">Loading bots…</p>
-        ) : sortedBots.length === 0 ? (
-          <p className="text-sm text-slate-400">No bots yet. Create one to begin a backtest.</p>
+        ) : filteredBots.length === 0 ? (
+          <p className="text-sm text-slate-400">
+            {search.trim() ? 'No bots match your search.' : 'No bots yet. Create one to begin a backtest.'}
+          </p>
         ) : (
-          sortedBots.map((bot) => {
+          filteredBots.map((bot) => {
             const assignedNames = (bot.strategy_ids || [])
               .map((id) => strategyLookup.get(id)?.name || id)
               .filter(Boolean)
-            const runtimeStatus = bot.runtime?.status || bot.status || 'idle'
-            const progressPct =
+            const runtimeStatus = computeStatus(bot)
+            const progressValue =
               typeof bot.runtime?.progress === 'number'
-                ? `${Math.round(bot.runtime.progress * 1000) / 10}%`
-                : '—'
+                ? bot.runtime.progress
+                : runtimeStatus === 'completed'
+                  ? 1
+                  : 0
+            const progressPct = `${Math.round(progressValue * 1000) / 10}%`
+            const progressWidth = `${Math.min(100, Math.max(0, progressValue * 100))}%`
             const nextBarLabel =
               typeof bot.runtime?.next_bar_in_seconds === 'number'
                 ? `${Math.max(0, Math.round(bot.runtime.next_bar_in_seconds))}s`
@@ -441,38 +536,69 @@ export function BotPanel() {
               `fetch ${bot.fetch_seconds}s`,
               (bot.run_type || 'backtest').replace('_', ' '),
             ].filter(Boolean)
+            const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
+            const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
+            const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
+            const keyStats = ['total_trades', 'wins', 'losses', 'win_rate']
+            const statsEntries = keyStats
+              .map((key) => ({ key, value: bot.last_stats?.[key] ?? bot.runtime?.stats?.[key] }))
+              .filter((entry) => entry.value !== undefined && entry.value !== null)
+
             return (
-              <div key={bot.id} className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-4 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
-                    {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
-                  </p>
-                  <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
-                  <p className="text-xs text-slate-400">{summaryParts.join(' • ')}</p>
-                  <p className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{describeRange(bot)}</p>
-                  <div className="mt-2 flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.25em] text-slate-500">
-                    <span>Progress: <span className="text-slate-200">{progressPct}</span></span>
-                    {bot.mode === 'walk-forward' ? (
-                      <span>Next bar: <span className="text-slate-200">{nextBarLabel}</span></span>
-                    ) : null}
+              <article key={bot.id} className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-5">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
+                      {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
+                    </p>
+                    <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
+                    <p className="text-xs text-slate-400">{summaryParts.join(' • ')}</p>
+                    <p className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{describeRange(bot)}</p>
                   </div>
-                  <div className="mt-2">{statusBadge(runtimeStatus)}</div>
+                  {statusBadge(runtimeStatus)}
                 </div>
+                <div className="flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.25em] text-slate-500">
+                  <span>
+                    Progress: <span className="text-slate-200">{progressPct}</span>
+                  </span>
+                  {bot.mode === 'walk-forward' ? (
+                    <span>
+                      Next bar: <span className="text-slate-200">{nextBarLabel}</span>
+                    </span>
+                  ) : null}
+                </div>
+                <div className="h-2 w-full rounded-full bg-white/5">
+                  <div className="h-full rounded-full bg-emerald-500/60 transition-all" style={{ width: progressWidth }} />
+                </div>
+                {statsEntries.length ? (
+                  <div className="flex flex-wrap gap-3 text-xs text-slate-300">
+                    {statsEntries.map(({ key, value }) => (
+                      <div key={key} className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-[0.35em] text-slate-500">{key.replace(/_/g, ' ')}</p>
+                        <p className="text-base font-semibold text-white">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleStart(bot.id)}
-                    className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10"
-                  >
-                    <Play className="size-4" /> Start
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleStop(bot.id)}
-                    className="inline-flex items-center gap-2 rounded-full border border-rose-500/30 px-4 py-2 text-sm text-rose-200 hover:bg-rose-500/10"
-                  >
-                    <Square className="size-4" /> Stop
-                  </button>
+                  {canStart ? (
+                    <button
+                      type="button"
+                      onClick={() => handleStart(bot.id)}
+                      className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10"
+                    >
+                      <Play className="size-4" /> {startLabel}
+                    </button>
+                  ) : null}
+                  {canStop ? (
+                    <button
+                      type="button"
+                      onClick={() => handleStop(bot.id)}
+                      className="inline-flex items-center gap-2 rounded-full border border-rose-500/30 px-4 py-2 text-sm text-rose-200 hover:bg-rose-500/10"
+                    >
+                      <Square className="size-4" /> Stop
+                    </button>
+                  ) : null}
                   {showPause ? (
                     <button
                       type="button"
@@ -507,7 +633,7 @@ export function BotPanel() {
                     <Trash2 className="size-4" /> Delete
                   </button>
                 </div>
-              </div>
+              </article>
             )
           })
         )}

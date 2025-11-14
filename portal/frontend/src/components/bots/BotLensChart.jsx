@@ -148,6 +148,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         const { type, payload, color } = overlay || {}
         if (!payload) continue
         const paneViews = getPaneViewsFor(type)
+        const paneSet = new Set(paneViews || [])
         const norm = adaptPayload(type, payload, color)
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
@@ -169,7 +170,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         if (Array.isArray(norm.markers)) {
           markers.push(...norm.markers)
         }
-        if (paneViews.includes('touch') && Array.isArray(norm.touchPoints) && norm.touchPoints.length) {
+        const wantsTouch = paneSet.has('touch') || (Array.isArray(norm.touchPoints) && norm.touchPoints.length > 0)
+        if (wantsTouch && Array.isArray(norm.touchPoints) && norm.touchPoints.length) {
           touchPoints.push(
             ...norm.touchPoints
               .map((point) => ({
@@ -179,7 +181,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
               .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.price))
           )
         }
-        if (paneViews.includes('va_box') && Array.isArray(norm.boxes) && norm.boxes.length) {
+        const wantsBoxes = paneSet.has('va_box') || (Array.isArray(norm.boxes) && norm.boxes.length > 0)
+        if (wantsBoxes && Array.isArray(norm.boxes) && norm.boxes.length) {
           const normalizedBoxes = norm.boxes
             .map((box) => {
               const x1 = toSec(coalesce(box.x1, box.start, box.start_date, box.startDate))
@@ -206,13 +209,16 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
             .filter((entry) => Number.isFinite(entry.x1) && Number.isFinite(entry.x2))
           boxes.push(...normalizedBoxes)
         }
-        if (paneViews.includes('segment') && Array.isArray(norm.segments) && norm.segments.length) {
+        const wantsSegments = paneSet.has('segment') || (Array.isArray(norm.segments) && norm.segments.length > 0)
+        if (wantsSegments && Array.isArray(norm.segments) && norm.segments.length) {
           segments.push(...norm.segments)
         }
-        if (paneViews.includes('polyline') && Array.isArray(norm.polylines) && norm.polylines.length) {
+        const wantsPolylines = paneSet.has('polyline') || (Array.isArray(norm.polylines) && norm.polylines.length > 0)
+        if (wantsPolylines && Array.isArray(norm.polylines) && norm.polylines.length) {
           polylines.push(...norm.polylines)
         }
-        if (paneViews.includes('signal_bubble') && Array.isArray(norm.bubbles) && norm.bubbles.length) {
+        const wantsBubbles = paneSet.has('signal_bubble') || (Array.isArray(norm.bubbles) && norm.bubbles.length > 0)
+        if (wantsBubbles && Array.isArray(norm.bubbles) && norm.bubbles.length) {
           const bubbleColor = color ? toRgba(color, 0.16) : undefined
           const tinted = color
             ? norm.bubbles.map((bubble) => ({
