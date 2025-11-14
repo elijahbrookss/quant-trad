@@ -13,6 +13,10 @@ from ..service.indicator_service import (
     delete_instance,
     create_instance,
     update_instance,
+    duplicate_instance,
+    set_instance_enabled,
+    bulk_set_enabled,
+    bulk_delete_instances,
     overlays_for_instance,
     generate_signals_for_instance,
     list_indicator_strategies,
@@ -55,6 +59,23 @@ class SignalRequest(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IndicatorDuplicateRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class IndicatorToggleRequest(BaseModel):
+    enabled: bool
+
+
+class IndicatorBulkToggleRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list)
+    enabled: bool
+
+
+class IndicatorBulkDeleteRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list)
 
 # ===== Instances =====
 @router.get("/", response_model=List[IndicatorInstanceOut])
@@ -112,6 +133,35 @@ async def delete(inst_id: str):
         delete_instance(inst_id)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
+
+
+@router.post("/{inst_id}/duplicate", response_model=IndicatorInstanceOut)
+async def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = None):
+    try:
+        return duplicate_instance(inst_id, name=body.name if body else None)
+    except KeyError:
+        raise HTTPException(404, "Indicator not found")
+
+
+@router.patch("/{inst_id}/enabled", response_model=IndicatorInstanceOut)
+async def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
+    try:
+        return set_instance_enabled(inst_id, body.enabled)
+    except KeyError:
+        raise HTTPException(404, "Indicator not found")
+
+
+@router.post("/bulk/toggle", response_model=List[IndicatorInstanceOut])
+async def bulk_toggle(body: IndicatorBulkToggleRequest):
+    if not body.ids:
+        return []
+    return bulk_set_enabled(body.ids, body.enabled)
+
+
+@router.post("/bulk/delete")
+async def bulk_delete(body: IndicatorBulkDeleteRequest):
+    removed = bulk_delete_instances(body.ids or [])
+    return {"deleted": removed}
 
 # ===== Types =====
 @router.get("-types", response_model=List[str])

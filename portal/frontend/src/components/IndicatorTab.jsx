@@ -6,6 +6,10 @@ import {
   createIndicator,
   updateIndicator,
   deleteIndicator,
+  setIndicatorEnabled,
+  bulkToggleIndicators,
+  bulkDeleteIndicators,
+  duplicateIndicator,
   fetchIndicatorOverlays,
   generateIndicatorSignals,
 } from '../adapters/indicator.adapter'
@@ -27,7 +31,8 @@ const COLOR_SWATCHES = [
 ];
 
 const DEFAULT_INDICATOR_COLOR = '#60a5fa';
-const INDICATOR_PAGE_SIZE = 6;
+const DEFAULT_PAGE_SIZE = 6;
+const PAGE_SIZE_OPTIONS = [6, 12, 24, 48];
 
 const buildColorMap = (list = []) => {
   if (!Array.isArray(list)) return {};
@@ -97,6 +102,10 @@ export const IndicatorSection = ({ chartId }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  const [duplicateBusyId, setDuplicateBusyId] = useState(null);
 
 
   const { updateChart, getChart } = useChartState()
@@ -423,6 +432,13 @@ export const IndicatorSection = ({ chartId }) => {
   const handleDelete = async (id) => {
     try {
       await deleteIndicator(id)
+      setSelectedIds((prev) => {
+        if (!prev || prev.size === 0) return prev;
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       setIndicators(prev => prev.filter(i => i.id !== id))
       const currentConfig = getChart(chartId)?.signalsConfig
       if (currentConfig && typeof currentConfig === 'object') {
@@ -454,14 +470,101 @@ export const IndicatorSection = ({ chartId }) => {
     }
   }
 
-  // refresh overlays immediately after toggling; pass the fresh list to avoid stale closures
+  const toggleIndicatorSelection = (id) => {
+    if (!id) return
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds || [])
+    if (!ids.length) return
+    try {
+      setBulkActionLoading(true)
+      await bulkDeleteIndicators(ids)
+      setIndicators((prev) => {
+        const remaining = prev.filter((ind) => !ids.includes(ind.id))
+        updateChart(chartId, { indicators: remaining })
+        return remaining
+      })
+      queueMicrotask(() => { void refreshEnabledOverlays() })
+      setSelectedIds(new Set())
+    } catch (e) {
+      setError(e.message)
+      logError('indicator_bulk_delete_failed', e)
+    } finally {
+      setBulkActionLoading(false)
+    }
+  }
+
+  const handleBulkToggle = async (enabled) => {
+    const ids = Array.from(selectedIds || [])
+    if (!ids.length) return
+    try {
+      setBulkActionLoading(true)
+      const updated = await bulkToggleIndicators(ids, enabled)
+      if (Array.isArray(updated) && updated.length) {
+        setIndicators((prev) => {
+          const replacements = new Map(updated.map((item) => [item.id, item]))
+          const next = prev.map((indicator) => replacements.get(indicator.id) || indicator)
+          updateChart(chartId, { indicators: next })
+          queueMicrotask(() => { void refreshEnabledOverlays(next) })
+          return next
+        })
+      } else {
+        queueMicrotask(() => { void refreshEnabledOverlays() })
+      }
+    } catch (e) {
+      setError(e.message)
+      logError('indicator_bulk_toggle_failed', e)
+    } finally {
+      setBulkActionLoading(false)
+    }
+  }
+
   const toggleEnable = (id) => {
-    setIndicators(prev => {
-      const next = prev.map(i => i.id === id ? { ...i, enabled: !i.enabled } : i);
-      queueMicrotask(() => { void refreshEnabledOverlays(next); }); // microtask prevents state timing issues
-      return next;
-    });
-  };
+    const target = indicators.find((indicator) => indicator.id === id)
+    if (!target) return
+    const previousEnabled = !!target.enabled
+    const nextEnabled = !previousEnabled
+
+    setIndicators((prev) => {
+      const next = prev.map((indicator) =>
+        indicator.id === id ? { ...indicator, enabled: nextEnabled } : indicator,
+      )
+      updateChart(chartId, { indicators: next })
+      queueMicrotask(() => { void refreshEnabledOverlays(next) })
+      return next
+    })
+
+    setIndicatorEnabled(id, nextEnabled)
+      .then((updated) => {
+        if (!updated) return
+        setIndicators((prev) => {
+          const next = prev.map((indicator) => (indicator.id === id ? updated : indicator))
+          updateChart(chartId, { indicators: next })
+          return next
+        })
+      })
+      .catch((err) => {
+        setError(err.message)
+        logError('indicator_toggle_failed', err)
+        setIndicators((prev) => {
+          const next = prev.map((indicator) =>
+            indicator.id === id ? { ...indicator, enabled: previousEnabled } : indicator,
+          )
+          updateChart(chartId, { indicators: next })
+          return next
+        })
+      })
+  }
 
   // Regenerate signals (not yet implemented)
   const generateSignals = async (id) => {
@@ -557,6 +660,30 @@ export const IndicatorSection = ({ chartId }) => {
     }
   };
 
+  const handleDuplicate = async (id) => {
+    if (!id) return
+    try {
+      setDuplicateBusyId(id)
+      const clone = await duplicateIndicator(id)
+      if (clone) {
+        setIndicators((prev) => {
+          const next = [clone, ...prev]
+          updateChart(chartId, { indicators: next })
+          return next
+        })
+        setIndColors((prev) => ({
+          ...prev,
+          [clone.id]: clone.color?.trim() ? clone.color : DEFAULT_INDICATOR_COLOR,
+        }))
+      }
+    } catch (e) {
+      setError(e.message)
+      logError('indicator_duplicate_failed', e)
+    } finally {
+      setDuplicateBusyId(null)
+    }
+  }
+
   const isSignalsLoading = !!chartState?.signalsLoading
   const signalsLoadingFor = chartState?.signalsLoadingFor
 
@@ -595,22 +722,42 @@ export const IndicatorSection = ({ chartId }) => {
 
   const totalCount = indicators.length;
   const filteredCount = filteredIndicators.length;
-  const totalPages = filteredCount ? Math.ceil(filteredCount / INDICATOR_PAGE_SIZE) : 1;
-  const pageStartIndex = (currentPage - 1) * INDICATOR_PAGE_SIZE;
+  const totalPages = filteredCount ? Math.ceil(filteredCount / pageSize) : 1;
+  const pageStartIndex = (currentPage - 1) * pageSize;
   const paginatedIndicators = filteredIndicators.slice(
     pageStartIndex,
-    pageStartIndex + INDICATOR_PAGE_SIZE,
+    pageStartIndex + pageSize,
   );
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [trimmedSearchQuery, typeFilter, showEnabledOnly]);
+  }, [trimmedSearchQuery, typeFilter, showEnabledOnly, pageSize]);
 
   useEffect(() => {
     if (currentPage > totalPages) {
       setCurrentPage(totalPages || 1);
     }
   }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (!prev || prev.size === 0) return prev;
+      const allowed = new Set(indicators.map((ind) => ind.id));
+      let changed = false;
+      const next = new Set();
+      prev.forEach((id) => {
+        if (allowed.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      if (changed || next.size !== prev.size) {
+        return next;
+      }
+      return prev;
+    });
+  }, [indicators]);
 
   const indicatorSummary = useMemo(() => {
     if (!totalCount) return 'No indicators created yet.';
@@ -620,7 +767,7 @@ export const IndicatorSection = ({ chartId }) => {
     }
 
     const pageStart = pageStartIndex + 1;
-    const pageEnd = Math.min(pageStartIndex + INDICATOR_PAGE_SIZE, filteredCount);
+    const pageEnd = Math.min(pageStartIndex + pageSize, filteredCount);
     const pageSummary = `${pageStart}-${pageEnd} of ${filteredCount} matching ${filteredCount === 1 ? 'indicator' : 'indicators'}`;
 
     if (!showEnabledOnly && !trimmedSearchQuery && (typeFilter === 'all' || typeFilter === '')) {
@@ -634,6 +781,7 @@ export const IndicatorSection = ({ chartId }) => {
     showEnabledOnly,
     enabledCount,
     pageStartIndex,
+    pageSize,
     trimmedSearchQuery,
     typeFilter,
   ]);
@@ -744,13 +892,105 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
               <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400/80">Overview</span>
               <p className="mt-2 text-sm leading-relaxed text-slate-300">{indicatorSummary}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                <span className="uppercase tracking-[0.24em] text-slate-500">Page size</span>
+                <select
+                  className="rounded-lg border border-white/10 bg-[#0b1324]/60 px-3 py-1.5 text-sm text-slate-100 focus:border-[color:var(--accent-alpha-60)] focus:outline-none"
+                  value={pageSize}
+                  onChange={(event) => {
+                    const next = Number(event.target.value) || DEFAULT_PAGE_SIZE;
+                    setPageSize(next);
+                  }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>
+                      {size} per page
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
+
+          {selectedIds?.size > 0 && (
+            <div className="flex flex-col gap-3 rounded-2xl border border-[color:var(--accent-alpha-20)] bg-[color:var(--accent-alpha-8)]/80 p-4 text-sm text-slate-200 shadow-inner shadow-black/30 md:flex-row md:items-center md:justify-between">
+              <div className="space-y-1">
+                <p className="text-base font-semibold text-slate-100">{selectedIds.size} selected</p>
+                <div className="flex flex-wrap gap-3 text-xs text-slate-400">
+                  <button
+                    type="button"
+                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
+                    onClick={() => {
+                      const pageIds = paginatedIndicators.map((ind) => ind.id);
+                      const pageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+                      setSelectedIds((prev) => {
+                        const next = new Set(prev);
+                        if (pageSelected) {
+                          pageIds.forEach((id) => next.delete(id));
+                        } else {
+                          pageIds.forEach((id) => next.add(id));
+                        }
+                        return next;
+                      });
+                    }}
+                  >
+                    {paginatedIndicators.length > 0 && paginatedIndicators.every((ind) => selectedIds.has(ind.id)) ? 'Clear page' : 'Select page'}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
+                    onClick={() => setSelectedIds(new Set())}
+                  >
+                    Clear all
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={bulkActionLoading}
+                  onClick={() => handleBulkToggle(true)}
+                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
+                    bulkActionLoading
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-emerald-500/40 text-emerald-200 hover:border-emerald-400/60 hover:text-emerald-100'
+                  }`}
+                >
+                  Enable
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkActionLoading}
+                  onClick={() => handleBulkToggle(false)}
+                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
+                    bulkActionLoading
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-amber-400/40 text-amber-200 hover:border-amber-300/60 hover:text-amber-100'
+                  }`}
+                >
+                  Disable
+                </button>
+                <button
+                  type="button"
+                  disabled={bulkActionLoading}
+                  onClick={handleBulkDelete}
+                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
+                    bulkActionLoading
+                      ? 'cursor-not-allowed border-white/10 text-slate-500'
+                      : 'border-rose-500/50 text-rose-200 hover:border-rose-400/70 hover:text-rose-100'
+                  }`}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="space-y-4">
             {paginatedIndicators.map(indicator => {
               const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
               const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+              const isSelected = selectedIds.has(indicator.id)
               return (
                 <IndicatorCard
                   key={indicator.id}
@@ -759,11 +999,15 @@ export const IndicatorSection = ({ chartId }) => {
                   onToggle={toggleEnable}
                   onEdit={openEditModal}
                   onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
                   onGenerateSignals={generateSignals}
                   onSelectColor={handleSelectColor}
                   colorSwatches={COLOR_SWATCHES}
                   isGeneratingSignals={isGenerating}
                   disableSignalAction={disableSignals}
+                  selected={isSelected}
+                  onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
+                  duplicatePending={duplicateBusyId === indicator.id}
                 />
               )
             })}
@@ -775,7 +1019,7 @@ export const IndicatorSection = ({ chartId }) => {
             )}
           </div>
 
-          {filteredCount > INDICATOR_PAGE_SIZE && (
+          {filteredCount > pageSize && (
             <nav className="flex flex-col gap-2 rounded-lg border border-white/10 bg-[#11131b] px-4 py-3 text-xs text-slate-300 md:flex-row md:items-center md:justify-between" aria-label="Indicator pagination">
               <span>
                 Page {currentPage} of {totalPages}

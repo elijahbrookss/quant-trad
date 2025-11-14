@@ -47,6 +47,10 @@ class _DummyIndicator:
     def __init__(self, symbol: str):
         self.symbol = symbol
 
+    @classmethod
+    def from_context(cls, provider, ctx, **kwargs):  # noqa: D401 - test helper
+        return cls(symbol=ctx.symbol)
+
 
 def _build_dataframe() -> _DummyFrame:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -70,7 +74,32 @@ def signal_test_env(monkeypatch):
             def get_ohlcv(self, ctx):
                 return self._frame.copy()
 
-        monkeypatch.setattr(svc, "_REGISTRY", {inst_id: {"meta": {"params": {"symbol": "ES"}}, "instance": indicator}})
+        record = {
+            "id": inst_id,
+            "name": "Test indicator",
+            "type": _DummyIndicator.NAME,
+            "params": {
+                "symbol": "ES",
+                "start": "2024-01-01T00:00:00Z",
+                "end": "2024-01-01T02:00:00Z",
+                "interval": "1h",
+            },
+            "color": "#60a5fa",
+            "datasource": "ALPACA",
+            "exchange": None,
+            "enabled": True,
+            "updated_at": "2024-01-01T00:00:00Z",
+        }
+        cache_entry = svc.IndicatorCacheEntry(
+            meta=svc._build_meta_from_record(record),
+            instance=indicator,
+            updated_at=record["updated_at"],
+        )
+        def _raise_missing():  # noqa: D401 - closure used above
+            raise KeyError("Indicator not found")
+
+        monkeypatch.setattr(svc, "_INSTANCE_CACHE", {inst_id: cache_entry})
+        monkeypatch.setattr(svc, "_load_indicator_record", lambda req_id: record if req_id == inst_id else (_raise_missing()))
         monkeypatch.setattr(svc, "AlpacaProvider", lambda: DummyProvider(df))
 
         engine_registry = dict(engine._REGISTRY)

@@ -60,8 +60,18 @@ _INDICATOR_MAP = {
 }
 
 # Ensure default signal rules are registered for built-in indicators
-# In-memory registry: id -> {"meta": <pydantic-like dict>, "instance": <object>}
-_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+
+@dataclass
+class IndicatorCacheEntry:
+    """Lightweight cache entry holding an indicator instance."""
+
+    meta: Dict[str, Any]
+    instance: Any
+    updated_at: Optional[str] = None
+
+
+_INSTANCE_CACHE: Dict[str, IndicatorCacheEntry] = {}
 
 
 def _coerce_record_meta(record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -79,104 +89,74 @@ def _coerce_record_meta(record: Mapping[str, Any]) -> Dict[str, Any]:
     return _ensure_color(payload)
 
 
-def _register_placeholder(record: Mapping[str, Any]) -> None:
+def _cache_indicator(inst_id: str, meta: Dict[str, Any], inst: Any, updated_at: Optional[str]) -> None:
+    if not inst_id:
+        return
+    _INSTANCE_CACHE[inst_id] = IndicatorCacheEntry(meta=deepcopy(meta), instance=inst, updated_at=updated_at)
+
+
+def _evict_indicator(inst_id: str) -> None:
+    if not inst_id:
+        return
+    _INSTANCE_CACHE.pop(inst_id, None)
+
+
+def _build_meta_from_record(record: Mapping[str, Any]) -> Dict[str, Any]:
     meta = _coerce_record_meta(record)
-    inst_id = meta.get("id")
-    if not inst_id:
-        return
-    existing = _REGISTRY.get(inst_id)
-    if existing:
-        existing["meta"] = meta
-        existing.setdefault("instance", None)
-    else:
-        _REGISTRY[inst_id] = {"meta": meta, "instance": None}
+    return _ensure_color(meta)
 
 
-def _restore_indicator_from_meta(meta: Mapping[str, Any]) -> None:
-    """Instantiate an indicator from persisted metadata and register it."""
-
+def _build_indicator_instance(meta: Mapping[str, Any]):
     inst_id = str(meta.get("id") or "").strip()
-    if not inst_id:
-        return
     type_str = str(meta.get("type") or "").strip()
     Cls = _INDICATOR_MAP.get(type_str)
-    if not Cls:
-        logger.warning("indicator_restore_unknown_type | id=%s type=%s", inst_id, type_str)
-        return
+    if not inst_id or not Cls:
+        raise KeyError(f"Unknown indicator: {inst_id}")
 
     params = deepcopy(meta.get("params") or {})
     ctx_kwargs: Dict[str, Any] = {}
+    missing: List[str] = []
     for key in ("symbol", "start", "end", "interval"):
         if key in params:
             ctx_kwargs[key] = params.pop(key)
-    if len(ctx_kwargs) != 4:
-        logger.warning("indicator_restore_missing_context | id=%s keys=%s", inst_id, sorted(ctx_kwargs))
-        return
+        else:
+            missing.append(key)
+    if missing:
+        raise ValueError(f"Indicator {inst_id} missing required context: {', '.join(missing)}")
 
     datasource = _normalize_datasource(meta.get("datasource"))
     exchange = _normalize_exchange(meta.get("exchange"))
     if exchange and not datasource:
         datasource = DataSource.CCXT.value
 
-    try:
-        ctx = DataContext(**ctx_kwargs)
-        ctx.validate()
-        provider = _resolve_data_provider(datasource, exchange=exchange)
-        inst = Cls.from_context(provider=provider, ctx=ctx, **params)
-    except Exception as exc:  # noqa: BLE001 - restoration guard
-        logger.warning("indicator_restore_failed | id=%s | error=%s", inst_id, exc)
-        _register_placeholder(meta)
-        return
-
+    ctx = DataContext(**ctx_kwargs)
+    ctx.validate()
+    provider = _resolve_data_provider(datasource, exchange=exchange)
+    inst = Cls.from_context(provider=provider, ctx=ctx, **params)
     if isinstance(inst, MarketProfileIndicator):
         setattr(inst, "symbol", ctx_kwargs.get("symbol"))
-
-    runtime_params = _extract_ctor_params(inst)
-    if datasource:
-        runtime_params["datasource"] = datasource
-    if exchange:
-        runtime_params["exchange"] = exchange
-
-    meta_payload = {
-        "id": inst_id,
-        "type": type_str,
-        "name": meta.get("name") or type_str.replace("_", " ").title(),
-        "params": _scrub_runtime_params(runtime_params),
-        "enabled": bool(meta.get("enabled", True)),
-        "datasource": datasource or meta.get("datasource"),
-    }
-    if exchange:
-        meta_payload["exchange"] = exchange
-    elif meta.get("exchange"):
-        meta_payload["exchange"] = meta.get("exchange")
-    if meta.get("color"):
-        meta_payload["color"] = meta.get("color")
-
-    _REGISTRY[inst_id] = {"meta": _ensure_color(meta_payload), "instance": inst}
+    return inst
 
 
-def _bootstrap_from_storage(force: bool = False) -> None:
-    """Hydrate the in-memory registry from persisted records."""
-
-    records = storage_load_indicators()
-    for record in records:
-        inst_id = str(record.get("id") or "").strip()
-        if not inst_id:
-            continue
-        if not force and inst_id in _REGISTRY:
-            continue
-        try:
-            _restore_indicator_from_meta(record)
-        except Exception as exc:  # noqa: BLE001 - defensive
-            logger.warning(
-                "indicator_bootstrap_failed | id=%s | error=%s",
-                inst_id,
-                exc,
-            )
-            _register_placeholder(record)
+def _load_indicator_record(inst_id: str) -> Dict[str, Any]:
+    record = storage_get_indicator(inst_id)
+    if not record:
+        raise KeyError("Indicator not found")
+    return record
 
 
-_bootstrap_from_storage()
+def _get_indicator_entry(inst_id: str) -> IndicatorCacheEntry:
+    record = _load_indicator_record(inst_id)
+    record_version = str(record.get("updated_at") or "")
+    cached = _INSTANCE_CACHE.get(inst_id)
+    if cached and cached.updated_at == record_version and cached.instance is not None:
+        return cached
+
+    meta = _build_meta_from_record(record)
+    inst = _build_indicator_instance(meta)
+    entry = IndicatorCacheEntry(meta=meta, instance=inst, updated_at=record_version)
+    _INSTANCE_CACHE[inst_id] = entry
+    return entry
 
 
 def _refresh_strategy_links(inst_id: str, meta: Mapping[str, Any]) -> None:
@@ -686,30 +666,15 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
 
 
 def list_instances_meta() -> List[Dict[str, Any]]:
-    if not _REGISTRY:
-        _bootstrap_from_storage(force=True)
-    return [_ensure_color(deepcopy(entry["meta"])) for entry in _REGISTRY.values()]
+    records = storage_load_indicators()
+    if not records:
+        return []
+    return [_build_meta_from_record(record) for record in records]
 
 
 def get_instance_meta(inst_id: str) -> Dict[str, Any]:
-    entry = _REGISTRY.get(inst_id)
-    if not entry:
-        record = storage_get_indicator(inst_id)
-        if not record:
-            raise KeyError("Indicator not found")
-        try:
-            _restore_indicator_from_meta(record)
-        except Exception as exc:  # noqa: BLE001 - defensive logging
-            logger.warning(
-                "indicator_meta_restore_failed | id=%s | error=%s",
-                inst_id,
-                exc,
-            )
-            _register_placeholder(record)
-        entry = _REGISTRY.get(inst_id)
-        if not entry:
-            raise KeyError("Indicator not found")
-    return _ensure_color(deepcopy(entry["meta"]))
+    record = _load_indicator_record(inst_id)
+    return _build_meta_from_record(record)
 
 
 def list_indicator_strategies(inst_id: str) -> List[Dict[str, Any]]:
@@ -718,11 +683,64 @@ def list_indicator_strategies(inst_id: str) -> List[Dict[str, Any]]:
     return storage_strategies_for_indicator(inst_id)
 
 def delete_instance(inst_id: str) -> None:
-    if inst_id not in _REGISTRY:
-        raise KeyError("Indicator not found")
-    del _REGISTRY[inst_id]
+    _load_indicator_record(inst_id)  # ensure it exists
+    _evict_indicator(inst_id)
     _purge_breakout_cache(inst_id)
     storage_delete_indicator(inst_id)
+
+
+def duplicate_instance(inst_id: str, name: Optional[str] = None) -> Dict[str, Any]:
+    """Clone a stored indicator instance."""
+
+    base_record = _load_indicator_record(inst_id)
+    clone_id = str(uuid.uuid4())
+    clone_record = deepcopy(base_record)
+    clone_record["id"] = clone_id
+    clone_record["name"] = name or f"{base_record.get('name') or base_record.get('type')} Copy"
+    storage_upsert_indicator(clone_record)
+    refreshed = storage_get_indicator(clone_id)
+    persisted = _build_meta_from_record(refreshed) if refreshed else _build_meta_from_record(clone_record)
+    inst = _build_indicator_instance(persisted)
+    _cache_indicator(clone_id, persisted, inst, (refreshed or {}).get("updated_at"))
+    return persisted
+
+
+def set_instance_enabled(inst_id: str, enabled: bool) -> Dict[str, Any]:
+    """Toggle the enabled flag for a stored indicator."""
+
+    record = _load_indicator_record(inst_id)
+    updated = deepcopy(record)
+    updated["enabled"] = bool(enabled)
+    storage_upsert_indicator(updated)
+    refreshed = storage_get_indicator(inst_id)
+    persisted = _build_meta_from_record(refreshed) if refreshed else _build_meta_from_record(updated)
+    _evict_indicator(inst_id)
+    return persisted
+
+
+def bulk_set_enabled(inst_ids: Sequence[str], enabled: bool) -> List[Dict[str, Any]]:
+    """Set the enabled flag for a collection of indicators."""
+
+    results: List[Dict[str, Any]] = []
+    for inst_id in inst_ids:
+        try:
+            results.append(set_instance_enabled(inst_id, enabled))
+        except KeyError:
+            continue
+    return results
+
+
+def bulk_delete_instances(inst_ids: Sequence[str]) -> int:
+    """Delete multiple indicator instances."""
+
+    removed = 0
+    for inst_id in inst_ids:
+        try:
+            delete_instance(inst_id)
+            removed += 1
+        except KeyError:
+            continue
+    return removed
 
 def create_instance(
     type_str: str,
@@ -778,11 +796,12 @@ def create_instance(
     if exchange:
         meta["exchange"] = exchange
     meta["color"] = _normalize_color(color)
-    meta = _ensure_color(meta)
-    _REGISTRY[inst_id] = {"meta": meta, "instance": inst}
     storage_upsert_indicator(meta)
-    _refresh_strategy_links(inst_id, meta)
-    return meta
+    persisted = storage_get_indicator(inst_id)
+    persisted_meta = _build_meta_from_record(persisted) if persisted else _ensure_color(meta)
+    _cache_indicator(inst_id, persisted_meta, inst, (persisted or {}).get("updated_at"))
+    _refresh_strategy_links(inst_id, persisted_meta)
+    return persisted_meta
 
 def update_instance(
     inst_id: str,
@@ -793,18 +812,19 @@ def update_instance(
     color: Optional[str] = None,
     color_provided: bool = False,
 ) -> Dict[str, Any]:
-    entry = _REGISTRY.get(inst_id)
-    if not entry:
-        raise KeyError("Indicator not found")
-    if type_str != entry["meta"]["type"]:
+    record = _load_indicator_record(inst_id)
+    meta = _build_meta_from_record(record)
+    if type_str != meta["type"]:
         raise ValueError("Cannot change indicator type; create a new instance instead")
 
     params = dict(params)
+    cached_entry = _INSTANCE_CACHE.get(inst_id)
+    cached_inst = cached_entry.instance if cached_entry else None
     if (
         type_str == MarketProfileIndicator.NAME
-        and isinstance(entry["instance"], MarketProfileIndicator)
+        and isinstance(cached_inst, MarketProfileIndicator)
         and "bin_size" in params
-        and not getattr(entry["instance"], "_bin_size_locked", False)
+        and not getattr(cached_inst, "_bin_size_locked", False)
     ):
         params.pop("bin_size", None)
 
@@ -827,8 +847,8 @@ def update_instance(
     ctx = DataContext(**ctx_kwargs)
     ctx.validate()
 
-    datasource = _normalize_datasource(params.pop("datasource", entry["meta"].get("datasource")))
-    exchange = _normalize_exchange(params.pop("exchange", entry["meta"].get("exchange")))
+    datasource = _normalize_datasource(params.pop("datasource", meta.get("datasource")))
+    exchange = _normalize_exchange(params.pop("exchange", meta.get("exchange")))
     if exchange and not datasource:
         datasource = DataSource.CCXT.value
 
@@ -847,23 +867,25 @@ def update_instance(
         runtime_params["datasource"] = datasource
     if exchange:
         runtime_params["exchange"] = exchange
-    entry["instance"] = new_inst
     _purge_breakout_cache(inst_id)
-    meta = entry["meta"]
-    meta["params"] = _scrub_runtime_params(runtime_params)
+    meta_payload = dict(meta)
+    meta_payload["params"] = _scrub_runtime_params(runtime_params)
     if name:
-        meta["name"] = name
+        meta_payload["name"] = name
     if color_provided:
-        meta["color"] = _normalize_color(color)
-    meta["datasource"] = datasource or DataSource.ALPACA.value
+        meta_payload["color"] = _normalize_color(color)
+    meta_payload["datasource"] = datasource or DataSource.ALPACA.value
     if exchange:
-        meta["exchange"] = exchange
-    elif "exchange" in meta:
-        meta.pop("exchange", None)
-    meta = _ensure_color(meta)
-    storage_upsert_indicator(meta)
-    _refresh_strategy_links(inst_id, meta)
-    return meta
+        meta_payload["exchange"] = exchange
+    elif "exchange" in meta_payload:
+        meta_payload.pop("exchange", None)
+    meta_payload = _ensure_color(meta_payload)
+    storage_upsert_indicator(meta_payload)
+    refreshed = storage_get_indicator(inst_id)
+    persisted_meta = _build_meta_from_record(refreshed) if refreshed else meta_payload
+    _cache_indicator(inst_id, persisted_meta, new_inst, (refreshed or {}).get("updated_at"))
+    _refresh_strategy_links(inst_id, persisted_meta)
+    return persisted_meta
 
 def overlays_for_instance(
     inst_id: str,
@@ -879,18 +901,14 @@ def overlays_for_instance(
     using the requested chart window (start/end/interval). Does not require
     indicator params (they come from the stored instance).
     """
-    entry = _REGISTRY.get(inst_id)
-    if not entry:
-        raise KeyError("Indicator not found")
-
-    inst = entry["instance"]
-    # prefer the stored symbol unless explicitly overridden
-    base_params = entry["meta"]["params"]
+    entry = _get_indicator_entry(inst_id)
+    inst = entry.instance
+    base_params = entry.meta.get("params", {})
     sym = symbol or base_params.get("symbol")
     if not sym:
         raise ValueError("Stored indicator has no symbol and none was provided")
 
-    meta = entry["meta"]
+    meta = entry.meta
     stored_params = meta.get("params", {})
     stored_datasource = _normalize_datasource(meta.get("datasource") or stored_params.get("datasource"))
     stored_exchange = _normalize_exchange(meta.get("exchange") or stored_params.get("exchange"))
@@ -1004,17 +1022,14 @@ def generate_signals_for_instance(
 ) -> Dict[str, Any]:
     """Execute registered signal rules for an indicator instance."""
 
-    entry = _REGISTRY.get(inst_id)
-    if not entry:
-        raise KeyError("Indicator not found")
-
-    inst = entry["instance"]
-    base_params = entry["meta"].get("params", {})
+    entry = _get_indicator_entry(inst_id)
+    inst = entry.instance
+    base_params = entry.meta.get("params", {})
     sym = symbol or base_params.get("symbol")
     if not sym:
         raise ValueError("Stored indicator has no symbol and none was provided")
 
-    meta = entry["meta"]
+    meta = entry.meta
     stored_datasource = _normalize_datasource(meta.get("datasource") or base_params.get("datasource"))
     stored_exchange = _normalize_exchange(meta.get("exchange") or base_params.get("exchange"))
 
