@@ -433,11 +433,11 @@ def test_fetch_with_cache_reuses_historical_window():
 
     MarketProfileIndicator._DATAFRAME_CACHE.clear()
     try:
-        first = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2, mode="research")
+        first = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2)
         assert provider.calls == 1
         assert not first.empty
 
-        second = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2, mode="research")
+        second = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2)
         assert provider.calls == 1, "Expected cached dataframe to be reused"
         pd.testing.assert_frame_equal(first, second)
     finally:

@@ -90,7 +90,6 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
-        context_usage: str = "research",
         days_back: Optional[int] = None,
     ):
         super().__init__(df)
@@ -99,7 +98,6 @@ class MarketProfileIndicator(BaseIndicator):
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
         self.mode = mode
-        self.context_usage = context_usage or "research"
         self.days_back = days_back
         # Compute raw daily profiles on initialization
         self.daily_profiles = self._compute_daily_profiles()
@@ -129,10 +127,8 @@ class MarketProfileIndicator(BaseIndicator):
         ctx: DataContext,
         *,
         days_back: Optional[int],
-        mode: Optional[str],
     ) -> pd.DataFrame:
         lookback = max(int(days_back or 0), 0)
-        usage_key = (mode or "research").lower()
         start_ts = cls._normalise_ts(ctx.start)
         if lookback:
             start_ts = start_ts - pd.Timedelta(days=lookback)
@@ -143,7 +139,6 @@ class MarketProfileIndicator(BaseIndicator):
             ctx.symbol or "",
             ctx.interval or "",
             lookback,
-            usage_key,
         )
         entry = cls._DATAFRAME_CACHE.get(cache_key)
         if entry is not None:
@@ -325,7 +320,6 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
-        context_usage: str = "research",
         days_back: Optional[int] = None,
     ):
         """
@@ -335,7 +329,7 @@ class MarketProfileIndicator(BaseIndicator):
         ctx = DataContext(symbol=ctx.symbol, start=ctx.start, end=ctx.end, interval=interval)
         ctx.validate()
 
-        df = cls._fetch_with_cache(provider, ctx, days_back=days_back, mode=context_usage)
+        df = cls._fetch_with_cache(provider, ctx, days_back=days_back)
         if df is None or df.empty:
             raise ValueError(f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest")
 
@@ -349,7 +343,6 @@ class MarketProfileIndicator(BaseIndicator):
             merge_threshold=merge_threshold,
             min_merge_sessions=min_merge_sessions,
             market_profile_breakout_confirmation_bars=market_profile_breakout_confirmation_bars,
-            context_usage=context_usage,
             days_back=days_back,
         )
 
