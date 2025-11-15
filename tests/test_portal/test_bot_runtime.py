@@ -1,9 +1,10 @@
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
-from portal.backend.service.bot_runtime import BotRuntime
+from portal.backend.service.bot_runtime import BotRuntime, Candle
 
 
 def make_runtime(**overrides):
@@ -129,3 +130,68 @@ def test_bot_runtime_market_profile_overlays_keep_extension(monkeypatch):
 
     assert overlays and overlays[0]["ind_id"] == "mpf-1"
     assert "overlay_options" not in captured["kwargs"] or captured["kwargs"].get("overlay_options") is None
+
+
+@pytest.mark.unit
+def test_visible_overlays_hide_future_profiles_and_markers():
+    runtime = make_runtime()
+    runtime.state["status"] = "running"
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    candles = [
+        Candle(
+            time=base + timedelta(hours=idx),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+        )
+        for idx in range(0, 48)
+    ]
+    runtime._primary_series = SimpleNamespace(candles=candles)
+    runtime._bar_index = 24
+
+    first_start = int(base.timestamp())
+    first_end = int((base + timedelta(hours=23)).timestamp())
+    future_start = int((base + timedelta(days=3)).timestamp())
+    future_end = int((base + timedelta(days=4)).timestamp())
+
+    runtime._chart_overlays = [
+        {
+            "type": "market_profile",
+            "payload": {
+                "boxes": [
+                    {
+                        "x1": first_start,
+                        "x2": first_end + 10_000,
+                        "start": first_start,
+                        "end": first_end,
+                        "extend": True,
+                    },
+                    {
+                        "x1": future_start,
+                        "x2": future_end + 10_000,
+                        "start": future_start,
+                        "end": future_end,
+                        "extend": True,
+                    },
+                ],
+                "markers": [
+                    {"time": first_start, "subtype": "touch", "price": 100.0},
+                    {"time": future_start, "subtype": "touch", "price": 101.0},
+                ],
+                "touchPoints": [
+                    {"time": first_start, "price": 100.0},
+                    {"time": future_start, "price": 101.0},
+                ],
+            },
+        }
+    ]
+
+    visible = runtime._visible_overlays()
+
+    assert visible, "expected at least one overlay"
+    payload = visible[0]["payload"]
+    assert len(payload.get("boxes", [])) == 1
+    assert payload["boxes"][0]["start"] == first_start
+    assert all(entry.get("time") == first_start for entry in payload.get("markers", []))
+    assert all(entry.get("time") == first_start for entry in payload.get("touchPoints", []))

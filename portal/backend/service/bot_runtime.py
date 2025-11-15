@@ -1099,8 +1099,9 @@ class BotRuntime:
 
         visible: List[Dict[str, Any]] = []
         for overlay in overlays:
-            if self._overlay_is_ready(overlay, current_epoch):
-                visible.append(overlay)
+            trimmed = self._trim_overlay_to_epoch(overlay, current_epoch)
+            if trimmed and self._overlay_is_ready(trimmed, current_epoch):
+                visible.append(trimmed)
         return visible
 
     @staticmethod
@@ -1118,9 +1119,11 @@ class BotRuntime:
         for box in boxes:
             if not isinstance(box, Mapping):
                 continue
-            end_epoch = BotRuntime._normalise_epoch(box.get("x2"))
+            end_epoch = BotRuntime._normalise_epoch(
+                box.get("end") or box.get("end_date") or box.get("endDate")
+            )
             if end_epoch is None:
-                end_epoch = BotRuntime._normalise_epoch(box.get("end"))
+                end_epoch = BotRuntime._normalise_epoch(box.get("x2"))
             if end_epoch is None:
                 end_epoch = BotRuntime._normalise_epoch(box.get("x1"))
             if end_epoch is None:
@@ -1130,6 +1133,169 @@ class BotRuntime:
         if latest_needed is None:
             return True
         return current_epoch >= latest_needed
+
+    @staticmethod
+    def _trim_overlay_to_epoch(overlay: Mapping[str, Any], current_epoch: int) -> Optional[Dict[str, Any]]:
+        if not isinstance(overlay, Mapping):
+            return None
+        payload = overlay.get("payload")
+        if not isinstance(payload, Mapping):
+            return dict(overlay)
+        trimmed_payload, has_content = BotRuntime._trim_overlay_payload(payload, current_epoch)
+        if not has_content:
+            return None
+        if trimmed_payload is payload:
+            return dict(overlay)
+        trimmed = dict(overlay)
+        trimmed["payload"] = trimmed_payload
+        return trimmed
+
+    @staticmethod
+    def _trim_overlay_payload(payload: Mapping[str, Any], current_epoch: int) -> Tuple[Mapping[str, Any], bool]:
+        if not isinstance(payload, Mapping):
+            return payload, True
+        trimmed: Dict[str, Any] = dict(payload)
+        changed = False
+
+        def process_list(key: str, filter_fn: Callable[[Any], Optional[Any]]) -> None:
+            nonlocal changed
+            entries = payload.get(key)
+            if not isinstance(entries, list):
+                return
+            new_entries: List[Any] = []
+            entry_changed = False
+            for entry in entries:
+                filtered = filter_fn(entry)
+                if filtered is None:
+                    entry_changed = True
+                    continue
+                new_entries.append(filtered)
+                if filtered is not entry:
+                    entry_changed = True
+            if entry_changed or len(new_entries) != len(entries):
+                trimmed[key] = new_entries
+                changed = True
+            else:
+                trimmed[key] = entries
+
+        process_list("price_lines", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
+        process_list("markers", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
+        process_list("touchPoints", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
+        process_list("touch_points", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
+        process_list("bubbles", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
+        process_list("segments", lambda entry: BotRuntime._trim_segment_entry(entry, current_epoch))
+        process_list("polylines", lambda entry: BotRuntime._trim_polyline_entry(entry, current_epoch))
+        process_list("boxes", lambda entry: BotRuntime._trim_box_entry(entry, current_epoch))
+
+        has_content = BotRuntime._payload_has_content(trimmed)
+        return (trimmed if changed else payload, has_content)
+
+    @staticmethod
+    def _payload_has_content(payload: Mapping[str, Any]) -> bool:
+        if not isinstance(payload, Mapping):
+            return False
+        list_keys = {
+            "price_lines",
+            "markers",
+            "touchPoints",
+            "touch_points",
+            "boxes",
+            "segments",
+            "polylines",
+            "bubbles",
+        }
+        for key in list_keys:
+            entries = payload.get(key)
+            if isinstance(entries, list) and entries:
+                return True
+        for key, value in payload.items():
+            if key in list_keys:
+                continue
+            if isinstance(value, list) and value:
+                return True
+            if isinstance(value, Mapping) and value:
+                return True
+            if isinstance(value, (int, float)) and value != 0:
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+        return False
+
+    @staticmethod
+    def _trim_time_entry(entry: Any, current_epoch: int, keys: Tuple[str, ...]) -> Optional[Any]:
+        if not isinstance(entry, Mapping):
+            return None
+        epoch = BotRuntime._first_epoch_from(entry, keys)
+        if epoch is not None and epoch > current_epoch:
+            return None
+        return entry
+
+    @staticmethod
+    def _trim_box_entry(entry: Any, current_epoch: int) -> Optional[Any]:
+        if not isinstance(entry, Mapping):
+            return None
+        start_epoch = BotRuntime._first_epoch_from(
+            entry,
+            ("start", "start_date", "startDate", "x1"),
+        )
+        if start_epoch is not None and start_epoch > current_epoch:
+            return None
+        end_epoch = BotRuntime._first_epoch_from(entry, ("end", "end_date", "endDate"))
+        extend_flag = bool(entry.get("extend")) if "extend" in entry else False
+        if end_epoch is None and not extend_flag:
+            end_epoch = BotRuntime._first_epoch_from(entry, ("x2",))
+        if end_epoch is not None and end_epoch > current_epoch:
+            return None
+        return entry
+
+    @staticmethod
+    def _trim_segment_entry(entry: Any, current_epoch: int) -> Optional[Any]:
+        if not isinstance(entry, Mapping):
+            return None
+        start_epoch = BotRuntime._first_epoch_from(entry, ("x1", "start", "start_date", "startDate"))
+        if start_epoch is not None and start_epoch > current_epoch:
+            return None
+        end_epoch = BotRuntime._first_epoch_from(entry, ("x2", "end", "end_date", "endDate"))
+        if end_epoch is not None and end_epoch > current_epoch:
+            trimmed = dict(entry)
+            trimmed["x2"] = current_epoch
+            return trimmed
+        return entry
+
+    @staticmethod
+    def _trim_polyline_entry(entry: Any, current_epoch: int) -> Optional[Any]:
+        if not isinstance(entry, Mapping):
+            return None
+        points = entry.get("points")
+        if not isinstance(points, list):
+            return entry
+        new_points: List[Any] = []
+        changed = False
+        for point in points:
+            if not isinstance(point, Mapping):
+                continue
+            epoch = BotRuntime._normalise_epoch(point.get("time"))
+            if epoch is not None and epoch > current_epoch:
+                changed = True
+                continue
+            new_points.append(point)
+        if not new_points:
+            return None
+        if changed or len(new_points) != len(points):
+            trimmed = dict(entry)
+            trimmed["points"] = new_points
+            return trimmed
+        return entry
+
+    @staticmethod
+    def _first_epoch_from(entry: Mapping[str, Any], keys: Tuple[str, ...]) -> Optional[int]:
+        for key in keys:
+            if key not in entry:
+                continue
+            epoch = BotRuntime._normalise_epoch(entry.get(key))
+            if epoch is not None:
+                return epoch
+        return None
 
     def _chart_state(self) -> Dict[str, Any]:
         candles = self._visible_candles()
