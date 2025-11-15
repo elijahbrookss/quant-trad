@@ -834,15 +834,15 @@ class MarketProfileIndicator(BaseIndicator):
             "end": _to_unix_s(profile_end_ts),
         })
 
-            logger.debug(
-                "event=market_profile_lightweight_box start=%s end=%s x1=%d x2=%d y1=%.4f y2=%.4f",
-                start_ts,
-                end_ts,
-                _to_unix_s(start_ts),
-                _to_unix_s(end_ts),
-                float(val),
-                float(vah),
-            )
+        logger.debug(
+            "event=market_profile_lightweight_box start=%s end=%s x1=%d x2=%d y1=%.4f y2=%.4f",
+            start_ts,
+            end_ts,
+            _to_unix_s(start_ts),
+            _to_unix_s(end_ts),
+            float(val),
+            float(vah),
+        )
 
             # ----- price lines (Lightweight "price line" settings) -----
             # # VAL (solid)
