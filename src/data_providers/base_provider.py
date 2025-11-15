@@ -247,8 +247,29 @@ class BaseDataProvider(ABC):
                         "request_end": requested_end,
                     },
                 ).fetchall()
+        except ProgrammingError as exc:
+            message = str(exc).lower()
+            if "does not exist" in message:
+                logger.warning(
+                    "Closure table '%s' missing. Ensuring schema before retry.",
+                    self._closures_table,
+                )
+                self.ensure_schema()
+                return []
+            logger.exception(
+                "Failed to load closure ranges for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
+            return []
         except SQLAlchemyError as exc:
-            logger.exception("Failed to load closure ranges for %s [%s]: %s", ctx.symbol, ctx.interval, exc)
+            logger.exception(
+                "Failed to load closure ranges for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
             return []
 
         closures: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
@@ -330,15 +351,44 @@ class BaseDataProvider(ABC):
                     },
                 )
 
-            logger.info(
-                "Recorded scheduled closure for %s [%s]: %s -> %s",
+                logger.info(
+                    "Recorded scheduled closure for %s [%s]: %s -> %s",
+                    ctx.symbol,
+                    ctx.interval,
+                    start_ts.isoformat(),
+                    end_ts.isoformat(),
+                )
+        except ProgrammingError as exc:
+            message = str(exc).lower()
+            if "does not exist" in message:
+                logger.warning(
+                    "Closure table '%s' missing during record; ensuring schema and retrying once.",
+                    self._closures_table,
+                )
+                self.ensure_schema()
+                try:
+                    self._record_closure_range(ctx, start, end)
+                except Exception:
+                    logger.exception(
+                        "Retry failed while recording closure for %s [%s].",
+                        ctx.symbol,
+                        ctx.interval,
+                    )
+                return
+            logger.exception(
+                "Failed to record closure for %s [%s]: %s",
                 ctx.symbol,
                 ctx.interval,
-                start_ts.isoformat(),
-                end_ts.isoformat(),
+                exc,
             )
+            return
         except SQLAlchemyError as exc:
-            logger.exception("Failed to record closure for %s [%s]: %s", ctx.symbol, ctx.interval, exc)
+            logger.exception(
+                "Failed to record closure for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
             return
 
     def _write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
