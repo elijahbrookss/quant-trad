@@ -153,7 +153,7 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
             record.quote_currency = meta.get("quote_currency")
             record.maker_fee_rate = meta.get("maker_fee_rate")
             record.taker_fee_rate = meta.get("taker_fee_rate")
-            record.metadata = dict(meta.get("metadata") or {})
+            record.extra_metadata = dict(meta.get("metadata") or {})
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now

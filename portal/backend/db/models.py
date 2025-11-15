@@ -202,7 +202,10 @@ class InstrumentRecord(Base):
     quote_currency = Column(String(16), nullable=True)
     maker_fee_rate = Column(Float, nullable=True)
     taker_fee_rate = Column(Float, nullable=True)
-    metadata = Column(JSON, nullable=False, default=dict)
+    # ``metadata`` is reserved by SQLAlchemy declarative models, so we expose the
+    # JSON payload via an attribute with a different name while keeping the
+    # column name stable for existing rows.
+    extra_metadata = Column("metadata", JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -228,7 +231,7 @@ class InstrumentRecord(Base):
             "quote_currency": self.quote_currency,
             "maker_fee_rate": self.maker_fee_rate,
             "taker_fee_rate": self.taker_fee_rate,
-            "metadata": dict(self.metadata or {}),
+            "metadata": dict(self.extra_metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
