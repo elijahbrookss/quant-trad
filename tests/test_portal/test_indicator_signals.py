@@ -177,3 +177,77 @@ def test_generate_signals_no_candles(signal_test_env):
     response = client.post(f"/api/indicators/{inst_id}/signals", json=payload)
     assert response.status_code == 404
     assert response.json()["detail"] == "No candles available for given window"
+
+
+def test_overlays_backfill_legacy_context(monkeypatch):
+    from portal.backend.service import indicator_service as svc
+
+    class _OverlayIndicator:
+        NAME = "LegacyOverlayIndicator"
+
+        def __init__(self, symbol: str):
+            self.symbol = symbol
+
+        @classmethod
+        def from_context(cls, provider, ctx, **kwargs):  # noqa: D401 - helper
+            return cls(symbol=ctx.symbol)
+
+        def to_lightweight(self, df):  # noqa: D401 - helper serializer
+            first = df.index[0]
+            timestamp = first.isoformat() if hasattr(first, "isoformat") else first
+            return {"price_lines": [{"time": timestamp, "price": 1.0}]}
+
+    inst_id = "legacy-ind"
+    legacy_record = {
+        "id": inst_id,
+        "name": "Legacy",
+        "type": _OverlayIndicator.NAME,
+        "params": {"lookback": 5},
+        "color": "#ffffff",
+        "datasource": "ALPACA",
+        "exchange": None,
+        "enabled": True,
+        "updated_at": "2024-01-01T00:00:00Z",
+    }
+
+    storage_state = {"record": dict(legacy_record), "upserts": 0}
+
+    def _fake_load(record_id):
+        assert record_id == inst_id
+        return dict(storage_state["record"])
+
+    def _fake_get(record_id):
+        assert record_id == inst_id
+        return dict(storage_state["record"])
+
+    def _fake_upsert(payload):
+        storage_state["upserts"] += 1
+        storage_state["record"] = dict(payload)
+
+    monkeypatch.setattr(svc, "_INSTANCE_CACHE", {})
+    monkeypatch.setattr(svc, "_load_indicator_record", _fake_load)
+    monkeypatch.setattr(svc, "storage_get_indicator", _fake_get)
+    monkeypatch.setattr(svc, "storage_upsert_indicator", _fake_upsert)
+
+    frame = _build_dataframe()
+
+    class _Provider:
+        def get_ohlcv(self, ctx):  # noqa: D401 - simple provider
+            return frame.copy()
+
+    monkeypatch.setitem(svc._INDICATOR_MAP, _OverlayIndicator.NAME, _OverlayIndicator)
+    monkeypatch.setattr(svc, "_resolve_data_provider", lambda *args, **kwargs: _Provider())
+
+    payload = svc.overlays_for_instance(
+        inst_id,
+        start="2024-01-01T00:00:00Z",
+        end="2024-01-01T02:00:00Z",
+        interval="1h",
+        symbol="ES",
+    )
+
+    assert payload["price_lines"], "expected overlay payload"
+    assert storage_state["upserts"] >= 1, "legacy record should be backfilled"
+    params = storage_state["record"].get("params", {})
+    for key in ("symbol", "start", "end", "interval"):
+        assert key in params, f"missing backfilled context key: {key}"

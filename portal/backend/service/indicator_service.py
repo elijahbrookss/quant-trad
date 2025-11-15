@@ -72,6 +72,60 @@ class IndicatorCacheEntry:
 
 
 _INSTANCE_CACHE: Dict[str, IndicatorCacheEntry] = {}
+_CONTEXT_KEYS = ("symbol", "start", "end", "interval")
+
+
+def _normalize_context_values(payload: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not payload:
+        return {}
+    context: Dict[str, Any] = {}
+    for key in _CONTEXT_KEYS:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        context[key] = value
+    return context
+
+
+def _maybe_backfill_context(
+    record: Mapping[str, Any],
+    fallback: Optional[Mapping[str, Any]] = None,
+    *,
+    persist: bool = False,
+) -> Mapping[str, Any]:
+    """Ensure legacy indicator rows have chart context available."""
+
+    params = dict(record.get("params") or {})
+    missing = [key for key in _CONTEXT_KEYS if not params.get(key)]
+    if not missing:
+        return record
+
+    ctx_patch = _normalize_context_values(fallback)
+    if not ctx_patch:
+        return record
+
+    updated = False
+    for key in missing:
+        value = ctx_patch.get(key)
+        if value is None:
+            continue
+        params[key] = value
+        updated = True
+
+    if not updated:
+        return record
+
+    patched = dict(record)
+    patched["params"] = params
+
+    if not persist:
+        return patched
+
+    storage_upsert_indicator(patched)
+    refreshed = storage_get_indicator(str(record.get("id")))
+    return refreshed or patched
 
 
 def _coerce_record_meta(record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -145,8 +199,19 @@ def _load_indicator_record(inst_id: str) -> Dict[str, Any]:
     return record
 
 
-def _get_indicator_entry(inst_id: str) -> IndicatorCacheEntry:
+def _get_indicator_entry(
+    inst_id: str,
+    *,
+    fallback_context: Optional[Mapping[str, Any]] = None,
+    persist_backfill: bool = False,
+) -> IndicatorCacheEntry:
     record = _load_indicator_record(inst_id)
+    if fallback_context:
+        record = _maybe_backfill_context(
+            record,
+            fallback_context,
+            persist=persist_backfill,
+        )
     record_version = str(record.get("updated_at") or "")
     cached = _INSTANCE_CACHE.get(inst_id)
     if cached and cached.updated_at == record_version and cached.instance is not None:
@@ -903,7 +968,16 @@ def overlays_for_instance(
     using the requested chart window (start/end/interval). Does not require
     indicator params (they come from the stored instance).
     """
-    entry = _get_indicator_entry(inst_id)
+    entry = _get_indicator_entry(
+        inst_id,
+        fallback_context={
+            "symbol": symbol,
+            "start": start,
+            "end": end,
+            "interval": interval,
+        },
+        persist_backfill=True,
+    )
     inst = entry.instance
     base_params = entry.meta.get("params", {})
     sym = symbol or base_params.get("symbol")
@@ -1032,7 +1106,16 @@ def generate_signals_for_instance(
 ) -> Dict[str, Any]:
     """Execute registered signal rules for an indicator instance."""
 
-    entry = _get_indicator_entry(inst_id)
+    entry = _get_indicator_entry(
+        inst_id,
+        fallback_context={
+            "symbol": symbol,
+            "start": start,
+            "end": end,
+            "interval": interval,
+        },
+        persist_backfill=True,
+    )
     inst = entry.instance
     base_params = entry.meta.get("params", {})
     sym = symbol or base_params.get("symbol")
