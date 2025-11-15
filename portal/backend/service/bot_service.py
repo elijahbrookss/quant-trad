@@ -7,6 +7,7 @@ from datetime import datetime
 from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from . import instrument_service
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -126,6 +127,36 @@ def _attach_strategy_meta(bot: Dict[str, object]) -> None:
     if not meta:
         raise ValueError("Bots require at least one valid strategy before starting.")
     bot["strategies_meta"] = meta
+
+
+def _attach_instrument_meta(bot: Dict[str, object]) -> None:
+    """Populate instrument metadata for the bot's strategy symbols."""
+
+    strategies: List[Dict[str, Any]] = bot.get("strategies_meta") or []  # type: ignore[assignment]
+    instrument_map: Dict[str, Dict[str, Any]] = {}
+    for strategy in strategies:
+        datasource = strategy.get("datasource") or bot.get("datasource")
+        exchange = strategy.get("exchange") or bot.get("exchange")
+        instruments: List[Dict[str, Any]] = []
+        for symbol in strategy.get("symbols") or []:
+            record = instrument_service.resolve_instrument(datasource, exchange, symbol)
+            if not record:
+                continue
+            keys = {
+                instrument_service.instrument_key(datasource, exchange, symbol),
+                instrument_service.instrument_key(datasource, None, symbol),
+                instrument_service.instrument_key(None, exchange, symbol),
+                instrument_service.instrument_key(None, None, symbol),
+            }
+            for key in keys:
+                instrument_map[key] = record
+            enriched = dict(record)
+            enriched.setdefault("symbol", symbol)
+            instruments.append(enriched)
+        if instruments:
+            strategy["instruments"] = instruments
+    if instrument_map:
+        bot["instrument_index"] = instrument_map
 
 
 def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
@@ -248,6 +279,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["strategy_id"] = bot["strategy_ids"][0]
     _validate_backtest_window(bot)
     _attach_strategy_meta(bot)
+    _attach_instrument_meta(bot)
     runtime = _runtime_for(bot_id, bot)
     runtime.reset_if_finished()
     runtime.start()
@@ -330,6 +362,7 @@ def runtime_logs(bot_id: str, limit: int = 200) -> List[Dict[str, Any]]:
 
     bot = get_bot(bot_id)
     _attach_strategy_meta(bot)
+    _attach_instrument_meta(bot)
     runtime = _runtime_for(bot_id, bot)
     runtime.warm_up()
     return runtime.logs(limit)
@@ -340,6 +373,7 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
 
     bot = get_bot(bot_id)
     _attach_strategy_meta(bot)
+    _attach_instrument_meta(bot)
     status = str(bot.get("status") or "idle").lower()
     runtime = _RUNTIME.get(bot_id)
     if runtime is None:
@@ -387,11 +421,15 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
     """Assemble descriptive metadata for bot strategies and symbols."""
 
     strategy_index = {strategy["id"]: strategy for strategy in load_strategies()}
+    runtime_meta = {
+        entry.get("id"): entry for entry in bot.get("strategies_meta") or [] if entry.get("id")
+    }
     selected: List[Dict[str, object]] = []
     for strategy_id in bot.get("strategy_ids", []) or []:
-        strategy = strategy_index.get(strategy_id)
+        strategy = runtime_meta.get(strategy_id) or strategy_index.get(strategy_id)
         if not strategy:
             continue
+        instruments = runtime_meta.get(strategy_id, {}).get("instruments") or []
         selected.append(
             {
                 "id": strategy["id"],
@@ -401,6 +439,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
                 "datasource": strategy.get("datasource") or bot.get("datasource"),
                 "exchange": strategy.get("exchange") or bot.get("exchange"),
                 "indicators": _indicator_meta(strategy),
+                "instruments": instruments,
             }
         )
     return {
@@ -414,6 +453,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             "risk": bot.get("risk"),
         },
         "strategies": selected,
+        "instrument_index": bot.get("instrument_index") or {},
     }
 
 
@@ -422,6 +462,7 @@ def performance(bot_id: str) -> Dict[str, object]:
 
     bot = get_bot(bot_id)
     _attach_strategy_meta(bot)
+    _attach_instrument_meta(bot)
     runtime = _RUNTIME.get(bot_id)
     status = str(bot.get("status") or "idle").lower()
     payload: Dict[str, Any]

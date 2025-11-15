@@ -16,12 +16,16 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
   const logs = payload?.logs || []
+  const quoteCurrency = payload?.stats?.quote_currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
   const streamEligible = ['running', 'starting', 'paused'].includes(runtimeStatus)
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
   const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
+  const statEntries = useMemo(() => {
+    return Object.entries(payload?.stats || {}).filter(([key]) => key !== 'quote_currency')
+  }, [payload?.stats])
 
   const formatTimestamp = useCallback((value) => {
     if (!value) return '—'
@@ -29,6 +33,26 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (Number.isNaN(date.getTime())) return value
     return date.toLocaleTimeString([], { hour12: false })
   }, [])
+
+  const formatStatValue = useCallback(
+    (key, value) => {
+      if (value === undefined || value === null) return '—'
+      const numeric = Number(value)
+      const hasCurrency = ['gross_pnl', 'fees_paid', 'net_pnl'].includes(key)
+      if (hasCurrency && Number.isFinite(numeric)) {
+        const formatted = numeric.toFixed(2)
+        return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
+      }
+      if (typeof value === 'number' && !Number.isInteger(value)) {
+        return value.toFixed(2)
+      }
+      if (Number.isFinite(numeric) && `${value}`.trim() !== '') {
+        return numeric
+      }
+      return value
+    },
+    [quoteCurrency],
+  )
 
   const describeLog = useCallback((entry) => {
     if (!entry) return '—'
@@ -320,11 +344,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                         <dd className="text-sm text-slate-100">{strategy.exchange || botMeta.exchange || '—'}</dd>
                       </div>
                     </dl>
-                    <div>
-                      <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
-                      {strategy.indicators?.length ? (
-                        <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
-                          {strategy.indicators.map((indicator, idx) => (
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
+                    {strategy.indicators?.length ? (
+                      <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
+                        {strategy.indicators.map((indicator, idx) => (
                             <li
                               key={`${indicator.id || idx}-${idx}`}
                               className="group/indicator flex items-center justify-between gap-3 px-3 py-2"
@@ -355,6 +379,49 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                         </div>
                       )}
                     </div>
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Instruments</p>
+                      {strategy.instruments?.length ? (
+                        <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
+                          {strategy.instruments.map((instrument, idx) => (
+                            <li key={`${instrument.symbol || idx}-${idx}`} className="flex flex-col gap-1 px-3 py-2">
+                              <div className="flex items-center justify-between text-sm text-white">
+                                <span>{instrument.symbol || 'Instrument'}</span>
+                                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                                  {instrument.quote_currency || '—'}
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-300">
+                                <div className="flex flex-wrap gap-3">
+                                  <span>Tick: {instrument.tick_size ?? '—'}</span>
+                                  <span>
+                                    Tick Value: {instrument.tick_value ?? '—'}
+                                    {instrument.quote_currency ? ` ${instrument.quote_currency}` : ''}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-3">
+                                  <span>Contract: {instrument.contract_size ?? '—'}</span>
+                                  <span>
+                                    Fees:{' '}
+                                    {instrument.maker_fee_rate != null
+                                      ? `${(Number(instrument.maker_fee_rate) * 100).toFixed(2)}%`
+                                      : '—'}{' '}
+                                    /{' '}
+                                    {instrument.taker_fee_rate != null
+                                      ? `${(Number(instrument.taker_fee_rate) * 100).toFixed(2)}%`
+                                      : '—'}
+                                  </span>
+                                </div>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
+                          No instrument metadata attached
+                        </div>
+                      )}
+                    </div>
                   </article>
                 ))}
               </div>
@@ -362,10 +429,10 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           ) : null}
 
           <div className="grid gap-4 rounded-3xl border border-white/5 bg-white/5 p-4 text-sm text-slate-200 sm:grid-cols-3">
-            {Object.entries(payload?.stats || {}).map(([key, value]) => (
+            {statEntries.map(([key, value]) => (
               <div key={key} className="rounded-2xl border border-white/10 bg-black/20 p-3">
                 <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{key.replace(/_/g, ' ')}</p>
-                <p className="text-2xl font-semibold text-white">{value ?? '—'}</p>
+                <p className="text-2xl font-semibold text-white">{formatStatValue(key, value)}</p>
               </div>
             ))}
           </div>

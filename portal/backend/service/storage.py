@@ -15,6 +15,7 @@ from ..db import (
     BotRecord,
     BotStrategyLink,
     IndicatorRecord,
+    InstrumentRecord,
     StrategyIndicatorLink,
     StrategyRecord,
     StrategyRuleRecord,
@@ -78,6 +79,102 @@ def get_indicator(indicator_id: str) -> Optional[Dict[str, Any]]:
     with db.session() as session:
         record = session.get(IndicatorRecord, indicator_id)
         return record.to_dict() if record else None
+
+
+def load_instruments() -> List[Dict[str, Any]]:
+    """Return all persisted instrument metadata rows."""
+
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = session.execute(select(InstrumentRecord)).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def get_instrument(instrument_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single instrument by identifier."""
+
+    if not db.available:
+        return None
+    with db.session() as session:
+        record = session.get(InstrumentRecord, instrument_id)
+        return record.to_dict() if record else None
+
+
+def find_instrument(datasource: Optional[str], exchange: Optional[str], symbol: str) -> Optional[Dict[str, Any]]:
+    """Look up an instrument by datasource/exchange/symbol with fallbacks."""
+
+    if not db.available:
+        return None
+    symbol_key = (symbol or "").upper()
+    if not symbol_key:
+        return None
+    datasource_key = (datasource or "").lower() or None
+    exchange_key = (exchange or "").lower() or None
+    with db.session() as session:
+        candidates = session.execute(
+            select(InstrumentRecord).where(InstrumentRecord.symbol == symbol_key)
+        ).scalars().all()
+        if not candidates:
+            return None
+        def _score(record: InstrumentRecord) -> int:
+            score = 0
+            if datasource_key and (record.datasource or "").lower() == datasource_key:
+                score += 2
+            if exchange_key and (record.exchange or "").lower() == exchange_key:
+                score += 1
+            return score
+
+        ranked = sorted(candidates, key=_score, reverse=True)
+        return ranked[0].to_dict() if ranked else None
+
+
+def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert or update an instrument record."""
+
+    if not db.available:
+        return meta
+    instrument_id = meta.get("id") or str(uuid.uuid4())
+    try:
+        with db.session() as session:
+            record = session.get(InstrumentRecord, instrument_id)
+            now = _utcnow()
+            if record is None:
+                record = InstrumentRecord(id=instrument_id)
+                session.add(record)
+            record.datasource = meta.get("datasource")
+            record.exchange = meta.get("exchange")
+            record.symbol = (meta.get("symbol") or "").upper()
+            record.instrument_type = meta.get("instrument_type")
+            record.tick_size = meta.get("tick_size")
+            record.tick_value = meta.get("tick_value")
+            record.contract_size = meta.get("contract_size")
+            record.min_order_size = meta.get("min_order_size")
+            record.quote_currency = meta.get("quote_currency")
+            record.maker_fee_rate = meta.get("maker_fee_rate")
+            record.taker_fee_rate = meta.get("taker_fee_rate")
+            record.metadata = dict(meta.get("metadata") or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
+            meta = record.to_dict()
+    except SQLAlchemyError as exc:
+        logger.warning("instrument_persist_failed | id=%s | error=%s", instrument_id, exc)
+    return meta
+
+
+def delete_instrument(instrument_id: str) -> None:
+    """Delete an instrument metadata row."""
+
+    if not db.available:
+        return
+    try:
+        with db.session() as session:
+            record = session.get(InstrumentRecord, instrument_id)
+            if record:
+                session.delete(record)
+    except SQLAlchemyError as exc:
+        logger.warning("instrument_delete_failed | id=%s | error=%s", instrument_id, exc)
 
 
 def load_bots() -> List[Dict[str, Any]]:

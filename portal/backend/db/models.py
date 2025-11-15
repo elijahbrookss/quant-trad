@@ -7,7 +7,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import declarative_base
 
 
@@ -170,6 +180,55 @@ class SymbolPresetRecord(Base):
             "exchange": self.exchange,
             "timeframe": self.timeframe,
             "symbol": self.symbol,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class InstrumentRecord(Base):
+    """Persisted instrument metadata for tick/fee calculations."""
+
+    __tablename__ = "portal_instruments"
+
+    id = Column(String(64), primary_key=True)
+    datasource = Column(String(64), nullable=True)
+    exchange = Column(String(64), nullable=True)
+    symbol = Column(String(64), nullable=False)
+    instrument_type = Column(String(64), nullable=True)
+    tick_size = Column(Float, nullable=True)
+    tick_value = Column(Float, nullable=True)
+    contract_size = Column(Float, nullable=True)
+    min_order_size = Column(Float, nullable=True)
+    quote_currency = Column(String(16), nullable=True)
+    maker_fee_rate = Column(Float, nullable=True)
+    taker_fee_rate = Column(Float, nullable=True)
+    metadata = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource", "exchange", "symbol", name="uq_instrument_symbol"
+        ),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the instrument payload for API consumers."""
+
+        return {
+            "id": self.id,
+            "datasource": self.datasource,
+            "exchange": self.exchange,
+            "symbol": self.symbol,
+            "instrument_type": self.instrument_type,
+            "tick_size": self.tick_size,
+            "tick_value": self.tick_value,
+            "contract_size": self.contract_size,
+            "min_order_size": self.min_order_size,
+            "quote_currency": self.quote_currency,
+            "maker_fee_rate": self.maker_fee_rate,
+            "taker_fee_rate": self.taker_fee_rate,
+            "metadata": dict(self.metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

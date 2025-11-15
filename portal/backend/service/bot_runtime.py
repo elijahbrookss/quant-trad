@@ -43,6 +43,26 @@ def _isoformat(value: Optional[datetime]) -> Optional[str]:
     return target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _coerce_float(value: Optional[object], default: Optional[float] = None) -> Optional[float]:
+    try:
+        if value is None:
+            return default
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return numeric
+
+
+def _instrument_key(datasource: Optional[str], exchange: Optional[str], symbol: Optional[str]) -> str:
+    return "::".join(
+        [
+            (datasource or "").strip().lower(),
+            (exchange or "").strip().lower(),
+            (symbol or "").strip().upper(),
+        ]
+    )
+
+
 @dataclass
 class Candle:
     """Single OHLC datapoint used by the simulated bot."""
@@ -81,6 +101,8 @@ class Leg:
     status: str = "open"
     exit_price: Optional[float] = None
     exit_time: Optional[str] = None
+    contracts: int = 1
+    pnl: float = 0.0
 
     def serialize(self) -> Dict[str, Optional[float]]:
         return {
@@ -90,6 +112,8 @@ class Leg:
             "status": self.status,
             "exit_price": None if self.exit_price is None else round(self.exit_price, 4),
             "exit_time": self.exit_time,
+            "contracts": self.contracts,
+            "pnl": round(self.pnl, 4),
         }
 
 
@@ -104,9 +128,21 @@ class LadderPosition:
     tick_size: float
     legs: List[Leg] = field(default_factory=list)
     breakeven_trigger_ticks: int = 20
+    tick_value: float = 1.0
+    contract_size: float = 1.0
+    maker_fee_rate: float = 0.0
+    taker_fee_rate: float = 0.0
+    quote_currency: str = "USD"
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
     trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    gross_pnl: float = 0.0
+    fees_paid: float = 0.0
+    net_pnl: float = 0.0
+
+    def register_entry_fee(self) -> None:
+        total_contracts = sum(max(leg.contracts, 0) for leg in self.legs) or 1
+        self._apply_fee(self.entry_price, total_contracts)
 
     def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
         events: List[Dict[str, str]] = []
@@ -119,6 +155,10 @@ class LadderPosition:
                     leg.status = "target"
                     leg.exit_price = leg.target_price
                     leg.exit_time = _isoformat(candle.time)
+                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
+                    leg.pnl = pnl
+                    self._record_pnl(pnl)
+                    self._apply_fee(leg.target_price, leg.contracts)
                     events.append(
                         {
                             "type": "target",
@@ -126,6 +166,8 @@ class LadderPosition:
                             "trade_id": self.trade_id,
                             "price": round(leg.target_price, 4),
                             "time": leg.exit_time,
+                            "pnl": round(pnl, 4),
+                            "currency": self.quote_currency,
                         }
                     )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
@@ -139,6 +181,10 @@ class LadderPosition:
                     leg.status = "target"
                     leg.exit_price = leg.target_price
                     leg.exit_time = _isoformat(candle.time)
+                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
+                    leg.pnl = pnl
+                    self._record_pnl(pnl)
+                    self._apply_fee(leg.target_price, leg.contracts)
                     events.append(
                         {
                             "type": "target",
@@ -146,6 +192,8 @@ class LadderPosition:
                             "trade_id": self.trade_id,
                             "price": round(leg.target_price, 4),
                             "time": leg.exit_time,
+                            "pnl": round(pnl, 4),
+                            "currency": self.quote_currency,
                         }
                     )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
@@ -160,12 +208,17 @@ class LadderPosition:
                     leg.status = "stop"
                     leg.exit_price = self.stop_price
                     leg.exit_time = _isoformat(candle.time)
+                    pnl = self._pnl_for_exit(self.stop_price, leg.contracts)
+                    leg.pnl = pnl
+                    self._record_pnl(pnl)
+                    self._apply_fee(self.stop_price, leg.contracts)
             self.closed_at = candle.time
             return {
                 "type": "stop",
                 "trade_id": self.trade_id,
                 "price": round(self.stop_price, 4),
                 "time": _isoformat(candle.time),
+                "currency": self.quote_currency,
             }
         if self.direction == "short" and candle.high >= self.stop_price:
             for leg in self.legs:
@@ -173,12 +226,17 @@ class LadderPosition:
                     leg.status = "stop"
                     leg.exit_price = self.stop_price
                     leg.exit_time = _isoformat(candle.time)
+                    pnl = self._pnl_for_exit(self.stop_price, leg.contracts)
+                    leg.pnl = pnl
+                    self._record_pnl(pnl)
+                    self._apply_fee(self.stop_price, leg.contracts)
             self.closed_at = candle.time
             return {
                 "type": "stop",
                 "trade_id": self.trade_id,
                 "price": round(self.stop_price, 4),
                 "time": _isoformat(candle.time),
+                "currency": self.quote_currency,
             }
         if all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
@@ -197,6 +255,10 @@ class LadderPosition:
                     "type": "close",
                     "trade_id": self.trade_id,
                     "time": _isoformat(self.closed_at or candle.time),
+                    "gross_pnl": round(self.gross_pnl, 4),
+                    "fees_paid": round(self.fees_paid, 4),
+                    "net_pnl": round(self.net_pnl, 4),
+                    "currency": self.quote_currency,
                 }
             )
         return events
@@ -214,15 +276,53 @@ class LadderPosition:
             "moved_to_breakeven": self.moved_to_breakeven,
             "legs": [leg.serialize() for leg in self.legs],
             "closed_at": _isoformat(self.closed_at),
+            "tick_size": self.tick_size,
+            "tick_value": round(self.tick_value, 6),
+            "contract_size": round(self.contract_size, 6),
+            "gross_pnl": round(self.gross_pnl, 4),
+            "fees_paid": round(self.fees_paid, 4),
+            "net_pnl": round(self.net_pnl, 4),
+            "currency": self.quote_currency,
         }
+
+    def _pnl_for_exit(self, exit_price: float, contracts: int) -> float:
+        if contracts <= 0:
+            return 0.0
+        direction = 1 if self.direction == "long" else -1
+        ticks = ((exit_price - self.entry_price) / self.tick_size) * direction
+        return ticks * self.tick_value * contracts
+
+    def _apply_fee(self, price: float, contracts: int) -> None:
+        if contracts <= 0:
+            return
+        notional = abs(price * self.contract_size * contracts)
+        fee_rate = self.taker_fee_rate or 0.0
+        fee = notional * fee_rate
+        if fee:
+            self.fees_paid += fee
+            self._update_net()
+
+    def _record_pnl(self, pnl: float) -> None:
+        self.gross_pnl += pnl
+        self._update_net()
+
+    def _update_net(self) -> None:
+        self.net_pnl = self.gross_pnl - self.fees_paid
 
 
 class LadderRiskEngine:
     """Create and manage laddered trades for simulated bots."""
 
-    def __init__(self, config: Optional[Dict[str, object]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, object]] = None,
+        instrument: Optional[Dict[str, Any]] = None,
+    ):
         self.config = {**DEFAULT_RISK, **(config or {})}
-        self.tick_size = float(self.config.get("tick_size") or DEFAULT_RISK["tick_size"])
+        self.instrument = instrument or {}
+        instrument_tick = _coerce_float(self.instrument.get("tick_size"))
+        config_tick = _coerce_float(self.config.get("tick_size"), DEFAULT_RISK["tick_size"])
+        self.tick_size = float(instrument_tick or config_tick or DEFAULT_RISK["tick_size"])
         targets: Sequence[int] = self.config.get("targets") or DEFAULT_RISK["targets"]
         self.targets = [int(t) for t in targets]
         self.stop_ticks = int(self.config.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
@@ -230,8 +330,17 @@ class LadderRiskEngine:
             self.config.get("breakeven_trigger_ticks")
             or DEFAULT_RISK["breakeven_trigger_ticks"]
         )
+        self.contract_size = _coerce_float(self.instrument.get("contract_size"), 1.0) or 1.0
+        tick_value = _coerce_float(self.instrument.get("tick_value"))
+        if tick_value is None:
+            tick_value = self.tick_size * self.contract_size
+        self.tick_value = float(tick_value or self.tick_size)
+        self.quote_currency = (self.instrument.get("quote_currency") or "USD").upper()
+        self.maker_fee = _coerce_float(self.instrument.get("maker_fee_rate"), 0.0) or 0.0
+        self.taker_fee = _coerce_float(self.instrument.get("taker_fee_rate"), 0.0) or 0.0
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
+        self._contracts = max(int(self.config.get("contracts") or len(self.targets)), 1)
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
         direction = "long" if direction == "long" else "short"
@@ -240,10 +349,18 @@ class LadderRiskEngine:
             candle.close - stop_distance if direction == "long" else candle.close + stop_distance
         )
         legs: List[Leg] = []
-        for ticks in self.targets:
+        contracts = self._leg_contracts()
+        for idx, ticks in enumerate(self.targets):
             distance = ticks * self.tick_size
             target = candle.close + distance if direction == "long" else candle.close - distance
-            legs.append(Leg(name=f"TP{ticks}", ticks=ticks, target_price=target))
+            legs.append(
+                Leg(
+                    name=f"TP{ticks}",
+                    ticks=ticks,
+                    target_price=target,
+                    contracts=contracts[idx] if idx < len(contracts) else 1,
+                )
+            )
         position = LadderPosition(
             entry_time=candle.time,
             entry_price=candle.close,
@@ -252,8 +369,27 @@ class LadderRiskEngine:
             tick_size=self.tick_size,
             legs=legs,
             breakeven_trigger_ticks=self.breakeven_trigger,
+            tick_value=self.tick_value,
+            contract_size=self.contract_size,
+            maker_fee_rate=self.maker_fee,
+            taker_fee_rate=self.taker_fee,
+            quote_currency=self.quote_currency,
         )
+        position.register_entry_fee()
         return position
+
+    def _leg_contracts(self) -> List[int]:
+        count = len(self.targets)
+        if count == 0:
+            return []
+        base = self._contracts // count
+        remainder = self._contracts % count
+        if base == 0:
+            return [1 for _ in range(count)]
+        distribution = [base for _ in range(count)]
+        for idx in range(remainder):
+            distribution[idx] += 1
+        return distribution
 
     def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
         if direction is None or self.active_trade is not None:
@@ -280,6 +416,9 @@ class LadderRiskEngine:
         total = wins + losses if wins + losses else 1
         long_trades = sum(1 for trade in self.trades if trade.direction == "long")
         short_trades = sum(1 for trade in self.trades if trade.direction == "short")
+        gross = sum(trade.gross_pnl for trade in self.trades)
+        fees = sum(trade.fees_paid for trade in self.trades)
+        net = gross - fees
         return {
             "total_trades": len(self.trades),
             "legs_closed": wins + losses,
@@ -288,6 +427,10 @@ class LadderRiskEngine:
             "win_rate": round(wins / total, 4),
             "long_trades": long_trades,
             "short_trades": short_trades,
+            "gross_pnl": round(gross, 4),
+            "fees_paid": round(fees, 4),
+            "net_pnl": round(net, 4),
+            "quote_currency": self.quote_currency,
         }
 
 
@@ -309,6 +452,7 @@ class StrategySeries:
     window_end: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
     last_consumed_epoch: int = 0
+    instrument: Optional[Dict[str, Any]] = None
 
 
 class BotRuntime:
@@ -447,7 +591,14 @@ class BotRuntime:
 
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
-        risk_engine = LadderRiskEngine(self.config.get("risk"))
+        instrument = self._instrument_for(datasource, exchange, symbol)
+        risk_config = dict(self.config.get("risk") or {})
+        if instrument and instrument.get("tick_size") and not risk_config.get("tick_size"):
+            risk_config["tick_size"] = instrument.get("tick_size")
+        risk_engine = LadderRiskEngine(risk_config, instrument=instrument)
+        series_meta = dict(strategy)
+        if instrument:
+            series_meta["instrument"] = instrument
 
         return StrategySeries(
             strategy_id=str(strategy.get("id")),
@@ -471,7 +622,8 @@ class BotRuntime:
             risk_engine=risk_engine,
             window_start=start_iso,
             window_end=end_iso,
-            meta=dict(strategy),
+            meta=series_meta,
+            instrument=instrument,
         )
 
     @staticmethod
@@ -489,6 +641,26 @@ class BotRuntime:
 
     def _resolve_exchange(self, strategy: Mapping[str, Any]) -> Optional[str]:
         return self.config.get("exchange") or strategy.get("exchange")
+
+    def _instrument_for(
+        self,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        symbol: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        index = self.config.get("instrument_index") or {}
+        if not symbol:
+            return None
+        keys = [
+            _instrument_key(datasource, exchange, symbol),
+            _instrument_key(datasource, None, symbol),
+            _instrument_key(None, exchange, symbol),
+            _instrument_key(None, None, symbol),
+        ]
+        for key in keys:
+            if key in index:
+                return index[key]
+        return None
 
     def _resolve_live_window(self) -> Tuple[str, str]:
         lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
@@ -912,6 +1084,11 @@ class BotRuntime:
             "long_trades": 0,
             "short_trades": 0,
         }
+        gross = 0.0
+        fees = 0.0
+        net = 0.0
+        currency: Optional[str] = None
+        multi_currency = False
         for series in self._series:
             stats = series.risk_engine.stats()
             for key in summary:
@@ -919,8 +1096,24 @@ class BotRuntime:
                     summary[key] += int(stats.get(key, 0) or 0)
                 except (TypeError, ValueError):
                     continue
+            gross += float(stats.get("gross_pnl", 0.0) or 0.0)
+            fees += float(stats.get("fees_paid", 0.0) or 0.0)
+            net += float(stats.get("net_pnl", 0.0) or 0.0)
+            series_currency = stats.get("quote_currency")
+            if isinstance(series_currency, str) and series_currency:
+                if currency is None:
+                    currency = series_currency
+                elif currency != series_currency:
+                    multi_currency = True
         total = summary["wins"] + summary["losses"]
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
+        summary["gross_pnl"] = round(gross, 4)
+        summary["fees_paid"] = round(fees, 4)
+        summary["net_pnl"] = round(net, 4)
+        if multi_currency:
+            summary["quote_currency"] = "MULTI"
+        elif currency:
+            summary["quote_currency"] = currency
         return summary
 
     def _log_event(
