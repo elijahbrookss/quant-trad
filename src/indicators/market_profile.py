@@ -804,86 +804,90 @@ class MarketProfileIndicator(BaseIndicator):
                 continue
 
             # start_iso = _ts_iso(start_ts)
-            start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
-            
-        profile_end_ts = pd.to_datetime(
-            prof.get("end") or prof.get("end_date") or chart_end,
-            utc=True,
-        )
-        if profile_end_ts > chart_end:
-            profile_end_ts = chart_end
-        if profile_end_ts < start_ts:
-            profile_end_ts = start_ts
+            start_str = fmt_time(start_ts)  # either 'YYYY-MM-DD' or unix seconds
 
-        if extend_boxes_to_chart_end:
-            end_ts = chart_end
-        else:
-            end_ts = profile_end_ts
-        if end_ts < start_ts:
-            end_ts = start_ts
+            profile_end_ts = pd.to_datetime(
+                prof.get("end") or prof.get("end_date") or chart_end,
+                utc=True,
+            )
+            if profile_end_ts > chart_end:
+                profile_end_ts = chart_end
+            if profile_end_ts < start_ts:
+                profile_end_ts = start_ts
 
-        out_boxes.append({
-            "x1": _to_unix_s(start_ts),   # epoch seconds
-            "x2": _to_unix_s(end_ts),     # epoch seconds
-            "y1": float(val),             # VAL
-            "y2": float(vah),             # VAH
-            "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
-            "precision": prof.get("precision", self.price_precision),
-            "extend": bool(extend_boxes_to_chart_end),
-            "start": _to_unix_s(start_ts),
-            "end": _to_unix_s(profile_end_ts),
-        })
+            if extend_boxes_to_chart_end:
+                end_ts = chart_end
+            else:
+                end_ts = profile_end_ts
+            if end_ts < start_ts:
+                end_ts = start_ts
 
-        logger.debug(
-            "event=market_profile_lightweight_box start=%s end=%s x1=%d x2=%d y1=%.4f y2=%.4f",
-            start_ts,
-            end_ts,
-            _to_unix_s(start_ts),
-            _to_unix_s(end_ts),
-            float(val),
-            float(vah),
-        )
+            out_boxes.append({
+                "x1": _to_unix_s(start_ts),  # epoch seconds
+                "x2": _to_unix_s(end_ts),  # epoch seconds
+                "y1": float(val),  # VAL
+                "y2": float(vah),  # VAH
+                "color": "rgba(156,163,175,0.18)",  # neutral grey w/ alpha; UI can recolor later
+                "precision": prof.get("precision", self.price_precision),
+                "extend": bool(extend_boxes_to_chart_end),
+                "start": _to_unix_s(start_ts),
+                "end": _to_unix_s(profile_end_ts),
+            })
 
-        # ----- price lines (Lightweight "price line" settings) -----
-        # # VAL (solid)
-        # out_lines.append({
-        #     "price": float(val),
-        #     "title": "VAL",
-        #     "time": start_str,          # when the line begins
-        #     "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
-        #     "lineWidth": 0,
-        #     "extend": "right",
-        #     "axisLabelVisible": True,
-        #     "color": "#6b7280",
-        # })
-        # # POC (dashed) — if available
-        # if poc is not None:
-        #     out_lines.append({
-        #         "price": float(poc),
-        #         "title": "POC",
-        #         "time": _to_unix_s(start_ts),
-        #         "lineStyle": 2,         # dashed to distinguish from VA band edges
-        #         "lineWidth": 0,
-        #         "extend": "right",
-        #         "axisLabelVisible": False,
-        #         "color": "#f59e0b",
-        #     })
-        # # VAH (solid)
-        # out_lines.append({
-        #     "price": float(vah),
-        #     "title": "VAH",
-        #     "time": start_str,
-        #     "lineStyle": 0,
-        #     "lineWidth": 0,
-        #     "extend": "right",
-        #     "axisLabelVisible": True,
-        #     "color": "#6b7280",
-        # })
+            logger.debug(
+                "event=market_profile_lightweight_box start=%s end=%s x1=%d x2=%d y1=%.4f y2=%.4f",
+                start_ts,
+                end_ts,
+                _to_unix_s(start_ts),
+                _to_unix_s(end_ts),
+                float(val),
+                float(vah),
+            )
 
-        # ----- touchpoint markers (optional) -----
-        if include_touches:
-            out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
-            out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+            # ----- price lines (Lightweight "price line" settings) -----
+            # # VAL (solid)
+            # out_lines.append({
+            #     "price": float(val),
+            #     "title": "VAL",
+            #     "time": start_str,          # when the line begins
+            #     "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
+            #     "lineWidth": 0,
+            #     "extend": "right",
+            #     "axisLabelVisible": True,
+            #     "color": "#6b7280",
+            # })
+            # # POC (dashed) — if available
+            # if poc is not None:
+            #     out_lines.append({
+            #         "price": float(poc),
+            #         "title": "POC",
+            #         "time": _to_unix_s(start_ts),
+            #         "lineStyle": 2,         # dashed to distinguish from VA band edges
+            #         "lineWidth": 0,
+            #         "extend": "right",
+            #         "axisLabelVisible": False,
+            #         "color": "#f59e0b",
+            #     })
+            # # VAH (solid)
+            # out_lines.append({
+            #     "price": float(vah),
+            #     "title": "VAH",
+            #     "time": start_str,
+            #     "lineStyle": 0,
+            #     "lineWidth": 0,
+            #     "extend": "right",
+            #     "axisLabelVisible": True,
+            #     "color": "#6b7280",
+            # })
+
+            # ----- touchpoint markers (optional) -----
+            if include_touches:
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time)
+                )
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time)
+                )
 
         logger.info(
             "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",
