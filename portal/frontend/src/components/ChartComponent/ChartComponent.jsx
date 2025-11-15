@@ -1503,22 +1503,54 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [symbolDraft, symbol, handleApply]);
 
-  const applySymbol = useCallback((sym) => {
-    const sanitized = (sym ?? '').toString().trim().toUpperCase();
+  const applySymbol = useCallback((input) => {
+    const payload = typeof input === 'string' ? { symbol: input } : (input ?? {});
+    const rawSymbol = payload.symbol ?? payload.s;
+    const sanitized = (rawSymbol ?? '').toString().trim().toUpperCase();
     if (!sanitized) {
       setPalOpen(false);
       return;
     }
 
-    const changed = sanitized !== symbol;
+    const normalizedInterval = (payload.timeframe ?? payload.interval ?? '').toString().trim();
+    const normalizedDatasource = (payload.datasource ?? '').toString().trim().toUpperCase();
+    const normalizedExchange = (payload.exchange ?? '').toString().trim().toUpperCase();
+
+    const overrides = { symbol: sanitized };
+    let changed = sanitized !== symbol;
+
+    if (normalizedInterval) {
+      overrides.interval = normalizedInterval;
+      if (normalizedInterval !== interval) {
+        changed = true;
+        setInterval(normalizedInterval);
+      }
+    }
+
+    if (normalizedDatasource) {
+      overrides.datasource = normalizedDatasource;
+      if (normalizedDatasource !== datasource) {
+        changed = true;
+        setDatasource(normalizedDatasource);
+      }
+    }
+
+    if (normalizedExchange) {
+      overrides.exchange = normalizedExchange;
+      if (normalizedExchange !== exchange) {
+        changed = true;
+        setExchange(normalizedExchange);
+      }
+    }
+
     setSymbolDraft(sanitized);
     setSymbol(sanitized);
     setPalOpen(false);
 
     if (changed && modeRef.current !== 'live') {
-      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+      void handleApply(overrides, { behavior: 'replace' });
     }
-  }, [symbol, handleApply]);
+  }, [symbol, interval, datasource, exchange, handleApply]);
 
   const handleLiveLookbackCommit = useCallback(() => {
     const parsed = Number.parseInt(liveLookbackInput, 10);

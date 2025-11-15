@@ -1,10 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SYMBOL_GROUPS } from '../data/symbol-presets';
 
 const FAV_KEY = 'qt.symbolFavorites';
 const DEFAULT_FAVORITES = ['BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'LINK/USDT'];
 
 const normalizeSymbol = (value) => (value ?? '').toString().trim().toUpperCase();
+
+const buildPickPayload = (item) => {
+  const symbol = normalizeSymbol(item?.symbol ?? item?.s);
+  if (!symbol) return null;
+  const timeframe = (item?.timeframe ?? item?.interval ?? '').toString().trim();
+  const datasource = (item?.datasource ?? '').toString().trim().toUpperCase();
+  const exchange = (item?.exchange ?? '').toString().trim().toUpperCase();
+  return {
+    symbol,
+    timeframe: timeframe || undefined,
+    datasource: datasource || undefined,
+    exchange: exchange || undefined,
+  };
+};
 
 const hasLocalStorage = () => {
   try {
@@ -49,8 +63,16 @@ export default function SymbolPalette({ open, onClose, onPick }) {
 
   useEffect(() => { if (!open) setQ(''); }, [open]);
 
-  const flat = useMemo(() =>
-    SYMBOL_GROUPS.flatMap(g => g.items.map(it => ({ ...it, group: g.title }))), []);
+  const flat = useMemo(
+    () => SYMBOL_GROUPS.flatMap((group) =>
+      group.items.map((item) => ({
+        ...item,
+        group: group.title,
+        symbol: normalizeSymbol(item.symbol ?? item.s),
+      })),
+    ),
+    [],
+  );
   const results = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return flat;
@@ -74,12 +96,21 @@ export default function SymbolPalette({ open, onClose, onPick }) {
     });
   };
 
+  const emitPick = useCallback((item) => {
+    const payload = buildPickPayload(item);
+    if (!payload) return;
+    onPick?.(payload);
+  }, [onPick]);
+
   const handleDirectPick = () => {
     const trimmed = normalizeSymbol(q);
     if (!trimmed) return;
     const matched = results.find((x) => normalizeSymbol(x.s) === trimmed);
-    const symbol = matched ? matched.s : trimmed;
-    onPick?.(symbol);
+    if (matched) {
+      emitPick(matched);
+    } else {
+      emitPick({ s: trimmed });
+    }
     onClose?.();
   };
 
@@ -154,13 +185,14 @@ export default function SymbolPalette({ open, onClose, onPick }) {
                   const entry =
                     preset || {
                       s: normalized,
+                      symbol: normalized,
                       name: 'Custom symbol',
                       note: 'Manual entry',
                       group: 'Favorites',
                       edge: '',
                     };
                   return (
-                    <Row key={`fav-${normalized}`} x={entry} onPick={onPick} onFav={toggleFav} fav />
+                    <Row key={`fav-${normalized}`} x={entry} onPick={emitPick} onFav={toggleFav} fav />
                   );
                 })}
               </div>
@@ -174,7 +206,7 @@ export default function SymbolPalette({ open, onClose, onPick }) {
             </div>
             <div className="flex max-h-[45vh] flex-col gap-2 overflow-auto pr-1">
               {results.map((x) => (
-                <Row key={`${x.group}-${x.s}`} x={x} onPick={onPick} onFav={toggleFav} fav={isFav(x.s)} />
+                <Row key={`${x.group}-${x.s}`} x={x} onPick={emitPick} onFav={toggleFav} fav={isFav(x.s)} />
               ))}
             </div>
           </div>
@@ -196,7 +228,7 @@ function Row({ x, onPick, onFav, fav }) {
   return (
     <div className="group flex w-full items-center justify-between gap-3 rounded-2xl border border-white/8 bg-[#0b1324]/70 px-4 py-3 transition hover:border-[color:var(--accent-alpha-35)] hover:bg-[#101d34]">
       <button
-        onClick={() => onPick(x.s)}
+        onClick={() => onPick?.(x)}
         className="flex-1 text-left"
       >
         <div className="font-semibold tracking-tight text-slate-100">

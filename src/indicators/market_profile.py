@@ -844,46 +844,46 @@ class MarketProfileIndicator(BaseIndicator):
             float(vah),
         )
 
-            # ----- price lines (Lightweight "price line" settings) -----
-            # # VAL (solid)
-            # out_lines.append({
-            #     "price": float(val),
-            #     "title": "VAL",
-            #     "time": start_str,          # when the line begins
-            #     "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
-            #     "lineWidth": 0,
-            #     "extend": "right",
-            #     "axisLabelVisible": True,
-            #     "color": "#6b7280",
-            # })
-            # # POC (dashed) — if available
-            # if poc is not None:
-            #     out_lines.append({
-            #         "price": float(poc),
-            #         "title": "POC",
-            #         "time": _to_unix_s(start_ts),
-            #         "lineStyle": 2,         # dashed to distinguish from VA band edges
-            #         "lineWidth": 0,
-            #         "extend": "right",
-            #         "axisLabelVisible": False,
-            #         "color": "#f59e0b",
-            #     })
-            # # VAH (solid)
-            # out_lines.append({
-            #     "price": float(vah),
-            #     "title": "VAH",
-            #     "time": start_str,
-            #     "lineStyle": 0,
-            #     "lineWidth": 0,
-            #     "extend": "right",
-            #     "axisLabelVisible": True,
-            #     "color": "#6b7280",
-            # })
+        # ----- price lines (Lightweight "price line" settings) -----
+        # # VAL (solid)
+        # out_lines.append({
+        #     "price": float(val),
+        #     "title": "VAL",
+        #     "time": start_str,          # when the line begins
+        #     "lineStyle": 0,             # 0=Solid, 2=Dashed (Lightweight enum)
+        #     "lineWidth": 0,
+        #     "extend": "right",
+        #     "axisLabelVisible": True,
+        #     "color": "#6b7280",
+        # })
+        # # POC (dashed) — if available
+        # if poc is not None:
+        #     out_lines.append({
+        #         "price": float(poc),
+        #         "title": "POC",
+        #         "time": _to_unix_s(start_ts),
+        #         "lineStyle": 2,         # dashed to distinguish from VA band edges
+        #         "lineWidth": 0,
+        #         "extend": "right",
+        #         "axisLabelVisible": False,
+        #         "color": "#f59e0b",
+        #     })
+        # # VAH (solid)
+        # out_lines.append({
+        #     "price": float(vah),
+        #     "title": "VAH",
+        #     "time": start_str,
+        #     "lineStyle": 0,
+        #     "lineWidth": 0,
+        #     "extend": "right",
+        #     "axisLabelVisible": True,
+        #     "color": "#6b7280",
+        # })
 
-            # ----- touchpoint markers (optional) -----
-            if include_touches:
-                out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
-                out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+        # ----- touchpoint markers (optional) -----
+        if include_touches:
+            out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
+            out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
 
         logger.info(
             "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",
