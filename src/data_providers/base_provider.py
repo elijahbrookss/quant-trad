@@ -28,6 +28,7 @@ class DataSource(str, Enum):
 class BaseDataProvider(ABC):
     _dsn = os.getenv("PG_DSN")
     _table = os.getenv("OHLC_TABLE")
+    _closures_table = os.getenv("OHLC_CLOSURES_TABLE", "portal_ohlc_closures")
 
     _engine = None
 
@@ -72,10 +73,23 @@ class BaseDataProvider(ABC):
         SELECT create_hypertable('{self._table}', 'timestamp', if_not_exists => TRUE);
         """
 
+        ddl_closures = f"""
+        CREATE TABLE IF NOT EXISTS {self._closures_table} (
+            datasource TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            start_ts TIMESTAMPTZ NOT NULL,
+            end_ts TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (datasource, symbol, interval, start_ts, end_ts)
+        );
+        """
+
         try:
             with self._engine.begin() as conn:
                 conn.execute(text(ddl_create))
                 conn.execute(text(ddl_hypertable))
+                conn.execute(text(ddl_closures))
             logger.info("Schema ensured for table '%s'.", self._table)
         except SQLAlchemyError as e:
             logger.exception("Failed to ensure schema for '%s': %s", self._table, e)
@@ -164,6 +178,168 @@ class BaseDataProvider(ABC):
             filtered.append((start, end))
 
         return filtered
+
+    @staticmethod
+    def _subtract_ranges(
+        ranges: List[Tuple[pd.Timestamp, pd.Timestamp]],
+        closures: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        if not closures:
+            return ranges
+
+        result: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        for start, end in ranges:
+            segments = [(start, end)]
+            for closure_start, closure_end in closures:
+                updated: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+                for seg_start, seg_end in segments:
+                    if closure_end <= seg_start or closure_start >= seg_end:
+                        updated.append((seg_start, seg_end))
+                        continue
+
+                    if seg_start < closure_start:
+                        updated.append((seg_start, closure_start))
+                    if closure_end < seg_end:
+                        updated.append((closure_end, seg_end))
+                segments = updated
+                if not segments:
+                    break
+            result.extend(segments)
+
+        filtered: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        for start, end in result:
+            if end <= start:
+                continue
+            filtered.append((start, end))
+
+        return filtered
+
+    def _load_closure_ranges(
+        self,
+        ctx: DataContext,
+        requested_start: pd.Timestamp,
+        requested_end: pd.Timestamp,
+    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+        if not self._engine:
+            return []
+
+        query = text(
+            f"""
+            SELECT start_ts, end_ts
+            FROM {self._closures_table}
+            WHERE datasource = :datasource
+              AND symbol = :symbol
+              AND interval = :interval
+              AND NOT (end_ts <= :request_start OR start_ts >= :request_end)
+            ORDER BY start_ts
+            """
+        )
+
+        try:
+            with self._engine.begin() as conn:
+                rows = conn.execute(
+                    query,
+                    {
+                        "datasource": self.get_datasource(),
+                        "symbol": ctx.symbol,
+                        "interval": ctx.interval,
+                        "request_start": requested_start,
+                        "request_end": requested_end,
+                    },
+                ).fetchall()
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to load closure ranges for %s [%s]: %s", ctx.symbol, ctx.interval, exc)
+            return []
+
+        closures: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        for row in rows:
+            closures.append((pd.to_datetime(row[0], utc=True), pd.to_datetime(row[1], utc=True)))
+
+        return closures
+
+    def _record_closure_range(
+        self,
+        ctx: DataContext,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ):
+        if not self._engine or end <= start:
+            return
+
+        start_ts = pd.to_datetime(start, utc=True)
+        end_ts = pd.to_datetime(end, utc=True)
+
+        overlap_query = text(
+            f"""
+            SELECT start_ts, end_ts FROM {self._closures_table}
+            WHERE datasource = :datasource
+              AND symbol = :symbol
+              AND interval = :interval
+              AND NOT (end_ts <= :start_ts OR start_ts >= :end_ts)
+            """
+        )
+
+        delete_query = text(
+            f"""
+            DELETE FROM {self._closures_table}
+            WHERE datasource = :datasource
+              AND symbol = :symbol
+              AND interval = :interval
+              AND NOT (end_ts <= :start_ts OR start_ts >= :end_ts)
+            """
+        )
+
+        insert_query = text(
+            f"""
+            INSERT INTO {self._closures_table}
+                (datasource, symbol, interval, start_ts, end_ts)
+            VALUES (:datasource, :symbol, :interval, :start_ts, :end_ts)
+            ON CONFLICT (datasource, symbol, interval, start_ts, end_ts) DO NOTHING
+            """
+        )
+
+        params = {
+            "datasource": self.get_datasource(),
+            "symbol": ctx.symbol,
+            "interval": ctx.interval,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+        }
+
+        try:
+            with self._engine.begin() as conn:
+                rows = conn.execute(overlap_query, params).fetchall()
+                if rows:
+                    start_ts = min(start_ts, *(pd.to_datetime(row[0], utc=True) for row in rows))
+                    end_ts = max(end_ts, *(pd.to_datetime(row[1], utc=True) for row in rows))
+                    conn.execute(
+                        delete_query,
+                        {
+                            **params,
+                            "start_ts": start_ts,
+                            "end_ts": end_ts,
+                        },
+                    )
+
+                conn.execute(
+                    insert_query,
+                    {
+                        **params,
+                        "start_ts": start_ts,
+                        "end_ts": end_ts,
+                    },
+                )
+
+            logger.info(
+                "Recorded scheduled closure for %s [%s]: %s -> %s",
+                ctx.symbol,
+                ctx.interval,
+                start_ts.isoformat(),
+                end_ts.isoformat(),
+            )
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to record closure for %s [%s]: %s", ctx.symbol, ctx.interval, exc)
+            return
 
     def _write_dataframe(self, df: pd.DataFrame, ctx: DataContext) -> int:
         if df.empty:
@@ -406,6 +582,10 @@ class BaseDataProvider(ABC):
                 ctx.interval,
             )
 
+            closures = self._load_closure_ranges(ctx, requested_start, requested_end)
+            if closures:
+                missing_ranges = self._subtract_ranges(missing_ranges, closures)
+
             supplemental_frames = []
             for start, end in missing_ranges:
                 if end <= start:
@@ -433,16 +613,31 @@ class BaseDataProvider(ABC):
                     continue
 
                 if segment is None or segment.empty:
-                    logger.warning(
-                        "Partial fetch for %s [%s] returned no rows for %s to %s.",
+                    logger.info(
+                        "Partial fetch for %s [%s] returned no rows for %s to %s; caching closure.",
                         ctx.symbol,
                         ctx.interval,
                         start.isoformat(),
                         end.isoformat(),
                     )
+                    self._record_closure_range(ctx, start, end)
                     continue
 
                 segment = segment.copy()
+                segment_ts = pd.to_datetime(segment["timestamp"], utc=True)
+                segment["timestamp"] = segment_ts
+                in_window = segment[(segment_ts >= start) & (segment_ts < end)]
+                if in_window.empty:
+                    logger.info(
+                        "Partial fetch for %s [%s] produced data outside %s -> %s; caching closure.",
+                        ctx.symbol,
+                        ctx.interval,
+                        start.isoformat(),
+                        end.isoformat(),
+                    )
+                    self._record_closure_range(ctx, start, end)
+                    continue
+
                 segment["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
                 segment["datasource"] = self.get_datasource()
                 segment["interval"] = ctx.interval

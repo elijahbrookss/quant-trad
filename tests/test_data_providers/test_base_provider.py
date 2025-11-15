@@ -35,3 +35,34 @@ def test_collect_missing_ranges_reports_trailing_gap_only_when_missing():
     missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
 
     assert missing == [(pd.Timestamp("2024-01-01T03:00:00Z"), end)]
+
+
+def test_subtract_ranges_removes_known_closures():
+    """Closures are carved out of missing windows."""
+
+    start = pd.Timestamp("2024-01-01T00:00:00Z")
+    ranges = [(start, start + pd.Timedelta(hours=6))]
+    closures = [
+        (start + pd.Timedelta(hours=1), start + pd.Timedelta(hours=2)),
+        (start + pd.Timedelta(hours=4), start + pd.Timedelta(hours=5)),
+    ]
+
+    remaining = BaseDataProvider._subtract_ranges(ranges, closures)
+
+    assert remaining == [
+        (start, start + pd.Timedelta(hours=1)),
+        (start + pd.Timedelta(hours=2), start + pd.Timedelta(hours=4)),
+        (start + pd.Timedelta(hours=5), start + pd.Timedelta(hours=6)),
+    ]
+
+
+def test_subtract_ranges_drops_fully_covered_segments():
+    """Missing ranges vanish once fully covered by closures."""
+
+    start = pd.Timestamp("2024-01-01T00:00:00Z")
+    ranges = [(start, start + pd.Timedelta(hours=3))]
+    closures = [(start - pd.Timedelta(minutes=30), start + pd.Timedelta(hours=3))]
+
+    remaining = BaseDataProvider._subtract_ranges(ranges, closures)
+
+    assert remaining == []
