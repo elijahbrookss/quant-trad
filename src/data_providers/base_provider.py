@@ -145,9 +145,17 @@ class BaseDataProvider(ABC):
                     missing.append((gap_start, gap_end))
 
         last = ordered[-1]
-        if requested_end - last > tolerance:
-            start = max(last, requested_start)
-            missing.append((start, requested_end))
+        effective_end = requested_end
+        trailing_start = max(last, requested_start)
+
+        if has_step:
+            effective_end = max(requested_start, requested_end - step)
+            trailing_start = last + step
+
+        if effective_end - last > tolerance:
+            trailing_start = max(trailing_start, requested_start)
+            if trailing_start < requested_end:
+                missing.append((trailing_start, requested_end))
 
         filtered: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
         for start, end in missing:

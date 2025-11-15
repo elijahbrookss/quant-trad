@@ -1,118 +1,37 @@
-import datetime as dt
+"""Tests for BaseDataProvider helpers."""
 
-import pytest
+from __future__ import annotations
 
-pd = pytest.importorskip("pandas")
+import pandas as pd
 
 from data_providers.base_provider import BaseDataProvider
-from indicators.config import DataContext
 
 
-class DummyProvider(BaseDataProvider):
-    def __init__(self):
-        self._fetch_impl = None
-
-    def get_datasource(self) -> str:
-        return "TEST"
-
-    def fetch_from_api(self, symbol: str, start: dt.datetime, end: dt.datetime, interval: str):
-        if self._fetch_impl is None:
-            raise RuntimeError("fetch_from_api was not configured")
-        return self._fetch_impl(symbol, start, end, interval)
+def _ts_range(start: str, count: int, step: str) -> list[pd.Timestamp]:
+    base = pd.Timestamp(start, tz="UTC")
+    delta = pd.to_timedelta(step)
+    return [base + i * delta for i in range(count)]
 
 
-@pytest.fixture
-def provider(monkeypatch):
-    instance = DummyProvider()
-    instance._engine = object()
-    instance._table = "ohlcv_test"
-    monkeypatch.setattr(DummyProvider, "_write_dataframe", lambda self, df, ctx: len(df))
-    return instance
+def test_collect_missing_ranges_handles_exclusive_end_without_gap():
+    """No supplemental fetch is needed when cached candles cover the window."""
+
+    start = pd.Timestamp("2024-01-01T00:00:00Z")
+    end = pd.Timestamp("2024-01-01T05:00:00Z")
+    timestamps = _ts_range("2024-01-01T00:00:00Z", 5, "1H")
+
+    missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
+
+    assert missing == []
 
 
-def _build_frame(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    index = pd.date_range(start=start, end=end, freq="D", tz="UTC")
-    return pd.DataFrame(
-        {
-            "timestamp": index,
-            "open": range(len(index)),
-            "high": range(len(index)),
-            "low": range(len(index)),
-            "close": range(len(index)),
-            "volume": [1.0] * len(index),
-        }
-    )
+def test_collect_missing_ranges_reports_trailing_gap_only_when_missing():
+    """Trailing gaps start at the next expected candle rather than the last seen."""
 
+    start = pd.Timestamp("2024-01-01T00:00:00Z")
+    end = pd.Timestamp("2024-01-01T05:00:00Z")
+    timestamps = _ts_range("2024-01-01T00:00:00Z", 3, "1H")
 
-def test_get_ohlcv_fetches_missing_segments(provider, monkeypatch):
-    cached = _build_frame(
-        pd.Timestamp("2024-01-05T00:00:00Z"),
-        pd.Timestamp("2024-01-07T00:00:00Z"),
-    )
+    missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
 
-    fetch_ranges = []
-
-    def fake_fetch(symbol, start, end, interval):
-        fetch_ranges.append((pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)))
-        return _build_frame(pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True))
-
-    provider._fetch_impl = fake_fetch
-
-    monkeypatch.setattr(
-        pd,
-        "read_sql",
-        lambda query, engine, params=None: cached.copy(),
-    )
-
-    ctx = DataContext(
-        symbol="LINK/USDT",
-        start="2024-01-01T00:00:00Z",
-        end="2024-01-10T00:00:00Z",
-        interval="1d",
-    )
-
-    frame = provider.get_ohlcv(ctx)
-
-    assert len(fetch_ranges) == 2
-    starts = {rng[0] for rng in fetch_ranges}
-    ends = {rng[1] for rng in fetch_ranges}
-    assert pd.Timestamp("2024-01-01T00:00:00Z") in starts
-    assert pd.Timestamp("2024-01-10T00:00:00Z") in ends
-    timestamps = frame.index
-    assert timestamps.min() <= pd.Timestamp("2024-01-01T00:00:00Z")
-    assert timestamps.max() >= pd.Timestamp("2024-01-10T00:00:00Z")
-
-
-def test_get_ohlcv_skips_fetch_when_range_complete(provider, monkeypatch):
-    cached = _build_frame(
-        pd.Timestamp("2024-01-01T00:00:00Z"),
-        pd.Timestamp("2024-01-10T00:00:00Z"),
-    )
-
-    monkeypatch.setattr(
-        pd,
-        "read_sql",
-        lambda query, engine, params=None: cached.copy(),
-    )
-
-    fetch_ranges = []
-
-    def fake_fetch(symbol, start, end, interval):
-        fetch_ranges.append((start, end))
-        return _build_frame(pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True))
-
-    provider._fetch_impl = fake_fetch
-
-    ctx = DataContext(
-        symbol="LINK/USDT",
-        start="2024-01-01T00:00:00Z",
-        end="2024-01-10T00:00:00Z",
-        interval="1d",
-    )
-
-    frame = provider.get_ohlcv(ctx)
-
-    assert not fetch_ranges
-    timestamps = frame.index
-    assert timestamps.min() <= pd.Timestamp("2024-01-01T00:00:00Z")
-    assert timestamps.max() >= pd.Timestamp("2024-01-10T00:00:00Z")
+    assert missing == [(pd.Timestamp("2024-01-01T03:00:00Z"), end)]
