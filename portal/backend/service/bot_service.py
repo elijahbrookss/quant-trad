@@ -398,11 +398,17 @@ def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
     """Return indicator metadata suitable for UI display."""
 
     indicators: List[Dict[str, object]] = []
-    for link in strategy.get("indicator_links", []) or []:
+    sources = strategy.get("indicator_links") or strategy.get("indicators") or []
+    for link in sources or []:
         if not isinstance(link, dict):
             continue
-        snapshot = dict(link.get("indicator_snapshot") or {})
-        indicator_id = link.get("indicator_id") or snapshot.get("id")
+        snapshot = dict(
+            link.get("indicator_snapshot")
+            or link.get("meta")
+            or link.get("snapshot")
+            or {}
+        )
+        indicator_id = link.get("indicator_id") or link.get("id") or snapshot.get("id")
         indicators.append(
             {
                 "id": indicator_id,
@@ -426,19 +432,26 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
     }
     selected: List[Dict[str, object]] = []
     for strategy_id in bot.get("strategy_ids", []) or []:
-        strategy = runtime_meta.get(strategy_id) or strategy_index.get(strategy_id)
-        if not strategy:
+        stored = strategy_index.get(strategy_id) or {}
+        runtime_entry = runtime_meta.get(strategy_id) or {}
+        if not stored and not runtime_entry:
             continue
-        instruments = runtime_meta.get(strategy_id, {}).get("instruments") or []
+        merged = dict(stored)
+        merged.update(runtime_entry)
+        instruments = (
+            runtime_entry.get("instruments")
+            or stored.get("instruments")
+            or []
+        )
         selected.append(
             {
-                "id": strategy["id"],
-                "name": strategy.get("name"),
-                "symbols": list(strategy.get("symbols") or []),
-                "timeframe": strategy.get("timeframe"),
-                "datasource": strategy.get("datasource") or bot.get("datasource"),
-                "exchange": strategy.get("exchange") or bot.get("exchange"),
-                "indicators": _indicator_meta(strategy),
+                "id": merged.get("id"),
+                "name": merged.get("name"),
+                "symbols": list(merged.get("symbols") or []),
+                "timeframe": merged.get("timeframe"),
+                "datasource": merged.get("datasource") or bot.get("datasource"),
+                "exchange": merged.get("exchange") or bot.get("exchange"),
+                "indicators": _indicator_meta(merged),
                 "instruments": instruments,
             }
         )

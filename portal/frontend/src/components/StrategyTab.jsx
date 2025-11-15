@@ -13,6 +13,7 @@ import {
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
+import { createInstrument } from '../adapters/instrument.adapter.js'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
@@ -45,6 +46,19 @@ const RULE_FORM_DEFAULT = {
     },
   ],
   enabled: true,
+}
+
+const INSTRUMENT_FORM_DEFAULT = {
+  symbol: '',
+  datasource: '',
+  exchange: '',
+  tick_size: '',
+  tick_value: '',
+  contract_size: '',
+  min_order_size: '',
+  quote_currency: '',
+  maker_fee_rate: '',
+  taker_fee_rate: '',
 }
 
 
@@ -624,6 +638,209 @@ function RuleFormModal({
   )
 }
 
+function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitting, error }) {
+  const [form, setForm] = useState(INSTRUMENT_FORM_DEFAULT)
+  const [localError, setLocalError] = useState(null)
+
+  useEffect(() => {
+    if (!open) {
+      setForm(INSTRUMENT_FORM_DEFAULT)
+      setLocalError(null)
+      return
+    }
+    setForm({
+      ...INSTRUMENT_FORM_DEFAULT,
+      ...(initialValues || {}),
+    })
+    setLocalError(null)
+  }, [open, initialValues])
+
+  if (!open) return null
+
+  const handleChange = (field) => (event) => {
+    const value = event?.target ? event.target.value : event
+    setForm((prev) => ({ ...prev, [field]: value ?? '' }))
+  }
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const payload = {
+      symbol: (form.symbol || '').trim().toUpperCase(),
+      datasource: (form.datasource || '').trim().toUpperCase() || null,
+      exchange: (form.exchange || '').trim() || null,
+      quote_currency: (form.quote_currency || '').trim().toUpperCase() || null,
+    }
+    const numericFields = [
+      'tick_size',
+      'tick_value',
+      'contract_size',
+      'min_order_size',
+      'maker_fee_rate',
+      'taker_fee_rate',
+    ]
+    numericFields.forEach((field) => {
+      const parsed = parseFloat(form[field])
+      payload[field] = Number.isFinite(parsed) ? parsed : null
+    })
+
+    if (!payload.symbol) {
+      setLocalError('Symbol is required for instrument metadata')
+      return
+    }
+    if (payload.tick_size == null && payload.tick_value == null) {
+      setLocalError('Provide at least a tick size or tick value')
+      return
+    }
+    setLocalError(null)
+    await onSubmit?.(payload)
+  }
+
+  const errorMessage = localError || error
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+        <header className="space-y-1">
+          <h3 className="text-lg font-semibold">Add instrument metadata</h3>
+          <p className="text-sm text-slate-400">
+            Define tick sizes, contract multipliers, and fee assumptions for this symbol.
+          </p>
+        </header>
+
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbol</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm uppercase tracking-[0.25em] focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.symbol}
+                onChange={handleChange('symbol')}
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Datasource</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm uppercase tracking-[0.3em] focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.datasource}
+                onChange={handleChange('datasource')}
+                placeholder="e.g. CCXT"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Exchange</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.exchange}
+                onChange={handleChange('exchange')}
+                placeholder="e.g. binanceus"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Quote currency</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm uppercase tracking-[0.2em] focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.quote_currency}
+                onChange={handleChange('quote_currency')}
+                placeholder="e.g. USDT"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick size</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.tick_size}
+                onChange={handleChange('tick_size')}
+                placeholder="0.0001"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick value</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.tick_value}
+                onChange={handleChange('tick_value')}
+                placeholder="e.g. 0.01"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Contract size</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.contract_size}
+                onChange={handleChange('contract_size')}
+                placeholder="1"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Min order size</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.min_order_size}
+                onChange={handleChange('min_order_size')}
+                placeholder="0.01"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Maker fee %</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.maker_fee_rate}
+                onChange={handleChange('maker_fee_rate')}
+                placeholder="0.001"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Taker fee %</label>
+              <input
+                type="number"
+                step="any"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.taker_fee_rate}
+                onChange={handleChange('taker_fee_rate')}
+                placeholder="0.001"
+              />
+            </div>
+          </div>
+
+          {errorMessage && <p className="text-xs text-rose-300">{errorMessage}</p>}
+
+          <footer className="flex items-center justify-end gap-2">
+            <ActionButton type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+              Cancel
+            </ActionButton>
+            <ActionButton type="submit" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Save metadata'}
+            </ActionButton>
+          </footer>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 const StrategyList = ({ strategies, selectedId, onSelect }) => {
   if (!strategies.length) {
     return (
@@ -1125,6 +1342,7 @@ const StrategyDetails = ({
   setSignalWindow,
   signalResult,
   signalsLoading,
+  onAddInstrument = () => {},
 }) => {
   if (!strategy) {
     return (
@@ -1149,6 +1367,49 @@ const StrategyDetails = ({
 
     setSignalWindow((prev) => ({ ...prev, [field]: value }))
   }
+
+  const instrumentMap = useMemo(() => {
+    const entries = Array.isArray(strategy.instruments) ? strategy.instruments : []
+    const map = new Map()
+    for (const entry of entries) {
+      const key = (entry.symbol || '').toUpperCase()
+      if (key) {
+        map.set(key, entry)
+      }
+    }
+    return map
+  }, [strategy.instruments])
+
+  const instrumentMessages = useMemo(
+    () => (Array.isArray(strategy.instrument_messages) ? strategy.instrument_messages : []),
+    [strategy.instrument_messages],
+  )
+
+  const formatInstrumentNumber = useCallback((value) => {
+    if (value === null || value === undefined || value === '') {
+      return '—'
+    }
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) {
+      if (Math.abs(numeric) >= 1) {
+        return numeric.toLocaleString(undefined, { maximumFractionDigits: 4 })
+      }
+      return numeric.toPrecision(4)
+    }
+    return value
+  }, [])
+
+  const handleAddInstrument = useCallback(
+    (symbol) => {
+      if (!symbol) return
+      onAddInstrument({
+        symbol,
+        datasource: strategy.datasource || '',
+        exchange: strategy.exchange || '',
+      })
+    },
+    [onAddInstrument, strategy.datasource, strategy.exchange],
+  )
 
   const handleSubmit = async (event) => {
     event.preventDefault()
@@ -1189,6 +1450,82 @@ const StrategyDetails = ({
           </ul>
         </div>
       )}
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-white">Instrument metadata</h4>
+        </div>
+        {instrumentMessages.length > 0 && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+            <p className="font-semibold text-amber-200">Metadata notes</p>
+            <ul className="mt-1 space-y-1">
+              {instrumentMessages.map((entry, idx) => (
+                <li key={`${entry.symbol || 'instrument'}-${idx}`}>
+                  <span className="font-semibold">{entry.symbol || 'Symbol'}:</span>{' '}
+                  {entry.message || 'No metadata stored'}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="space-y-3">
+          {(strategy.symbols || []).map((symbol) => {
+            const key = (symbol || '').toUpperCase()
+            const record = key ? instrumentMap.get(key) : null
+            const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)
+            return (
+              <div key={key || symbol} className="rounded-2xl border border-white/10 bg-[#111726] p-4 text-sm text-slate-200">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbol</p>
+                    <p className="text-lg font-semibold text-white">{symbol || '—'}</p>
+                  </div>
+                  <ActionButton variant="ghost" onClick={() => handleAddInstrument(symbol)}>
+                    {hasMetadata ? 'Update metadata' : 'Add metadata'}
+                  </ActionButton>
+                </div>
+                {hasMetadata ? (
+                  <dl className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-2">
+                    <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Tick size</dt>
+                      <dd className="text-base text-white">{formatInstrumentNumber(record.tick_size)}</dd>
+                    </div>
+                    <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Tick value</dt>
+                      <dd className="text-base text-white">
+                        {formatInstrumentNumber(record.tick_value)}{' '}
+                        {record.quote_currency || ''}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Contract size</dt>
+                      <dd className="text-base text-white">{formatInstrumentNumber(record.contract_size)}</dd>
+                    </div>
+                    <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
+                      <dd className="text-base text-white">
+                        {record.maker_fee_rate != null
+                          ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%`
+                          : '—'}{' '}
+                        /{' '}
+                        {record.taker_fee_rate != null
+                          ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%`
+                          : '—'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Min order size</dt>
+                      <dd className="text-base text-white">{formatInstrumentNumber(record.min_order_size)}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="mt-3 text-sm text-slate-400">No tick or fee metadata stored yet.</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </section>
 
       <section className="space-y-4">
         <h4 className="text-sm font-semibold text-white">Indicators</h4>
@@ -1318,6 +1655,9 @@ const StrategyTab = ({ chartId }) => {
   const [savingRule, setSavingRule] = useState(false)
   const [signalsLoading, setSignalsLoading] = useState(false)
   const [signalResult, setSignalResult] = useState(null)
+  const [instrumentModal, setInstrumentModal] = useState({ open: false, defaults: null })
+  const [savingInstrument, setSavingInstrument] = useState(false)
+  const [instrumentError, setInstrumentError] = useState(null)
   const [signalWindow, setSignalWindow] = useState(() => {
     const end = new Date()
     const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -1334,6 +1674,26 @@ const StrategyTab = ({ chartId }) => {
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
     [strategies, selectedId],
   )
+
+  const openInstrumentModal = useCallback(
+    (defaults = {}) => {
+      const fallbackSymbol = defaults.symbol || selectedStrategy?.symbols?.[0] || ''
+      setInstrumentError(null)
+      setInstrumentModal({
+        open: true,
+        defaults: {
+          symbol: fallbackSymbol,
+          datasource: defaults.datasource || selectedStrategy?.datasource || '',
+          exchange: defaults.exchange || selectedStrategy?.exchange || '',
+        },
+      })
+    },
+    [selectedStrategy],
+  )
+
+  const closeInstrumentModal = useCallback(() => {
+    setInstrumentModal({ open: false, defaults: null })
+  }, [])
 
   const indicatorLookup = useMemo(() => {
     const map = new Map()
@@ -1538,6 +1898,22 @@ const StrategyTab = ({ chartId }) => {
     }
   }
 
+  const handleInstrumentSubmit = async (payload) => {
+    setSavingInstrument(true)
+    setInstrumentError(null)
+    try {
+      await createInstrument(payload)
+      info('instrument_saved', { symbol: payload.symbol })
+      await refreshStrategies()
+      closeInstrumentModal()
+    } catch (err) {
+      setInstrumentError(err?.message || 'Failed to save instrument metadata')
+      error('instrument_save_failed', err)
+    } finally {
+      setSavingInstrument(false)
+    }
+  }
+
   const handleDeleteStrategy = async (strategy) => {
     if (!strategy) return
     setErrorMessage(null)
@@ -1729,6 +2105,7 @@ const StrategyTab = ({ chartId }) => {
             setSignalWindow={setSignalWindow}
             signalResult={signalResult}
             signalsLoading={signalsLoading}
+            onAddInstrument={(defaults) => openInstrumentModal(defaults)}
           />
         </div>
       </div>
@@ -1749,6 +2126,15 @@ const StrategyTab = ({ chartId }) => {
         onSubmit={handleRuleSubmit}
         onCancel={closeRuleModal}
         submitting={savingRule}
+      />
+
+      <InstrumentFormModal
+        open={instrumentModal.open}
+        initialValues={instrumentModal.defaults}
+        onSubmit={handleInstrumentSubmit}
+        onCancel={closeInstrumentModal}
+        submitting={savingInstrument}
+        error={instrumentError}
       />
     </div>
   )

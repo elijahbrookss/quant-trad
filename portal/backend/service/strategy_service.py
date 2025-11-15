@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 
+from . import instrument_service
 from .indicator_service import generate_signals_for_instance, get_instance_meta
 from .storage import (
     delete_strategy as storage_delete_strategy,
@@ -703,6 +704,7 @@ class StrategyDefinition:
     indicator_ids: List[str] = field(default_factory=list)
     indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
+    instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -727,6 +729,38 @@ class StrategyDefinition:
             indicators.append(payload)
             if not active_meta:
                 missing.append(identifier)
+        instruments: List[Dict[str, Any]] = []
+        instrument_messages = list(self.instrument_messages)
+
+        def _message_exists(symbol: str) -> bool:
+            symbol_key = (symbol or "").upper()
+            for entry in instrument_messages:
+                if (entry.get("symbol") or "").upper() == symbol_key:
+                    return True
+            return False
+
+        for symbol in self.symbols:
+            record: Optional[Dict[str, Any]] = None
+            try:
+                record = instrument_service.resolve_instrument(
+                    self.datasource,
+                    self.exchange,
+                    symbol,
+                )
+            except Exception:
+                record = None
+            if record:
+                instruments.append(record)
+            else:
+                instruments.append({"symbol": symbol})
+                if not _message_exists(symbol):
+                    instrument_messages.append(
+                        {
+                            "symbol": symbol,
+                            "message": "No instrument metadata stored",
+                        }
+                    )
+
         return {
             "id": self.id,
             "name": self.name,
@@ -738,6 +772,8 @@ class StrategyDefinition:
             "indicator_ids": list(self.indicator_ids),
             "indicators": indicators,
             "missing_indicators": missing,
+            "instruments": instruments,
+            "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
@@ -879,6 +915,25 @@ class StrategyRegistry:
 
             self._records[strategy_id] = base
 
+    def _sync_instruments(self, record: StrategyDefinition) -> None:
+        """Auto-load instrument metadata for CCXT strategies."""
+
+        record.instrument_messages = []
+        datasource = (record.datasource or "").strip().upper()
+        if datasource != "CCXT":
+            return
+        for symbol in record.symbols:
+            _, error = instrument_service.auto_sync_instrument(
+                record.datasource,
+                record.exchange,
+                symbol,
+            )
+            if error:
+                record.instrument_messages.append({
+                    "symbol": symbol,
+                    "message": error,
+                })
+
     def list(self) -> List[Dict[str, Any]]:
         """Return serialised strategies for API responses."""
 
@@ -934,6 +989,7 @@ class StrategyRegistry:
             except KeyError:
                 meta = {}
             record.indicator_snapshots[inst_id] = meta
+        self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
         for inst_id in record.indicator_ids:
@@ -950,6 +1006,7 @@ class StrategyRegistry:
 
         record = self.get(strategy_id)
         record.update(**fields)
+        self._sync_instruments(record)
         storage_upsert_strategy(record.to_storage_payload())
         logger.info("strategy_updated | id=%s", strategy_id)
         return record.to_dict()

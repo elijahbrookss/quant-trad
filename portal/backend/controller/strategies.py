@@ -51,6 +51,8 @@ class StrategyOut(BaseModel):
     indicator_ids: List[str]
     indicators: List[Dict[str, Any]]
     missing_indicators: List[str]
+    instruments: List[Dict[str, Any]] = Field(default_factory=list)
+    instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
     rules: List[StrategyRuleOut]
     created_at: str
     updated_at: str
