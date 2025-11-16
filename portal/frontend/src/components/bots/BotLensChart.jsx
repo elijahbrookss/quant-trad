@@ -215,9 +215,11 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         const norm = adaptPayload(type, payload, color)
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
+            const price = toFiniteNumber(pl?.price)
+            if (!Number.isFinite(price)) return
             try {
               const handle = seriesRef.current.createPriceLine({
-                price: pl.price,
+                price,
                 color: pl.color ?? color ?? '#a5b4fc',
                 lineWidth: pl.lineWidth ?? 1,
                 lineStyle: pl.lineStyle ?? 0,
@@ -274,7 +276,30 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }
         const wantsSegments = paneSet.has('segment') || (Array.isArray(norm.segments) && norm.segments.length > 0)
         if (wantsSegments && Array.isArray(norm.segments) && norm.segments.length) {
-          const normalisedSegments = norm.segments.map((segment) => normaliseSegment(segment))
+          const normalisedSegments = norm.segments
+            .map((segment) => {
+              const normalised = normaliseSegment(segment)
+              if (!Number.isFinite(normalised.y2) && Number.isFinite(normalised.y1)) {
+                normalised.y2 = normalised.y1
+              }
+              if (!Number.isFinite(normalised.y1) && Number.isFinite(normalised.y2)) {
+                normalised.y1 = normalised.y2
+              }
+              if (!Number.isFinite(normalised.x2) && Number.isFinite(normalised.x1)) {
+                normalised.x2 = normalised.x1
+              }
+              if (!Number.isFinite(normalised.x1) && Number.isFinite(normalised.x2)) {
+                normalised.x1 = normalised.x2
+              }
+              return normalised
+            })
+            .filter(
+              (segment) =>
+                Number.isFinite(segment.x1) &&
+                Number.isFinite(segment.x2) &&
+                Number.isFinite(segment.y1) &&
+                Number.isFinite(segment.y2),
+            )
           segments.push(...normalisedSegments)
           if (type === 'bot_trade_rays') {
             tradeSegments.push(...normalisedSegments)
