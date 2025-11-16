@@ -64,6 +64,8 @@ const INSTRUMENT_FORM_DEFAULT = {
   taker_fee_rate: '',
 }
 
+const EMPTY_LIST = Object.freeze([])
+
 
 const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   const base =
@@ -115,8 +117,6 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     }
   }, [open, initialValues])
 
-  if (!open) return null
-
   const handleChange = (field) => (input) => {
     let value = input
     if (input && typeof input === 'object' && 'target' in input) {
@@ -156,6 +156,8 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     }
     await onSubmit(payload)
   }
+
+  if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
@@ -1384,13 +1386,13 @@ const StrategyDetails = ({
   signalsLoading,
   onAddInstrument = () => {},
 }) => {
-  if (!strategy) {
-    return (
-      <div className="rounded-2xl border border-dashed border-white/10 bg-[#121520] p-6 text-center text-sm text-slate-400">
-        Select a strategy to manage indicators, rules, and signal evaluations.
-      </div>
-    )
-  }
+  const hasStrategy = Boolean(strategy)
+  const strategyInstruments = Array.isArray(strategy?.instruments) ? strategy.instruments : EMPTY_LIST
+  const strategyInstrumentMessages = Array.isArray(strategy?.instrument_messages)
+    ? strategy.instrument_messages
+    : EMPTY_LIST
+  const strategyDatasource = strategy?.datasource || ''
+  const strategyExchange = strategy?.exchange || ''
 
   const handleDateRangeChange = (range) => {
     setSignalWindow((prev) => ({ ...prev, dateRange: range }))
@@ -1409,21 +1411,17 @@ const StrategyDetails = ({
   }
 
   const instrumentMap = useMemo(() => {
-    const entries = Array.isArray(strategy.instruments) ? strategy.instruments : []
     const map = new Map()
-    for (const entry of entries) {
+    for (const entry of strategyInstruments) {
       const key = (entry.symbol || '').toUpperCase()
       if (key) {
         map.set(key, entry)
       }
     }
     return map
-  }, [strategy.instruments])
+  }, [strategyInstruments])
 
-  const instrumentMessages = useMemo(
-    () => (Array.isArray(strategy.instrument_messages) ? strategy.instrument_messages : []),
-    [strategy.instrument_messages],
-  )
+  const instrumentMessages = strategyInstrumentMessages
 
   const formatInstrumentNumber = useCallback((value) => {
     if (value === null || value === undefined || value === '') {
@@ -1444,16 +1442,24 @@ const StrategyDetails = ({
       if (!symbol) return
       onAddInstrument({
         symbol,
-        datasource: strategy.datasource || '',
-        exchange: strategy.exchange || '',
+        datasource: strategyDatasource,
+        exchange: strategyExchange,
       })
     },
-    [onAddInstrument, strategy.datasource, strategy.exchange],
+    [onAddInstrument, strategyDatasource, strategyExchange],
   )
 
   const handleSubmit = async (event) => {
     event.preventDefault()
     await onRunSignals(signalWindow)
+  }
+
+  if (!hasStrategy) {
+    return (
+      <div className="rounded-2xl border border-dashed border-white/10 bg-[#121520] p-6 text-center text-sm text-slate-400">
+        Select a strategy to manage indicators, rules, and signal evaluations.
+      </div>
+    )
   }
 
   return (
