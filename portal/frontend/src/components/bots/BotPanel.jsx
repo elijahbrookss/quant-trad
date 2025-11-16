@@ -12,6 +12,7 @@ import {
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
+import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from '../atm/ATMConfigForm.jsx'
 
 const defaultForm = {
   name: '',
@@ -22,6 +23,8 @@ const defaultForm = {
   backtest_start: '',
   backtest_end: '',
   strategy_ids: [],
+  use_custom_atm: false,
+  atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
 }
 
 const STATUS_ORDER = {
@@ -133,6 +136,14 @@ export function BotPanel() {
     })
   }
 
+  const handleATMTemplateChange = useCallback((template) => {
+    setForm((prev) => ({ ...prev, atm_template: cloneATMTemplate(template) }))
+  }, [])
+
+  const toggleCustomATM = () => {
+    setForm((prev) => ({ ...prev, use_custom_atm: !prev.use_custom_atm }))
+  }
+
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
@@ -148,17 +159,26 @@ export function BotPanel() {
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
     try {
-      const payload = await createBot({
-        ...form,
+      const { use_custom_atm, atm_template, ...rest } = form
+      const payloadBody = {
+        ...rest,
         fetch_seconds: Number(form.fetch_seconds) || 0,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
-      })
+      }
+      if (use_custom_atm) {
+        payloadBody.risk = atm_template
+      }
+      const payload = await createBot(payloadBody)
       upsertBot(payload)
       setForm((prev) => ({
         ...defaultForm,
         strategy_ids: prev.strategy_ids,
         run_type: prev.run_type,
+        atm_template: use_custom_atm
+          ? cloneATMTemplate(atm_template)
+          : cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+        use_custom_atm: use_custom_atm && Boolean(payloadBody.risk),
       }))
     } catch (err) {
       setError(err?.message || 'Unable to create bot')
@@ -492,6 +512,30 @@ export function BotPanel() {
             </button>
           </div>
         </form>
+        <div className="rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">ATM override</p>
+              <p className="text-xs text-slate-400">Optional custom contracts/targets for this bot run.</p>
+            </div>
+            <button
+              type="button"
+              onClick={toggleCustomATM}
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${form.use_custom_atm ? 'border-emerald-400/40 text-emerald-200' : 'border-white/20 text-slate-300'}`}
+            >
+              {form.use_custom_atm ? 'Disable override' : 'Use override'}
+            </button>
+          </div>
+          {form.use_custom_atm ? (
+            <div className="mt-3">
+              <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-slate-400">
+              Bots will reuse each strategy's ATM template unless you enable an override.
+            </p>
+          )}
+        </div>
       </header>
 
       {error ? (

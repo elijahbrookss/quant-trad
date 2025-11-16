@@ -8,7 +8,7 @@ from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import instrument_service
-from .atm import merge_templates
+from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -43,7 +43,7 @@ def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
     """Merge user overrides with the default ladder template."""
 
     if not risk:
-        return merge_templates()
+        return {}
     return merge_templates(risk)
 
 
@@ -438,7 +438,12 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             continue
         merged = dict(stored)
         merged.update(runtime_entry)
-        atm_template = merge_templates(merged.get("atm_template"))
+        bot_override = bot.get("risk") or {}
+        override_payload = bot_override if bot_override and bot_override != DEFAULT_ATM_TEMPLATE else None
+        atm_template = merge_templates(
+            merged.get("atm_template"),
+            override_payload,
+        )
         instruments = (
             runtime_entry.get("instruments")
             or stored.get("instruments")

@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 from . import instrument_service
+from .atm import normalise_template
 from .indicator_service import generate_signals_for_instance, get_instance_meta
 from .storage import (
     delete_strategy as storage_delete_strategy,
@@ -691,6 +692,13 @@ class StrategyRule:
 
 
 @dataclass
+def _default_atm_template() -> Dict[str, Any]:
+    """Return a fresh ATM template for strategies."""
+
+    return normalise_template(None)
+
+
+@dataclass
 class StrategyDefinition:
     """Domain model describing a user-defined strategy."""
 
@@ -705,6 +713,7 @@ class StrategyDefinition:
     indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
+    atm_template: Dict[str, Any] = field(default_factory=_default_atm_template)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -775,6 +784,7 @@ class StrategyDefinition:
             "instruments": instruments,
             "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
+            "atm_template": dict(self.atm_template or {}),
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
@@ -791,6 +801,7 @@ class StrategyDefinition:
             "datasource": self.datasource,
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids),
+            "atm_template": dict(self.atm_template or {}),
         }
 
     def update(self, **fields: Any) -> None:
@@ -830,6 +841,8 @@ class StrategyDefinition:
                 for obsolete in removed:
                     self.indicator_snapshots.pop(obsolete, None)
                 self.indicator_ids = new_ids
+        if "atm_template" in fields and fields["atm_template"] is not None:
+            self.atm_template = normalise_template(fields["atm_template"])
         self.updated_at = _utcnow()
 
     def add_rule(self, rule: StrategyRule) -> None:
@@ -873,6 +886,7 @@ class StrategyRegistry:
             )
             base.created_at = _parse_timestamp(entry.get("created_at"))
             base.updated_at = _parse_timestamp(entry.get("updated_at"))
+            base.atm_template = normalise_template(entry.get("atm_template"))
 
             for link in entry.get("indicator_links", []):
                 indicator_id = str(link.get("indicator_id") or "").strip()
@@ -957,6 +971,7 @@ class StrategyRegistry:
         datasource: Optional[str] = None,
         exchange: Optional[str] = None,
         indicator_ids: Optional[Iterable[str]] = None,
+        atm_template: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new strategy record and return its payload."""
 
@@ -983,6 +998,7 @@ class StrategyRegistry:
             exchange=str(exchange).strip() if exchange else None,
             indicator_ids=list(dict.fromkeys(indicators)),
         )
+        record.atm_template = normalise_template(atm_template)
         for inst_id in record.indicator_ids:
             try:
                 meta = deepcopy(get_instance_meta(inst_id))
@@ -1461,6 +1477,7 @@ def create_strategy(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     indicator_ids: Optional[Iterable[str]] = None,
+    atm_template: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new strategy using the global registry."""
 
@@ -1472,6 +1489,7 @@ def create_strategy(
         datasource=datasource,
         exchange=exchange,
         indicator_ids=indicator_ids,
+        atm_template=atm_template,
     )
 
 

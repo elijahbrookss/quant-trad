@@ -375,6 +375,7 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.datasource = payload.get("datasource")
             record.exchange = payload.get("exchange")
             record.indicator_ids = list(payload.get("indicator_ids") or [])
+            record.atm_template = dict(payload.get("atm_template") or {})
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now

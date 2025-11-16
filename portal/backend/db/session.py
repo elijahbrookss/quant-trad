@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, List, Optional
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -90,25 +90,40 @@ class Database:
         if self._engine is None:
             return
         inspector = inspect(self._engine)
-        if not inspector.has_table("portal_bots"):
-            return
-        existing_columns = {col["name"] for col in inspector.get_columns("portal_bots")}
-        statements = []
-        if "run_type" not in existing_columns:
-            statements.append("ALTER TABLE portal_bots ADD COLUMN run_type VARCHAR(32) NOT NULL DEFAULT 'backtest'")
-        if "backtest_start" not in existing_columns:
-            statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_start TIMESTAMP NULL")
-        if "backtest_end" not in existing_columns:
-            statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_end TIMESTAMP NULL")
-        if not statements:
-            return
-        with self._engine.begin() as conn:
-            for statement in statements:
-                conn.execute(text(statement))
-        logger.info(
-            "portal_db_migrated | table=portal_bots | statements=%s",
-            ",".join(statements),
-        )
+
+        def _run_statements(table: str, stmts: List[str]) -> None:
+            if not stmts:
+                return
+            with self._engine.begin() as conn:  # type: ignore[arg-type]
+                for statement in stmts:
+                    conn.execute(text(statement))
+            logger.info(
+                "portal_db_migrated | table=%s | statements=%s",
+                table,
+                ",".join(stmts),
+            )
+
+        if inspector.has_table("portal_bots"):
+            bot_columns = {col["name"] for col in inspector.get_columns("portal_bots")}
+            bot_statements: List[str] = []
+            if "run_type" not in bot_columns:
+                bot_statements.append(
+                    "ALTER TABLE portal_bots ADD COLUMN run_type VARCHAR(32) NOT NULL DEFAULT 'backtest'"
+                )
+            if "backtest_start" not in bot_columns:
+                bot_statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_start TIMESTAMP NULL")
+            if "backtest_end" not in bot_columns:
+                bot_statements.append("ALTER TABLE portal_bots ADD COLUMN backtest_end TIMESTAMP NULL")
+            _run_statements("portal_bots", bot_statements)
+
+        if inspector.has_table("portal_strategies"):
+            strategy_columns = {col["name"] for col in inspector.get_columns("portal_strategies")}
+            strategy_statements: List[str] = []
+            if "atm_template" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN atm_template JSON NOT NULL DEFAULT '{}'"
+                )
+            _run_statements("portal_strategies", strategy_statements)
 
     @property
     def available(self) -> bool:

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from portal.backend.service.bot_runtime import BotRuntime, Candle
+from portal.backend.service.bot_runtime import BotRuntime, Candle, LadderRiskEngine
 from portal.backend.service import bot_service
 
 
@@ -249,3 +249,35 @@ def test_performance_meta_merges_indicator_and_atm_data(monkeypatch):
     entry = meta["strategies"][0]
     assert entry["indicators"][0]["id"] == "ind-1"
     assert entry["atm_template"]["take_profit_orders"][0]["ticks"] == 10
+
+
+@pytest.mark.unit
+def test_ladder_risk_engine_uses_strategy_template():
+    template = {
+        "contracts": 4,
+        "stop_ticks": 12,
+        "take_profit_orders": [
+            {"ticks": 10, "contracts": 1, "label": "Scout"},
+            {"ticks": 25, "contracts": 3, "label": "Runner"},
+        ],
+        "breakeven": {"target_index": 0},
+    }
+    instrument = {"tick_size": 0.25, "quote_currency": "USD"}
+    engine = LadderRiskEngine(template, instrument=instrument)
+    candle = Candle(
+        time=datetime.utcnow(),
+        open=100.0,
+        high=101.0,
+        low=99.5,
+        close=100.0,
+    )
+
+    trade = engine.maybe_enter(candle, "long")
+
+    assert trade is not None
+    assert len(trade.legs) == 2
+    assert trade.legs[0].name == "Scout"
+    assert trade.legs[0].contracts == 1
+    assert trade.legs[1].contracts == 3
+    expected_stop = candle.close - template["stop_ticks"] * instrument["tick_size"]
+    assert trade.stop_price == pytest.approx(expected_stop)

@@ -15,6 +15,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from . import indicator_service, strategy_service
+from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
 from .candle_service import fetch_ohlcv
 
 
@@ -318,18 +319,15 @@ class LadderRiskEngine:
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
     ):
-        self.config = {**DEFAULT_RISK, **(config or {})}
+        self.template = merge_templates(config)
         self.instrument = instrument or {}
         instrument_tick = _coerce_float(self.instrument.get("tick_size"))
-        config_tick = _coerce_float(self.config.get("tick_size"), DEFAULT_RISK["tick_size"])
+        config_tick = _coerce_float(self.template.get("tick_size"), DEFAULT_RISK["tick_size"])
         self.tick_size = float(instrument_tick or config_tick or DEFAULT_RISK["tick_size"])
-        targets: Sequence[int] = self.config.get("targets") or DEFAULT_RISK["targets"]
-        self.targets = [int(t) for t in targets]
-        self.stop_ticks = int(self.config.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
-        self.breakeven_trigger = int(
-            self.config.get("breakeven_trigger_ticks")
-            or DEFAULT_RISK["breakeven_trigger_ticks"]
-        )
+        self.orders = self._orders_from_template()
+        self.targets = [int(order["ticks"]) for order in self.orders]
+        self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
+        self.breakeven_trigger = self._breakeven_threshold()
         self.contract_size = _coerce_float(self.instrument.get("contract_size"), 1.0) or 1.0
         tick_value = _coerce_float(self.instrument.get("tick_value"))
         if tick_value is None:
@@ -340,7 +338,72 @@ class LadderRiskEngine:
         self.taker_fee = _coerce_float(self.instrument.get("taker_fee_rate"), 0.0) or 0.0
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
-        self._contracts = max(int(self.config.get("contracts") or len(self.targets)), 1)
+        logger.info(
+            "ladder_risk_configured | targets=%s | stop_ticks=%s | tick=%.5f | instrument=%s",
+            ",".join(str(order["ticks"]) for order in self.orders),
+            self.stop_ticks,
+            self.tick_size,
+            self.instrument.get("symbol"),
+        )
+
+    def _orders_from_template(self) -> List[Dict[str, Any]]:
+        orders: List[Dict[str, Any]] = []
+        entries = self.template.get("take_profit_orders") or []
+        for idx, entry in enumerate(entries):
+            ticks = _coerce_float(entry.get("ticks"))
+            if ticks is None:
+                continue
+            label = entry.get("label") or f"Target {idx + 1}"
+            contracts = int(entry.get("contracts") or 0)
+            orders.append(
+                {
+                    "label": label,
+                    "ticks": int(ticks),
+                    "contracts": max(contracts, 1),
+                }
+            )
+        if orders:
+            return orders
+
+        fallback_targets: Sequence[int] = (
+            self.template.get("targets")
+            or DEFAULT_RISK.get("targets")
+            or [20, 40, 60]
+        )
+        total_contracts = int(self.template.get("contracts") or len(fallback_targets) or 1)
+        distribution = self._distribute_contracts(len(fallback_targets), total_contracts)
+        built: List[Dict[str, Any]] = []
+        for idx, ticks in enumerate(fallback_targets):
+            built.append(
+                {
+                    "label": f"TP +{int(ticks)}",
+                    "ticks": int(ticks),
+                    "contracts": distribution[idx] if idx < len(distribution) else 1,
+                }
+            )
+        return built
+
+    @staticmethod
+    def _distribute_contracts(count: int, total: int) -> List[int]:
+        if count <= 0:
+            return []
+        slots = [0 for _ in range(count)]
+        total = total if total > 0 else count
+        for idx in range(total):
+            slots[idx % count] += 1
+        return slots
+
+    def _breakeven_threshold(self) -> int:
+        config = self.template.get("breakeven") or {}
+        ticks = _coerce_float(config.get("ticks"))
+        if ticks and ticks > 0:
+            return int(ticks)
+        if config.get("target_index") is not None and self.targets:
+            index = max(0, min(int(config.get("target_index") or 0), len(self.targets) - 1))
+            return int(self.targets[index])
+        fallback = self.template.get("breakeven_trigger_ticks")
+        value = _coerce_float(fallback) or DEFAULT_RISK["breakeven_trigger_ticks"]
+        return int(value)
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
         direction = "long" if direction == "long" else "short"
@@ -349,16 +412,16 @@ class LadderRiskEngine:
             candle.close - stop_distance if direction == "long" else candle.close + stop_distance
         )
         legs: List[Leg] = []
-        contracts = self._leg_contracts()
-        for idx, ticks in enumerate(self.targets):
+        for idx, order in enumerate(self.orders):
+            ticks = order.get("ticks", 0)
             distance = ticks * self.tick_size
             target = candle.close + distance if direction == "long" else candle.close - distance
             legs.append(
                 Leg(
-                    name=f"TP{ticks}",
+                    name=order.get("label") or f"TP{ticks}",
                     ticks=ticks,
                     target_price=target,
-                    contracts=contracts[idx] if idx < len(contracts) else 1,
+                    contracts=order.get("contracts", 1),
                 )
             )
         position = LadderPosition(
@@ -377,19 +440,6 @@ class LadderRiskEngine:
         )
         position.register_entry_fee()
         return position
-
-    def _leg_contracts(self) -> List[int]:
-        count = len(self.targets)
-        if count == 0:
-            return []
-        base = self._contracts // count
-        remainder = self._contracts % count
-        if base == 0:
-            return [1 for _ in range(count)]
-        distribution = [base for _ in range(count)]
-        for idx in range(remainder):
-            distribution[idx] += 1
-        return distribution
 
     def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
         if direction is None or self.active_trade is not None:
@@ -453,6 +503,7 @@ class StrategySeries:
     meta: Dict[str, Any] = field(default_factory=dict)
     last_consumed_epoch: int = 0
     instrument: Optional[Dict[str, Any]] = None
+    atm_template: Dict[str, Any] = field(default_factory=dict)
 
 
 class BotRuntime:
@@ -592,13 +643,26 @@ class BotRuntime:
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
         instrument = self._instrument_for(datasource, exchange, symbol)
-        risk_config = dict(self.config.get("risk") or {})
-        if instrument and instrument.get("tick_size") and not risk_config.get("tick_size"):
-            risk_config["tick_size"] = instrument.get("tick_size")
-        risk_engine = LadderRiskEngine(risk_config, instrument=instrument)
+        bot_override = self.config.get("risk") or {}
+        override_payload = bot_override if bot_override and bot_override != DEFAULT_ATM_TEMPLATE else None
+        atm_template = merge_templates(
+            strategy.get("atm_template"),
+            override_payload,
+        )
+        if instrument and instrument.get("tick_size") and not atm_template.get("tick_size"):
+            atm_template["tick_size"] = instrument.get("tick_size")
+        risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
         series_meta = dict(strategy)
         if instrument:
             series_meta["instrument"] = instrument
+        series_meta["atm_template"] = atm_template
+        logger.info(
+            "bot_runtime_series_ready | bot=%s | strategy=%s | contracts=%s | targets=%s",
+            self.bot_id,
+            strategy.get("id"),
+            atm_template.get("contracts"),
+            ",".join(str(order.get("ticks")) for order in atm_template.get("take_profit_orders", [])),
+        )
 
         return StrategySeries(
             strategy_id=str(strategy.get("id")),
@@ -624,6 +688,7 @@ class BotRuntime:
             window_end=end_iso,
             meta=series_meta,
             instrument=instrument,
+            atm_template=atm_template,
         )
 
     @staticmethod

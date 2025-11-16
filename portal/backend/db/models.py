@@ -70,6 +70,7 @@ class StrategyRecord(Base):
     datasource = Column(String(64), nullable=True)
     exchange = Column(String(64), nullable=True)
     indicator_ids = Column(JSON, nullable=False, default=list)
+    atm_template = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -85,6 +86,7 @@ class StrategyRecord(Base):
             "datasource": self.datasource,
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids or []),
+            "atm_template": dict(self.atm_template or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
