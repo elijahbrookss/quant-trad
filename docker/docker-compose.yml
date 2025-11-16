@@ -4,6 +4,7 @@ services:
     build:
       context: ..
       dockerfile: portal/frontend/Dockerfile
+      target: dev
     hostname: frontend.quanttrad
     labels:
       loki.job: quanttrad
@@ -11,7 +12,7 @@ services:
     environment:
       - VITE_API_BASE_URL=http://backend.quanttrad:8000
     ports:
-      - "5173:80"
+      - "5173:5173"
     depends_on:
       - backend
     networks:
