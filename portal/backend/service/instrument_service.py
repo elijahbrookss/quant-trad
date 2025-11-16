@@ -194,17 +194,37 @@ def _market_for_symbol(exchange_id: str, symbol: str) -> Dict[str, Any]:
     raise ValueError(f"Symbol {symbol} not found on {exchange_id}")
 
 
+def _tick_from_precision(value: object) -> Optional[float]:
+    """Return a tick increment derived from CCXT precision metadata."""
+
+    if value is None:
+        return None
+    # CCXT reports integers for decimal precision (e.g. 5 -> 0.00001)
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        integer = int(float(value))
+        if integer >= 0:
+            return float(10 ** (-integer))
+    numeric = _coerce_float(value)
+    if numeric in (None, 0):
+        return None
+    return float(numeric)
+
+
 def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
     precision = market.get("precision") or {}
     limits = market.get("limits") or {}
-    price_precision = _coerce_float(precision.get("price"))
-    if price_precision not in (None, 0):
+    price_precision_raw = precision.get("price")
+    tick_size = _tick_from_precision(price_precision_raw)
+    if tick_size not in (None, 0):
+        return tick_size
+    price_precision = _coerce_float(price_precision_raw)
+    if price_precision not in (None, 0) and price_precision < 1:
         return price_precision
     price_limit = limits.get("price") if isinstance(limits.get("price"), Mapping) else {}
     min_price = _coerce_float(price_limit.get("min"))
     if min_price not in (None, 0):
         return min_price
-    return None
+    return price_precision if price_precision not in (None, 0) else None
 
 
 def _instrument_payload_from_market(

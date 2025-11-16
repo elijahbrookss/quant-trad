@@ -461,9 +461,15 @@ class LadderRiskEngine:
 
     def stats(self) -> Dict[str, float]:
         legs = [leg for trade in self.trades for leg in trade.legs]
-        wins = sum(1 for leg in legs if leg.status == "target")
-        losses = sum(1 for leg in legs if leg.status == "stop")
-        total = wins + losses if wins + losses else 1
+        leg_wins = sum(1 for leg in legs if leg.status == "target")
+        leg_losses = sum(1 for leg in legs if leg.status == "stop")
+        completed = [trade for trade in self.trades if not trade.is_active()]
+        tolerance = 1e-8
+        trade_wins = sum(1 for trade in completed if trade.net_pnl > tolerance)
+        trade_losses = sum(1 for trade in completed if trade.net_pnl < -tolerance)
+        breakeven = max(len(completed) - trade_wins - trade_losses, 0)
+        completed_total = len(completed)
+        denominator = completed_total or 1
         long_trades = sum(1 for trade in self.trades if trade.direction == "long")
         short_trades = sum(1 for trade in self.trades if trade.direction == "short")
         gross = sum(trade.gross_pnl for trade in self.trades)
@@ -471,10 +477,12 @@ class LadderRiskEngine:
         net = gross - fees
         return {
             "total_trades": len(self.trades),
-            "legs_closed": wins + losses,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(wins / total, 4),
+            "completed_trades": completed_total,
+            "legs_closed": leg_wins + leg_losses,
+            "wins": trade_wins,
+            "losses": trade_losses,
+            "breakeven_trades": breakeven,
+            "win_rate": round(trade_wins / denominator, 4),
             "long_trades": long_trades,
             "short_trades": short_trades,
             "gross_pnl": round(gross, 4),
@@ -1143,9 +1151,11 @@ class BotRuntime:
     def _aggregate_stats(self) -> Dict[str, float]:
         summary = {
             "total_trades": 0,
+            "completed_trades": 0,
             "legs_closed": 0,
             "wins": 0,
             "losses": 0,
+            "breakeven_trades": 0,
             "long_trades": 0,
             "short_trades": 0,
         }
@@ -1170,7 +1180,7 @@ class BotRuntime:
                     currency = series_currency
                 elif currency != series_currency:
                     multi_currency = True
-        total = summary["wins"] + summary["losses"]
+        total = summary.get("completed_trades") or (summary["wins"] + summary["losses"])
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
         summary["gross_pnl"] = round(gross, 4)
         summary["fees_paid"] = round(fees, 4)

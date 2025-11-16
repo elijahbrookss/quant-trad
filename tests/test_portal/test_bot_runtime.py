@@ -1,8 +1,15 @@
 import math
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+
+if "pandas" not in sys.modules:  # pragma: no cover - testing convenience
+    sys.modules["pandas"] = SimpleNamespace(
+        DataFrame=object,
+        to_datetime=lambda *args, **kwargs: None,
+    )
 
 from portal.backend.service.bot_runtime import BotRuntime, Candle, LadderRiskEngine
 from portal.backend.service import bot_service
@@ -281,3 +288,68 @@ def test_ladder_risk_engine_uses_strategy_template():
     assert trade.legs[1].contracts == 3
     expected_stop = candle.close - template["stop_ticks"] * instrument["tick_size"]
     assert trade.stop_price == pytest.approx(expected_stop)
+
+
+@pytest.mark.unit
+def test_ladder_risk_engine_stats_count_trade_outcomes():
+    template = {
+        "contracts": 3,
+        "stop_ticks": 2,
+        "take_profit_orders": [
+            {"ticks": 1, "contracts": 1},
+            {"ticks": 2, "contracts": 2},
+        ],
+        "breakeven": {"target_index": 0},
+    }
+    instrument = {"tick_size": 1.0, "quote_currency": "USD"}
+    engine = LadderRiskEngine(template, instrument=instrument)
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    first_entry = Candle(time=start, open=100.0, high=100.0, low=100.0, close=100.0)
+    engine.maybe_enter(first_entry, "long")
+
+    # Hit the first target, then stop out remaining contracts at breakeven
+    engine.step(
+        Candle(
+            time=start + timedelta(minutes=1),
+            open=100.5,
+            high=101.2,
+            low=99.8,
+            close=101.0,
+        )
+    )
+    engine.step(
+        Candle(
+            time=start + timedelta(minutes=2),
+            open=100.2,
+            high=100.3,
+            low=99.5,
+            close=99.8,
+        )
+    )
+
+    second_entry = Candle(
+        time=start + timedelta(minutes=10),
+        open=102.0,
+        high=102.0,
+        low=102.0,
+        close=102.0,
+    )
+    engine.maybe_enter(second_entry, "long")
+    engine.step(
+        Candle(
+            time=start + timedelta(minutes=11),
+            open=102.0,
+            high=102.5,
+            low=99.0,
+            close=100.0,
+        )
+    )
+
+    stats = engine.stats()
+
+    assert stats["total_trades"] == 2
+    assert stats["wins"] == 1
+    assert stats["losses"] == 1
+    assert stats["breakeven_trades"] == 0
+    assert stats["win_rate"] == pytest.approx(0.5)
