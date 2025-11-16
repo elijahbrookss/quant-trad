@@ -8,6 +8,7 @@ from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import instrument_service
+from .atm import merge_templates
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -41,10 +42,9 @@ def _now_iso() -> str:
 def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
     """Merge user overrides with the default ladder template."""
 
-    config = dict(DEFAULT_RISK)
-    if isinstance(risk, dict):
-        config.update({k: risk[k] for k in risk if risk[k] is not None})
-    return config
+    if not risk:
+        return merge_templates()
+    return merge_templates(risk)
 
 
 def _coerce_isoformat(value: Optional[object]) -> Optional[str]:
@@ -438,6 +438,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             continue
         merged = dict(stored)
         merged.update(runtime_entry)
+        atm_template = merge_templates(merged.get("atm_template"))
         instruments = (
             runtime_entry.get("instruments")
             or stored.get("instruments")
@@ -453,6 +454,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
                 "exchange": merged.get("exchange") or bot.get("exchange"),
                 "indicators": _indicator_meta(merged),
                 "instruments": instruments,
+                "atm_template": atm_template,
             }
         )
     return {

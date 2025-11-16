@@ -14,6 +14,8 @@ import {
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
 import { createInstrument } from '../adapters/instrument.adapter.js'
+import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from './atm/ATMConfigForm.jsx'
+import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
@@ -30,6 +32,7 @@ const STRATEGY_FORM_DEFAULT = {
   datasource: '',
   exchange: '',
   symbols: '',
+  atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
 }
 
 const RULE_FORM_DEFAULT = {
@@ -78,11 +81,17 @@ const ActionButton = ({ variant = 'default', className = '', ...props }) => {
 }
 
 function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting }) {
-  const [form, setForm] = useState(STRATEGY_FORM_DEFAULT)
+  const [form, setForm] = useState(() => ({
+    ...STRATEGY_FORM_DEFAULT,
+    atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+  }))
 
   useEffect(() => {
     if (!open) {
-      setForm(STRATEGY_FORM_DEFAULT)
+      setForm({
+        ...STRATEGY_FORM_DEFAULT,
+        atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+      })
       return
     }
 
@@ -96,9 +105,13 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
           : initialValues.symbols || '',
+        atm_template: cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE),
       })
     } else {
-      setForm(STRATEGY_FORM_DEFAULT)
+      setForm({
+        ...STRATEGY_FORM_DEFAULT,
+        atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+      })
     }
   }, [open, initialValues])
 
@@ -117,6 +130,13 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
   }
 
+  const handleATMTemplateChange = useCallback((template) => {
+    setForm((prev) => ({
+      ...prev,
+      atm_template: cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE),
+    }))
+  }, [])
+
   const handleSubmit = async (event) => {
     event.preventDefault()
     const payload = {
@@ -129,6 +149,7 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         .split(/[\s,;]+/)
         .map((token) => token.trim())
         .filter(Boolean),
+      atm_template: cloneATMTemplate(form.atm_template),
     }
     if (Array.isArray(payload.symbols) && payload.symbols.length > 1) {
       payload.symbols = payload.symbols.slice(0, 1)
@@ -207,23 +228,42 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
                 placeholder="optional"
               />
             </div>
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Symbols
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.symbols}
-                onChange={handleChange('symbols')}
-                placeholder="e.g. BTCUSD, ETHUSD"
-              />
-            </div>
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              Symbols
+            </label>
+            <input
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              value={form.symbols}
+              onChange={handleChange('symbols')}
+              placeholder="e.g. BTCUSD, ETHUSD"
+            />
           </div>
+        </div>
 
-          <footer className="flex items-center justify-end gap-2">
-            <ActionButton type="button" variant="ghost" onClick={onCancel}>
-              Cancel
-            </ActionButton>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
+              <p className="text-xs text-slate-500">
+                Configure contracts, profit targets, breakeven, and trailing rules per entry.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="text-xs font-semibold text-[color:var(--accent-text-strong)] hover:underline"
+              onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}
+            >
+              Reset
+            </button>
+          </div>
+          <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+        </div>
+
+        <footer className="flex items-center justify-end gap-2">
+          <ActionButton type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </ActionButton>
             <ActionButton type="submit" disabled={submitting}>
               {submitting ? 'Saving…' : 'Save strategy'}
             </ActionButton>
@@ -1525,6 +1565,14 @@ const StrategyDetails = ({
             )
           })}
         </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-semibold text-white">ATM template</h4>
+          <p className="text-xs text-slate-400">Distribution of targets, contracts, and trailing rules.</p>
+        </div>
+        <ATMTemplateSummary template={strategy.atm_template} />
       </section>
 
       <section className="space-y-4">

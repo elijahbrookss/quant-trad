@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from portal.backend.service.bot_runtime import BotRuntime, Candle
+from portal.backend.service import bot_service
 
 
 def make_runtime(**overrides):
@@ -195,3 +196,56 @@ def test_visible_overlays_hide_future_profiles_and_markers():
     assert payload["boxes"][0]["start"] == first_start
     assert all(entry.get("time") == first_start for entry in payload.get("markers", []))
     assert all(entry.get("time") == first_start for entry in payload.get("touchPoints", []))
+
+
+@pytest.mark.unit
+def test_performance_meta_merges_indicator_and_atm_data(monkeypatch):
+    stored_strategy = {
+        "id": "strategy-1",
+        "name": "Breakout",
+        "symbols": ["ES"],
+        "timeframe": "1h",
+        "indicator_links": [
+            {
+                "indicator_id": "ind-1",
+                "indicator_snapshot": {
+                    "name": "Market profile",
+                    "type": "market_profile",
+                    "params": {"symbol": "ES", "interval": "1h"},
+                },
+            }
+        ],
+        "atm_template": {
+            "contracts": 2,
+            "take_profit_orders": [
+                {"ticks": 10, "contracts": 1},
+                {"ticks": 30, "contracts": 1},
+            ],
+        },
+    }
+
+    monkeypatch.setattr(
+        bot_service,
+        "load_strategies",
+        lambda: [stored_strategy],
+    )
+
+    bot = {
+        "id": "bot-1",
+        "name": "Test bot",
+        "strategy_ids": ["strategy-1"],
+        "strategies_meta": [
+            {
+                "id": "strategy-1",
+                "symbols": ["ES"],
+                "datasource": "TIMESCALE",
+            }
+        ],
+    }
+
+    meta = bot_service._performance_meta(bot)
+
+    assert meta["strategies"], "Expected at least one strategy entry"
+    entry = meta["strategies"][0]
+    assert entry["indicators"][0]["id"] == "ind-1"
+    assert entry["atm_template"]["take_profit_orders"][0]["ticks"] == 10
