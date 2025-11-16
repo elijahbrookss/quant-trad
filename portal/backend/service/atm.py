@@ -181,6 +181,9 @@ def normalise_template(
     else:
         payload = template
 
+    payload_meta = payload.get("_meta") if isinstance(payload.get("_meta"), Mapping) else {}
+    meta: Dict[str, Any] = dict(result.get("_meta") or {})
+
     if payload.get("contracts") is not None:
         result["contracts"] = max(_coerce_int(payload.get("contracts"), result["contracts"]) or 1, 1)
 
@@ -204,6 +207,15 @@ def normalise_template(
     result["breakeven"] = _normalise_breakeven(payload, result.get("breakeven", {}))
     result["trailing"] = _normalise_trailing(payload, result.get("trailing", {}))
 
+    def _should_override(field: str, provided: Any) -> bool:
+        flag = payload_meta.get(f"{field}_override")
+        if flag is not None:
+            return bool(flag)
+        if provided is None:
+            return False
+        current = result.get(field)
+        return provided != current
+
     for key in (
         "tick_size",
         "tick_value",
@@ -212,8 +224,17 @@ def normalise_template(
         "taker_fee_rate",
         "quote_currency",
     ):
-        if payload.get(key) is not None:
-            result[key] = payload.get(key)
+        provided = payload.get(key) if isinstance(payload, Mapping) else None
+        if _should_override(key, provided):
+            result[key] = provided
+            meta[f"{key}_override"] = True
+        else:
+            meta[f"{key}_override"] = False
+
+    if meta:
+        result["_meta"] = meta
+    elif "_meta" in result:
+        result.pop("_meta", None)
 
     return result
 

@@ -24,7 +24,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
   const statEntries = useMemo(() => {
-    return Object.entries(payload?.stats || {}).filter(([key]) => key !== 'quote_currency')
+    const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
+    return Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
   }, [payload?.stats])
 
   const formatTimestamp = useCallback((value) => {

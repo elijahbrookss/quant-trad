@@ -321,21 +321,55 @@ class LadderRiskEngine:
     ):
         self.template = merge_templates(config)
         self.instrument = instrument or {}
+        config_tick = _coerce_float(self.template.get("tick_size"))
         instrument_tick = _coerce_float(self.instrument.get("tick_size"))
-        config_tick = _coerce_float(self.template.get("tick_size"), DEFAULT_RISK["tick_size"])
-        self.tick_size = float(instrument_tick or config_tick or DEFAULT_RISK["tick_size"])
+        fallback_tick = _coerce_float(DEFAULT_RISK.get("tick_size"), 0.01)
+        if config_tick not in (None, 0):
+            self.tick_size = float(config_tick)
+        elif instrument_tick not in (None, 0):
+            self.tick_size = float(instrument_tick)
+        elif fallback_tick not in (None, 0):
+            self.tick_size = float(fallback_tick)
+        else:
+            self.tick_size = 0.01
         self.orders = self._orders_from_template()
         self.targets = [int(order["ticks"]) for order in self.orders]
         self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
         self.breakeven_trigger = self._breakeven_threshold()
-        self.contract_size = _coerce_float(self.instrument.get("contract_size"), 1.0) or 1.0
-        tick_value = _coerce_float(self.instrument.get("tick_value"))
-        if tick_value is None:
+        config_contract = _coerce_float(self.template.get("contract_size"))
+        instrument_contract = _coerce_float(self.instrument.get("contract_size"))
+        self.contract_size = (
+            float(config_contract)
+            if config_contract not in (None, 0)
+            else float(instrument_contract)
+            if instrument_contract not in (None, 0)
+            else 1.0
+        )
+        config_tick_value = _coerce_float(self.template.get("tick_value"))
+        instrument_tick_value = _coerce_float(self.instrument.get("tick_value"))
+        if config_tick_value not in (None, 0):
+            tick_value = float(config_tick_value)
+        elif instrument_tick_value not in (None, 0):
+            tick_value = float(instrument_tick_value)
+        else:
             tick_value = self.tick_size * self.contract_size
         self.tick_value = float(tick_value or self.tick_size)
-        self.quote_currency = (self.instrument.get("quote_currency") or "USD").upper()
-        self.maker_fee = _coerce_float(self.instrument.get("maker_fee_rate"), 0.0) or 0.0
-        self.taker_fee = _coerce_float(self.instrument.get("taker_fee_rate"), 0.0) or 0.0
+        quote_value = self.template.get("quote_currency") or self.instrument.get("quote_currency") or "USD"
+        self.quote_currency = str(quote_value).upper()
+        config_maker = _coerce_float(self.template.get("maker_fee_rate"))
+        instrument_maker = _coerce_float(self.instrument.get("maker_fee_rate"), 0.0)
+        config_taker = _coerce_float(self.template.get("taker_fee_rate"))
+        instrument_taker = _coerce_float(self.instrument.get("taker_fee_rate"), 0.0)
+        self.maker_fee = (
+            float(config_maker)
+            if config_maker is not None
+            else float(instrument_maker or 0.0)
+        )
+        self.taker_fee = (
+            float(config_taker)
+            if config_taker is not None
+            else float(instrument_taker or 0.0)
+        )
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         logger.info(
@@ -657,8 +691,27 @@ class BotRuntime:
             strategy.get("atm_template"),
             override_payload,
         )
-        if instrument and instrument.get("tick_size") and not atm_template.get("tick_size"):
-            atm_template["tick_size"] = instrument.get("tick_size")
+        template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
+
+        def _apply_instrument_field(field: str) -> None:
+            if template_meta.get(f"{field}_override"):
+                return
+            if not instrument:
+                return
+            value = instrument.get(field)
+            if value is None:
+                return
+            atm_template[field] = value
+
+        for field_name in (
+            "tick_size",
+            "tick_value",
+            "contract_size",
+            "maker_fee_rate",
+            "taker_fee_rate",
+            "quote_currency",
+        ):
+            _apply_instrument_field(field_name)
         risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
         series_meta = dict(strategy)
         if instrument:

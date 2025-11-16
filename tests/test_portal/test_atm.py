@@ -46,3 +46,16 @@ def test_merge_templates_returns_defaults_when_none_provided():
     merged = merge_templates(None)
     assert merged["contracts"] == DEFAULT_ATM_TEMPLATE["contracts"]
     assert merged["take_profit_orders"] == DEFAULT_ATM_TEMPLATE["take_profit_orders"]
+
+
+@pytest.mark.unit
+def test_normalise_template_tracks_tick_overrides():
+    template = normalise_template({"tick_size": 0.5})
+
+    assert template["tick_size"] == 0.5
+    assert template.get("_meta", {}).get("tick_size_override") is True
+
+    reverted = normalise_template({"tick_size": None, "_meta": {"tick_size_override": False}}, base=template)
+
+    assert reverted.get("tick_size") == template.get("tick_size")
+    assert reverted.get("_meta", {}).get("tick_size_override") is False

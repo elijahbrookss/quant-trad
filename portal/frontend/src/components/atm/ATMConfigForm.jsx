@@ -13,11 +13,16 @@ export const DEFAULT_ATM_TEMPLATE = {
 }
 
 export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
+  let cloned
   try {
-    return JSON.parse(JSON.stringify(template || DEFAULT_ATM_TEMPLATE))
+    cloned = JSON.parse(JSON.stringify(template || DEFAULT_ATM_TEMPLATE))
   } catch {
-    return JSON.parse(JSON.stringify(DEFAULT_ATM_TEMPLATE))
+    cloned = JSON.parse(JSON.stringify(DEFAULT_ATM_TEMPLATE))
   }
+  if (!cloned._meta || typeof cloned._meta !== 'object') {
+    cloned._meta = {}
+  }
+  return cloned
 }
 
 const fieldButtonClasses =
@@ -38,10 +43,28 @@ export default function ATMConfigForm({ value, onChange }) {
 
   const update = (patch = {}) => {
     const next = { ...template, ...patch }
+    if (!next._meta || typeof next._meta !== 'object') {
+      next._meta = { ...template._meta }
+    }
     if (!Array.isArray(next.take_profit_orders) || !next.take_profit_orders.length) {
       next.take_profit_orders = normalizeTargets(next)
     }
     onChange?.(next)
+  }
+
+  const applyOverrideField = (field, rawValue) => {
+    const next = cloneATMTemplate(template)
+    const meta = { ...(next._meta || {}) }
+    if (rawValue === '' || rawValue === null || rawValue === undefined) {
+      delete next[field]
+      meta[`${field}_override`] = false
+    } else {
+      const numeric = Number(rawValue)
+      next[field] = Number.isFinite(numeric) ? numeric : rawValue
+      meta[`${field}_override`] = true
+    }
+    next._meta = meta
+    update(next)
   }
 
   const handleTargetChange = (index, field, rawValue) => {
@@ -114,6 +137,42 @@ export default function ATMConfigForm({ value, onChange }) {
           <button type="button" className={fieldButtonClasses} onClick={addTarget}>
             Add target
           </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick size</label>
+          <input
+            className={inputClasses}
+            type="number"
+            step="any"
+            placeholder="Auto"
+            value={template._meta?.tick_size_override ? template.tick_size ?? '' : ''}
+            onChange={(event) => applyOverrideField('tick_size', event.target.value)}
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick value</label>
+          <input
+            className={inputClasses}
+            type="number"
+            step="any"
+            placeholder="Auto"
+            value={template._meta?.tick_value_override ? template.tick_value ?? '' : ''}
+            onChange={(event) => applyOverrideField('tick_value', event.target.value)}
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Contract size</label>
+          <input
+            className={inputClasses}
+            type="number"
+            step="any"
+            placeholder="Auto"
+            value={template._meta?.contract_size_override ? template.contract_size ?? '' : ''}
+            onChange={(event) => applyOverrideField('contract_size', event.target.value)}
+          />
         </div>
       </div>
 

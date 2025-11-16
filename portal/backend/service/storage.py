@@ -22,6 +22,7 @@ from ..db import (
     SymbolPresetRecord,
     db,
 )
+from .atm import normalise_template
 
 
 logger = logging.getLogger(__name__)
@@ -335,6 +336,7 @@ def load_strategies() -> List[Dict[str, Any]]:
         payload: List[Dict[str, Any]] = []
         for strategy in strategies:
             record = strategy.to_dict()
+            record["atm_template"] = normalise_template(record.get("atm_template"))
             links = session.execute(
                 select(StrategyIndicatorLink).where(
                     StrategyIndicatorLink.strategy_id == strategy.id

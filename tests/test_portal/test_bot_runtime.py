@@ -353,3 +353,12 @@ def test_ladder_risk_engine_stats_count_trade_outcomes():
     assert stats["losses"] == 1
     assert stats["breakeven_trades"] == 0
     assert stats["win_rate"] == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+def test_ladder_risk_engine_prefers_template_tick_size():
+    config = {"tick_size": 0.5, "take_profit_orders": [{"ticks": 10, "contracts": 1}]}
+    instrument = {"tick_size": 0.25}
+    engine = LadderRiskEngine(config, instrument=instrument)
+
+    assert engine.tick_size == pytest.approx(0.5)

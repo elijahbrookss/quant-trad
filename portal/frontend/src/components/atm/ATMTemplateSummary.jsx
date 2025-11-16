@@ -48,6 +48,14 @@ export default function ATMTemplateSummary({ template }) {
   const targets = Array.isArray(config.take_profit_orders) ? config.take_profit_orders : []
   const breakeven = config.breakeven || {}
   const trailing = config.trailing || {}
+  const meta = config._meta || {}
+
+  const describeField = (value, flag) => {
+    if (flag) {
+      return formatNumber(value)
+    }
+    return 'Auto'
+  }
 
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
@@ -69,6 +77,21 @@ export default function ATMTemplateSummary({ template }) {
                 ? `${formatNumber(breakeven.ticks)} ticks`
                 : 'Manual'}
           </p>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Tick size</p>
+          <p className="text-base text-white">{describeField(config.tick_size, meta.tick_size_override)}</p>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Tick value</p>
+          <p className="text-base text-white">{describeField(config.tick_value, meta.tick_value_override)}</p>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Contract size</p>
+          <p className="text-base text-white">{describeField(config.contract_size, meta.contract_size_override)}</p>
         </div>
       </div>
 
