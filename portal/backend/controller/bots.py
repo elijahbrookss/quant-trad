@@ -47,7 +47,7 @@ class BotBase(BaseModel):
     timeframe: str = "15m"
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
     run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade)$")
-    fetch_seconds: int = Field(default=1, ge=0)
+    playback_speed: float = Field(default=1.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     risk: RiskSettings = Field(default_factory=RiskSettings)
@@ -69,7 +69,7 @@ class BotUpdateRequest(BaseModel):
     exchange: Optional[str] = None
     timeframe: Optional[str] = None
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
-    fetch_seconds: Optional[int] = Field(default=None, ge=0)
+    playback_speed: Optional[float] = Field(default=None, ge=0)
     risk: Optional[RiskSettings] = None
 
 

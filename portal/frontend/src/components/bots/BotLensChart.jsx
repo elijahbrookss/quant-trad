@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useCallback } from 'react'
-import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts'
+import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 import { PaneViewManager } from '../../chart/paneViews/factory.js'
 import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js'
@@ -102,6 +102,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const paneMgrRef = useRef(null)
   const overlayHandlesRef = useRef({ priceLines: [] })
   const barSpacingRef = useRef(null)
+  const levelSeriesRef = useRef(null)
+  const tradeSegmentsRef = useRef([])
 
   const candleData = useMemo(() => {
     return candles.map((candle) => ({
@@ -117,6 +119,59 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     const markers = trades.flatMap((trade) => markerForTrade(trade))
     return markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
   }, [trades])
+
+  const updateViewport = useCallback(
+    (tradeSegments = []) => {
+      if (!chartRef.current || candleData.length === 0) return
+      const timeScale = chartRef.current.timeScale()
+      const lastIndex = candleData.length - 1
+      const lastTime = candleData[lastIndex]?.time
+      const normalizedSegments = (tradeSegments || []).filter(
+        (segment) => Number.isFinite(segment?.x1) || Number.isFinite(segment?.x2),
+      )
+      let appliedRange = false
+      if (normalizedSegments.length && Number.isFinite(lastTime)) {
+        const candidateTimes = normalizedSegments
+          .flatMap((segment) => [segment.x1, segment.x2])
+          .filter((value) => Number.isFinite(value))
+        if (candidateTimes.length) {
+          const minTime = Math.min(...candidateTimes, lastTime)
+          const maxTime = Math.max(...candidateTimes, lastTime)
+          if (Number.isFinite(minTime) && Number.isFinite(maxTime) && maxTime > minTime) {
+            const span = Math.max(maxTime - minTime, 60)
+            const pad = span * 0.05
+            timeScale.setVisibleRange({ from: minTime - pad, to: maxTime + pad })
+            appliedRange = true
+          }
+        }
+      }
+      if (!appliedRange) {
+        const barsToShow = Math.min(200, Math.max(30, candleData.length))
+        const from = Math.max(0, lastIndex - barsToShow + 1)
+        const to = lastIndex + 5
+        timeScale.setVisibleLogicalRange({ from, to })
+      }
+      if (!levelSeriesRef.current) return
+      const overlayPrices = normalizedSegments.flatMap((segment) => {
+        const prices = []
+        if (Number.isFinite(segment?.y1)) prices.push(segment.y1)
+        if (Number.isFinite(segment?.y2)) prices.push(segment.y2)
+        return prices
+      })
+      const ghostPoints = []
+      if (Number.isFinite(lastTime)) {
+        const lastCandle = candleData[lastIndex]
+        ghostPoints.push({ time: lastTime, value: lastCandle?.high ?? lastCandle?.close ?? 0 })
+        ghostPoints.push({ time: lastTime - 1, value: lastCandle?.low ?? lastCandle?.close ?? 0 })
+      }
+      overlayPrices.forEach((price, idx) => {
+        if (!Number.isFinite(lastTime)) return
+        ghostPoints.push({ time: lastTime + idx + 1, value: price })
+      })
+      levelSeriesRef.current.setData(ghostPoints)
+    },
+    [candleData],
+  )
 
   const syncOverlays = useCallback(
     (overlayPayloads = [], tradeMarkerPayload = []) => {
@@ -140,9 +195,17 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       const touchPoints = []
       const boxes = []
       const segments = []
+      const tradeSegments = []
       const polylines = []
       const bubbles = []
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
+      const normaliseSegment = (segment = {}) => {
+        const x1 = toSec(coalesce(segment.x1, segment.start, segment.start_date, segment.startDate, segment.time))
+        const x2 = toSec(coalesce(segment.x2, segment.end, segment.end_date, segment.endDate, segment.time))
+        const y1 = toFiniteNumber(coalesce(segment.y1, segment.price, segment.value, segment.y))
+        const y2 = toFiniteNumber(coalesce(segment.y2, segment.price, segment.value, segment.y))
+        return { ...segment, x1, x2, y1, y2 }
+      }
 
       for (const overlay of overlayPayloads) {
         const { type, payload, color } = overlay || {}
@@ -211,7 +274,11 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }
         const wantsSegments = paneSet.has('segment') || (Array.isArray(norm.segments) && norm.segments.length > 0)
         if (wantsSegments && Array.isArray(norm.segments) && norm.segments.length) {
-          segments.push(...norm.segments)
+          const normalisedSegments = norm.segments.map((segment) => normaliseSegment(segment))
+          segments.push(...normalisedSegments)
+          if (type === 'bot_trade_rays') {
+            tradeSegments.push(...normalisedSegments)
+          }
         }
         const wantsPolylines = paneSet.has('polyline') || (Array.isArray(norm.polylines) && norm.polylines.length > 0)
         if (wantsPolylines && Array.isArray(norm.polylines) && norm.polylines.length) {
@@ -242,8 +309,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       paneMgrRef.current.setSegments(segments)
       paneMgrRef.current.setPolylines(polylines)
       paneMgrRef.current.setSignalBubbles(bubbles)
+      tradeSegmentsRef.current = tradeSegments
+      updateViewport(tradeSegments)
     },
-    [candleData]
+    [candleData, updateViewport]
   )
 
   useEffect(() => {
@@ -255,8 +324,16 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       height: el.clientHeight || 360,
     })
     const series = chart.addSeries(CandlestickSeries, seriesOptions)
+    const levelSeries = chart.addSeries(LineSeries, {
+      color: 'rgba(0,0,0,0)',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    })
     chartRef.current = chart
     seriesRef.current = series
+    levelSeriesRef.current = levelSeries
     markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
     paneMgrRef.current = new PaneViewManager(chart)
     registerChart?.(chartId, {
@@ -283,6 +360,14 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       paneMgrRef.current?.destroy()
       paneMgrRef.current = null
       overlayHandlesRef.current.priceLines = []
+      if (levelSeriesRef.current) {
+        try {
+          chart.removeSeries(levelSeriesRef.current)
+        } catch {
+          /* ignore */
+        }
+      }
+      levelSeriesRef.current = null
       seriesRef.current = null
       chartRef.current?.remove()
       chartRef.current = null
@@ -316,6 +401,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   useEffect(() => {
     syncOverlays(overlays, tradeMarkers)
   }, [overlays, tradeMarkers, syncOverlays])
+
+  useEffect(() => {
+    updateViewport(tradeSegmentsRef.current || [])
+  }, [candleData, updateViewport])
 
   return (
     <div

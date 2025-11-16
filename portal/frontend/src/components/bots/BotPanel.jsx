@@ -19,7 +19,7 @@ const defaultForm = {
   timeframe: '15m',
   mode: 'walk-forward',
   run_type: 'backtest',
-  fetch_seconds: 1,
+  playback_speed: 1,
   backtest_start: '',
   backtest_end: '',
   strategy_ids: [],
@@ -50,6 +50,16 @@ export function BotPanel() {
   const [strategyError, setStrategyError] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
   const [search, setSearch] = useState('')
+  const playbackLabelFor = useCallback((bot) => {
+    const raw =
+      bot?.playback_speed ??
+      bot?.runtime?.playback_speed ??
+      bot?.config?.playback_speed ??
+      0
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value <= 0) return 'instant'
+    return `${value.toFixed(2)}x`
+  }, [])
 
   const upsertBot = useCallback((payload) => {
     if (!payload?.id) return
@@ -144,6 +154,11 @@ export function BotPanel() {
     setForm((prev) => ({ ...prev, use_custom_atm: !prev.use_custom_atm }))
   }
 
+  const handlePlaybackSpeedChange = (event) => {
+    const value = Number(event?.target?.value)
+    setForm((prev) => ({ ...prev, playback_speed: Number.isFinite(value) ? value : 0 }))
+  }
+
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
@@ -162,7 +177,9 @@ export function BotPanel() {
       const { use_custom_atm, atm_template, ...rest } = form
       const payloadBody = {
         ...rest,
-        fetch_seconds: Number(form.fetch_seconds) || 0,
+        playback_speed: Number.isFinite(Number(form.playback_speed))
+          ? Number(form.playback_speed)
+          : 0,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
       }
@@ -175,6 +192,7 @@ export function BotPanel() {
         ...defaultForm,
         strategy_ids: prev.strategy_ids,
         run_type: prev.run_type,
+        playback_speed: prev.playback_speed,
         atm_template: use_custom_atm
           ? cloneATMTemplate(atm_template)
           : cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
@@ -440,16 +458,24 @@ export function BotPanel() {
                 <option value="sim_trade">Sim trade</option>
               </select>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Fetch seconds</label>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
+                <span>Playback speed</span>
+                <span className="text-xs normal-case tracking-normal text-white">{Number(form.playback_speed || 0).toFixed(2)}x</span>
+              </div>
               <input
-                type="number"
-                name="fetch_seconds"
+                type="range"
                 min="0"
-                value={form.fetch_seconds}
-                onChange={handleChange}
-                className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                max="5"
+                step="0.25"
+                name="playback_speed"
+                value={form.playback_speed}
+                onChange={handlePlaybackSpeedChange}
+                className="w-full accent-[color:var(--accent-alpha-60)]"
               />
+              <p className="text-[11px] text-slate-500">
+                0 = instant playback. Drag right to speed up walk-forward loops.
+              </p>
             </div>
             {form.run_type === 'backtest' ? (
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
@@ -577,7 +603,7 @@ export function BotPanel() {
               timeframeLabel ? `TF ${timeframeLabel}` : null,
               datasourceLabel ? `DS ${datasourceLabel}` : null,
               exchangeLabel ? `EX ${exchangeLabel}` : null,
-              `fetch ${bot.fetch_seconds}s`,
+              `speed ${playbackLabelFor(bot)}`,
               (bot.run_type || 'backtest').replace('_', ' '),
             ].filter(Boolean)
             const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)

@@ -627,8 +627,9 @@ class BotRuntime:
         self.config = dict(config)
         self.mode = (self.config.get("mode") or "instant").lower()
         self.run_type = (self.config.get("run_type") or "backtest").lower()
-        self.fetch_seconds = self._coerce_fetch_seconds(self.config.get("fetch_seconds"))
+        self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
+        self.state["playback_speed"] = self.playback_speed
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -650,12 +651,23 @@ class BotRuntime:
         self._intrabar_cache: Dict[str, List[Candle]] = {}
 
     @staticmethod
-    def _coerce_fetch_seconds(value: Optional[object]) -> float:
+    def _coerce_playback_speed(value: Optional[object]) -> float:
         try:
             numeric = float(value) if value is not None else 1.0
         except (TypeError, ValueError):
             numeric = 1.0
         return numeric if numeric >= 0 else 0.0
+
+    def apply_config(self, payload: Mapping[str, Any]) -> None:
+        """Apply runtime config updates (e.g., playback speed overrides)."""
+
+        if not payload:
+            return
+        self.config.update(payload)
+        if "playback_speed" in payload:
+            self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
+            with self._lock:
+                self.state["playback_speed"] = self.playback_speed
 
     def _ensure_prepared(self) -> None:
         if self._prepared:
@@ -1320,10 +1332,15 @@ class BotRuntime:
         return direction
 
     def _sleep_between_bars(self) -> None:
-        if self.mode != "walk-forward" or self.fetch_seconds <= 0:
+        if self.mode != "walk-forward":
             return
-        self._next_bar_at = datetime.utcnow() + timedelta(seconds=self.fetch_seconds)
-        target = time.time() + self.fetch_seconds
+        speed = self.playback_speed
+        if speed is None or speed <= 0:
+            self._next_bar_at = None
+            return
+        interval = max(1.0 / speed, 0.02)
+        self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
+        target = time.time() + interval
         while not self._stop.is_set():
             if not self._pause_event.wait(timeout=0.2):
                 continue
@@ -1616,6 +1633,7 @@ class BotRuntime:
             "paused": self._paused,
             "next_bar_at": _isoformat(self._next_bar_at),
             "next_bar_in_seconds": self._seconds_until_next_bar(),
+            "playback_speed": self.playback_speed,
         }
         with self._lock:
             self.state.update(snapshot)

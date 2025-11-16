@@ -47,6 +47,16 @@ def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
     return merge_templates(risk)
 
 
+def _coerce_playback_speed(value: Optional[object]) -> float:
+    """Normalise playback speed factors into non-negative floats."""
+
+    try:
+        numeric = float(value) if value is not None else 1.0
+    except (TypeError, ValueError):
+        numeric = 1.0
+    return numeric if numeric >= 0 else 0.0
+
+
 def _coerce_isoformat(value: Optional[object]) -> Optional[str]:
     """Normalise datetime inputs into ISO8601 strings."""
 
@@ -172,7 +182,7 @@ def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
         )
         _RUNTIME[bot_id] = runtime
     else:
-        runtime.config.update(payload)
+        runtime.apply_config(payload)
     return runtime
 
 
@@ -195,6 +205,10 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         payload.get("strategy_ids"), payload.get("strategy_id")
     )
     run_type = str(payload.get("run_type") or "backtest").lower()
+    playback_input = payload.get("playback_speed")
+    if playback_input is None:
+        playback_input = payload.get("fetch_seconds")
+
     record = {
         "id": bot_id,
         "name": name,
@@ -205,7 +219,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "timeframe": payload.get("timeframe") or "15m",
         "mode": (payload.get("mode") or "instant").lower(),
         "run_type": run_type,
-        "fetch_seconds": max(int(payload.get("fetch_seconds") or 1), 0),
+        "playback_speed": _coerce_playback_speed(playback_input),
         "backtest_start": _coerce_isoformat(payload.get("backtest_start")),
         "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
         "risk": _normalise_risk(payload.get("risk")),
@@ -236,8 +250,10 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         record["run_type"] = str(payload["run_type"]).lower()
     if "mode" in payload and payload["mode"] is not None:
         record["mode"] = str(payload["mode"]).lower()
-    if "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
-        record["fetch_seconds"] = max(int(payload["fetch_seconds"]), 0)
+    if "playback_speed" in payload and payload["playback_speed"] is not None:
+        record["playback_speed"] = _coerce_playback_speed(payload["playback_speed"])
+    elif "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
+        record["playback_speed"] = _coerce_playback_speed(payload["fetch_seconds"])
     if "datasource" in payload and payload["datasource"] is not None:
         record["datasource"] = payload["datasource"]
     if "exchange" in payload and payload["exchange"] is not None:
@@ -254,7 +270,7 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     upsert_bot(record)
     runtime = _RUNTIME.get(bot_id)
     if runtime:
-        runtime.config.update(record)
+        runtime.apply_config(record)
     return record
 
 
@@ -381,7 +397,7 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
             raise ValueError("Bot has not been started yet.")
         runtime = _runtime_for(bot_id, bot)
     else:
-        runtime.config.update(bot)
+        runtime.apply_config(bot)
     runtime.warm_up()
     token, channel = runtime.subscribe()
 
@@ -488,7 +504,7 @@ def performance(bot_id: str) -> Dict[str, object]:
     status = str(bot.get("status") or "idle").lower()
     payload: Dict[str, Any]
     if runtime is not None:
-        runtime.config.update(bot)
+        runtime.apply_config(bot)
         runtime.warm_up()
         payload = runtime.chart_payload()
         payload.setdefault("logs", runtime.logs())
@@ -510,7 +526,7 @@ def performance(bot_id: str) -> Dict[str, object]:
         }
     else:
         runtime = _runtime_for(bot_id, bot)
-        runtime.config.update(bot)
+        runtime.apply_config(bot)
         runtime.warm_up()
         payload = runtime.chart_payload()
         payload.setdefault("logs", runtime.logs())

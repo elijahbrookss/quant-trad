@@ -23,7 +23,7 @@ def make_runtime(**overrides):
     config = {
         "runtime_mode": "backtest",
         "mode": "walk-forward",
-        "fetch_seconds": 5,
+        "playback_speed": 1.0,
         "symbol": "ES",
         "timeframe": "15m",
         "strategies_meta": [

@@ -252,7 +252,7 @@ class BotRecord(Base):
     timeframe = Column(String(32), nullable=False, default="15m")
     mode = Column(String(32), nullable=False, default="instant")
     run_type = Column(String(32), nullable=False, default="backtest")
-    fetch_seconds = Column(Integer, nullable=False, default=5)
+    playback_speed = Column("fetch_seconds", Float, nullable=False, default=1.0)
     backtest_start = Column(DateTime, nullable=True)
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
@@ -274,7 +274,7 @@ class BotRecord(Base):
             "timeframe": self.timeframe,
             "mode": self.mode,
             "run_type": self.run_type,
-            "fetch_seconds": self.fetch_seconds,
+            "playback_speed": float(self.playback_speed or 0.0),
             "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
