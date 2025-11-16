@@ -691,7 +691,6 @@ class StrategyRule:
         }
 
 
-@dataclass
 def _default_atm_template() -> Dict[str, Any]:
     """Return a fresh ATM template for strategies."""
 
