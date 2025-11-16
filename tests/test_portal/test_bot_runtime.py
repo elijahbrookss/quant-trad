@@ -2,6 +2,7 @@ import math
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Dict, List
 
 import pytest
 
@@ -203,6 +204,97 @@ def test_visible_overlays_hide_future_profiles_and_markers():
     assert payload["boxes"][0]["start"] == first_start
     assert all(entry.get("time") == first_start for entry in payload.get("markers", []))
     assert all(entry.get("time") == first_start for entry in payload.get("touchPoints", []))
+
+
+@pytest.mark.unit
+def test_intrabar_interval_selection():
+    assert BotRuntime._intrabar_interval_for("1m") is None
+    assert BotRuntime._intrabar_interval_for("15m") == "1m"
+    assert BotRuntime._intrabar_interval_for("1h") == "1m"
+
+
+@pytest.mark.unit
+def test_step_series_with_intrabar_uses_subcandles(monkeypatch):
+    runtime = make_runtime()
+    parent_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    parent = Candle(
+        time=parent_start,
+        open=100.0,
+        high=101.0,
+        low=99.5,
+        close=100.5,
+        end=parent_start + timedelta(hours=1),
+    )
+    sub_candles = [
+        Candle(time=parent_start + timedelta(minutes=idx), open=100.0, high=100.5, low=99.8, close=100.2)
+        for idx in range(2)
+    ]
+
+    monkeypatch.setattr(
+        BotRuntime,
+        "_intrabar_candles",
+        lambda self, series, candle: sub_candles,
+    )
+
+    class DummyEngine:
+        def __init__(self):
+            self.active_trade = object()
+            self.calls: List[Candle] = []
+
+        def step(self, candle: Candle) -> List[Dict[str, Any]]:
+            self.calls.append(candle)
+            if len(self.calls) >= len(sub_candles):
+                self.active_trade = None
+            return [{"type": "target", "trade_id": "t1"}]
+
+    engine = DummyEngine()
+    series = SimpleNamespace(risk_engine=engine, timeframe="1h")
+
+    events = runtime._step_series_with_intrabar(series, parent)
+
+    assert len(engine.calls) == len(sub_candles)
+    assert events
+
+
+@pytest.mark.unit
+def test_intrabar_candles_cached(monkeypatch):
+    runtime = make_runtime()
+    runtime._intrabar_cache.clear()
+    parent_start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    parent = Candle(
+        time=parent_start,
+        open=50.0,
+        high=51.0,
+        low=49.0,
+        close=50.5,
+        end=parent_start + timedelta(hours=1),
+    )
+    series = SimpleNamespace(
+        risk_engine=SimpleNamespace(active_trade=object()),
+        timeframe="1h",
+        symbol="ES",
+        datasource="timescale",
+        exchange="cme",
+        strategy_id="strategy-1",
+    )
+    calls = {"count": 0}
+    sub_candles = [
+        Candle(time=parent_start + timedelta(minutes=5), open=50.0, high=50.5, low=49.5, close=50.2),
+        Candle(time=parent_start + timedelta(minutes=10), open=50.2, high=50.6, low=49.9, close=50.4),
+    ]
+
+    def fake_fetch(self, series_obj, start, end, interval):
+        calls["count"] += 1
+        return sub_candles
+
+    monkeypatch.setattr(BotRuntime, "_fetch_intrabar_candles", fake_fetch)
+
+    first = runtime._intrabar_candles(series, parent)
+    second = runtime._intrabar_candles(series, parent)
+
+    assert calls["count"] == 1
+    assert first is second
+    assert first == sub_candles
 
 
 @pytest.mark.unit

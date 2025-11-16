@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -64,6 +65,42 @@ def _instrument_key(datasource: Optional[str], exchange: Optional[str], symbol: 
     )
 
 
+_TIMEFRAME_MULTIPLIERS = {
+    "s": 1,
+    "m": 60,
+    "h": 60 * 60,
+    "d": 60 * 60 * 24,
+    "w": 60 * 60 * 24 * 7,
+}
+
+
+def _timeframe_to_seconds(label: Optional[str]) -> Optional[int]:
+    """Convert timeframe strings like '15m' or '4h' into seconds."""
+
+    if not label:
+        return None
+    value = str(label).strip().lower()
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d+)([a-z]+)", value)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    suffix = match.group(2)
+    key = suffix[0]
+    multiplier = _TIMEFRAME_MULTIPLIERS.get(key)
+    if not multiplier:
+        return None
+    return amount * multiplier
+
+
+def _timeframe_duration(label: Optional[str]) -> Optional[timedelta]:
+    seconds = _timeframe_to_seconds(label)
+    if not seconds:
+        return None
+    return timedelta(seconds=seconds)
+
+
 @dataclass
 class Candle:
     """Single OHLC datapoint used by the simulated bot."""
@@ -73,15 +110,27 @@ class Candle:
     high: float
     low: float
     close: float
+    end: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, float]:
-        return {
+        payload = {
             "time": _isoformat(self.time),
             "open": round(self.open, 4),
             "high": round(self.high, 4),
             "low": round(self.low, 4),
             "close": round(self.close, 4),
         }
+        if self.end:
+            payload["end"] = _isoformat(self.end)
+        return payload
+
+    @property
+    def start_time(self) -> datetime:
+        return self.time
+
+    @property
+    def end_time(self) -> datetime:
+        return self.end or self.time
 
 
 @dataclass
@@ -591,6 +640,7 @@ class BotRuntime:
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._subscribers: Dict[str, Queue] = {}
         self._state_callback = state_callback
+        self._intrabar_cache: Dict[str, List[Candle]] = {}
 
     @staticmethod
     def _coerce_fetch_seconds(value: Optional[object]) -> float:
@@ -668,7 +718,7 @@ class BotRuntime:
             )
             return None
 
-        candles = self._build_candles(df)
+        candles = self._build_candles(df, timeframe)
         if not candles:
             return None
 
@@ -869,10 +919,11 @@ class BotRuntime:
         return overlays
 
     @staticmethod
-    def _build_candles(df: pd.DataFrame) -> List[Candle]:
+    def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
         frame = df.copy()
         frame.index = pd.to_datetime(frame.index, utc=True)
         candles: List[Candle] = []
+        duration = _timeframe_duration(timeframe)
         for ts, row in frame.iterrows():
             try:
                 open_price = float(row.get("open", row.get("Open")))
@@ -881,13 +932,16 @@ class BotRuntime:
                 close_price = float(row.get("close", row.get("Close")))
             except (TypeError, ValueError):
                 continue
+            start_dt = ts.to_pydatetime()
+            end_dt = start_dt + duration if duration else None
             candles.append(
                 Candle(
-                    time=ts.to_pydatetime(),
+                    time=start_dt,
                     open=open_price,
                     high=high_price,
                     low=low_price,
                     close=close_price,
+                    end=end_dt,
                 )
             )
         return candles
@@ -905,6 +959,91 @@ class BotRuntime:
                 queued.append(StrategySignal(epoch=epoch, direction="short"))
         queued.sort(key=lambda signal: signal.epoch)
         return deque(queued)
+
+    @staticmethod
+    def _intrabar_interval_for(timeframe: Optional[str]) -> Optional[str]:
+        base_seconds = _timeframe_to_seconds(timeframe)
+        if not base_seconds or base_seconds <= 60:
+            return None
+        return "1m"
+
+    def _intrabar_cache_key(self, series: StrategySeries, start: datetime, interval: str) -> str:
+        epoch = int(start.timestamp())
+        return f"{series.strategy_id}:{series.symbol}:{series.timeframe}:{interval}:{epoch}"
+
+    def _fetch_intrabar_candles(
+        self,
+        series: StrategySeries,
+        start: datetime,
+        end: datetime,
+        interval: str,
+    ) -> List[Candle]:
+        start_iso = _isoformat(start)
+        end_iso = _isoformat(end)
+        try:
+            df = fetch_ohlcv(
+                series.symbol,
+                start_iso,
+                end_iso,
+                interval,
+                datasource=series.datasource,
+                exchange=series.exchange,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug(
+                "bot_runtime_intrabar_fetch_failed | bot=%s | strategy=%s | symbol=%s | interval=%s | error=%s",
+                self.bot_id,
+                series.strategy_id,
+                series.symbol,
+                interval,
+                exc,
+            )
+            return []
+        if df is None or getattr(df, "empty", False):
+            return []
+        candles = self._build_candles(df, interval)
+        filtered: List[Candle] = []
+        for candle in candles:
+            start_ts = candle.start_time
+            end_ts = candle.end_time
+            if end_ts <= start:
+                continue
+            if start_ts >= end:
+                break
+            filtered.append(candle)
+        return filtered
+
+    def _intrabar_candles(self, series: StrategySeries, candle: Candle) -> List[Candle]:
+        engine = series.risk_engine
+        if engine is None or engine.active_trade is None:
+            return []
+        interval = self._intrabar_interval_for(series.timeframe)
+        if not interval:
+            return []
+        start = candle.start_time
+        end = candle.end or (start + (_timeframe_duration(series.timeframe) or timedelta(0)))
+        if start is None or end is None or end <= start:
+            return []
+        key = self._intrabar_cache_key(series, start, interval)
+        if key in self._intrabar_cache:
+            return self._intrabar_cache[key]
+        sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
+        self._intrabar_cache[key] = sub_candles
+        return sub_candles
+
+    def _step_series_with_intrabar(self, series: StrategySeries, candle: Candle) -> List[Dict[str, Any]]:
+        engine = series.risk_engine
+        if engine is None:
+            return []
+        intrabar = self._intrabar_candles(series, candle)
+        if not intrabar:
+            return engine.step(candle)
+        events: List[Dict[str, Any]] = []
+        for minute_bar in intrabar:
+            events.extend(engine.step(minute_bar))
+            if engine.active_trade is None:
+                break
+        return events
 
     @staticmethod
     def _normalise_epoch(value: Any) -> Optional[int]:
@@ -951,6 +1090,7 @@ class BotRuntime:
             self._last_stats = {}
             self._next_bar_at = None
             self._logs.clear()
+            self._intrabar_cache.clear()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -1059,7 +1199,7 @@ class BotRuntime:
                     contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
                 )
                 self._persist_trade_entry(series, new_trade)
-            trade_events = series.risk_engine.step(candle)
+            trade_events = self._step_series_with_intrabar(series, candle)
             for event in trade_events:
                 self._log_event(
                     event.get("type", "event"),
@@ -1130,7 +1270,11 @@ class BotRuntime:
         )
         if df is None or df.empty:
             return False
-        new_candles = [c for c in self._build_candles(df) if not series.candles or c.time > series.candles[-1].time]
+        new_candles = [
+            c
+            for c in self._build_candles(df, series.timeframe)
+            if not series.candles or c.time > series.candles[-1].time
+        ]
         if not new_candles:
             return False
         series.candles.extend(new_candles)
