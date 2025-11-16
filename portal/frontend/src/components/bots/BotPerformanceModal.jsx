@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, Pause, RotateCw } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
+import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import { fetchBotPerformance, pauseBot, resumeBot, openBotStream } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
@@ -70,6 +71,17 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       parts.push(`targets: ${entry.targets.map((t) => t.name).join(', ')}`)
     }
     return parts.length ? parts.join(' • ') : '—'
+  }, [])
+
+  const formatRiskReward = useCallback((metrics) => {
+    if (!metrics || metrics.reward_to_risk === null || metrics.reward_to_risk === undefined) {
+      return '—'
+    }
+    const numeric = Number(metrics.reward_to_risk)
+    if (!Number.isFinite(numeric)) {
+      return '—'
+    }
+    return `${numeric.toFixed(2)} R`
   }, [])
 
   const headerDetails = useMemo(() => {
@@ -422,6 +434,13 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                           No instrument metadata attached
                         </div>
                       )}
+                    </div>
+                    <div>
+                      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-slate-400">
+                        <span>ATM template</span>
+                        <span className="text-xs text-slate-200">R:R {formatRiskReward(strategy.atm_metrics)}</span>
+                      </div>
+                      <ATMTemplateSummary template={strategy.atm_template} />
                     </div>
                   </article>
                 ))}

@@ -14,6 +14,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..db import (
     BotRecord,
     BotStrategyLink,
+    BotTradeEventRecord,
+    BotTradeRecord,
     IndicatorRecord,
     InstrumentRecord,
     StrategyIndicatorLink,
@@ -59,6 +61,24 @@ def _parse_optional_timestamp(value: Any) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(text)
     except ValueError:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -600,3 +620,99 @@ def delete_symbol_preset(preset_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("symbol_preset_delete_failed | id=%s | error=%s", preset_id, exc)
+
+
+def record_bot_trade(snapshot: Dict[str, Any]) -> None:
+    """Insert or update a stored trade snapshot for dashboarding."""
+
+    if not db.available:
+        return
+    trade_id = snapshot.get("trade_id") or snapshot.get("id")
+    bot_id = snapshot.get("bot_id")
+    if not trade_id or not bot_id:
+        return
+    try:
+        with db.session() as session:
+            record = session.get(BotTradeRecord, trade_id)
+            now = _utcnow()
+            if record is None:
+                record = BotTradeRecord(id=str(trade_id), bot_id=str(bot_id), direction=snapshot.get("direction") or "long")
+                record.created_at = now
+                session.add(record)
+            record.bot_id = str(bot_id)
+            if snapshot.get("strategy_id"):
+                record.strategy_id = str(snapshot.get("strategy_id"))
+            if snapshot.get("symbol"):
+                record.symbol = str(snapshot.get("symbol"))
+            if snapshot.get("direction"):
+                record.direction = str(snapshot.get("direction")).lower()
+            status = snapshot.get("status")
+            if status:
+                record.status = str(status)
+            contracts = _coerce_int(snapshot.get("contracts"))
+            if contracts is not None:
+                record.contracts = contracts
+            entry_time = _parse_optional_timestamp(snapshot.get("entry_time"))
+            if entry_time:
+                record.entry_time = entry_time
+            exit_time = _parse_optional_timestamp(snapshot.get("exit_time"))
+            if exit_time:
+                record.exit_time = exit_time
+            entry_price = _coerce_float(snapshot.get("entry_price"))
+            if entry_price is not None:
+                record.entry_price = entry_price
+            stop_price = _coerce_float(snapshot.get("stop_price"))
+            if stop_price is not None:
+                record.stop_price = stop_price
+            gross = _coerce_float(snapshot.get("gross_pnl"))
+            if gross is not None:
+                record.gross_pnl = gross
+            fees = _coerce_float(snapshot.get("fees_paid"))
+            if fees is not None:
+                record.fees_paid = fees
+            net = _coerce_float(snapshot.get("net_pnl"))
+            if net is not None:
+                record.net_pnl = net
+            quote = snapshot.get("quote_currency")
+            if quote:
+                record.quote_currency = str(quote).upper()
+            if snapshot.get("atm_template") is not None:
+                record.atm_template = dict(snapshot.get("atm_template") or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
+    except SQLAlchemyError as exc:
+        logger.warning("bot_trade_persist_failed | trade=%s | error=%s", trade_id, exc)
+
+
+def record_bot_trade_event(event: Dict[str, Any]) -> None:
+    """Persist a stop/target event for a stored trade."""
+
+    if not db.available:
+        return
+    trade_id = event.get("trade_id")
+    bot_id = event.get("bot_id")
+    if not trade_id or not bot_id:
+        return
+    event_id = event.get("id") or str(uuid.uuid4())
+    event_time = _parse_optional_timestamp(event.get("event_time") or event.get("time"))
+    try:
+        with db.session() as session:
+            record = BotTradeEventRecord(
+                id=event_id,
+                trade_id=str(trade_id),
+                bot_id=str(bot_id),
+                strategy_id=event.get("strategy_id"),
+                symbol=event.get("symbol"),
+                event_type=str(event.get("event_type") or event.get("type") or "event"),
+                leg=event.get("leg"),
+                contracts=_coerce_int(event.get("contracts")),
+                price=_coerce_float(event.get("price")),
+                ticks=_coerce_float(event.get("ticks")),
+                pnl=_coerce_float(event.get("pnl")),
+                quote_currency=(event.get("currency") or event.get("quote_currency")),
+                event_time=event_time,
+            )
+            session.add(record)
+    except SQLAlchemyError as exc:
+        logger.warning("bot_trade_event_persist_failed | trade=%s | error=%s", trade_id, exc)

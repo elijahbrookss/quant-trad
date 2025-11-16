@@ -1,7 +1,12 @@
 import pytest
 import pytest
 
-from portal.backend.service.atm import DEFAULT_ATM_TEMPLATE, merge_templates, normalise_template
+from portal.backend.service.atm import (
+    DEFAULT_ATM_TEMPLATE,
+    merge_templates,
+    normalise_template,
+    template_metrics,
+)
 
 
 @pytest.mark.unit
@@ -59,3 +64,22 @@ def test_normalise_template_tracks_tick_overrides():
 
     assert reverted.get("tick_size") == template.get("tick_size")
     assert reverted.get("_meta", {}).get("tick_size_override") is False
+
+
+@pytest.mark.unit
+def test_template_metrics_reports_reward_to_risk():
+    template = {
+        "contracts": 3,
+        "stop_ticks": 30,
+        "take_profit_orders": [
+            {"ticks": 20, "contracts": 1},
+            {"ticks": 40, "contracts": 1},
+            {"ticks": 60, "contracts": 1},
+        ],
+    }
+
+    metrics = template_metrics(template)
+
+    assert metrics["average_reward_ticks"] == pytest.approx(40)
+    assert metrics["stop_ticks"] == pytest.approx(30)
+    assert metrics["reward_to_risk"] == pytest.approx(40 / 30, rel=1e-4)

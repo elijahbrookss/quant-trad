@@ -8,7 +8,7 @@ from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import instrument_service
-from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
+from .atm import DEFAULT_ATM_TEMPLATE, merge_templates, template_metrics
 from .bot_runtime import BotRuntime, DEFAULT_RISK
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -460,6 +460,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
                 "indicators": _indicator_meta(merged),
                 "instruments": instruments,
                 "atm_template": atm_template,
+                "atm_metrics": template_metrics(atm_template),
             }
         )
     return {

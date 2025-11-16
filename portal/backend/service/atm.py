@@ -239,6 +239,35 @@ def normalise_template(
     return result
 
 
+def template_metrics(template: Optional[Mapping[str, Any]]) -> Dict[str, Optional[float]]:
+    """Compute aggregate metrics such as average reward and R:R."""
+
+    config = normalise_template(template)
+    take_profits: Sequence[Mapping[str, Any]] = config.get("take_profit_orders") or []
+    total_contracts = max(int(config.get("contracts") or 0), 0)
+    weighted_reward = 0.0
+    max_reward = 0.0
+    actual_contracts = 0
+    for order in take_profits:
+        ticks = abs(float(order.get("ticks") or 0.0))
+        contracts = max(int(order.get("contracts") or 0), 0)
+        weighted_reward += ticks * contracts
+        max_reward = max(max_reward, ticks)
+        actual_contracts += contracts
+    if total_contracts == 0 and actual_contracts > 0:
+        total_contracts = actual_contracts
+    avg_reward = weighted_reward / total_contracts if total_contracts else 0.0
+    stop_ticks = abs(float(config.get("stop_ticks") or 0.0))
+    reward_to_risk = (avg_reward / stop_ticks) if stop_ticks else None
+    return {
+        "average_reward_ticks": round(avg_reward, 4),
+        "max_reward_ticks": round(max_reward, 4),
+        "stop_ticks": round(stop_ticks, 4),
+        "reward_to_risk": round(reward_to_risk, 4) if reward_to_risk is not None else None,
+        "contracts": total_contracts,
+    }
+
+
 def merge_templates(*templates: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Merge multiple template sources from left to right."""
 
@@ -249,4 +278,9 @@ def merge_templates(*templates: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-__all__ = ["DEFAULT_ATM_TEMPLATE", "normalise_template", "merge_templates"]
+__all__ = [
+    "DEFAULT_ATM_TEMPLATE",
+    "normalise_template",
+    "merge_templates",
+    "template_metrics",
+]

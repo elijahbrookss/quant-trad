@@ -14,7 +14,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from . import indicator_service, strategy_service
+from . import indicator_service, storage, strategy_service
 from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
 from .candle_service import fetch_ohlcv
 
@@ -169,6 +169,9 @@ class LadderPosition:
                             "time": leg.exit_time,
                             "pnl": round(pnl, 4),
                             "currency": self.quote_currency,
+                            "contracts": leg.contracts,
+                            "ticks": leg.ticks,
+                            "direction": self.direction,
                         }
                     )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
@@ -195,6 +198,9 @@ class LadderPosition:
                             "time": leg.exit_time,
                             "pnl": round(pnl, 4),
                             "currency": self.quote_currency,
+                            "contracts": leg.contracts,
+                            "ticks": leg.ticks,
+                            "direction": self.direction,
                         }
                     )
                     if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
@@ -202,8 +208,15 @@ class LadderPosition:
                         self.moved_to_breakeven = True
         return events
 
-    def _apply_stop(self, candle: Candle) -> Optional[Dict[str, str]]:
+    def _apply_stop(self, candle: Candle) -> List[Dict[str, str]]:
+        events: List[Dict[str, str]] = []
+        triggered = False
         if self.direction == "long" and candle.low <= self.stop_price:
+            triggered = True
+        elif self.direction == "short" and candle.high >= self.stop_price:
+            triggered = True
+        if triggered:
+            tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
             for leg in self.legs:
                 if leg.status == "open":
                     leg.status = "stop"
@@ -213,43 +226,32 @@ class LadderPosition:
                     leg.pnl = pnl
                     self._record_pnl(pnl)
                     self._apply_fee(self.stop_price, leg.contracts)
+                    events.append(
+                        {
+                            "type": "stop",
+                            "trade_id": self.trade_id,
+                            "price": round(self.stop_price, 4),
+                            "time": leg.exit_time,
+                            "currency": self.quote_currency,
+                            "leg": leg.name,
+                            "contracts": leg.contracts,
+                            "pnl": round(pnl, 4),
+                            "ticks": tick_distance,
+                            "direction": self.direction,
+                        }
+                    )
             self.closed_at = candle.time
-            return {
-                "type": "stop",
-                "trade_id": self.trade_id,
-                "price": round(self.stop_price, 4),
-                "time": _isoformat(candle.time),
-                "currency": self.quote_currency,
-            }
-        if self.direction == "short" and candle.high >= self.stop_price:
-            for leg in self.legs:
-                if leg.status == "open":
-                    leg.status = "stop"
-                    leg.exit_price = self.stop_price
-                    leg.exit_time = _isoformat(candle.time)
-                    pnl = self._pnl_for_exit(self.stop_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(self.stop_price, leg.contracts)
+        elif all(leg.status != "open" for leg in self.legs):
             self.closed_at = candle.time
-            return {
-                "type": "stop",
-                "trade_id": self.trade_id,
-                "price": round(self.stop_price, 4),
-                "time": _isoformat(candle.time),
-                "currency": self.quote_currency,
-            }
-        if all(leg.status != "open" for leg in self.legs):
-            self.closed_at = candle.time
-        return None
+        return events
 
     def apply_bar(self, candle: Candle) -> List[Dict[str, str]]:
         """Advance the position with the latest candle."""
 
         events = self._apply_leg_fills(candle)
-        stop_event = self._apply_stop(candle)
-        if stop_event:
-            events.append(stop_event)
+        stop_events = self._apply_stop(candle)
+        if stop_events:
+            events.extend(stop_events)
         if not self.is_active():
             events.append(
                 {
@@ -260,6 +262,8 @@ class LadderPosition:
                     "fees_paid": round(self.fees_paid, 4),
                     "net_pnl": round(self.net_pnl, 4),
                     "currency": self.quote_currency,
+                    "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
+                    "direction": self.direction,
                 }
             )
         return events
@@ -292,6 +296,12 @@ class LadderPosition:
         direction = 1 if self.direction == "long" else -1
         ticks = ((exit_price - self.entry_price) / self.tick_size) * direction
         return ticks * self.tick_value * contracts
+
+    def _ticks_from_entry(self, price: float) -> float:
+        if not self.tick_size:
+            return 0.0
+        direction = 1 if self.direction == "long" else -1
+        return ((price - self.entry_price) / self.tick_size) * direction
 
     def _apply_fee(self, price: float, contracts: int) -> None:
         if contracts <= 0:
@@ -1046,7 +1056,9 @@ class BotRuntime:
                     stop_price=round(new_trade.stop_price, 4),
                     targets=targets,
                     bar_index=index,
+                    contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
                 )
+                self._persist_trade_entry(series, new_trade)
             trade_events = series.risk_engine.step(candle)
             for event in trade_events:
                 self._log_event(
@@ -1058,7 +1070,9 @@ class BotRuntime:
                     price=event.get("price"),
                     event_time=event.get("time"),
                     bar_index=index,
+                    contracts=event.get("contracts"),
                 )
+                self._persist_trade_event(series, event)
             series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
         self._bar_index = index + 1
         primary = self._primary_series
@@ -1276,6 +1290,64 @@ class BotRuntime:
         if limit and limit > 0:
             entries = entries[-limit:]
         return entries
+
+    def _persist_trade_entry(self, series: StrategySeries, trade: LadderPosition) -> None:
+        if not series or not trade:
+            return
+        contracts = sum(max(leg.contracts, 0) for leg in trade.legs)
+        storage.record_bot_trade(
+            {
+                "trade_id": trade.trade_id,
+                "bot_id": self.bot_id,
+                "strategy_id": series.strategy_id,
+                "symbol": series.symbol,
+                "direction": trade.direction,
+                "entry_time": trade.entry_time,
+                "entry_price": trade.entry_price,
+                "stop_price": trade.stop_price,
+                "contracts": contracts,
+                "status": "open",
+                "atm_template": series.atm_template,
+                "quote_currency": trade.quote_currency,
+            }
+        )
+
+    def _persist_trade_event(self, series: StrategySeries, event: Dict[str, Any]) -> None:
+        trade_id = event.get("trade_id")
+        if not trade_id:
+            return
+        payload = {
+            "id": event.get("id"),
+            "trade_id": trade_id,
+            "bot_id": self.bot_id,
+            "strategy_id": getattr(series, "strategy_id", None),
+            "symbol": getattr(series, "symbol", None),
+            "event_type": event.get("type"),
+            "leg": event.get("leg"),
+            "contracts": event.get("contracts"),
+            "price": event.get("price"),
+            "ticks": event.get("ticks"),
+            "pnl": event.get("pnl"),
+            "quote_currency": event.get("currency"),
+            "event_time": event.get("event_time") or event.get("time"),
+        }
+        storage.record_bot_trade_event(payload)
+        if event.get("type") == "close":
+            storage.record_bot_trade(
+                {
+                    "trade_id": trade_id,
+                    "bot_id": self.bot_id,
+                    "strategy_id": getattr(series, "strategy_id", None),
+                    "symbol": getattr(series, "symbol", None),
+                    "direction": event.get("direction"),
+                    "status": "closed",
+                    "exit_time": event.get("time"),
+                    "gross_pnl": event.get("gross_pnl"),
+                    "fees_paid": event.get("fees_paid"),
+                    "net_pnl": event.get("net_pnl"),
+                    "quote_currency": event.get("currency"),
+                }
+            )
 
     def _persist_runtime_state(self, status: str) -> None:
         """Send completion metadata back to the service layer for persistence."""
