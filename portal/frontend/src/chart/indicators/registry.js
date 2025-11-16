@@ -6,6 +6,7 @@ const INDICATOR_PANEVIEWS = {
   market_profile: [PaneViewType.VA_BOX, PaneViewType.TOUCH],
   trendline: [PaneViewType.SEGMENT, PaneViewType.TOUCH],
   vwap: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
+  bot_trade_rays: [PaneViewType.SEGMENT],
 };
 
 export function getPaneViewsFor(type) {

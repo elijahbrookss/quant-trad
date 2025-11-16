@@ -12,7 +12,7 @@ if "pandas" not in sys.modules:  # pragma: no cover - testing convenience
         to_datetime=lambda *args, **kwargs: None,
     )
 
-from portal.backend.service.bot_runtime import BotRuntime, Candle, LadderRiskEngine
+from portal.backend.service.bot_runtime import BotRuntime, Candle, LadderRiskEngine, StrategySeries
 from portal.backend.service import bot_service
 
 
@@ -454,3 +454,65 @@ def test_ladder_risk_engine_prefers_template_tick_size():
     engine = LadderRiskEngine(config, instrument=instrument)
 
     assert engine.tick_size == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+def test_trade_ray_overlays_follow_active_trade():
+    runtime = make_runtime()
+    runtime.state["status"] = "running"
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    candles = [
+        Candle(
+            time=base + timedelta(hours=idx),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0 + idx,
+        )
+        for idx in range(3)
+    ]
+    template = {
+        "take_profit_orders": [
+            {"ticks": 20, "contracts": 1, "label": "TP +20"},
+            {"ticks": 40, "contracts": 1, "label": "TP +40"},
+        ],
+        "stop_ticks": 10,
+    }
+    engine = LadderRiskEngine(template, instrument={"tick_size": 0.25})
+    series = StrategySeries(
+        strategy_id="s-ray",
+        name="Ray strategy",
+        symbol="ES",
+        timeframe="1h",
+        datasource="timescale",
+        exchange="cme",
+        candles=candles,
+        overlays=[],
+        risk_engine=engine,
+    )
+    runtime._series = [series]
+    runtime._primary_series = series
+    runtime._bar_index = 1
+
+    trade = engine._new_position(candles[0], "long")
+    engine.active_trade = trade
+
+    runtime._update_trade_overlay(series)
+
+    assert series.trade_overlay is not None
+    assert runtime._chart_overlays, "trade overlay should populate cache"
+    payload = series.trade_overlay.get("payload", {})
+    segments = payload.get("segments", [])
+    assert len(segments) == 1 + len(trade.legs)
+    segment_prices = sorted(round(seg["y1"], 4) for seg in segments)
+    expected_prices = sorted(
+        [round(trade.stop_price, 4)]
+        + [round(leg.target_price, 4) for leg in trade.legs if leg.status == "open"]
+    )
+    assert segment_prices == expected_prices
+
+    engine.active_trade = None
+    runtime._update_trade_overlay(series)
+
+    assert series.trade_overlay is None
+    assert runtime._chart_overlays == []

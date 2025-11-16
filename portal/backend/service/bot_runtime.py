@@ -33,6 +33,12 @@ DEFAULT_RISK = {
 
 MAX_LOG_ENTRIES = 500
 
+TRADE_OVERLAY_SOURCE = "trade_levels"
+TRADE_STOP_COLOR = "#f87171"
+TRADE_TARGET_COLOR = "#22d3ee"
+TRADE_RAY_MIN_SECONDS = 900
+TRADE_RAY_SPAN_MULTIPLIER = 120
+
 
 def _isoformat(value: Optional[datetime]) -> Optional[str]:
     """Return a UTC ISO8601 string with Z suffix for *value*."""
@@ -605,6 +611,7 @@ class StrategySeries:
     last_consumed_epoch: int = 0
     instrument: Optional[Dict[str, Any]] = None
     atm_template: Dict[str, Any] = field(default_factory=dict)
+    trade_overlay: Optional[Dict[str, Any]] = None
 
 
 class BotRuntime:
@@ -665,12 +672,20 @@ class BotRuntime:
         self._primary_series = self._series[0]
         self._total_bars = len(self._primary_series.candles)
         self._bar_index = 0
-        self._chart_overlays = [overlay for series in self._series for overlay in series.overlays]
+        self._rebuild_overlay_cache()
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
         self._log_event("prepared", total_bars=self._total_bars)
         self._push_update("prepared")
+
+    def _rebuild_overlay_cache(self) -> None:
+        overlays: List[Dict[str, Any]] = []
+        for series in self._series:
+            overlays.extend(series.overlays)
+            if series.trade_overlay:
+                overlays.append(series.trade_overlay)
+        self._chart_overlays = overlays
 
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
@@ -917,6 +932,81 @@ class BotRuntime:
                 }
             )
         return overlays
+
+    def _update_trade_overlay(self, series: Optional[StrategySeries]) -> None:
+        if series is None:
+            return
+        overlay = self._build_trade_overlay(series)
+        series.trade_overlay = overlay
+        self._rebuild_overlay_cache()
+
+    def _build_trade_overlay(self, series: StrategySeries) -> Optional[Dict[str, Any]]:
+        engine = getattr(series, "risk_engine", None)
+        trade = getattr(engine, "active_trade", None)
+        if not trade or not trade.is_active():
+            return None
+        anchor_epoch = self._current_epoch()
+        if anchor_epoch is None:
+            if series.candles:
+                anchor_epoch = int(series.candles[-1].time.timestamp())
+            else:
+                return None
+        timeframe_seconds = _timeframe_to_seconds(series.timeframe) or 60
+        span = max(int(timeframe_seconds) * TRADE_RAY_SPAN_MULTIPLIER, TRADE_RAY_MIN_SECONDS)
+        start_epoch = anchor_epoch
+        end_epoch = anchor_epoch - span
+
+        def quantise(value: float) -> float:
+            return round(float(value), 8)
+
+        segments_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
+
+        def add_level(kind: str, price: Optional[float]) -> None:
+            if price in (None, float("inf"), float("-inf")):
+                return
+            key = (kind, quantise(price))
+            entry = segments_map.get(key)
+            if entry:
+                entry["count"] = entry.get("count", 1) + 1
+                return
+            color = TRADE_STOP_COLOR if kind == "stop" else TRADE_TARGET_COLOR
+            segments_map[key] = {
+                "kind": kind,
+                "price": float(price),
+                "color": color,
+                "lineWidth": 2,
+                "lineStyle": 2,
+            }
+
+        add_level("stop", trade.stop_price)
+        for leg in trade.legs:
+            if getattr(leg, "status", "open") == "open":
+                add_level("target", leg.target_price)
+
+        if not segments_map:
+            return None
+
+        segments = [
+            {
+                "x1": start_epoch,
+                "x2": end_epoch,
+                "y1": entry["price"],
+                "y2": entry["price"],
+                "color": entry["color"],
+                "lineWidth": entry["lineWidth"],
+                "lineStyle": entry["lineStyle"],
+            }
+            for entry in segments_map.values()
+        ]
+
+        if not segments:
+            return None
+
+        return {
+            "type": "bot_trade_rays",
+            "source": TRADE_OVERLAY_SOURCE,
+            "payload": {"segments": segments},
+        }
 
     @staticmethod
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
@@ -1199,6 +1289,7 @@ class BotRuntime:
                     contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
                 )
                 self._persist_trade_entry(series, new_trade)
+                self._update_trade_overlay(series)
             trade_events = self._step_series_with_intrabar(series, candle)
             for event in trade_events:
                 self._log_event(
@@ -1213,6 +1304,7 @@ class BotRuntime:
                     contracts=event.get("contracts"),
                 )
                 self._persist_trade_event(series, event)
+            self._update_trade_overlay(series)
             series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
         self._bar_index = index + 1
         primary = self._primary_series
@@ -1254,7 +1346,7 @@ class BotRuntime:
             primary = self._primary_series
             if primary:
                 self._total_bars = len(primary.candles)
-            self._chart_overlays = [overlay for series in self._series for overlay in series.overlays]
+            self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended live candles")
             self._push_update("live_refresh")
         return updated
