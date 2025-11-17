@@ -1740,6 +1740,7 @@ class BotRuntime:
             "visible_payload",
             getattr(primary, "strategy_id", None),
             candles,
+            once=False,
         )
         return candles
 
@@ -1748,6 +1749,8 @@ class BotRuntime:
         stage: str,
         strategy_id: Optional[str],
         candles: Sequence[Any],
+        *,
+        once: bool = True,
     ) -> None:
         if not candles or len(candles) < 2:
             return
@@ -1763,6 +1766,7 @@ class BotRuntime:
 
         previous: Optional[int] = None
         first_epoch: Optional[int] = None
+        second_epoch: Optional[int] = None
         last_epoch: Optional[int] = None
         for idx, entry in enumerate(candles):
             epoch = epoch_from_entry(entry)
@@ -1770,6 +1774,8 @@ class BotRuntime:
                 continue
             if first_epoch is None:
                 first_epoch = epoch
+            elif second_epoch is None:
+                second_epoch = epoch
             last_epoch = epoch
             if previous is not None and epoch < previous:
                 logger.error(
@@ -1786,12 +1792,30 @@ class BotRuntime:
 
         if first_epoch is None or last_epoch is None:
             return
+        start_iso = _isoformat(datetime.fromtimestamp(first_epoch, tz=timezone.utc))
+        second_iso = (
+            _isoformat(datetime.fromtimestamp(second_epoch, tz=timezone.utc))
+            if second_epoch is not None
+            else None
+        )
+        end_iso = _isoformat(datetime.fromtimestamp(last_epoch, tz=timezone.utc))
+        if not once:
+            logger.debug(
+                "bot_runtime_candle_sequence_snapshot | bot=%s | strategy=%s | stage=%s | count=%s | first=%s | second=%s | last=%s",
+                self.bot_id,
+                strategy_id,
+                stage,
+                len(candles),
+                start_iso,
+                second_iso,
+                end_iso,
+            )
+            return
+
         key = (stage, strategy_id or "unknown")
         if key in self._candle_diag_seen:
             return
         self._candle_diag_seen.add(key)
-        start_iso = _isoformat(datetime.fromtimestamp(first_epoch, tz=timezone.utc))
-        end_iso = _isoformat(datetime.fromtimestamp(last_epoch, tz=timezone.utc))
         logger.debug(
             "bot_runtime_candle_sequence_ok | bot=%s | strategy=%s | stage=%s | count=%s | start=%s | end=%s",
             self.bot_id,
