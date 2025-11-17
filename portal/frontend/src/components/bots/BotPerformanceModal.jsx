@@ -5,6 +5,42 @@ import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import { fetchBotPerformance, pauseBot, resumeBot, openBotStream } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
+const logCandleDiagnostics = (label, candles, botId) => {
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return
+  }
+  let previous = null
+  let violation = null
+  let first = null
+  let last = null
+  for (let idx = 0; idx < candles.length; idx += 1) {
+    const raw = candles[idx]?.time
+    const epoch = raw ? Math.floor(new Date(raw).getTime() / 1000) : null
+    if (!Number.isFinite(epoch)) {
+      continue
+    }
+    if (first === null) first = epoch
+    last = epoch
+    if (previous !== null && epoch < previous) {
+      violation = { index: idx, prev: previous, current: epoch }
+      break
+    }
+    previous = epoch
+  }
+  const context = {
+    botId,
+    label,
+    count: candles.length,
+    first,
+    last,
+  }
+  if (violation) {
+    console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
+  } else {
+    console.debug('[BotPerformanceModal] Candle payload received', context)
+  }
+}
+
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -134,6 +170,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     setError(null)
     try {
       const data = await fetchBotPerformance(bot.id)
+      logCandleDiagnostics('initial_fetch', data?.candles, bot?.id)
       applyPayload(data)
     } catch (err) {
       setError(err?.message || 'Unable to fetch performance')
@@ -163,6 +200,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
+        logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
         applyPayload(data)
         setStreamStatus('open')
       } catch (err) {

@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -649,6 +649,7 @@ class BotRuntime:
         self._subscribers: Dict[str, Queue] = {}
         self._state_callback = state_callback
         self._intrabar_cache: Dict[str, List[Candle]] = {}
+        self._candle_diag_seen: Set[Tuple[str, str]] = set()
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -745,9 +746,24 @@ class BotRuntime:
             )
             return None
 
+        if not df.index.is_monotonic_increasing:
+            first_idx = df.index[0] if len(df.index) else None
+            second_idx = df.index[1] if len(df.index) > 1 else None
+            logger.warning(
+                "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
+                self.bot_id,
+                strategy.get("id"),
+                symbol,
+                timeframe,
+                first_idx,
+                second_idx,
+                len(df.index),
+            )
+
         candles = self._build_candles(df, timeframe)
         if not candles:
             return None
+        self._log_candle_sequence("build_series", strategy.get("id"), candles)
 
         try:
             evaluation = strategy_service.generate_strategy_signals(
@@ -1720,7 +1736,71 @@ class BotRuntime:
             visible = min(self._bar_index, len(primary.candles))
         visible = max(1, visible)
         candles = [candle.to_dict() for candle in primary.candles[:visible]]
+        self._log_candle_sequence(
+            "visible_payload",
+            getattr(primary, "strategy_id", None),
+            candles,
+        )
         return candles
+
+    def _log_candle_sequence(
+        self,
+        stage: str,
+        strategy_id: Optional[str],
+        candles: Sequence[Any],
+    ) -> None:
+        if not candles or len(candles) < 2:
+            return
+
+        def epoch_from_entry(entry: Any) -> Optional[int]:
+            if isinstance(entry, Candle):
+                return int(entry.time.timestamp())
+            if isinstance(entry, Mapping):
+                return self._normalise_epoch(entry.get("time"))
+            if isinstance(entry, (int, float)):
+                return int(entry)
+            return None
+
+        previous: Optional[int] = None
+        first_epoch: Optional[int] = None
+        last_epoch: Optional[int] = None
+        for idx, entry in enumerate(candles):
+            epoch = epoch_from_entry(entry)
+            if epoch is None:
+                continue
+            if first_epoch is None:
+                first_epoch = epoch
+            last_epoch = epoch
+            if previous is not None and epoch < previous:
+                logger.error(
+                    "bot_runtime_candle_order_violation | bot=%s | strategy=%s | stage=%s | index=%s | prev=%s | current=%s",
+                    self.bot_id,
+                    strategy_id,
+                    stage,
+                    idx,
+                    previous,
+                    epoch,
+                )
+                return
+            previous = epoch
+
+        if first_epoch is None or last_epoch is None:
+            return
+        key = (stage, strategy_id or "unknown")
+        if key in self._candle_diag_seen:
+            return
+        self._candle_diag_seen.add(key)
+        start_iso = _isoformat(datetime.fromtimestamp(first_epoch, tz=timezone.utc))
+        end_iso = _isoformat(datetime.fromtimestamp(last_epoch, tz=timezone.utc))
+        logger.debug(
+            "bot_runtime_candle_sequence_ok | bot=%s | strategy=%s | stage=%s | count=%s | start=%s | end=%s",
+            self.bot_id,
+            strategy_id,
+            stage,
+            len(candles),
+            start_iso,
+            end_iso,
+        )
 
     def _current_epoch(self) -> Optional[int]:
         primary = self._primary_series

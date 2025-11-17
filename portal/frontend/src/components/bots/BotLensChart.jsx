@@ -104,6 +104,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const barSpacingRef = useRef(null)
   const levelSeriesRef = useRef(null)
   const tradeSegmentsRef = useRef([])
+  const diagLoggedRef = useRef(false)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
@@ -123,6 +124,45 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       }))
       .filter((entry) => Number.isFinite(entry.time))
   }, [resolvedCandles])
+
+  useEffect(() => {
+    if (!candleData.length) {
+      diagLoggedRef.current = false
+      return
+    }
+    let previous = null
+    let violation = null
+    for (let idx = 0; idx < candleData.length; idx += 1) {
+      const current = candleData[idx]
+      if (!Number.isFinite(current?.time)) {
+        continue
+      }
+      if (previous !== null && current.time < previous) {
+        violation = { index: idx, prev: previous, current: current.time }
+        break
+      }
+      previous = current.time
+    }
+    if (violation) {
+      console.error('[BotLensChart] Candle order violation', {
+        chartId,
+        count: candleData.length,
+        ...violation,
+      })
+      return
+    }
+    if (!diagLoggedRef.current) {
+      const first = candleData[0]?.time
+      const last = candleData[candleData.length - 1]?.time
+      console.debug('[BotLensChart] Candle range', {
+        chartId,
+        count: candleData.length,
+        first,
+        last,
+      })
+      diagLoggedRef.current = true
+    }
+  }, [candleData, chartId])
 
   const tradeMarkers = useMemo(() => {
     if (!Array.isArray(resolvedTrades)) {
