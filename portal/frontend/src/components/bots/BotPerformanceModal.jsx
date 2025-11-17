@@ -1,8 +1,14 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { X, Pause, RotateCw } from 'lucide-react'
+import { X, Pause, RotateCw, ChevronDown } from 'lucide-react'
 import { BotLensChart, toSec } from './BotLensChart.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
-import { fetchBotPerformance, pauseBot, resumeBot, openBotStream } from '../../adapters/bot.adapter.js'
+import {
+  fetchBotPerformance,
+  pauseBot,
+  resumeBot,
+  openBotStream,
+  updateBot,
+} from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
 const logCandleDiagnostics = (label, candles, botId) => {
@@ -48,10 +54,39 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [action, setAction] = useState(null)
   const [streamStatus, setStreamStatus] = useState('idle')
   const streamRef = useRef(null)
+  const [expandedStrategies, setExpandedStrategies] = useState(() => new Set())
+  const [playbackDraft, setPlaybackDraft] = useState(() => {
+    const raw = Number(bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 0)
+    return Number.isFinite(raw) ? raw : 0
+  })
+  const [speedSaving, setSpeedSaving] = useState(false)
+  const playbackDebounceRef = useRef(null)
 
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
+
+  useEffect(() => {
+    setExpandedStrategies(new Set())
+  }, [bot?.id])
+
+  useEffect(() => {
+    const candidate =
+      payload?.runtime?.playback_speed ??
+      bot?.runtime?.playback_speed ??
+      bot?.playback_speed ??
+      0
+    const numeric = Number(candidate)
+    if (Number.isFinite(numeric)) {
+      setPlaybackDraft(numeric)
+    }
+  }, [payload?.runtime?.playback_speed, bot?.runtime?.playback_speed, bot?.playback_speed, bot?.id])
+
+  useEffect(() => () => {
+    if (playbackDebounceRef.current) {
+      clearTimeout(playbackDebounceRef.current)
+    }
+  }, [])
   const logs = payload?.logs || []
   const quoteCurrency = payload?.stats?.quote_currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
@@ -60,10 +95,44 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
   const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
+  const runtimeInitialising = runtimeStatus === 'initialising'
+  const strategiesReady = strategies.length > 0
+  const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
+  const bootstrapTimeline = useMemo(() => {
+    const stateFor = (done, active) => {
+      if (done) return 'done'
+      if (active) return 'active'
+      return 'pending'
+    }
+    return [
+      {
+        id: 'runtime',
+        label: 'Spinning up bot runtime',
+        state: stateFor(!runtimeInitialising, runtimeInitialising || loading),
+      },
+      {
+        id: 'strategy',
+        label: 'Loading strategy details',
+        state: stateFor(strategiesReady, !strategiesReady && !runtimeInitialising),
+      },
+      {
+        id: 'atm',
+        label: 'Loading ATM rules',
+        state: stateFor(atmReady, strategiesReady && !atmReady),
+      },
+    ]
+  }, [runtimeInitialising, loading, strategiesReady, atmReady])
+  const showBootstrapTimeline = bootstrapTimeline.some((step) => step.state !== 'done')
+  const bootstrapStyles = {
+    done: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100',
+    active: 'border-sky-400/40 bg-sky-400/10 text-sky-100',
+    pending: 'border-white/10 text-slate-300',
+  }
   const statEntries = useMemo(() => {
     const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
     return Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
   }, [payload?.stats])
+  const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
 
   const formatTimestamp = useCallback((value) => {
     if (!value) return '—'
@@ -119,6 +188,54 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
     return `${numeric.toFixed(2)} R`
   }, [])
+
+  const playbackLabel = playbackDraft <= 0 ? 'Instant' : `${playbackDraft.toFixed(2)}x`
+
+  const toggleStrategyDetails = useCallback((strategyId) => {
+    if (!strategyId) return
+    setExpandedStrategies((prev) => {
+      const next = new Set(prev)
+      if (next.has(strategyId)) {
+        next.delete(strategyId)
+      } else {
+        next.add(strategyId)
+      }
+      return next
+    })
+  }, [])
+
+  const persistPlaybackSpeed = useCallback(
+    async (value) => {
+      if (!bot?.id) return
+      setSpeedSaving(true)
+      try {
+        await updateBot(bot.id, { playback_speed: Number.isFinite(value) ? value : 0 })
+        onRefresh?.()
+      } catch (err) {
+        console.error('bot playback update failed', err)
+        setError(err?.message || 'Unable to update playback speed')
+      } finally {
+        setSpeedSaving(false)
+      }
+    },
+    [bot?.id, onRefresh],
+  )
+
+  const handlePlaybackInput = useCallback(
+    (event) => {
+      const raw = Number(event?.target?.value)
+      const next = Number.isFinite(raw) ? raw : 0
+      setPlaybackDraft(next)
+      if (playbackDebounceRef.current) {
+        clearTimeout(playbackDebounceRef.current)
+      }
+      playbackDebounceRef.current = setTimeout(() => {
+        playbackDebounceRef.current = null
+        persistPlaybackSpeed(next)
+      }, 300)
+    },
+    [persistPlaybackSpeed],
+  )
 
   const headerDetails = useMemo(() => {
     const parts = []
@@ -315,6 +432,24 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               <p className="text-lg font-semibold text-white">{streamStatus}</p>
             </div>
           </div>
+          {showBootstrapTimeline ? (
+            <div className="rounded-3xl border border-dashed border-white/10 bg-black/20 p-4">
+              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Boot sequence</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                {bootstrapTimeline.map((step) => (
+                  <div
+                    key={step.id}
+                    className={`rounded-2xl border px-3 py-2 text-sm font-semibold ${bootstrapStyles[step.state]}`}
+                  >
+                    <p>{step.label}</p>
+                    <p className="text-[10px] font-normal uppercase tracking-[0.35em] text-white/60">
+                      {step.state}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             {canPause ? (
               <button
@@ -337,8 +472,31 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </button>
             ) : null}
           </div>
+          <div className="rounded-3xl border border-white/5 bg-black/40 p-4">
+            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
+              <span>Playback speed</span>
+              <span className="text-sm font-semibold text-white">
+                {playbackLabel}
+                {speedSaving ? ' • syncing…' : ''}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="4"
+              step="0.05"
+              value={playbackDraft}
+              onChange={handlePlaybackInput}
+              className="mt-3 w-full accent-sky-400"
+            />
+            <div className="mt-1 flex justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
+              <span>Instant</span>
+              <span>2x</span>
+              <span>4x</span>
+            </div>
+          </div>
           <div className="relative">
-            {loading ? <LoadingOverlay label="Loading bot performance…" /> : null}
+            {loading ? <LoadingOverlay label={loadingLabel} /> : null}
             {error ? (
               <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
             ) : showInactiveState ? (
@@ -365,123 +523,147 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           </div>
 
           {strategies.length ? (
-            <div className="space-y-3 rounded-3xl border border-white/5 bg-black/30 p-4">
-              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Strategy wiring</p>
-              <div className="grid gap-4 md:grid-cols-2">
-                {strategies.map((strategy) => (
-                  <article
-                    key={strategy.id}
-                    className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-200"
-                  >
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.3em] text-slate-400">{strategy.id}</p>
-                      <h4 className="text-lg font-semibold text-white">{strategy.name || 'Unnamed strategy'}</h4>
-                    </div>
-                    <dl className="grid gap-2 text-xs text-slate-300 sm:grid-cols-2">
-                      <div>
-                        <dt className="uppercase tracking-[0.3em] text-slate-500">Symbols</dt>
-                        <dd className="text-sm text-slate-100">{strategy.symbols?.join(', ') || '—'}</dd>
+            <div className="space-y-4 rounded-3xl border border-white/5 bg-black/30 p-4">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Strategy wiring</p>
+                <span className="text-xs text-slate-400">{strategies.length} linked</span>
+              </div>
+              <div className="space-y-3">
+                {strategies.map((strategy) => {
+                  const summarySymbols = strategy.symbols?.join(', ') || strategy.symbol || '—'
+                  const timeframeLabel = strategy.timeframe || botMeta.timeframe || '—'
+                  const datasourceLabel = strategy.datasource || botMeta.datasource || '—'
+                  const exchangeLabel = strategy.exchange || botMeta.exchange || '—'
+                  const primaryInstrument = strategy.instruments?.[0] || strategy.instrument
+                  const contractSize = primaryInstrument?.contract_size ?? strategy.atm_template?.contract_size ?? '—'
+                  const rrDisplay = formatRiskReward(strategy.atm_metrics)
+                  const isExpanded = expandedStrategies.has(strategy.id)
+                  return (
+                    <article key={strategy.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-lg font-semibold text-white">{strategy.name || 'Unnamed strategy'}</h4>
+                          <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">{strategy.id}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleStrategyDetails(strategy.id)}
+                          className="inline-flex items-center gap-2 rounded-full border border-white/20 px-3 py-1 text-xs text-slate-100 hover:border-white/40"
+                        >
+                          <span>{isExpanded ? 'Hide details' : 'Details'}</span>
+                          <ChevronDown className={`size-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                        </button>
                       </div>
-                      <div>
-                        <dt className="uppercase tracking-[0.3em] text-slate-500">Timeframe</dt>
-                        <dd className="text-sm text-slate-100">{strategy.timeframe || '—'}</dd>
-                      </div>
-                      <div>
-                        <dt className="uppercase tracking-[0.3em] text-slate-500">Datasource</dt>
-                        <dd className="text-sm text-slate-100">{strategy.datasource || botMeta.datasource || '—'}</dd>
-                      </div>
-                      <div>
-                        <dt className="uppercase tracking-[0.3em] text-slate-500">Exchange</dt>
-                        <dd className="text-sm text-slate-100">{strategy.exchange || botMeta.exchange || '—'}</dd>
-                      </div>
-                    </dl>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
-                    {strategy.indicators?.length ? (
-                      <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
-                        {strategy.indicators.map((indicator, idx) => (
-                            <li
-                              key={`${indicator.id || idx}-${idx}`}
-                              className="group/indicator flex items-center justify-between gap-3 px-3 py-2"
-                            >
-                              <div className="flex flex-col gap-1">
-                                <div className="flex flex-wrap items-center gap-2 text-sm text-white">
-                                  <span
-                                    className="h-2 w-2 rounded-full"
-                                    style={{ backgroundColor: indicator.color || '#a5b4fc' }}
-                                  />
-                                  <span>{indicator.name || indicator.id || 'Indicator'}</span>
-                                  {indicator.id ? (
-                                    <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-slate-500">
-                                      {indicator.id}
+                      <dl className="mt-3 grid gap-3 text-xs text-slate-400 sm:grid-cols-4">
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Symbols</dt>
+                          <dd className="text-sm text-white">{summarySymbols}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Timeframe</dt>
+                          <dd className="text-sm text-white">{timeframeLabel}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Datasource / Exch.</dt>
+                          <dd className="text-sm text-white">{datasourceLabel} / {exchangeLabel}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Contract &amp; R:R</dt>
+                          <dd className="text-sm text-white">
+                            {contractSize} / {rrDisplay}
+                          </dd>
+                        </div>
+                      </dl>
+                      {isExpanded ? (
+                        <div className="mt-4 space-y-4 border-t border-white/10 pt-4 text-sm text-slate-200">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
+                            {strategy.indicators?.length ? (
+                              <ul className="mt-2 divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
+                                {strategy.indicators.map((indicator, idx) => (
+                                  <li
+                                    key={`${indicator.id || idx}-${idx}`}
+                                    className="flex items-center justify-between gap-3 px-3 py-2"
+                                  >
+                                    <div className="flex flex-wrap items-center gap-2 text-sm text-white">
+                                      <span
+                                        className="h-2 w-2 rounded-full"
+                                        style={{ backgroundColor: indicator.color || '#a5b4fc' }}
+                                      />
+                                      <span>{indicator.name || indicator.id || 'Indicator'}</span>
+                                      {indicator.id ? (
+                                        <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-slate-500">
+                                          {indicator.id}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">
+                                      {indicator.type || 'custom'}
                                     </span>
-                                  ) : null}
-                                </div>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-2 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
+                                No indicator overlays attached
                               </div>
-                              <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">
-                                {indicator.type || 'custom'}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div className="rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
-                          No indicator overlays attached
+                            )}
+                          </div>
+                          <div>
+                            <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Instruments</p>
+                            {strategy.instruments?.length ? (
+                              <ul className="mt-2 divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
+                                {strategy.instruments.map((instrument, idx) => (
+                                  <li key={`${instrument.symbol || idx}-${idx}`} className="flex flex-col gap-1 px-3 py-2">
+                                    <div className="flex items-center justify-between text-sm text-white">
+                                      <span>{instrument.symbol || 'Instrument'}</span>
+                                      <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                                        {instrument.quote_currency || '—'}
+                                      </span>
+                                    </div>
+                                    <div className="text-xs text-slate-300">
+                                      <div className="flex flex-wrap gap-3">
+                                        <span>Tick: {instrument.tick_size ?? '—'}</span>
+                                        <span>
+                                          Tick Value: {instrument.tick_value ?? '—'}
+                                          {instrument.quote_currency ? ` ${instrument.quote_currency}` : ''}
+                                        </span>
+                                      </div>
+                                      <div className="flex flex-wrap gap-3">
+                                        <span>Contract: {instrument.contract_size ?? '—'}</span>
+                                        <span>
+                                          Fees{' '}
+                                          {instrument.maker_fee_rate != null
+                                            ? `${(Number(instrument.maker_fee_rate) * 100).toFixed(2)}%`
+                                            : '—'}{' '}
+                                          /{' '}
+                                          {instrument.taker_fee_rate != null
+                                            ? `${(Number(instrument.taker_fee_rate) * 100).toFixed(2)}%`
+                                            : '—'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="mt-2 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
+                                No instrument metadata attached
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-slate-400">
+                              <span>ATM template</span>
+                              <span className="text-xs text-slate-200">R:R {rrDisplay}</span>
+                            </div>
+                            <ATMTemplateSummary template={strategy.atm_template} />
+                          </div>
                         </div>
-                      )}
-                    </div>
-                    <div>
-                      <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Instruments</p>
-                      {strategy.instruments?.length ? (
-                        <ul className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
-                          {strategy.instruments.map((instrument, idx) => (
-                            <li key={`${instrument.symbol || idx}-${idx}`} className="flex flex-col gap-1 px-3 py-2">
-                              <div className="flex items-center justify-between text-sm text-white">
-                                <span>{instrument.symbol || 'Instrument'}</span>
-                                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                                  {instrument.quote_currency || '—'}
-                                </span>
-                              </div>
-                              <div className="text-xs text-slate-300">
-                                <div className="flex flex-wrap gap-3">
-                                  <span>Tick: {instrument.tick_size ?? '—'}</span>
-                                  <span>
-                                    Tick Value: {instrument.tick_value ?? '—'}
-                                    {instrument.quote_currency ? ` ${instrument.quote_currency}` : ''}
-                                  </span>
-                                </div>
-                                <div className="flex flex-wrap gap-3">
-                                  <span>Contract: {instrument.contract_size ?? '—'}</span>
-                                  <span>
-                                    Fees:{' '}
-                                    {instrument.maker_fee_rate != null
-                                      ? `${(Number(instrument.maker_fee_rate) * 100).toFixed(2)}%`
-                                      : '—'}{' '}
-                                    /{' '}
-                                    {instrument.taker_fee_rate != null
-                                      ? `${(Number(instrument.taker_fee_rate) * 100).toFixed(2)}%`
-                                      : '—'}
-                                  </span>
-                                </div>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <div className="rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
-                          No instrument metadata attached
-                        </div>
-                      )}
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-slate-400">
-                        <span>ATM template</span>
-                        <span className="text-xs text-slate-200">R:R {formatRiskReward(strategy.atm_metrics)}</span>
-                      </div>
-                      <ATMTemplateSummary template={strategy.atm_template} />
-                    </div>
-                  </article>
-                ))}
+                      ) : null}
+                    </article>
+                  )
+                })}
               </div>
             </div>
           ) : null}

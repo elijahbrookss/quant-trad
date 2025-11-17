@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
@@ -38,6 +39,7 @@ TRADE_STOP_COLOR = "#f87171"
 TRADE_TARGET_COLOR = "#22d3ee"
 TRADE_RAY_MIN_SECONDS = 900
 TRADE_RAY_SPAN_MULTIPLIER = 120
+INTRABAR_BASE_SECONDS = 0.4
 
 
 def _isoformat(value: Optional[datetime]) -> Optional[str]:
@@ -651,6 +653,7 @@ class BotRuntime:
         self._intrabar_cache: Dict[str, List[Candle]] = {}
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
+        self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -932,6 +935,11 @@ class BotRuntime:
             interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
             ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
             ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
+            cache_key = self._indicator_overlay_cache_key(indicator_id, start_iso, end_iso, interval, window_symbol, ds, ex)
+            cached = self._indicator_overlay_cache.get(cache_key)
+            if cached:
+                overlays.append(deepcopy(cached))
+                continue
             try:
                 payload = indicator_service.overlays_for_instance(
                     indicator_id,
@@ -960,7 +968,29 @@ class BotRuntime:
                     "source": "indicator",
                 }
             )
+            self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
         return overlays
+
+    @staticmethod
+    def _indicator_overlay_cache_key(
+        indicator_id: str,
+        start_iso: Optional[str],
+        end_iso: Optional[str],
+        interval: Optional[str],
+        symbol: Optional[str],
+        datasource: Optional[str],
+        exchange: Optional[str],
+    ) -> str:
+        parts = [
+            indicator_id or "",
+            start_iso or "",
+            end_iso or "",
+            str(interval or ""),
+            (symbol or "").upper(),
+            (datasource or "").lower(),
+            (exchange or "").lower(),
+        ]
+        return "::".join(parts)
 
     def _update_trade_overlay(self, series: Optional[StrategySeries]) -> None:
         if series is None:
@@ -1164,6 +1194,7 @@ class BotRuntime:
             events.extend(engine.step(minute_bar))
             if engine.active_trade is None:
                 break
+            self._pace_intrabar_step()
         return events
 
     @staticmethod
@@ -1212,6 +1243,7 @@ class BotRuntime:
             self._next_bar_at = None
             self._logs.clear()
             self._intrabar_cache.clear()
+            self._indicator_overlay_cache.clear()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -1353,12 +1385,22 @@ class BotRuntime:
     def _sleep_between_bars(self) -> None:
         if self.mode != "walk-forward":
             return
-        speed = self.playback_speed
-        if speed is None or speed <= 0:
-            self._next_bar_at = None
+        interval = self._compute_playback_interval()
+        self._pace(interval, update_next_bar=True)
+
+    def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
+        speed = self.playback_speed or 0.0
+        if speed <= 0:
+            return 0.0
+        return max(base_seconds / speed, 0.02)
+
+    def _pace(self, interval: float, update_next_bar: bool = False) -> None:
+        if interval <= 0:
+            if update_next_bar:
+                self._next_bar_at = None
             return
-        interval = max(1.0 / speed, 0.02)
-        self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
+        if update_next_bar:
+            self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
         target = time.time() + interval
         while not self._stop.is_set():
             if not self._pause_event.wait(timeout=0.2):
@@ -1367,6 +1409,12 @@ class BotRuntime:
             if remaining <= 0:
                 break
             time.sleep(min(0.25, remaining))
+
+    def _pace_intrabar_step(self) -> None:
+        if self.mode != "walk-forward":
+            return
+        interval = self._compute_playback_interval(INTRABAR_BASE_SECONDS)
+        self._pace(interval)
 
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
