@@ -114,15 +114,24 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     if (!Array.isArray(resolvedCandles)) {
       return []
     }
-    return resolvedCandles
+    const normalized = resolvedCandles
       .map((candle) => ({
-        time: Math.floor(new Date(candle.time).getTime() / 1000),
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
+        time: toSec(candle?.time),
+        open: toFiniteNumber(candle?.open),
+        high: toFiniteNumber(candle?.high),
+        low: toFiniteNumber(candle?.low),
+        close: toFiniteNumber(candle?.close),
       }))
-      .filter((entry) => Number.isFinite(entry.time))
+      .filter(
+        (entry) =>
+          Number.isFinite(entry.time) &&
+          Number.isFinite(entry.open) &&
+          Number.isFinite(entry.high) &&
+          Number.isFinite(entry.low) &&
+          Number.isFinite(entry.close),
+      )
+
+    return normalized.sort((a, b) => a.time - b.time)
   }, [resolvedCandles])
 
   useEffect(() => {
