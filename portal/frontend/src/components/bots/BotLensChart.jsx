@@ -222,13 +222,14 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       const ghostPoints = []
       if (Number.isFinite(lastTime)) {
         const lastCandle = candleData[lastIndex]
-        ghostPoints.push({ time: lastTime, value: lastCandle?.high ?? lastCandle?.close ?? 0 })
         ghostPoints.push({ time: lastTime - 1, value: lastCandle?.low ?? lastCandle?.close ?? 0 })
+        ghostPoints.push({ time: lastTime, value: lastCandle?.high ?? lastCandle?.close ?? 0 })
       }
       overlayPrices.forEach((price, idx) => {
         if (!Number.isFinite(lastTime)) return
         ghostPoints.push({ time: lastTime + idx + 1, value: price })
       })
+      ghostPoints.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
       levelSeriesRef.current.setData(ghostPoints)
     },
     [candleData],
