@@ -1,11 +1,20 @@
 import os
 from datetime import date
+from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
 # 1) Load the same secrets.env your test file uses
 #    (absolute path so imports don't break it)
-load_dotenv(dotenv_path="/home/jorge/projects/quant-trad/secrets.env")
+#load_dotenv(dotenv_path="/home/jorge/projects/quant-trad/secrets.env")
+# parents[0] = notion
+# parents[1] = automation
+# parents[2] = src
+# parents[3] = quant-trad (repo root)
+BASE_DIR = Path(__file__).resolve().parents[3]
+ENV_PATH = BASE_DIR / "secrets.env"
+
+load_dotenv(dotenv_path=ENV_PATH)
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_RELEASE_DB_ID = os.getenv("NOTION_RELEASE_DB_ID")
@@ -23,56 +32,38 @@ HEADERS = {
 
 def create_release_page(
     name: str,
-    change_type: str,
     summary: str,
-    raw_changelog: str,
-    priority: str = "Medium",
-    status: str = "Released",
-    release_date: date | None = None,
-    version_tag: str | None = None,
+    release_date: date,
+    branch: str,
 ):
     if release_date is None:
         release_date = date.today()
-
     payload = {
         "parent": {"database_id": NOTION_RELEASE_DB_ID},
         "properties": {
-            "Release Name": {
+            "Name": {
                 "title": [{"text": {"content": name}}],
-            },
-            "Change Type": {
-                "select": {"name": change_type},
             },
             "Release Date": {
                 "date": {"start": release_date.isoformat()},
             },
-            "Priority": {
-                "select": {"name": priority},
-            },
-            "Release Status": {
-                "status": {"name": status},
-            },
             "Summary": {
                 "rich_text": [{"text": {"content": summary}}],
             },
-            "Raw Changelog": {
-                "rich_text": [{"text": {"content": raw_changelog}}],
+            "Branch": {
+                "rich_text": [{"text": {"content": branch}}],
             },
-            "Tag / Version": {
-                "rich_text": [{"text": {"content": version_tag or ""}}],
-            },
-        },
-    }
-
-    if version_tag:
-        payload["properties"]["Tag / Version"] = {
-            "rich_text": [{"text": {"content": version_tag}}]
         }
-
+    }
     resp = requests.post(
         "https://api.notion.com/v1/pages",
         headers=HEADERS,
         json=payload,
     )
+    
+    
+    print("DEBUG status:", resp.status_code)
+    print("DEBUG body:", resp.text)
+    
     resp.raise_for_status()
     return resp.json()
