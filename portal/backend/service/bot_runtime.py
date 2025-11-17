@@ -650,6 +650,7 @@ class BotRuntime:
         self._state_callback = state_callback
         self._intrabar_cache: Dict[str, List[Candle]] = {}
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
+        self._candle_diag_null: Set[Tuple[str, str]] = set()
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -1740,7 +1741,6 @@ class BotRuntime:
             "visible_payload",
             getattr(primary, "strategy_id", None),
             candles,
-            once=False,
         )
         return candles
 
@@ -1749,11 +1749,11 @@ class BotRuntime:
         stage: str,
         strategy_id: Optional[str],
         candles: Sequence[Any],
-        *,
-        once: bool = True,
     ) -> None:
         if not candles or len(candles) < 2:
             return
+
+        key = (stage, strategy_id or "unknown")
 
         def epoch_from_entry(entry: Any) -> Optional[int]:
             if isinstance(entry, Candle):
@@ -1771,6 +1771,15 @@ class BotRuntime:
         for idx, entry in enumerate(candles):
             epoch = epoch_from_entry(entry)
             if epoch is None:
+                if key not in self._candle_diag_null:
+                    self._candle_diag_null.add(key)
+                    logger.error(
+                        "bot_runtime_candle_missing_time | bot=%s | strategy=%s | stage=%s | index=%s",
+                        self.bot_id,
+                        strategy_id,
+                        stage,
+                        idx,
+                    )
                 continue
             if first_epoch is None:
                 first_epoch = epoch
@@ -1799,30 +1808,17 @@ class BotRuntime:
             else None
         )
         end_iso = _isoformat(datetime.fromtimestamp(last_epoch, tz=timezone.utc))
-        if not once:
-            logger.debug(
-                "bot_runtime_candle_sequence_snapshot | bot=%s | strategy=%s | stage=%s | count=%s | first=%s | second=%s | last=%s",
-                self.bot_id,
-                strategy_id,
-                stage,
-                len(candles),
-                start_iso,
-                second_iso,
-                end_iso,
-            )
-            return
-
-        key = (stage, strategy_id or "unknown")
         if key in self._candle_diag_seen:
             return
         self._candle_diag_seen.add(key)
         logger.debug(
-            "bot_runtime_candle_sequence_ok | bot=%s | strategy=%s | stage=%s | count=%s | start=%s | end=%s",
+            "bot_runtime_candle_sequence_ok | bot=%s | strategy=%s | stage=%s | count=%s | start=%s | second=%s | end=%s",
             self.bot_id,
             strategy_id,
             stage,
             len(candles),
             start_iso,
+            second_iso,
             end_iso,
         )
 
