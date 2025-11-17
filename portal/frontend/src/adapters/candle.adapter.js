@@ -1,7 +1,29 @@
 import { createLogger } from '../utils/logger.js';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const candleLogger = createLogger('CandleAdapter');
+
+function normalizeBase(url) {
+  if (!url) return '';
+  return url.endsWith('/') ? url.slice(0, -1) : url;
+}
+
+function resolveApiBase() {
+  const configured = normalizeBase(import.meta.env.VITE_API_BASE_URL);
+  if (configured) return configured;
+
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname, port } = window.location;
+    if (port && Number(port) === 5173) {
+      return `${protocol}//${hostname}:8000`;
+    }
+    const basePort = port ? `:${port}` : '';
+    return `${protocol}//${hostname}${basePort}`;
+  }
+
+  return 'http://localhost:8000';
+}
+
+const API_BASE_URL = resolveApiBase();
 
 /**
  * Adapter to fetch OHLCV candle data from backend API
@@ -16,7 +38,7 @@ const candleLogger = createLogger('CandleAdapter');
  */
 export async function fetchCandleData({ symbol, timeframe, start, end, datasource, exchange }) {
   try {
-    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange });
+    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange, baseUrl: API_BASE_URL });
     const payload = { symbol, timeframe, start, end };
     if (datasource) payload.datasource = datasource;
     if (exchange) payload.exchange = exchange;
