@@ -105,20 +105,32 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const levelSeriesRef = useRef(null)
   const tradeSegmentsRef = useRef([])
 
+  const resolvedCandles = Array.isArray(candles) ? candles : []
+  const resolvedTrades = Array.isArray(trades) ? trades : []
+  const resolvedOverlays = Array.isArray(overlays) ? overlays : []
+
   const candleData = useMemo(() => {
-    return candles.map((candle) => ({
-      time: Math.floor(new Date(candle.time).getTime() / 1000),
-      open: candle.open,
-      high: candle.high,
-      low: candle.low,
-      close: candle.close,
-    }))
-  }, [candles])
+    if (!Array.isArray(resolvedCandles)) {
+      return []
+    }
+    return resolvedCandles
+      .map((candle) => ({
+        time: Math.floor(new Date(candle.time).getTime() / 1000),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      }))
+      .filter((entry) => Number.isFinite(entry.time))
+  }, [resolvedCandles])
 
   const tradeMarkers = useMemo(() => {
-    const markers = trades.flatMap((trade) => markerForTrade(trade))
+    if (!Array.isArray(resolvedTrades)) {
+      return []
+    }
+    const markers = resolvedTrades.flatMap((trade) => markerForTrade(trade))
     return markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-  }, [trades])
+  }, [resolvedTrades])
 
   const updateViewport = useCallback(
     (tradeSegments = []) => {
@@ -424,8 +436,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   }, [candleData])
 
   useEffect(() => {
-    syncOverlays(overlays, tradeMarkers)
-  }, [overlays, tradeMarkers, syncOverlays])
+    syncOverlays(resolvedOverlays, tradeMarkers)
+  }, [resolvedOverlays, tradeMarkers, syncOverlays])
 
   useEffect(() => {
     updateViewport(tradeSegmentsRef.current || [])
