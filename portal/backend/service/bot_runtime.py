@@ -1736,7 +1736,9 @@ class BotRuntime:
         else:
             visible = min(self._bar_index, len(primary.candles))
         visible = max(1, visible)
-        candles = [candle.to_dict() for candle in primary.candles[:visible]]
+        slice_candidates = list(primary.candles[:visible])
+        ordered = sorted(slice_candidates, key=lambda candle: candle.time.timestamp())
+        candles = [candle.to_dict() for candle in ordered]
         self._log_candle_sequence(
             "visible_payload",
             getattr(primary, "strategy_id", None),

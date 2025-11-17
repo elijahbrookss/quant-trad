@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, Pause, RotateCw } from 'lucide-react'
-import { BotLensChart } from './BotLensChart.jsx'
+import { BotLensChart, toSec } from './BotLensChart.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import { fetchBotPerformance, pauseBot, resumeBot, openBotStream } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
@@ -15,7 +15,7 @@ const logCandleDiagnostics = (label, candles, botId) => {
   let last = null
   for (let idx = 0; idx < candles.length; idx += 1) {
     const raw = candles[idx]?.time
-    const epoch = raw ? Math.floor(new Date(raw).getTime() / 1000) : null
+    const epoch = toSec(raw)
     if (!Number.isFinite(epoch)) {
       continue
     }

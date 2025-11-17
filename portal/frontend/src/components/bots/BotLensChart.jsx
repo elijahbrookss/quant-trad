@@ -26,7 +26,7 @@ const seriesOptions = {
   priceLineVisible: false,
 }
 
-const toSec = (value) => {
+export const toSec = (value) => {
   if (value == null) return value
   if (typeof value === 'number') {
     return value > 2e10 ? Math.floor(value / 1000) : value
