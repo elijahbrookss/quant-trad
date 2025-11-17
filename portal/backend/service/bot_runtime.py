@@ -1024,6 +1024,8 @@ class BotRuntime:
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
         frame = df.copy()
         frame.index = pd.to_datetime(frame.index, utc=True)
+        if not frame.index.is_monotonic_increasing:
+            frame = frame.sort_index()
         candles: List[Candle] = []
         duration = _timeframe_duration(timeframe)
         for ts, row in frame.iterrows():
