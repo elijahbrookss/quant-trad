@@ -711,7 +711,42 @@ class BaseDataProvider(ABC):
 
     def _fetch_and_format(self, ctx: DataContext) -> pd.DataFrame:
         try:
-            df = self.fetch_from_api(ctx.symbol, ctx.start, ctx.end, ctx.interval)
+            start_dt = pd.to_datetime(ctx.start, utc=True)
+            end_dt = pd.to_datetime(ctx.end, utc=True)
+        except Exception as exc:
+            logger.exception(
+                "Fallback fetch has invalid timestamps for %s [%s]: %s",
+                ctx.symbol,
+                ctx.interval,
+                exc,
+            )
+            return pd.DataFrame()
+
+        if start_dt is None or end_dt is None:
+            logger.error(
+                "Fallback fetch missing start/end for %s [%s]; start=%s end=%s",
+                ctx.symbol,
+                ctx.interval,
+                ctx.start,
+                ctx.end,
+            )
+            return pd.DataFrame()
+
+        start_dt = start_dt.to_pydatetime()
+        end_dt = end_dt.to_pydatetime()
+
+        if start_dt >= end_dt:
+            logger.warning(
+                "Fallback fetch has non-increasing window for %s [%s]; start=%s end=%s",
+                ctx.symbol,
+                ctx.interval,
+                start_dt,
+                end_dt,
+            )
+            return pd.DataFrame()
+
+        try:
+            df = self.fetch_from_api(ctx.symbol, start_dt, end_dt, ctx.interval)
         except Exception as e:
             logger.exception("Fallback fetch_from_api failed for %s: %s", ctx.symbol, e)
             return pd.DataFrame()
