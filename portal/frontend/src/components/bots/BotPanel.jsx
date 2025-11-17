@@ -19,7 +19,7 @@ const defaultForm = {
   timeframe: '15m',
   mode: 'walk-forward',
   run_type: 'backtest',
-  playback_speed: 1,
+  playback_speed: 10,
   backtest_start: '',
   backtest_end: '',
   strategy_ids: [],
@@ -50,14 +50,20 @@ export function BotPanel() {
   const [strategyError, setStrategyError] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
   const [search, setSearch] = useState('')
+  const formatPlaybackValue = useCallback((value) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return '—'
+    return numeric <= 0 ? 'Instant' : `${numeric.toFixed(2)}x`
+  }, [])
   const playbackLabelFor = useCallback((bot) => {
     const raw =
       bot?.playback_speed ??
       bot?.runtime?.playback_speed ??
       bot?.config?.playback_speed ??
-      0
+      10
     const value = Number(raw)
-    if (!Number.isFinite(value) || value <= 0) return 'instant'
+    if (!Number.isFinite(value)) return '—'
+    if (value <= 0) return 'Instant'
     return `${value.toFixed(2)}x`
   }, [])
 
@@ -461,20 +467,22 @@ export function BotPanel() {
             <div className="space-y-2">
               <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
                 <span>Playback speed</span>
-                <span className="text-xs normal-case tracking-normal text-white">{Number(form.playback_speed || 0).toFixed(2)}x</span>
+                <span className="text-xs normal-case tracking-normal text-white">
+                  {formatPlaybackValue(form.playback_speed)}
+                </span>
               </div>
               <input
                 type="range"
                 min="0"
-                max="5"
-                step="0.25"
+                max="25"
+                step="0.5"
                 name="playback_speed"
                 value={form.playback_speed}
                 onChange={handlePlaybackSpeedChange}
                 className="w-full accent-[color:var(--accent-alpha-60)]"
               />
               <p className="text-[11px] text-slate-500">
-                0 = instant playback. Drag right to speed up walk-forward loops.
+                0 = instant playback. 10x is the normal pace; drag right to accelerate walk-forward loops.
               </p>
             </div>
             {form.run_type === 'backtest' ? (

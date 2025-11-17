@@ -56,8 +56,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const streamRef = useRef(null)
   const [expandedStrategies, setExpandedStrategies] = useState(() => new Set())
   const [playbackDraft, setPlaybackDraft] = useState(() => {
-    const raw = Number(bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 0)
-    return Number.isFinite(raw) ? raw : 0
+    const initial = bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
+    const raw = Number(initial)
+    return Number.isFinite(raw) ? raw : 10
   })
   const [speedSaving, setSpeedSaving] = useState(false)
   const playbackDebounceRef = useRef(null)
@@ -75,10 +76,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       payload?.runtime?.playback_speed ??
       bot?.runtime?.playback_speed ??
       bot?.playback_speed ??
-      0
+      10
     const numeric = Number(candidate)
     if (Number.isFinite(numeric)) {
       setPlaybackDraft(numeric)
+    } else {
+      setPlaybackDraft(10)
     }
   }, [payload?.runtime?.playback_speed, bot?.runtime?.playback_speed, bot?.playback_speed, bot?.id])
 
@@ -483,17 +486,20 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             <input
               type="range"
               min="0"
-              max="4"
-              step="0.05"
+              max="25"
+              step="0.25"
               value={playbackDraft}
               onChange={handlePlaybackInput}
               className="mt-3 w-full accent-sky-400"
             />
             <div className="mt-1 flex justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
               <span>Instant</span>
-              <span>2x</span>
-              <span>4x</span>
+              <span>10x</span>
+              <span>25x</span>
             </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              10x is the normal walk-forward pace; changes apply to intra-candle playback instantly.
+            </p>
           </div>
           <div className="relative">
             {loading ? <LoadingOverlay label={loadingLabel} /> : null}

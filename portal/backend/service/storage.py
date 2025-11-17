@@ -302,7 +302,11 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 try:
                     record.playback_speed = float(playback_speed)
                 except (TypeError, ValueError):
-                    record.playback_speed = record.playback_speed or 1.0
+                    record.playback_speed = (
+                        record.playback_speed if record.playback_speed is not None else 10.0
+                    )
+            if record.playback_speed is None:
+                record.playback_speed = 10.0
             if "risk" in payload:
                 record.risk = dict(payload.get("risk") or {})
             record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start

@@ -654,13 +654,14 @@ class BotRuntime:
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
+        self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
         try:
-            numeric = float(value) if value is not None else 1.0
+            numeric = float(value) if value is not None else 10.0
         except (TypeError, ValueError):
-            numeric = 1.0
+            numeric = 10.0
         return numeric if numeric >= 0 else 0.0
 
     def apply_config(self, payload: Mapping[str, Any]) -> None:
@@ -1182,6 +1183,75 @@ class BotRuntime:
         self._intrabar_cache[key] = sub_candles
         return sub_candles
 
+    def _ensure_intrabar_snapshot(self, series: StrategySeries, candle: Candle) -> Dict[str, Any]:
+        snapshot = self._intrabar_snapshots.get(series.strategy_id)
+        if snapshot:
+            return snapshot
+        open_price = _coerce_float(candle.open, 0.0) or 0.0
+        entry = {
+            "strategy_id": series.strategy_id,
+            "time": candle.time,
+            "open": open_price,
+            "high": open_price,
+            "low": open_price,
+            "close": open_price,
+            "end": candle.end or candle.time,
+        }
+        self._intrabar_snapshots[series.strategy_id] = entry
+        return entry
+
+    def _update_intrabar_snapshot(
+        self,
+        series: StrategySeries,
+        candle: Candle,
+        minute_bar: Candle,
+    ) -> Dict[str, Any]:
+        snapshot = self._ensure_intrabar_snapshot(series, candle)
+        close_price = _coerce_float(minute_bar.close, snapshot["close"])
+        high_price = _coerce_float(minute_bar.high, snapshot["high"])
+        low_price = _coerce_float(minute_bar.low, snapshot["low"])
+        if close_price is not None:
+            snapshot["close"] = close_price
+        if high_price is not None:
+            snapshot["high"] = max(snapshot["high"], high_price)
+        if low_price is not None:
+            snapshot["low"] = min(snapshot["low"], low_price)
+        snapshot["end"] = minute_bar.end or minute_bar.time
+        return snapshot
+
+    def _snapshot_candle_for_state(self, base: Candle, snapshot: Mapping[str, Any]) -> Candle:
+        open_price = _coerce_float(snapshot.get("open"), base.open) or base.open
+        high_price = _coerce_float(snapshot.get("high"), max(base.high, open_price)) or max(base.high, open_price)
+        low_price = _coerce_float(snapshot.get("low"), min(base.low, open_price)) or min(base.low, open_price)
+        close_price = _coerce_float(snapshot.get("close"), base.close) or base.close
+        return Candle(
+            time=base.time,
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            end=snapshot.get("end") or base.end,
+        )
+
+    def _merge_intrabar_snapshot_payload(
+        self,
+        existing: Mapping[str, Any],
+        snapshot: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        payload = dict(existing)
+        open_price = _coerce_float(snapshot.get("open"), payload.get("open", 0.0)) or 0.0
+        high_price = _coerce_float(snapshot.get("high"), payload.get("high", open_price)) or open_price
+        low_price = _coerce_float(snapshot.get("low"), payload.get("low", open_price)) or open_price
+        close_price = _coerce_float(snapshot.get("close"), payload.get("close", open_price)) or open_price
+        payload["open"] = round(open_price, 4)
+        payload["high"] = round(high_price, 4)
+        payload["low"] = round(low_price, 4)
+        payload["close"] = round(close_price, 4)
+        end_ts = snapshot.get("end")
+        if isinstance(end_ts, datetime):
+            payload["end"] = _isoformat(end_ts)
+        return payload
+
     def _step_series_with_intrabar(self, series: StrategySeries, candle: Candle) -> List[Dict[str, Any]]:
         engine = series.risk_engine
         if engine is None:
@@ -1190,11 +1260,19 @@ class BotRuntime:
         if not intrabar:
             return engine.step(candle)
         events: List[Dict[str, Any]] = []
+        snapshot_used = False
         for minute_bar in intrabar:
             events.extend(engine.step(minute_bar))
+            snapshot = self._update_intrabar_snapshot(series, candle, minute_bar)
+            snapshot_used = True
+            temp_candle = self._snapshot_candle_for_state(candle, snapshot)
+            self._update_state(temp_candle)
+            self._push_update("intrabar")
             if engine.active_trade is None:
                 break
             self._pace_intrabar_step()
+        if snapshot_used:
+            self._intrabar_snapshots.pop(series.strategy_id, None)
         return events
 
     @staticmethod
@@ -1244,6 +1322,7 @@ class BotRuntime:
             self._logs.clear()
             self._intrabar_cache.clear()
             self._indicator_overlay_cache.clear()
+            self._intrabar_snapshots.clear()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -1787,6 +1866,9 @@ class BotRuntime:
         slice_candidates = list(primary.candles[:visible])
         ordered = sorted(slice_candidates, key=lambda candle: candle.time.timestamp())
         candles = [candle.to_dict() for candle in ordered]
+        snapshot = self._intrabar_snapshots.get(getattr(primary, "strategy_id", None))
+        if snapshot and candles:
+            candles[-1] = self._merge_intrabar_snapshot_payload(candles[-1], snapshot)
         self._log_candle_sequence(
             "visible_payload",
             getattr(primary, "strategy_id", None),

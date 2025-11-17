@@ -1,5 +1,6 @@
 import math
 import sys
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Dict, List
@@ -23,7 +24,7 @@ def make_runtime(**overrides):
     config = {
         "runtime_mode": "backtest",
         "mode": "walk-forward",
-        "playback_speed": 1.0,
+        "playback_speed": 10.0,
         "symbol": "ES",
         "timeframe": "15m",
         "strategies_meta": [
@@ -204,6 +205,98 @@ def test_visible_overlays_hide_future_profiles_and_markers():
     assert payload["boxes"][0]["start"] == first_start
     assert all(entry.get("time") == first_start for entry in payload.get("markers", []))
     assert all(entry.get("time") == first_start for entry in payload.get("touchPoints", []))
+
+
+@pytest.mark.unit
+def test_visible_candles_reflect_intrabar_snapshot():
+    runtime = make_runtime()
+    runtime.state["status"] = "running"
+    base = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    candles = [
+        Candle(time=base + timedelta(hours=idx), open=100.0, high=101.0, low=99.5, close=100.5)
+        for idx in range(2)
+    ]
+    runtime._primary_series = SimpleNamespace(strategy_id="strategy-1", candles=candles)
+    runtime._intrabar_snapshots["strategy-1"] = {
+        "strategy_id": "strategy-1",
+        "time": candles[-1].time,
+        "open": 100.5,
+        "high": 104.25,
+        "low": 99.25,
+        "close": 103.75,
+        "end": candles[-1].time + timedelta(minutes=37),
+    }
+
+    visible = runtime._visible_candles()
+
+    assert visible
+    last = visible[-1]
+    assert last["close"] == pytest.approx(103.75)
+    assert last["high"] == pytest.approx(104.25)
+    assert last["low"] == pytest.approx(99.25)
+    assert last.get("end").startswith("2024-01-02T01:37:00")
+
+
+@pytest.mark.unit
+def test_intrabar_steps_emit_updates_and_cleanup(monkeypatch):
+    runtime = make_runtime()
+    runtime.state["status"] = "running"
+    runtime._total_bars = 10
+    runtime._bar_index = 1
+
+    base = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    hour_candle = Candle(time=base, open=100.0, high=101.0, low=99.5, close=100.25)
+
+    class DummyEngine:
+        def __init__(self):
+            self.active_trade = object()
+            self.calls = 0
+
+        def step(self, _candle):
+            self.calls += 1
+            if self.calls >= 2:
+                self.active_trade = None
+            return []
+
+        def stats(self):
+            return {}
+
+        def serialise_trades(self):
+            return []
+
+    engine = DummyEngine()
+    series = StrategySeries(
+        strategy_id="strategy-1",
+        name="Strategy",
+        symbol="ES",
+        timeframe="1h",
+        datasource="timescale",
+        exchange=None,
+        candles=[hour_candle],
+        signals=deque(),
+        risk_engine=engine,
+    )
+    runtime._series = [series]
+    runtime._primary_series = series
+
+    minute_1 = Candle(time=base, open=100.0, high=100.5, low=99.75, close=100.25, end=base + timedelta(minutes=1))
+    minute_2 = Candle(
+        time=base + timedelta(minutes=1),
+        open=100.25,
+        high=101.0,
+        low=99.8,
+        close=100.75,
+        end=base + timedelta(minutes=2),
+    )
+    monkeypatch.setattr(runtime, "_intrabar_candles", lambda *_: [minute_1, minute_2])
+
+    emitted: List[str] = []
+    runtime._push_update = lambda event: emitted.append(event)
+
+    runtime._step_series_with_intrabar(series, hour_candle)
+
+    assert emitted.count("intrabar") == 2
+    assert runtime._intrabar_snapshots.get(series.strategy_id) is None
 
 
 @pytest.mark.unit

@@ -51,9 +51,9 @@ def _coerce_playback_speed(value: Optional[object]) -> float:
     """Normalise playback speed factors into non-negative floats."""
 
     try:
-        numeric = float(value) if value is not None else 1.0
+        numeric = float(value) if value is not None else 10.0
     except (TypeError, ValueError):
-        numeric = 1.0
+        numeric = 10.0
     return numeric if numeric >= 0 else 0.0
 
 
