@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
 
+from . import instrument_service
+from .atm import normalise_template
 from .indicator_service import generate_signals_for_instance, get_instance_meta
 from .storage import (
     delete_strategy as storage_delete_strategy,
@@ -689,6 +691,12 @@ class StrategyRule:
         }
 
 
+def _default_atm_template() -> Dict[str, Any]:
+    """Return a fresh ATM template for strategies."""
+
+    return normalise_template(None)
+
+
 @dataclass
 class StrategyDefinition:
     """Domain model describing a user-defined strategy."""
@@ -703,6 +711,8 @@ class StrategyDefinition:
     indicator_ids: List[str] = field(default_factory=list)
     indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
+    instrument_messages: List[Dict[str, str]] = field(default_factory=list)
+    atm_template: Dict[str, Any] = field(default_factory=_default_atm_template)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -727,6 +737,38 @@ class StrategyDefinition:
             indicators.append(payload)
             if not active_meta:
                 missing.append(identifier)
+        instruments: List[Dict[str, Any]] = []
+        instrument_messages = list(self.instrument_messages)
+
+        def _message_exists(symbol: str) -> bool:
+            symbol_key = (symbol or "").upper()
+            for entry in instrument_messages:
+                if (entry.get("symbol") or "").upper() == symbol_key:
+                    return True
+            return False
+
+        for symbol in self.symbols:
+            record: Optional[Dict[str, Any]] = None
+            try:
+                record = instrument_service.resolve_instrument(
+                    self.datasource,
+                    self.exchange,
+                    symbol,
+                )
+            except Exception:
+                record = None
+            if record:
+                instruments.append(record)
+            else:
+                instruments.append({"symbol": symbol})
+                if not _message_exists(symbol):
+                    instrument_messages.append(
+                        {
+                            "symbol": symbol,
+                            "message": "No instrument metadata stored",
+                        }
+                    )
+
         return {
             "id": self.id,
             "name": self.name,
@@ -738,7 +780,10 @@ class StrategyDefinition:
             "indicator_ids": list(self.indicator_ids),
             "indicators": indicators,
             "missing_indicators": missing,
+            "instruments": instruments,
+            "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
+            "atm_template": dict(self.atm_template or {}),
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
@@ -755,6 +800,7 @@ class StrategyDefinition:
             "datasource": self.datasource,
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids),
+            "atm_template": dict(self.atm_template or {}),
         }
 
     def update(self, **fields: Any) -> None:
@@ -794,6 +840,8 @@ class StrategyDefinition:
                 for obsolete in removed:
                     self.indicator_snapshots.pop(obsolete, None)
                 self.indicator_ids = new_ids
+        if "atm_template" in fields and fields["atm_template"] is not None:
+            self.atm_template = normalise_template(fields["atm_template"])
         self.updated_at = _utcnow()
 
     def add_rule(self, rule: StrategyRule) -> None:
@@ -837,6 +885,7 @@ class StrategyRegistry:
             )
             base.created_at = _parse_timestamp(entry.get("created_at"))
             base.updated_at = _parse_timestamp(entry.get("updated_at"))
+            base.atm_template = normalise_template(entry.get("atm_template"))
 
             for link in entry.get("indicator_links", []):
                 indicator_id = str(link.get("indicator_id") or "").strip()
@@ -879,6 +928,25 @@ class StrategyRegistry:
 
             self._records[strategy_id] = base
 
+    def _sync_instruments(self, record: StrategyDefinition) -> None:
+        """Auto-load instrument metadata for CCXT strategies."""
+
+        record.instrument_messages = []
+        datasource = (record.datasource or "").strip().upper()
+        if datasource != "CCXT":
+            return
+        for symbol in record.symbols:
+            _, error = instrument_service.auto_sync_instrument(
+                record.datasource,
+                record.exchange,
+                symbol,
+            )
+            if error:
+                record.instrument_messages.append({
+                    "symbol": symbol,
+                    "message": error,
+                })
+
     def list(self) -> List[Dict[str, Any]]:
         """Return serialised strategies for API responses."""
 
@@ -902,6 +970,7 @@ class StrategyRegistry:
         datasource: Optional[str] = None,
         exchange: Optional[str] = None,
         indicator_ids: Optional[Iterable[str]] = None,
+        atm_template: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new strategy record and return its payload."""
 
@@ -928,12 +997,14 @@ class StrategyRegistry:
             exchange=str(exchange).strip() if exchange else None,
             indicator_ids=list(dict.fromkeys(indicators)),
         )
+        record.atm_template = normalise_template(atm_template)
         for inst_id in record.indicator_ids:
             try:
                 meta = deepcopy(get_instance_meta(inst_id))
             except KeyError:
                 meta = {}
             record.indicator_snapshots[inst_id] = meta
+        self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
         for inst_id in record.indicator_ids:
@@ -950,6 +1021,7 @@ class StrategyRegistry:
 
         record = self.get(strategy_id)
         record.update(**fields)
+        self._sync_instruments(record)
         storage_upsert_strategy(record.to_storage_payload())
         logger.info("strategy_updated | id=%s", strategy_id)
         return record.to_dict()
@@ -1404,6 +1476,7 @@ def create_strategy(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     indicator_ids: Optional[Iterable[str]] = None,
+    atm_template: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new strategy using the global registry."""
 
@@ -1415,6 +1488,7 @@ def create_strategy(
         datasource=datasource,
         exchange=exchange,
         indicator_ids=indicator_ids,
+        atm_template=atm_template,
     )
 
 

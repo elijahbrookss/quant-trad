@@ -41,7 +41,7 @@ export const CRYPTO_EXCHANGES = [
   { value: 'wavesexchange', label: 'Waves Exchange', category: 'DEX' },
 ];
 
-export const DEFAULT_DATASOURCE = DATASOURCE_IDS.ALPACA;
-export const DEFAULT_MARKET_PROVIDER = 'alpaca';
+export const DEFAULT_DATASOURCE = DATASOURCE_IDS.CCXT;
+export const DEFAULT_MARKET_PROVIDER = 'binanceus';
 export const DEFAULT_CRYPTO_EXCHANGE = 'binanceus';
 export const DEFAULT_IB_EXCHANGE = 'SMART';

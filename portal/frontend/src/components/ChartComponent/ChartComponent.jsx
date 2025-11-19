@@ -208,12 +208,12 @@ export const ChartComponent = ({ chartId }) => {
   const chartState = useChartValue(chartId);
 
   // Local UI state.
-  const [symbol, setSymbol] = useState('CL');
-  const [symbolDraft, setSymbolDraft] = useState('CL');
+  const [symbol, setSymbol] = useState('LINKUSD');
+  const [symbolDraft, setSymbolDraft] = useState('LINKUSD');
   const [interval, setInterval] = useState('15m');
-  const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
-  const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
-  const [marketProvider, setMarketProvider] = useState(DEFAULT_MARKET_PROVIDER);
+  const [datasource, setDatasource] = useState(DATASOURCE_IDS.CCXT);
+  const [exchange, setExchange] = useState(DEFAULT_CRYPTO_EXCHANGE);
+  const [marketProvider, setMarketProvider] = useState(DEFAULT_CRYPTO_EXCHANGE);
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
@@ -1503,22 +1503,54 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [symbolDraft, symbol, handleApply]);
 
-  const applySymbol = useCallback((sym) => {
-    const sanitized = (sym ?? '').toString().trim().toUpperCase();
+  const applySymbol = useCallback((input) => {
+    const payload = typeof input === 'string' ? { symbol: input } : (input ?? {});
+    const rawSymbol = payload.symbol ?? payload.s;
+    const sanitized = (rawSymbol ?? '').toString().trim().toUpperCase();
     if (!sanitized) {
       setPalOpen(false);
       return;
     }
 
-    const changed = sanitized !== symbol;
+    const normalizedInterval = (payload.timeframe ?? payload.interval ?? '').toString().trim();
+    const normalizedDatasource = (payload.datasource ?? '').toString().trim().toUpperCase();
+    const normalizedExchange = (payload.exchange ?? '').toString().trim().toUpperCase();
+
+    const overrides = { symbol: sanitized };
+    let changed = sanitized !== symbol;
+
+    if (normalizedInterval) {
+      overrides.interval = normalizedInterval;
+      if (normalizedInterval !== interval) {
+        changed = true;
+        setInterval(normalizedInterval);
+      }
+    }
+
+    if (normalizedDatasource) {
+      overrides.datasource = normalizedDatasource;
+      if (normalizedDatasource !== datasource) {
+        changed = true;
+        setDatasource(normalizedDatasource);
+      }
+    }
+
+    if (normalizedExchange) {
+      overrides.exchange = normalizedExchange;
+      if (normalizedExchange !== exchange) {
+        changed = true;
+        setExchange(normalizedExchange);
+      }
+    }
+
     setSymbolDraft(sanitized);
     setSymbol(sanitized);
     setPalOpen(false);
 
     if (changed && modeRef.current !== 'live') {
-      void handleApply({ symbol: sanitized }, { behavior: 'replace' });
+      void handleApply(overrides, { behavior: 'replace' });
     }
-  }, [symbol, handleApply]);
+  }, [symbol, interval, datasource, exchange, handleApply]);
 
   const handleLiveLookbackCommit = useCallback(() => {
     const parsed = Number.parseInt(liveLookbackInput, 10);

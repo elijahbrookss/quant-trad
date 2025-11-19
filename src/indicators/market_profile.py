@@ -71,6 +71,8 @@ DEFAULT_BREAKOUT_CONFIRMATION_BARS = 3
 
 
 class MarketProfileIndicator(BaseIndicator):
+    _DATAFRAME_CACHE: Dict[Tuple[str, str, str, int, str], Dict[str, Any]] = {}
+    _PROFILE_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     """
     Computes daily market profile (TPO) to identify Point of Control (POC),
     Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
@@ -89,6 +91,7 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         super().__init__(df)
         self._bin_size_locked = False
@@ -96,9 +99,23 @@ class MarketProfileIndicator(BaseIndicator):
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
         self.mode = mode
-        # Compute raw daily profiles on initialization
-        self.daily_profiles = self._compute_daily_profiles()
-        self.merged_profiles = []
+        self.days_back = days_back
+        self._overlay_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        cached = self._restore_profile_cache(df)
+        if cached:
+            self.daily_profiles = cached["daily_profiles"]
+            self.merged_profiles = cached.get("merged_profiles", [])
+            self._overlay_cache = cached.get("overlay_cache", {})
+        else:
+            # Compute raw daily profiles on initialization
+            self.daily_profiles = self._compute_daily_profiles()
+            self.merged_profiles = []
+            cache_key = self._profile_cache_key(df)
+            self._PROFILE_CACHE[cache_key] = {
+                "daily_profiles": [dict(p) for p in self.daily_profiles],
+                "merged_profiles": [dict(p) for p in self.merged_profiles],
+                "overlay_cache": {},
+            }
         self.interval = interval
         self.extend_value_area_to_chart_end = bool(extend_value_area_to_chart_end)
         self.use_merged_value_areas = bool(use_merged_value_areas)
@@ -109,12 +126,99 @@ class MarketProfileIndicator(BaseIndicator):
         )
 
     @staticmethod
+    def _normalise_ts(value: Any) -> pd.Timestamp:
+        stamp = pd.Timestamp(value)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        return stamp
+
+    @classmethod
+    def _fetch_with_cache(
+        cls,
+        provider,
+        ctx: DataContext,
+        *,
+        days_back: Optional[int],
+    ) -> pd.DataFrame:
+        lookback = max(int(days_back or 0), 0)
+        start_ts = cls._normalise_ts(ctx.start)
+        if lookback:
+            start_ts = start_ts - pd.Timedelta(days=lookback)
+        end_ts = cls._normalise_ts(ctx.end)
+        cache_key = (
+            getattr(provider, "CACHE_KEY", provider.__class__.__name__),
+            getattr(provider, "exchange", None) or getattr(provider, "exchange_id", None) or "",
+            ctx.symbol or "",
+            ctx.interval or "",
+            lookback,
+        )
+        entry = cls._DATAFRAME_CACHE.get(cache_key)
+        if entry is not None:
+            cached_df: pd.DataFrame = entry["df"]
+            cached_start: pd.Timestamp = entry["start"]
+            cached_end: pd.Timestamp = entry["end"]
+            if start_ts >= cached_start and end_ts <= cached_end:
+                window = cached_df.loc[(cached_df.index >= start_ts) & (cached_df.index <= end_ts)]
+                return window.copy()
+
+        request_ctx = DataContext(
+            symbol=ctx.symbol,
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            interval=ctx.interval,
+        )
+        df = provider.get_ohlcv(request_ctx)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.sort_index()
+        cls._DATAFRAME_CACHE[cache_key] = {
+            "df": df,
+            "start": cls._normalise_ts(df.index.min()),
+            "end": cls._normalise_ts(df.index.max()),
+        }
+        return df.copy()
+
+    @staticmethod
     def _normalise_confirmation_bars(value: Any) -> int:
         try:
             numeric = int(value)
         except (TypeError, ValueError):
             return DEFAULT_BREAKOUT_CONFIRMATION_BARS
         return numeric if numeric >= 1 else 1
+
+    def _profile_cache_key(self, df: pd.DataFrame) -> Tuple[Any, ...]:
+        idx = df.index if isinstance(df.index, pd.DatetimeIndex) else pd.to_datetime(df.index, utc=True)
+        start = idx.min()
+        end = idx.max()
+        return (
+            len(df),
+            start.isoformat() if start is not None else None,
+            end.isoformat() if end is not None else None,
+            round(float(self.bin_size), 10),
+            self.mode,
+            self.interval,
+            bool(self.extend_value_area_to_chart_end),
+            bool(self.use_merged_value_areas),
+            float(self.merge_threshold),
+            int(self.min_merge_sessions),
+            int(self.days_back or 0),
+        )
+
+    def _restore_profile_cache(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        try:
+            key = self._profile_cache_key(df)
+        except Exception:
+            return None
+        cached = self._PROFILE_CACHE.get(key)
+        if not cached:
+            return None
+        return {
+            "daily_profiles": [dict(p) for p in cached.get("daily_profiles", [])],
+            "merged_profiles": [dict(p) for p in cached.get("merged_profiles", [])],
+            "overlay_cache": {k: dict(v) for k, v in cached.get("overlay_cache", {}).items()},
+        }
 
     @staticmethod
     def _normalize_step(value: float) -> float:
@@ -262,6 +366,7 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -270,7 +375,7 @@ class MarketProfileIndicator(BaseIndicator):
         ctx = DataContext(symbol=ctx.symbol, start=ctx.start, end=ctx.end, interval=interval)
         ctx.validate()
 
-        df = provider.get_ohlcv(ctx)
+        df = cls._fetch_with_cache(provider, ctx, days_back=days_back)
         if df is None or df.empty:
             raise ValueError(f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest")
 
@@ -284,6 +389,7 @@ class MarketProfileIndicator(BaseIndicator):
             merge_threshold=merge_threshold,
             min_merge_sessions=min_merge_sessions,
             market_profile_breakout_confirmation_bars=market_profile_breakout_confirmation_bars,
+            days_back=days_back,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
@@ -327,33 +433,49 @@ class MarketProfileIndicator(BaseIndicator):
         :param data: intraday DataFrame for one session.
         :return: mapping of price bucket -> count of TPO occurrences.
         """
-        tpo_counts = {}
         logger.debug("Building TPO histogram for session with %d bars", len(data))
-        for _, row in data.iterrows():
-            low, high = float(row["low"]), float(row["high"])
-            if not math.isfinite(low) or not math.isfinite(high):
+        step = float(self.bin_size)
+        if step <= 0 or data.empty:
+            return {}
+
+        lows = pd.to_numeric(data.get("low"), errors="coerce").to_numpy()
+        highs = pd.to_numeric(data.get("high"), errors="coerce").to_numpy()
+        mask = np.isfinite(lows) & np.isfinite(highs)
+        if not mask.any():
+            return {}
+
+        lows = lows[mask]
+        highs = highs[mask]
+        swap_mask = highs < lows
+        if swap_mask.any():
+            highs[swap_mask], lows[swap_mask] = lows[swap_mask], highs[swap_mask]
+
+        min_price = lows.min()
+        max_price = highs.max()
+        if not math.isfinite(min_price) or not math.isfinite(max_price):
+            return {}
+
+        base = math.floor(min_price / step) * step
+        bin_count = int(math.floor((max_price - base) / step)) + 2
+        counts = np.zeros(bin_count, dtype=np.int64)
+
+        start_idx = np.floor((lows - base) / step).astype(int)
+        end_idx = np.floor((highs - base) / step).astype(int)
+        for s, e in zip(start_idx, end_idx):
+            if e < s:
                 continue
-            if high < low:
-                low, high = high, low
+            idx_range = np.arange(s, e + 1, dtype=int)
+            np.add.at(counts, idx_range, 1)
 
-            step = self.bin_size
-            if step <= 0:
+        buckets = {}
+        bucket_prices = base + np.arange(counts.size) * step
+        for price, count in zip(bucket_prices, counts):
+            if count <= 0:
                 continue
-
-            tolerance = abs(step) * 1e-9
-            span = max(high - low, 0.0)
-            steps = int(math.floor(span / step + 1e-9))
-
-            for idx in range(steps + 1):
-                price = low + idx * step
-                if price > high + tolerance:
-                    break
-
-                scaled = round(price / step)
-                bucket = round(scaled * step, self._bin_precision)
-                tpo_counts[bucket] = tpo_counts.get(bucket, 0) + 1
-        logger.debug("Built TPO histogram with %d buckets", len(tpo_counts))
-        return tpo_counts
+            bucket = round(price, self._bin_precision)
+            buckets[bucket] = buckets.get(bucket, 0) + int(count)
+        logger.debug("Built TPO histogram with %d buckets", len(buckets))
+        return buckets
 
     def _extract_value_area(self, tpo_hist: Dict[float, int]) -> Dict[str, float]:
         """
@@ -415,64 +537,64 @@ class MarketProfileIndicator(BaseIndicator):
         else:
             min_merge = int(min_merge)
 
-        merged = []
+        merged: List[Dict[str, float]] = []
         profiles = self.daily_profiles
-        i, n = 0, len(profiles)
+        n = len(profiles)
 
         logger.info("Starting merge of value areas: threshold=%.2f, min_merge=%d", threshold, min_merge)
 
-        while i < n:
-            base = profiles[i]
-            merged_val, merged_vah = base["VAL"], base["VAH"]
+        idx = 0
+        while idx < n:
+            base = profiles[idx]
+            current_val, current_vah = base["VAL"], base["VAH"]
             start_ts, end_ts = base["start_date"], base["end_date"]
             poc_list = [base["POC"]] if base.get("POC") is not None else []
-            count = 1
-            j = i + 1
+            session_count = 1
 
-            logger.debug("Merging from profile %d (start: %s)", i, start_ts)
-            while j < n:
-                next_prof = profiles[j]
-                overlap = self._calculate_overlap(merged_val, merged_vah, next_prof["VAL"], next_prof["VAH"])
-                logger.debug("Checking overlap with profile %d: overlap=%.2f (threshold=%.2f)", j, overlap, threshold)
+            next_idx = idx + 1
+            while next_idx < n:
+                candidate = profiles[next_idx]
+                overlap = self._calculate_overlap(current_val, current_vah, candidate["VAL"], candidate["VAH"])
                 if overlap < threshold:
-                    logger.debug("Overlap below threshold, stopping merge at profile %d", j)
                     break
-                merged_val = min(merged_val, next_prof["VAL"])
-                merged_vah = max(merged_vah, next_prof["VAH"])
-                end_ts = next_prof["end_date"]
-                if next_prof.get("POC") is not None:
-                    poc_list.append(next_prof["POC"])
-                count += 1
-                j += 1
+                current_val = min(current_val, candidate["VAL"])
+                current_vah = max(current_vah, candidate["VAH"])
+                end_ts = candidate["end_date"]
+                if candidate.get("POC") is not None:
+                    poc_list.append(candidate["POC"])
+                session_count += 1
+                next_idx += 1
 
-            if count >= min_merge:
-                avg_poc = sum(poc_list) / len(poc_list) if poc_list else None
-                if avg_poc is not None:
-                    avg_poc = round(float(avg_poc), self.price_precision)
-                merged_payload = {
-                    "start": start_ts,
-                    "end": end_ts,
-                    "VAL": round(float(merged_val), self.price_precision),
-                    "VAH": round(float(merged_vah), self.price_precision),
-                    "POC": avg_poc,
-                    "session_count": count,
-                    "precision": self.price_precision,
-                }
-                merged.append(merged_payload)
-                logger.info(
-                    "Merged %d profiles: [%s → %s], VAL=%s, VAH=%s, avg POC=%s",
-                    count,
-                    start_ts,
-                    end_ts,
-                    self._format_price(merged_payload["VAL"]),
-                    self._format_price(merged_payload["VAH"]),
-                    self._format_price(avg_poc),
-                )
-            else:
-                logger.debug("Merge group too small (%d < %d), skipping", count, min_merge)
-            i = j
+            poc = None
+            if poc_list:
+                poc = round(float(sum(poc_list) / len(poc_list)), self.price_precision)
+
+            payload = {
+                "start": start_ts,
+                "end": end_ts,
+                "VAL": round(float(current_val), self.price_precision),
+                "VAH": round(float(current_vah), self.price_precision),
+                "POC": poc if session_count >= min_merge else base.get("POC"),
+                "session_count": session_count,
+                "precision": self.price_precision,
+            }
+            merged.append(payload)
+            logger.debug(
+                "Merged block: sessions=%d start=%s end=%s VAL=%.4f VAH=%.4f POC=%s",
+                session_count,
+                start_ts,
+                end_ts,
+                payload["VAL"],
+                payload["VAH"],
+                payload["POC"],
+            )
+            idx = next_idx
 
         self.merged_profiles = merged
+        cache_key = self._profile_cache_key(self.df)
+        cached = self._PROFILE_CACHE.get(cache_key)
+        if cached is not None:
+            cached["merged_profiles"] = [dict(p) for p in merged]
         logger.info("Completed merging. Total merged profiles: %d", len(merged))
 
         if profiles:
@@ -706,6 +828,23 @@ class MarketProfileIndicator(BaseIndicator):
         else:
             profiles = self.daily_profiles or []
 
+        cache_key = (
+            use_merged,
+            merge_threshold,
+            min_merge,
+            include_touches,
+            extend_boxes_to_chart_end,
+            _to_unix_s(plot_df.index.min()),
+            _to_unix_s(plot_df.index.max()),
+        )
+        cached = self._overlay_cache.get(cache_key)
+        if cached is not None:
+            return {
+                "price_lines": list(cached.get("price_lines", [])),
+                "markers": list(cached.get("markers", [])),
+                "boxes": list(cached.get("boxes", [])),
+            }
+
         out_lines: List[Dict[str, Any]] = []
         out_markers: List[Dict[str, Any]] = []
 
@@ -744,28 +883,34 @@ class MarketProfileIndicator(BaseIndicator):
                 continue
 
             # start_iso = _ts_iso(start_ts)
-            start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
-            
+            start_str = fmt_time(start_ts)  # either 'YYYY-MM-DD' or unix seconds
+
+            profile_end_ts = pd.to_datetime(
+                prof.get("end") or prof.get("end_date") or chart_end,
+                utc=True,
+            )
+            if profile_end_ts > chart_end:
+                profile_end_ts = chart_end
+            if profile_end_ts < start_ts:
+                profile_end_ts = start_ts
+
             if extend_boxes_to_chart_end:
                 end_ts = chart_end
             else:
-                end_ts = pd.to_datetime(
-                    prof.get("end") or prof.get("end_date") or chart_end,
-                    utc=True,
-                )
-                if end_ts > chart_end:
-                    end_ts = chart_end
+                end_ts = profile_end_ts
             if end_ts < start_ts:
                 end_ts = start_ts
 
             out_boxes.append({
-                "x1": _to_unix_s(start_ts),   # epoch seconds
-                "x2": _to_unix_s(end_ts),     # epoch seconds
-                "y1": float(val),             # VAL
-                "y2": float(vah),             # VAH
-                "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
+                "x1": _to_unix_s(start_ts),  # epoch seconds
+                "x2": _to_unix_s(end_ts),  # epoch seconds
+                "y1": float(val),  # VAL
+                "y2": float(vah),  # VAH
+                "color": "rgba(156,163,175,0.18)",  # neutral grey w/ alpha; UI can recolor later
                 "precision": prof.get("precision", self.price_precision),
                 "extend": bool(extend_boxes_to_chart_end),
+                "start": _to_unix_s(start_ts),
+                "end": _to_unix_s(profile_end_ts),
             })
 
             logger.debug(
@@ -816,8 +961,12 @@ class MarketProfileIndicator(BaseIndicator):
 
             # ----- touchpoint markers (optional) -----
             if include_touches:
-                out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
-                out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time)
+                )
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time)
+                )
 
         logger.info(
             "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",
@@ -826,8 +975,18 @@ class MarketProfileIndicator(BaseIndicator):
             len(out_boxes),
         )
 
-        return {
+        payload = {
             "price_lines": out_lines,
             "markers": out_markers,
-            "boxes": out_boxes
+            "boxes": out_boxes,
         }
+        self._overlay_cache[cache_key] = {
+            "price_lines": list(out_lines),
+            "markers": list(out_markers),
+            "boxes": list(out_boxes),
+        }
+        profile_cache_key = self._profile_cache_key(self.df)
+        cached_profiles = self._PROFILE_CACHE.get(profile_cache_key)
+        if cached_profiles is not None:
+            cached_profiles.setdefault("overlay_cache", {})[cache_key] = self._overlay_cache[cache_key]
+        return payload
