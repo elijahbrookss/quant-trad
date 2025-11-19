@@ -66,7 +66,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
-  const bootstrapStages = payload?.bootstrap || []
 
   useEffect(() => {
     setExpandedStrategies(new Set())
@@ -100,16 +99,32 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
   const runtimeInitialising = runtimeStatus === 'initialising'
+  const strategiesReady = strategies.length > 0
+  const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
   const bootstrapTimeline = useMemo(() => {
-    if (bootstrapStages.length) return bootstrapStages
-    const fallbackState = (active) => (runtimeInitialising || loading || active ? 'active' : 'pending')
+    const stateFor = (done, active) => {
+      if (done) return 'done'
+      if (active) return 'active'
+      return 'pending'
+    }
     return [
-      { id: 'runtime', label: 'Spinning up bot runtime', state: fallbackState(true) },
-      { id: 'indicators', label: 'Instantiating indicator overlays…', state: 'pending' },
-      { id: 'cache', label: 'Caching overlays…', state: 'pending' },
-      { id: 'boot', label: 'Bootstrapping bot…', state: 'pending' },
+      {
+        id: 'runtime',
+        label: 'Spinning up bot runtime',
+        state: stateFor(!runtimeInitialising, runtimeInitialising || loading),
+      },
+      {
+        id: 'strategy',
+        label: 'Loading strategy details',
+        state: stateFor(strategiesReady, !strategiesReady && !runtimeInitialising),
+      },
+      {
+        id: 'atm',
+        label: 'Loading ATM rules',
+        state: stateFor(atmReady, strategiesReady && !atmReady),
+      },
     ]
-  }, [bootstrapStages, runtimeInitialising, loading])
+  }, [runtimeInitialising, loading, strategiesReady, atmReady])
   const showBootstrapTimeline = bootstrapTimeline.some((step) => step.state !== 'done')
   const bootstrapStyles = {
     done: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100',
@@ -225,12 +240,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     [persistPlaybackSpeed],
   )
 
-    const headerDetails = useMemo(() => {
-      const parts = []
-      const collectUnique = (iterable) => {
-        const set = new Set()
-        for (const value of iterable || []) {
-          if (value) set.add(value)
+  const headerDetails = useMemo(() => {
+    const parts = []
+    const collectUnique = (iterable) => {
+      const set = new Set()
+      for (const value of iterable || []) {
+        if (value) set.add(value)
       }
       return Array.from(set)
     }
@@ -301,7 +316,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!source) return undefined
     streamRef.current = source
     setStreamStatus('connecting')
-    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'bootstrap']
+    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop']
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
@@ -530,32 +545,43 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                   const rrDisplay = formatRiskReward(strategy.atm_metrics)
                   const isExpanded = expandedStrategies.has(strategy.id)
                   return (
-                    <article key={strategy.id} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="space-y-1">
+                    <article key={strategy.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
                           <h4 className="text-lg font-semibold text-white">{strategy.name || 'Unnamed strategy'}</h4>
-                          <p className="text-sm text-slate-300">
-                            {summarySymbols} • {timeframeLabel} • {datasourceLabel} / {exchangeLabel}
-                          </p>
-                          <div className="flex flex-wrap gap-3 text-[12px] text-slate-400">
-                            <span>Contract {contractSize}</span>
-                            <span>R:R {rrDisplay}</span>
-                            <span className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                              {strategy.id}
-                            </span>
-                          </div>
+                          <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">{strategy.id}</p>
                         </div>
                         <button
                           type="button"
                           onClick={() => toggleStrategyDetails(strategy.id)}
-                          className="inline-flex items-center gap-2 self-start rounded-full border border-white/20 px-3 py-1 text-xs text-slate-100 hover:border-white/40"
+                          className="inline-flex items-center gap-2 rounded-full border border-white/20 px-3 py-1 text-xs text-slate-100 hover:border-white/40"
                         >
                           <span>{isExpanded ? 'Hide details' : 'Details'}</span>
                           <ChevronDown className={`size-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                         </button>
                       </div>
+                      <dl className="mt-3 grid gap-3 text-xs text-slate-400 sm:grid-cols-4">
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Symbols</dt>
+                          <dd className="text-sm text-white">{summarySymbols}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Timeframe</dt>
+                          <dd className="text-sm text-white">{timeframeLabel}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Datasource / Exch.</dt>
+                          <dd className="text-sm text-white">{datasourceLabel} / {exchangeLabel}</dd>
+                        </div>
+                        <div>
+                          <dt className="uppercase tracking-[0.3em]">Contract &amp; R:R</dt>
+                          <dd className="text-sm text-white">
+                            {contractSize} / {rrDisplay}
+                          </dd>
+                        </div>
+                      </dl>
                       {isExpanded ? (
-                        <div className="mt-3 space-y-3 border-t border-white/10 pt-3 text-sm text-slate-200">
+                        <div className="mt-4 space-y-4 border-t border-white/10 pt-4 text-sm text-slate-200">
                           <div>
                             <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
                             {strategy.indicators?.length ? (

@@ -655,7 +655,6 @@ class BotRuntime:
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
-        self._bootstrap: List[Dict[str, str]] = self._init_bootstrap()
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -676,58 +675,25 @@ class BotRuntime:
             with self._lock:
                 self.state["playback_speed"] = self.playback_speed
 
-    @staticmethod
-    def _init_bootstrap() -> List[Dict[str, str]]:
-        return [
-            {"id": "runtime", "label": "Spinning up instance…", "state": "pending"},
-            {
-                "id": "indicators",
-                "label": "Instantiating indicator overlays…",
-                "state": "pending",
-            },
-            {"id": "cache", "label": "Caching overlays…", "state": "pending"},
-            {"id": "boot", "label": "Bootstrapping bot…", "state": "pending"},
-        ]
-
-    def _set_bootstrap_state(self, stage_id: str, state: str) -> None:
-        updated = False
-        for entry in self._bootstrap:
-            if entry.get("id") == stage_id:
-                entry["state"] = state
-                updated = True
-                break
-        if updated:
-            with self._lock:
-                runtime_state = dict(self.state)
-            self._broadcast("bootstrap", {"bootstrap": self._bootstrap, "runtime": runtime_state})
-
     def _ensure_prepared(self) -> None:
         if self._prepared:
             return
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
-        self._bootstrap = self._init_bootstrap()
-        self._set_bootstrap_state("runtime", "active")
         meta = self.config.get("strategies_meta")
         if not meta:
             raise ValueError("Runtime requires strategy metadata to initialise")
         streams = self._build_series(meta)
         if not streams:
             raise ValueError("No strategy streams could be prepared for this bot")
-        self._set_bootstrap_state("runtime", "done")
         self._series = streams
         self._primary_series = self._series[0]
         self._total_bars = len(self._primary_series.candles)
         self._bar_index = 0
-        self._set_bootstrap_state("indicators", "active")
         self._rebuild_overlay_cache()
-        self._set_bootstrap_state("indicators", "done")
-        self._set_bootstrap_state("cache", "active")
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
-        self._set_bootstrap_state("cache", "done")
-        self._set_bootstrap_state("boot", "done")
         self._log_event("prepared", total_bars=self._total_bars)
         self._push_update("prepared")
 
@@ -1357,7 +1323,6 @@ class BotRuntime:
             self._intrabar_cache.clear()
             self._indicator_overlay_cache.clear()
             self._intrabar_snapshots.clear()
-            self._bootstrap = self._init_bootstrap()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -2221,7 +2186,6 @@ class BotRuntime:
             "stats": self._last_stats or self._aggregate_stats(),
             "overlays": self._visible_overlays(),
             "logs": self.logs(),
-            "bootstrap": self._bootstrap,
         }
 
     def _push_update(self, event: str) -> None:
