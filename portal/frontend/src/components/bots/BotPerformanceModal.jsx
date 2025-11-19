@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, Pause, RotateCw, ChevronDown } from 'lucide-react'
 import { BotLensChart, toSec } from './BotLensChart.jsx'
+import { useChartValue } from '../../contexts/ChartStateContext.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import {
   fetchBotPerformance,
@@ -61,6 +62,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return Number.isFinite(raw) ? raw : 10
   })
   const [speedSaving, setSpeedSaving] = useState(false)
+  const [logTab, setLogTab] = useState('trade')
   const playbackDebounceRef = useRef(null)
 
   const strategies = payload?.meta?.strategies || []
@@ -91,7 +93,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
   }, [])
   const logs = payload?.logs || []
-  const quoteCurrency = payload?.stats?.quote_currency
+  const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
   const streamEligible = ['running', 'starting', 'paused'].includes(runtimeStatus)
@@ -101,6 +103,29 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const runtimeInitialising = runtimeStatus === 'initialising'
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
+  const chartHandle = useChartValue(`bot-${bot?.id}`)
+  const lastCandle = useMemo(() => {
+    if (!Array.isArray(payload?.candles) || payload.candles.length === 0) return null
+    return payload.candles[payload.candles.length - 1]
+  }, [payload?.candles])
+  const simTimeLabel = useMemo(() => {
+    const epoch = toSec(lastCandle?.time)
+    if (!Number.isFinite(epoch)) return null
+    const date = new Date(epoch * 1000)
+    const dateLabel = date.toLocaleDateString('en-US', {
+      timeZone: 'UTC',
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+    })
+    const timeLabel = date.toLocaleTimeString([], {
+      timeZone: 'UTC',
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    return `Sim Time: ${dateLabel} — ${timeLabel} UTC`
+  }, [lastCandle?.time])
   const bootstrapTimeline = useMemo(() => {
     const stateFor = (done, active) => {
       if (done) return 'done'
@@ -131,10 +156,125 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     active: 'border-sky-400/40 bg-sky-400/10 text-sky-100',
     pending: 'border-white/10 text-slate-300',
   }
+  const activeTrade = useMemo(() => {
+    const trades = Array.isArray(payload?.trades) ? payload.trades : []
+    return (
+      trades.find((trade) => {
+        const hasOpenLeg = (trade.legs || []).some((leg) => leg.status === 'open' || !leg.exit_time)
+        return hasOpenLeg || !trade?.closed_at
+      }) || null
+    )
+  }, [payload?.trades])
+  const sumContracts = useCallback((legs = []) => {
+    return legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
+  }, [])
+  const activeTradeChip = useMemo(() => {
+    if (!activeTrade) return null
+    const directionLabel = (activeTrade.direction || 'long').toLowerCase() === 'short' ? 'Short' : 'Long'
+    const contractsTotal = sumContracts(activeTrade.legs)
+    const openContracts = sumContracts((activeTrade.legs || []).filter((leg) => leg.status === 'open' || !leg.exit_time))
+    const entryPrice = Number(activeTrade.entry_price)
+    const stopPrice = Number(activeTrade.stop_price)
+    const tickSize = Number(activeTrade.tick_size)
+    const tickValue = Number(activeTrade.tick_value)
+    const contractSize = Number(activeTrade.contract_size) || 1
+    const targets = (activeTrade.legs || [])
+      .map((leg) => Number(leg?.target_price))
+      .filter((value) => Number.isFinite(value))
+    const tpPrice = targets.length
+      ? (directionLabel === 'Short' ? Math.min(...targets) : Math.max(...targets))
+      : null
+    const currentPrice = Number(lastCandle?.close ?? lastCandle?.price)
+    const directionSign = directionLabel === 'Short' ? -1 : 1
+    const riskPerUnit = Number.isFinite(entryPrice) && Number.isFinite(stopPrice) ? Math.abs(entryPrice - stopPrice) : null
+    const rMultiple =
+      riskPerUnit && Number.isFinite(currentPrice)
+        ? ((currentPrice - entryPrice) * directionSign) / riskPerUnit
+        : null
+    const openContractsCount = openContracts || contractsTotal || 0
+    const unrealized =
+      Number.isFinite(entryPrice) &&
+      Number.isFinite(currentPrice) &&
+      Number.isFinite(tickSize) &&
+      Number.isFinite(tickValue) &&
+      tickSize !== 0
+        ? ((currentPrice - entryPrice) / tickSize) * directionSign * tickValue * contractSize * openContractsCount
+        : null
+    const realized = Number.isFinite(activeTrade.net_pnl) ? activeTrade.net_pnl : 0
+    const currentPnl = Number.isFinite(unrealized) ? realized + unrealized : realized
+    const fmtPrice = (value) => (Number.isFinite(value) ? Number(value).toFixed(2) : '—')
+    const fmtPnl = Number.isFinite(currentPnl)
+      ? `${currentPnl >= 0 ? '+' : ''}${currentPnl.toFixed(2)}${quoteCurrency ? ` ${quoteCurrency}` : ''}`
+      : '—'
+    const fmtR = Number.isFinite(rMultiple) ? `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)} R` : '—'
+    return {
+      headline: `${directionLabel} ${Math.max(1, openContractsCount || contractsTotal || 1)}x @ ${fmtPrice(entryPrice)}`,
+      r: fmtR,
+      pnl: fmtPnl,
+      sl: fmtPrice(stopPrice),
+      tp: fmtPrice(tpPrice),
+    }
+  }, [activeTrade, lastCandle?.close, lastCandle?.price, quoteCurrency, sumContracts])
+  const tradeMetrics = useMemo(() => {
+    const trades = Array.isArray(payload?.trades) ? payload.trades : []
+    const toContracts = (legs = []) => legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
+    const sortedTrades = trades.slice().sort((a, b) => (toSec(a?.entry_time) || 0) - (toSec(b?.entry_time) || 0))
+    let totalR = 0
+    let running = 0
+    let peak = 0
+    let maxDrawdown = 0
+    const rValues = []
+    const pnlValues = []
+    const winPnls = []
+    const lossPnls = []
+    for (const trade of sortedTrades) {
+      const net = Number(trade?.net_pnl)
+      const entryPrice = Number(trade?.entry_price)
+      const stopPrice = Number(trade?.stop_price)
+      const tickSize = Number(trade?.tick_size)
+      const tickValue = Number(trade?.tick_value)
+      const contracts = toContracts(trade?.legs)
+      const riskValue =
+        Number.isFinite(entryPrice) &&
+        Number.isFinite(stopPrice) &&
+        Number.isFinite(tickSize) &&
+        Number.isFinite(tickValue) &&
+        tickSize !== 0 &&
+        contracts > 0
+          ? (Math.abs(entryPrice - stopPrice) / tickSize) * tickValue * contracts
+          : null
+      const r = riskValue && Number.isFinite(net) && riskValue !== 0 ? net / riskValue : null
+      if (Number.isFinite(r)) {
+        rValues.push(r)
+        totalR += r
+      }
+      if (Number.isFinite(net)) {
+        pnlValues.push(net)
+        running += net
+        if (running > peak) peak = running
+        const dd = peak - running
+        if (dd > maxDrawdown) maxDrawdown = dd
+        if (net > 0) winPnls.push(net)
+        else if (net < 0) lossPnls.push(net)
+      }
+    }
+    const expectancyR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null
+    const expectancyPnl = pnlValues.length ? pnlValues.reduce((a, b) => a + b, 0) / pnlValues.length : null
+    const avgWin = winPnls.length ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : null
+    const avgLoss = lossPnls.length ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null
+    return { totalR, expectancyR, expectancyPnl, maxDrawdown, avgWin, avgLoss }
+  }, [payload?.trades])
   const statEntries = useMemo(() => {
     const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
-    return Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
-  }, [payload?.stats])
+    const entries = Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
+    if (Number.isFinite(tradeMetrics.maxDrawdown)) entries.push(['max_drawdown', tradeMetrics.maxDrawdown])
+    if (Number.isFinite(tradeMetrics.expectancyR)) entries.push(['expectancy_r', tradeMetrics.expectancyR])
+    if (Number.isFinite(tradeMetrics.expectancyPnl)) entries.push(['expectancy_value', tradeMetrics.expectancyPnl])
+    if (Number.isFinite(tradeMetrics.avgWin)) entries.push(['avg_win', tradeMetrics.avgWin])
+    if (Number.isFinite(tradeMetrics.avgLoss)) entries.push(['avg_loss', tradeMetrics.avgLoss])
+    if (Number.isFinite(tradeMetrics.totalR)) entries.push(['total_r', tradeMetrics.totalR])
+    return entries
+  }, [payload?.stats, tradeMetrics])
   const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
 
   const formatTimestamp = useCallback((value) => {
@@ -148,6 +288,16 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     (key, value) => {
       if (value === undefined || value === null) return '—'
       const numeric = Number(value)
+      if (['expectancy_r', 'total_r'].includes(key)) {
+        if (!Number.isFinite(numeric)) return '—'
+        const formatted = numeric.toFixed(2)
+        return `${numeric >= 0 ? '+' : ''}${formatted} R`
+      }
+      if (['max_drawdown', 'expectancy_value', 'avg_win', 'avg_loss'].includes(key)) {
+        if (!Number.isFinite(numeric)) return '—'
+        const formatted = numeric.toFixed(2)
+        return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
+      }
       const hasCurrency = ['gross_pnl', 'fees_paid', 'net_pnl'].includes(key)
       if (hasCurrency && Number.isFinite(numeric)) {
         const formatted = numeric.toFixed(2)
@@ -180,6 +330,29 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
     return parts.length ? parts.join(' • ') : '—'
   }, [])
+
+  const isTradeLog = useCallback((entry) => {
+    if (!entry) return false
+    if (entry.trade_id) return true
+    const type = (entry.event || entry.type || '').toLowerCase()
+    const keywords = ['entry', 'exit', 'close', 'target', 'stop', 'tp', 'sl', 'fill', 'order', 'open', 'trade']
+    return keywords.some((keyword) => type.includes(keyword))
+  }, [])
+
+  const tradeLogs = useMemo(() => logs.filter((entry) => isTradeLog(entry)), [logs, isTradeLog])
+  const systemLogs = useMemo(() => logs.filter((entry) => !isTradeLog(entry)), [logs, isTradeLog])
+  const displayedLogs = logTab === 'trade' ? tradeLogs : systemLogs
+
+  const focusChartOnLog = useCallback(
+    (entry) => {
+      const handles = chartHandle?.handles || chartHandle
+      if (!handles?.focusAtTime) return
+      const time = entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time
+      const price = entry?.price
+      handles.focusAtTime(time, price)
+    },
+    [chartHandle],
+  )
 
   const formatRiskReward = useCallback((metrics) => {
     if (!metrics || metrics.reward_to_risk === null || metrics.reward_to_risk === undefined) {
@@ -497,11 +670,34 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               <span>10x</span>
               <span>25x</span>
             </div>
+            <div className="mt-2 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-3">
+              <span>Instant = skip visuals</span>
+              <span>10x = normal speed</span>
+              <span>25x = fast mode (reduced detail)</span>
+            </div>
             <p className="mt-1 text-[11px] text-slate-500">
               10x is the normal walk-forward pace; changes apply to intra-candle playback instantly.
             </p>
           </div>
           <div className="relative">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              {simTimeLabel ? (
+                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
+                  {simTimeLabel}
+                </div>
+              ) : (
+                <span className="text-xs text-slate-500">&nbsp;</span>
+              )}
+              {activeTradeChip ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-full border border-sky-400/30 bg-white/5 px-3 py-2 text-xs text-white shadow">
+                  <span className="text-sm font-semibold text-white">{activeTradeChip.headline}</span>
+                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{activeTradeChip.r}</span>
+                  <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{activeTradeChip.pnl}</span>
+                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {activeTradeChip.sl}</span>
+                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {activeTradeChip.tp}</span>
+                </div>
+              ) : null}
+            </div>
             {loading ? <LoadingOverlay label={loadingLabel} /> : null}
             {error ? (
               <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
@@ -684,19 +880,40 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           </div>
 
           <div className="space-y-3 rounded-3xl border border-white/5 bg-black/40 p-4">
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Runtime log</p>
-              <span className="text-xs text-slate-400">Showing last {logs.length} events</span>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Runtime log</p>
+                <div className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 text-xs text-white">
+                  <button
+                    type="button"
+                    onClick={() => setLogTab('trade')}
+                    className={`rounded-full px-3 py-1 ${logTab === 'trade' ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-white/10'}`}
+                  >
+                    Trade Events ({tradeLogs.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLogTab('system')}
+                    className={`rounded-full px-3 py-1 ${logTab === 'system' ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-white/10'}`}
+                  >
+                    System Logs ({systemLogs.length})
+                  </button>
+                </div>
+              </div>
+              <span className="text-xs text-slate-400">Showing last {displayedLogs.length} events</span>
             </div>
             <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
-              {logs.length ? (
-                logs
+              {displayedLogs.length ? (
+                displayedLogs
                   .slice()
                   .reverse()
                   .map((entry, idx) => (
                     <article
                       key={entry.id || `${entry.timestamp || 'log'}-${idx}`}
-                      className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white"
+                      onClick={logTab === 'trade' ? () => focusChartOnLog(entry) : undefined}
+                      className={`rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white ${
+                        logTab === 'trade' ? 'cursor-pointer transition hover:border-sky-400/40 hover:bg-sky-500/5' : ''
+                      }`}
                     >
                       <div className="flex items-center justify-between text-xs uppercase tracking-[0.3em] text-slate-400">
                         <span>{entry.event || 'event'}</span>
@@ -712,7 +929,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                   ))
               ) : (
                 <div className="rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
-                  No runtime events yet
+                  {logTab === 'trade' ? 'No trade events yet' : 'No system logs yet'}
                 </div>
               )}
             </div>

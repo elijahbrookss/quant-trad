@@ -74,19 +74,35 @@ const markerForTrade = (trade) => {
     time: entryTime,
     position: isLong ? 'belowBar' : 'aboveBar',
     shape: isLong ? 'arrowUp' : 'arrowDown',
-    color: isLong ? '#34d399' : '#f97316',
+    color: isLong ? 'rgba(52,211,153,0.82)' : 'rgba(249,115,22,0.82)',
     text: `${isLong ? 'Buy' : 'Sell'} ${trade.legs?.length || 0}x`,
   }
-  const exitMarkers = []
+  const grouped = new Map()
   for (const leg of trade.legs || []) {
     if (!leg?.exit_time || !leg?.status) continue
     const ts = Math.floor(new Date(leg.exit_time).getTime() / 1000)
+    if (!grouped.has(ts)) grouped.set(ts, [])
+    grouped.get(ts).push(leg)
+  }
+  const exitMarkers = []
+  for (const [time, legs] of grouped.entries()) {
+    const targets = legs.filter((leg) => leg.status === 'target')
+    const stops = legs.filter((leg) => leg.status !== 'target')
+    const shape = stops.length > 0 ? 'square' : 'circle'
+    const color = stops.length > 0 ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)'
+    const labelParts = []
+    if (targets.length) {
+      labelParts.push(targets.map((leg) => leg.name || 'TP').join('\n'))
+    }
+    if (stops.length) {
+      labelParts.push(stops.map((leg) => leg.name || 'SL').join('\n'))
+    }
     exitMarkers.push({
-      time: ts,
+      time,
       position: isLong ? 'aboveBar' : 'belowBar',
-      shape: leg.status === 'target' ? 'circle' : 'square',
-      color: leg.status === 'target' ? '#22d3ee' : '#f87171',
-      text: `${leg.name} ${leg.status === 'target' ? 'TP' : 'SL'}`,
+      shape,
+      color,
+      text: labelParts.join('\n'),
     })
   }
   return [entryMarker, ...exitMarkers]
@@ -105,10 +121,24 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const levelSeriesRef = useRef(null)
   const tradeSegmentsRef = useRef([])
   const diagLoggedRef = useRef(false)
+  const markerCacheRef = useRef([])
+  const overlayDelayRef = useRef(null)
+  const focusTimeoutRef = useRef(null)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
+
+  const candleLookup = useMemo(() => {
+    const map = new Map()
+    for (const candle of resolvedCandles || []) {
+      const epoch = toSec(candle?.time)
+      if (Number.isFinite(epoch)) {
+        map.set(epoch, candle)
+      }
+    }
+    return map
+  }, [resolvedCandles])
 
   const candleData = useMemo(() => {
     if (!Array.isArray(resolvedCandles)) {
@@ -181,6 +211,43 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     return markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
   }, [resolvedTrades])
 
+  const tradeRegions = useMemo(() => {
+    if (!Array.isArray(resolvedTrades)) return []
+    const regions = []
+    for (const trade of resolvedTrades) {
+      const entryTime = toSec(trade?.entry_time)
+      if (!Number.isFinite(entryTime)) continue
+      const isLong = (trade?.direction || '').toLowerCase() === 'long'
+      const baseColor = isLong ? '#34d399' : '#f87171'
+      const fill = toRgba(baseColor, 0.08)
+      const border = toRgba(baseColor, 0.22)
+      for (const leg of trade.legs || []) {
+        const exitTime = toSec(leg?.exit_time || trade?.closed_at)
+        if (!Number.isFinite(exitTime)) continue
+        const entryPrice = toFiniteNumber(coalesce(leg?.entry_price, trade?.entry_price))
+        const exitPrice = toFiniteNumber(coalesce(leg?.exit_price, trade?.stop_price, leg?.target_price))
+        const entryCandle = candleLookup.get(entryTime)
+        const exitCandle = candleLookup.get(exitTime)
+        const inferredEntry = toFiniteNumber(coalesce(entryPrice, entryCandle?.close, entryCandle?.open))
+        const inferredExit = toFiniteNumber(coalesce(exitPrice, exitCandle?.close, exitCandle?.open))
+        const prices = [inferredEntry, inferredExit].filter(Number.isFinite)
+        if (!prices.length) continue
+        const y1 = Math.min(...prices)
+        const y2 = Math.max(...prices)
+        regions.push({
+          x1: entryTime,
+          x2: exitTime,
+          y1,
+          y2,
+          color: fill,
+          border: border,
+          precision: 4,
+        })
+      }
+    }
+    return regions
+  }, [candleLookup, resolvedTrades])
+
   const updateViewport = useCallback(
     (tradeSegments = []) => {
       if (!chartRef.current || candleData.length === 0) return
@@ -238,6 +305,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const syncOverlays = useCallback(
     (overlayPayloads = [], tradeMarkerPayload = []) => {
       if (!seriesRef.current || !paneMgrRef.current) return
+      if (overlayDelayRef.current) {
+        clearTimeout(overlayDelayRef.current)
+        overlayDelayRef.current = null
+      }
       overlayHandlesRef.current.priceLines.forEach((handle) => {
         try {
           seriesRef.current.removePriceLine(handle)
@@ -253,9 +324,11 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       }
       paneMgrRef.current.clearFrame()
 
-      const markers = [...tradeMarkerPayload]
+      const hasAnyEntry = resolvedTrades.some((trade) => Number.isFinite(toSec(trade?.entry_time)))
+      const baseMarkers = [...tradeMarkerPayload]
+      const overlayMarkers = []
       const touchPoints = []
-      const boxes = []
+      const boxes = [...tradeRegions]
       const segments = []
       const tradeSegments = []
       const polylines = []
@@ -269,7 +342,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         return { ...segment, x1, x2, y1, y2 }
       }
 
-      for (const overlay of overlayPayloads) {
+      for (const overlay of hasAnyEntry ? overlayPayloads : []) {
         const { type, payload, color } = overlay || {}
         if (!payload) continue
         const paneViews = getPaneViewsFor(type)
@@ -283,7 +356,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
               const handle = seriesRef.current.createPriceLine({
                 price,
                 color: pl.color ?? color ?? '#a5b4fc',
-                lineWidth: pl.lineWidth ?? 1,
+                lineWidth:
+                  pl.title?.toLowerCase?.().includes('sl') || pl.title?.toLowerCase?.().includes('stop')
+                    ? 2.5
+                    : pl.lineWidth ?? 1,
                 lineStyle: pl.lineStyle ?? 0,
                 axisLabelVisible: pl.axisLabelVisible ?? false,
                 title: pl.title || type || '',
@@ -295,7 +371,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           })
         }
         if (Array.isArray(norm.markers)) {
-          markers.push(...norm.markers)
+          overlayMarkers.push(...norm.markers)
         }
         const wantsTouch = paneSet.has('touch') || (Array.isArray(norm.touchPoints) && norm.touchPoints.length > 0)
         if (wantsTouch && Array.isArray(norm.touchPoints) && norm.touchPoints.length) {
@@ -385,9 +461,19 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }
       }
 
-      markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+      const applyMarkers = (set) => {
+        const sorted = [...set].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+        markerCacheRef.current = sorted
+        markersApiRef.current?.setMarkers?.(sorted)
+      }
 
-      markersApiRef.current?.setMarkers?.(markers)
+      applyMarkers(baseMarkers)
+      if (hasAnyEntry) {
+        overlayDelayRef.current = setTimeout(() => {
+          applyMarkers([...baseMarkers, ...overlayMarkers])
+        }, 180)
+      }
+
       paneMgrRef.current.setTouchPoints(touchPoints)
       paneMgrRef.current.setVABlocks(boxes, {
         lastSeriesTime,
@@ -398,8 +484,36 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       paneMgrRef.current.setSignalBubbles(bubbles)
       tradeSegmentsRef.current = tradeSegments
       updateViewport(tradeSegments)
+      },
+      [candleData, resolvedTrades, tradeRegions, updateViewport]
+    )
+
+  const focusAtTime = useCallback(
+    (time, priceHint) => {
+      if (!chartRef.current || !seriesRef.current) return
+      const epoch = toSec(time)
+      if (!Number.isFinite(epoch)) return
+      const ts = chartRef.current.timeScale()
+      const span = barSpacingRef.current ? Math.max(barSpacingRef.current * 20, 30) : 60
+      ts.setVisibleRange({ from: epoch - span, to: epoch + span })
+      const candle = candleLookup.get(epoch)
+      const price = toFiniteNumber(coalesce(priceHint, candle?.close, candle?.open, candle?.high, candle?.low))
+      const highlight = Number.isFinite(price)
+        ? { time: epoch, position: 'aboveBar', shape: 'circle', color: 'rgba(125,211,252,0.9)', text: ' ' }
+        : null
+      if (highlight && markersApiRef.current) {
+        const combined = [...markerCacheRef.current, highlight].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+        markersApiRef.current.setMarkers(combined)
+        if (focusTimeoutRef.current) {
+          clearTimeout(focusTimeoutRef.current)
+        }
+        focusTimeoutRef.current = setTimeout(() => {
+          markersApiRef.current?.setMarkers?.(markerCacheRef.current)
+          focusTimeoutRef.current = null
+        }, 600)
+      }
     },
-    [candleData, updateViewport]
+    [candleLookup],
   )
 
   useEffect(() => {
@@ -430,6 +544,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       get series() {
         return seriesRef.current
       },
+      focusAtTime,
     })
 
     resizeObserverRef.current = new ResizeObserver(([entry]) => {
@@ -442,11 +557,20 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     return () => {
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
+      if (overlayDelayRef.current) {
+        clearTimeout(overlayDelayRef.current)
+        overlayDelayRef.current = null
+      }
+      if (focusTimeoutRef.current) {
+        clearTimeout(focusTimeoutRef.current)
+        focusTimeoutRef.current = null
+      }
       markersApiRef.current?.setMarkers?.([])
       markersApiRef.current = null
       paneMgrRef.current?.destroy()
       paneMgrRef.current = null
       overlayHandlesRef.current.priceLines = []
+      markerCacheRef.current = []
       if (levelSeriesRef.current) {
         try {
           chart.removeSeries(levelSeriesRef.current)
