@@ -10,7 +10,7 @@ services:
       loki.job: quanttrad
       loki.service: frontend
     environment:
-      - VITE_API_BASE_URL=http://backend.quanttrad:8000
+      - VITE_API_BASE_URL=http://localhost:8000 #http://backend.quanttrad:8000
     ports:
       - "5173:5173"
     depends_on:
