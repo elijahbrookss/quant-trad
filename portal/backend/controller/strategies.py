@@ -51,7 +51,10 @@ class StrategyOut(BaseModel):
     indicator_ids: List[str]
     indicators: List[Dict[str, Any]]
     missing_indicators: List[str]
+    instruments: List[Dict[str, Any]] = Field(default_factory=list)
+    instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
     rules: List[StrategyRuleOut]
+    atm_template: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -66,6 +69,7 @@ class StrategyCreateRequest(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     indicator_ids: List[str] = Field(default_factory=list)
+    atm_template: Optional[Dict[str, Any]] = None
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -78,6 +82,7 @@ class StrategyUpdateRequest(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     indicator_ids: Optional[List[str]] = None
+    atm_template: Optional[Dict[str, Any]] = None
 
 
 class RuleConditionCreate(BaseModel):
@@ -171,6 +176,7 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
             datasource=body.datasource,
             exchange=body.exchange,
             indicator_ids=body.indicator_ids,
+            atm_template=body.atm_template,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_create_failed")

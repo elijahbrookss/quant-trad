@@ -34,13 +34,26 @@ export default function IndicatorCard({
   onToggle,
   onEdit,
   onDelete,
+  onDuplicate,
   onGenerateSignals,
   onSelectColor,
   isGeneratingSignals = false,
   disableSignalAction = false,
+  selected = false,
+  onSelectionToggle,
+  duplicatePending = false,
 }) {
   const [showAllParams, setShowAllParams] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const cardBorderClass = selected
+    ? 'border border-[color:var(--accent-alpha-60)] ring-1 ring-[color:var(--accent-alpha-25)] shadow-[0_25px_60px_-45px_var(--accent-shadow-strong)]'
+    : 'border border-white/10';
+  const handleSelectionClick = () => {
+    if (typeof onSelectionToggle === 'function') {
+      onSelectionToggle();
+    }
+  };
+  const duplicateDisabled = duplicatePending || typeof onDuplicate !== 'function';
 
   const paramsList = useMemo(() => {
     const entries = Object.entries(indicator?.params || {})
@@ -92,10 +105,28 @@ export default function IndicatorCard({
       .join(" ");
   }, [indicator?.type]);
 
+  const decoratedName = useMemo(() => {
+    const base = indicator?.name?.trim() || typeLabel || "Indicator";
+    return indicator?.id ? `${base} - ${indicator.id}` : base;
+  }, [indicator?.name, indicator?.id, typeLabel]);
+
   return (
-    <div className="flex items-start justify-between gap-4 rounded-2xl border border-white/10 bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)]">
+    <div className={`group flex items-start justify-between gap-4 rounded-2xl bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)] ${cardBorderClass}`}>
       <div className="min-w-0 flex-1 space-y-3">
         <div className="flex items-start gap-3">
+          <button
+            type="button"
+            onClick={handleSelectionClick}
+            className={`mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-semibold uppercase tracking-[0.2em] transition ${
+              selected
+                ? 'border-[color:var(--accent-alpha-70)] bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)]'
+                : 'border-white/15 text-slate-400 hover:border-white/30'
+            }`}
+            aria-pressed={selected}
+            aria-label={selected ? 'Deselect indicator' : 'Select indicator'}
+          >
+            {selected ? '✓' : ''}
+          </button>
           <span
             className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
             aria-hidden="true"
@@ -103,8 +134,8 @@ export default function IndicatorCard({
             <span className="h-2.5 w-2.5 rounded-full border border-white/25" style={{ backgroundColor: color }} />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-base font-semibold text-slate-100" title={indicator?.name}>
-              {indicator?.name}
+            <div className="truncate text-base font-semibold text-slate-100" title={decoratedName}>
+              {decoratedName}
             </div>
             <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-[color:var(--accent-text-soft-alpha)]">
               {typeLabel}
@@ -243,6 +274,23 @@ export default function IndicatorCard({
                         className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]"
                       >
                         <span className="inline-flex items-center gap-2"><Copy className="size-4" /> Copy params JSON</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          if (duplicateDisabled) return
+                          onDuplicate?.(indicator.id)
+                          setConfirmingDelete(false)
+                          close()
+                        }}
+                        disabled={duplicateDisabled}
+                        className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left text-slate-200 transition ${
+                          duplicateDisabled
+                            ? 'cursor-not-allowed border-white/5 text-slate-500'
+                            : 'border-white/10 bg-white/5 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
+                        }`}
+                      >
+                        <span>{duplicatePending ? 'Duplicating…' : 'Duplicate indicator'}</span>
                       </button>
 
                       {!confirmingDelete && (
