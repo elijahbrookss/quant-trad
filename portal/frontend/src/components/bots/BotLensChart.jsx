@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useRef, useCallback, useState } from 'react'
 import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 import { PaneViewManager } from '../../chart/paneViews/factory.js'
@@ -76,8 +76,11 @@ const markerForTrade = (trade) => {
     shape: isLong ? 'arrowUp' : 'arrowDown',
     color: isLong ? 'rgba(52,211,153,0.82)' : 'rgba(249,115,22,0.82)',
     text: `${isLong ? 'Buy' : 'Sell'} ${trade.legs?.length || 0}x`,
+    kind: 'entry',
   }
   const grouped = new Map()
+  const targetSummary = []
+  const stopSummary = []
   for (const leg of trade.legs || []) {
     if (!leg?.exit_time || !leg?.status) continue
     const ts = Math.floor(new Date(leg.exit_time).getTime() / 1000)
@@ -88,24 +91,54 @@ const markerForTrade = (trade) => {
   for (const [time, legs] of grouped.entries()) {
     const targets = legs.filter((leg) => leg.status === 'target')
     const stops = legs.filter((leg) => leg.status !== 'target')
-    const shape = stops.length > 0 ? 'square' : 'circle'
-    const color = stops.length > 0 ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)'
-    const labelParts = []
     if (targets.length) {
-      labelParts.push(targets.map((leg) => leg.name || 'TP').join('\n'))
+      targetSummary.push(
+        ...targets.map((leg) => ({
+          name: leg.name || 'TP',
+          price: leg.target_price || leg.exit_price,
+        })),
+      )
     }
     if (stops.length) {
-      labelParts.push(stops.map((leg) => leg.name || 'SL').join('\n'))
+      stopSummary.push(
+        ...stops.map((leg) => ({
+          name: leg.name || 'SL',
+          price: leg.target_price || leg.exit_price || leg.stop_price,
+        })),
+      )
     }
     exitMarkers.push({
       time,
       position: isLong ? 'aboveBar' : 'belowBar',
-      shape,
-      color,
-      text: labelParts.join('\n'),
+      shape: stops.length > 0 ? 'square' : 'circle',
+      color: stops.length > 0 ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
+      text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
+        stops.length ? `SL x${stops.length}` : ''
+      }`,
+      kind: stops.length ? 'stop' : 'target',
     })
   }
-  return [entryMarker, ...exitMarkers]
+  const summaryLabel = []
+  if (targetSummary.length) summaryLabel.push(`TP x${targetSummary.length}`)
+  if (stopSummary.length) summaryLabel.push(`SL x${stopSummary.length}`)
+  const summaryMarker = summaryLabel.length
+    ? {
+        time: entryTime,
+        position: isLong ? 'aboveBar' : 'belowBar',
+        shape: 'arrowUp',
+        color: 'rgba(148,163,184,0.6)',
+        text: summaryLabel.join(' / '),
+        kind: 'tp-sl-summary',
+        tooltip: {
+          entries: [
+            ...targetSummary.map((entry) => `${entry.name}: ${entry.price ?? '—'}`),
+            ...stopSummary.map((entry) => `${entry.name}: ${entry.price ?? '—'}`),
+          ],
+        },
+      }
+    : null
+  const markers = summaryMarker ? [entryMarker, summaryMarker, ...exitMarkers] : [entryMarker, ...exitMarkers]
+  return markers
 }
 
 export function BotLensChart({ chartId, candles = [], trades = [], overlays = [] }) {
@@ -124,6 +157,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const markerCacheRef = useRef([])
   const overlayDelayRef = useRef(null)
   const focusTimeoutRef = useRef(null)
+  const markerDetailsRef = useRef([])
+  const prevCandleDataRef = useRef([])
+  const candleAnimationRef = useRef(null)
+  const [markerTooltip, setMarkerTooltip] = useState(null)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
@@ -203,13 +240,29 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
   }, [candleData, chartId])
 
-  const tradeMarkers = useMemo(() => {
+  const tradeMarkerBundle = useMemo(() => {
     if (!Array.isArray(resolvedTrades)) {
-      return []
+      return { markers: [], tooltips: [] }
     }
-    const markers = resolvedTrades.flatMap((trade) => markerForTrade(trade))
-    return markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+    const markers = []
+    const tooltips = []
+    for (const trade of resolvedTrades) {
+      const entries = markerForTrade(trade)
+      markers.push(...entries)
+      entries
+        .filter((entry) => entry?.kind === 'tp-sl-summary' && Array.isArray(entry?.tooltip?.entries))
+        .forEach((entry) => {
+          tooltips.push({ time: entry.time, entries: entry.tooltip.entries })
+        })
+    }
+    return {
+      markers: markers.sort((a, b) => (a.time ?? 0) - (b.time ?? 0)),
+      tooltips,
+    }
   }, [resolvedTrades])
+
+  const tradeMarkers = tradeMarkerBundle.markers
+  const tradeMarkerTooltips = tradeMarkerBundle.tooltips
 
   const tradeRegions = useMemo(() => {
     if (!Array.isArray(resolvedTrades)) return []
@@ -303,7 +356,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   )
 
   const syncOverlays = useCallback(
-    (overlayPayloads = [], tradeMarkerPayload = []) => {
+    (overlayPayloads = [], tradeMarkerPayload = [], markerDetails = []) => {
       if (!seriesRef.current || !paneMgrRef.current) return
       if (overlayDelayRef.current) {
         clearTimeout(overlayDelayRef.current)
@@ -324,6 +377,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       }
       paneMgrRef.current.clearFrame()
 
+      markerDetailsRef.current = Array.isArray(markerDetails) ? markerDetails : []
       const hasAnyEntry = resolvedTrades.some((trade) => Number.isFinite(toSec(trade?.entry_time)))
       const baseMarkers = [...tradeMarkerPayload]
       const overlayMarkers = []
@@ -461,16 +515,50 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }
       }
 
-      const applyMarkers = (set) => {
+      const markerKey = (marker) => `${marker.time}-${marker.position}-${marker.text}-${marker.kind || ''}`
+
+      const applyMarkers = (set, animate = false) => {
         const sorted = [...set].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-        markerCacheRef.current = sorted
-        markersApiRef.current?.setMarkers?.(sorted)
+        if (!animate) {
+          markerCacheRef.current = sorted
+          markersApiRef.current?.setMarkers?.(sorted)
+          return
+        }
+        const previous = new Set((markerCacheRef.current || []).map((marker) => markerKey(marker)))
+        const staged = sorted.map((marker) => {
+          if (!previous.has(markerKey(marker))) {
+            if (marker.kind === 'entry') {
+              return { ...marker, size: (marker.size || 1) * 0.85, color: marker.color?.replace('0.82', '0.7') }
+            }
+            if (marker.kind === 'target') {
+              return { ...marker, color: marker.color?.replace('0.82', '0.6'), text: marker.text, __fadeIn: true }
+            }
+            if (marker.kind === 'stop') {
+              return { ...marker, color: marker.color?.replace('0.82', '0.55'), text: marker.text, __fadeIn: true }
+            }
+            return { ...marker, color: marker.color?.replace('0.82', '0.65'), __fadeIn: true }
+          }
+          return marker
+        })
+        markerCacheRef.current = staged
+        markersApiRef.current?.setMarkers?.(staged)
+        if (staged.some((marker) => marker.__fadeIn)) {
+          setTimeout(() => {
+            const finalized = sorted.map((marker) => {
+              const clone = { ...marker }
+              delete clone.__fadeIn
+              return clone
+            })
+            markerCacheRef.current = finalized
+            markersApiRef.current?.setMarkers?.(finalized)
+          }, 200)
+        }
       }
 
-      applyMarkers(baseMarkers)
+      applyMarkers(baseMarkers, true)
       if (hasAnyEntry) {
         overlayDelayRef.current = setTimeout(() => {
-          applyMarkers([...baseMarkers, ...overlayMarkers])
+          applyMarkers([...baseMarkers, ...overlayMarkers], true)
         }, 180)
       }
 
@@ -515,6 +603,33 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     },
     [candleLookup],
   )
+
+  const animateCandle = useCallback((from, to) => {
+    if (!seriesRef.current || !to) return
+    if (candleAnimationRef.current) {
+      cancelAnimationFrame(candleAnimationRef.current)
+      candleAnimationRef.current = null
+    }
+    const start = performance.now()
+    const duration = 200
+    const frame = (now) => {
+      const progress = Math.min(1, (now - start) / duration)
+      const eased = progress < 1 ? progress * progress * (3 - 2 * progress) : 1
+      const lerp = (a, b) => a + (b - a) * eased
+      const next = {
+        time: to.time,
+        open: lerp(from?.open ?? to.open, to.open),
+        high: lerp(from?.high ?? to.high, to.high),
+        low: lerp(from?.low ?? to.low, to.low),
+        close: lerp(from?.close ?? to.close, to.close),
+      }
+      seriesRef.current.update(next)
+      if (progress < 1) {
+        candleAnimationRef.current = requestAnimationFrame(frame)
+      }
+    }
+    candleAnimationRef.current = requestAnimationFrame(frame)
+  }, [])
 
   useEffect(() => {
     const el = containerRef.current
@@ -565,6 +680,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         clearTimeout(focusTimeoutRef.current)
         focusTimeoutRef.current = null
       }
+      if (candleAnimationRef.current) {
+        cancelAnimationFrame(candleAnimationRef.current)
+        candleAnimationRef.current = null
+      }
       markersApiRef.current?.setMarkers?.([])
       markersApiRef.current = null
       paneMgrRef.current?.destroy()
@@ -587,12 +706,31 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   useEffect(() => {
     if (!seriesRef.current) return
-    seriesRef.current.setData(candleData)
     if (!markersApiRef.current) {
       markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
     }
+    const previous = prevCandleDataRef.current || []
+    const next = candleData
+    const prevLast = previous[previous.length - 1]
+    const nextLast = next[next.length - 1]
+    const sameLength = previous.length === next.length && next.length > 0
+    if (
+      sameLength &&
+      prevLast &&
+      nextLast &&
+      Number.isFinite(prevLast.time) &&
+      Number.isFinite(nextLast.time) &&
+      prevLast.time === nextLast.time
+    ) {
+      const base = next.slice(0, -1)
+      seriesRef.current.setData(base)
+      animateCandle(prevLast, nextLast)
+    } else {
+      seriesRef.current.setData(next)
+    }
+    prevCandleDataRef.current = next
     chartRef.current?.timeScale().fitContent()
-  }, [candleData])
+  }, [animateCandle, candleData])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -610,8 +748,27 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   }, [candleData])
 
   useEffect(() => {
-    syncOverlays(resolvedOverlays, tradeMarkers)
-  }, [resolvedOverlays, tradeMarkers, syncOverlays])
+    if (!chartRef.current) return undefined
+    const handler = (param) => {
+      const epoch = toSec(param?.time)
+      if (!Number.isFinite(epoch) || !param?.point) {
+        setMarkerTooltip(null)
+        return
+      }
+      const detail = (markerDetailsRef.current || []).find((entry) => entry.time === epoch)
+      if (detail) {
+        setMarkerTooltip({ x: param.point.x, y: param.point.y, entries: detail.entries })
+      } else {
+        setMarkerTooltip(null)
+      }
+    }
+    chartRef.current.subscribeCrosshairMove(handler)
+    return () => chartRef.current?.unsubscribeCrosshairMove?.(handler)
+  }, [])
+
+  useEffect(() => {
+    syncOverlays(resolvedOverlays, tradeMarkers, tradeMarkerTooltips)
+  }, [resolvedOverlays, tradeMarkerTooltips, tradeMarkers, syncOverlays])
 
   useEffect(() => {
     updateViewport(tradeSegmentsRef.current || [])
@@ -620,7 +777,23 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   return (
     <div
       ref={containerRef}
-      className="h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]"
-    />
+      className="relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]"
+    >
+      {markerTooltip?.entries?.length ? (
+        <div
+          className="pointer-events-none absolute z-10 rounded-lg border border-white/10 bg-black/70 px-3 py-2 text-xs text-white shadow-lg backdrop-blur"
+          style={{ left: markerTooltip.x, top: markerTooltip.y - 12 }}
+        >
+          <p className="text-[11px] uppercase tracking-[0.25em] text-slate-300">TP / SL breakdown</p>
+          <ul className="mt-1 space-y-0.5 text-slate-100">
+            {markerTooltip.entries.map((line, idx) => (
+              <li key={`${line}-${idx}`} className="whitespace-nowrap">
+                {line}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   )
 }

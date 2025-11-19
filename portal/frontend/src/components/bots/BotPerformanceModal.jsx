@@ -64,6 +64,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [speedSaving, setSpeedSaving] = useState(false)
   const [logTab, setLogTab] = useState('trade')
   const playbackDebounceRef = useRef(null)
+  const chipHideTimeoutRef = useRef(null)
+  const [chipVisible, setChipVisible] = useState(false)
+  const [renderedChip, setRenderedChip] = useState(null)
 
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
@@ -91,7 +94,26 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (playbackDebounceRef.current) {
       clearTimeout(playbackDebounceRef.current)
     }
+    if (chipHideTimeoutRef.current) {
+      clearTimeout(chipHideTimeoutRef.current)
+    }
   }, [])
+
+  useEffect(() => {
+    if (chipHideTimeoutRef.current) {
+      clearTimeout(chipHideTimeoutRef.current)
+      chipHideTimeoutRef.current = null
+    }
+    if (activeTradeChip) {
+      setRenderedChip(activeTradeChip)
+      requestAnimationFrame(() => setChipVisible(true))
+    } else if (renderedChip) {
+      setChipVisible(false)
+      chipHideTimeoutRef.current = setTimeout(() => {
+        setRenderedChip(null)
+      }, 200)
+    }
+  }, [activeTradeChip, renderedChip])
   const logs = payload?.logs || []
   const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
@@ -213,6 +235,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       pnl: fmtPnl,
       sl: fmtPrice(stopPrice),
       tp: fmtPrice(tpPrice),
+      direction: directionLabel.toLowerCase(),
     }
   }, [activeTrade, lastCandle?.close, lastCandle?.price, quoteCurrency, sumContracts])
   const tradeMetrics = useMemo(() => {
@@ -688,13 +711,22 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               ) : (
                 <span className="text-xs text-slate-500">&nbsp;</span>
               )}
-              {activeTradeChip ? (
-                <div className="flex flex-wrap items-center gap-2 rounded-full border border-sky-400/30 bg-white/5 px-3 py-2 text-xs text-white shadow">
-                  <span className="text-sm font-semibold text-white">{activeTradeChip.headline}</span>
-                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{activeTradeChip.r}</span>
-                  <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{activeTradeChip.pnl}</span>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {activeTradeChip.sl}</span>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {activeTradeChip.tp}</span>
+              {renderedChip ? (
+                <div
+                  className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow transition-all duration-200 ${
+                    chipVisible ? 'border-sky-400/30 bg-white/5 opacity-100' : 'border-sky-400/10 bg-white/0 opacity-0'
+                  } ${chipVisible ? 'translate-y-0' : '-translate-y-1'}`}
+                >
+                  <span
+                    className={`h-2.5 w-2.5 rounded-full ${
+                      renderedChip.direction === 'short' ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20' : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
+                    }`}
+                  />
+                  <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
+                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{renderedChip.r}</span>
+                  <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{renderedChip.pnl}</span>
+                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {renderedChip.sl}</span>
+                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {renderedChip.tp}</span>
                 </div>
               ) : null}
             </div>
