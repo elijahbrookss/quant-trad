@@ -71,6 +71,7 @@ DEFAULT_BREAKOUT_CONFIRMATION_BARS = 3
 
 
 class MarketProfileIndicator(BaseIndicator):
+    _DATAFRAME_CACHE: Dict[Tuple[str, str, str, int, str], Dict[str, Any]] = {}
     """
     Computes daily market profile (TPO) to identify Point of Control (POC),
     Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
@@ -89,6 +90,7 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         super().__init__(df)
         self._bin_size_locked = False
@@ -96,6 +98,7 @@ class MarketProfileIndicator(BaseIndicator):
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
         self.mode = mode
+        self.days_back = days_back
         # Compute raw daily profiles on initialization
         self.daily_profiles = self._compute_daily_profiles()
         self.merged_profiles = []
@@ -107,6 +110,61 @@ class MarketProfileIndicator(BaseIndicator):
         self.market_profile_breakout_confirmation_bars = self._normalise_confirmation_bars(
             market_profile_breakout_confirmation_bars
         )
+
+    @staticmethod
+    def _normalise_ts(value: Any) -> pd.Timestamp:
+        stamp = pd.Timestamp(value)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        return stamp
+
+    @classmethod
+    def _fetch_with_cache(
+        cls,
+        provider,
+        ctx: DataContext,
+        *,
+        days_back: Optional[int],
+    ) -> pd.DataFrame:
+        lookback = max(int(days_back or 0), 0)
+        start_ts = cls._normalise_ts(ctx.start)
+        if lookback:
+            start_ts = start_ts - pd.Timedelta(days=lookback)
+        end_ts = cls._normalise_ts(ctx.end)
+        cache_key = (
+            getattr(provider, "CACHE_KEY", provider.__class__.__name__),
+            getattr(provider, "exchange", None) or getattr(provider, "exchange_id", None) or "",
+            ctx.symbol or "",
+            ctx.interval or "",
+            lookback,
+        )
+        entry = cls._DATAFRAME_CACHE.get(cache_key)
+        if entry is not None:
+            cached_df: pd.DataFrame = entry["df"]
+            cached_start: pd.Timestamp = entry["start"]
+            cached_end: pd.Timestamp = entry["end"]
+            if start_ts >= cached_start and end_ts <= cached_end:
+                window = cached_df.loc[(cached_df.index >= start_ts) & (cached_df.index <= end_ts)]
+                return window.copy()
+
+        request_ctx = DataContext(
+            symbol=ctx.symbol,
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            interval=ctx.interval,
+        )
+        df = provider.get_ohlcv(request_ctx)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.sort_index()
+        cls._DATAFRAME_CACHE[cache_key] = {
+            "df": df,
+            "start": cls._normalise_ts(df.index.min()),
+            "end": cls._normalise_ts(df.index.max()),
+        }
+        return df.copy()
 
     @staticmethod
     def _normalise_confirmation_bars(value: Any) -> int:
@@ -262,6 +320,7 @@ class MarketProfileIndicator(BaseIndicator):
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -270,7 +329,7 @@ class MarketProfileIndicator(BaseIndicator):
         ctx = DataContext(symbol=ctx.symbol, start=ctx.start, end=ctx.end, interval=interval)
         ctx.validate()
 
-        df = provider.get_ohlcv(ctx)
+        df = cls._fetch_with_cache(provider, ctx, days_back=days_back)
         if df is None or df.empty:
             raise ValueError(f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest")
 
@@ -284,6 +343,7 @@ class MarketProfileIndicator(BaseIndicator):
             merge_threshold=merge_threshold,
             min_merge_sessions=min_merge_sessions,
             market_profile_breakout_confirmation_bars=market_profile_breakout_confirmation_bars,
+            days_back=days_back,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
@@ -744,28 +804,34 @@ class MarketProfileIndicator(BaseIndicator):
                 continue
 
             # start_iso = _ts_iso(start_ts)
-            start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
-            
+            start_str = fmt_time(start_ts)  # either 'YYYY-MM-DD' or unix seconds
+
+            profile_end_ts = pd.to_datetime(
+                prof.get("end") or prof.get("end_date") or chart_end,
+                utc=True,
+            )
+            if profile_end_ts > chart_end:
+                profile_end_ts = chart_end
+            if profile_end_ts < start_ts:
+                profile_end_ts = start_ts
+
             if extend_boxes_to_chart_end:
                 end_ts = chart_end
             else:
-                end_ts = pd.to_datetime(
-                    prof.get("end") or prof.get("end_date") or chart_end,
-                    utc=True,
-                )
-                if end_ts > chart_end:
-                    end_ts = chart_end
+                end_ts = profile_end_ts
             if end_ts < start_ts:
                 end_ts = start_ts
 
             out_boxes.append({
-                "x1": _to_unix_s(start_ts),   # epoch seconds
-                "x2": _to_unix_s(end_ts),     # epoch seconds
-                "y1": float(val),             # VAL
-                "y2": float(vah),             # VAH
-                "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
+                "x1": _to_unix_s(start_ts),  # epoch seconds
+                "x2": _to_unix_s(end_ts),  # epoch seconds
+                "y1": float(val),  # VAL
+                "y2": float(vah),  # VAH
+                "color": "rgba(156,163,175,0.18)",  # neutral grey w/ alpha; UI can recolor later
                 "precision": prof.get("precision", self.price_precision),
                 "extend": bool(extend_boxes_to_chart_end),
+                "start": _to_unix_s(start_ts),
+                "end": _to_unix_s(profile_end_ts),
             })
 
             logger.debug(
@@ -816,8 +882,12 @@ class MarketProfileIndicator(BaseIndicator):
 
             # ----- touchpoint markers (optional) -----
             if include_touches:
-                out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
-                out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time)
+                )
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time)
+                )
 
         logger.info(
             "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",

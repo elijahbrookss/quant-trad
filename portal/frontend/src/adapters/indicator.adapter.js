@@ -101,6 +101,53 @@ export async function deleteIndicator(id) {
   return handleResponse(res)
 }
 
+export async function setIndicatorEnabled(id, enabled) {
+  const res = await fetch(`${BASE}/api/indicators/${id}/enabled`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function bulkToggleIndicators(ids = [], enabled) {
+  const res = await fetch(`${BASE}/api/indicators/bulk/toggle`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, enabled }),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function bulkDeleteIndicators(ids = []) {
+  const res = await fetch(`${BASE}/api/indicators/bulk/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+export async function duplicateIndicator(id, { name } = {}) {
+  const payload = {}
+  if (typeof name === 'string' && name.trim()) {
+    payload.name = name.trim()
+  }
+  const hasBody = Object.keys(payload).length > 0
+  const headers = hasBody ? { 'Content-Type': 'application/json' } : undefined
+  const body = hasBody ? JSON.stringify(payload) : undefined
+  const res = await fetch(`${BASE}/api/indicators/${id}/duplicate`, {
+    method: 'POST',
+    headers,
+    body,
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
 export async function fetchIndicatorOverlays(id, { start, end, interval, symbol, datasource, exchange }) {
   adapterLogger.debug('fetch_indicator_overlays_request', { id, start, end, interval, symbol, datasource, exchange })
   const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
