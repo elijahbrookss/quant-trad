@@ -744,6 +744,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 candles={payload?.candles || []}
                 trades={payload?.trades || []}
                 overlays={payload?.overlays || []}
+                playbackSpeed={playbackDraft}
               />
             ) : (
               <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">

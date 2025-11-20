@@ -141,7 +141,7 @@ const markerForTrade = (trade) => {
   return markers
 }
 
-export function BotLensChart({ chartId, candles = [], trades = [], overlays = [] }) {
+export function BotLensChart({ chartId, candles = [], trades = [], overlays = [], playbackSpeed = 10 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -165,6 +165,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
+  const instantPlayback = Number(playbackSpeed) <= 0
 
   const candleLookup = useMemo(() => {
     const map = new Map()
@@ -200,6 +201,25 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
     return normalized.sort((a, b) => a.time - b.time)
   }, [resolvedCandles])
+
+  const activeTradeAtLastCandle = useMemo(() => {
+    const lastTime = candleData[candleData.length - 1]?.time
+    if (!Number.isFinite(lastTime)) return false
+    return resolvedTrades.some((trade) => {
+      const entry = toSec(trade?.entry_time)
+      if (!Number.isFinite(entry) || entry > lastTime) return false
+      const closed = toSec(trade?.closed_at)
+      const legs = Array.isArray(trade?.legs) ? trade.legs : []
+      const openLeg = legs.some((leg) => {
+        const exit = toSec(leg?.exit_time)
+        if (!Number.isFinite(exit)) return true
+        return exit >= lastTime
+      })
+      if (openLeg) return true
+      if (!Number.isFinite(closed)) return true
+      return closed >= lastTime
+    })
+  }, [candleData, resolvedTrades])
 
   useEffect(() => {
     if (!candleData.length) {
@@ -782,7 +802,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       nextLast &&
       Number.isFinite(prevLast.time) &&
       Number.isFinite(nextLast.time) &&
-      prevLast.time === nextLast.time
+      prevLast.time === nextLast.time &&
+      activeTradeAtLastCandle &&
+      !instantPlayback
     ) {
       const base = next.slice(0, -1)
       seriesRef.current.setData(base)
@@ -792,7 +814,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
     prevCandleDataRef.current = next
     chartRef.current?.timeScale().fitContent()
-  }, [animateCandle, candleData])
+  }, [activeTradeAtLastCandle, animateCandle, candleData, instantPlayback])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
