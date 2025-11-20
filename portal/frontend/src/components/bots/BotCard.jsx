@@ -42,12 +42,11 @@ export const BotCard = memo(function BotCard({
       : runtimeStatus === 'completed'
         ? 1
         : 0
-  const progressPct = `${Math.round(progressValue * 1000) / 10}%`
   const progressWidth = `${Math.min(100, Math.max(0, progressValue * 100))}%`
   const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
   const showResume = runtimeStatus === 'paused'
-  const timeframeLabel = describeBotMeta(bot, 'timeframe')
-  const symbolLabel = describeBotMeta(bot, 'symbol')
+  const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
+  const symbolLabel = describeBotMeta(bot, strategyLookup, 'symbol')
   const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
   const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
   const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
@@ -75,10 +74,7 @@ export const BotCard = memo(function BotCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start text-xs text-slate-300">
-          {statusBadge(runtimeStatus)}
-          <span className="text-[11px] uppercase tracking-[0.24em] text-slate-400">{progressPct}</span>
-        </div>
+        <div className="flex items-center gap-2 self-start text-xs text-slate-300">{statusBadge(runtimeStatus)}</div>
       </div>
 
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -86,7 +82,6 @@ export const BotCard = memo(function BotCard({
           <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/5">
             <div className="h-full bg-[color:var(--accent-alpha-40)] transition-[width] duration-500" style={{ width: progressWidth }} />
           </div>
-          <span className="w-14 text-right text-xs text-slate-300">{progressPct}</span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <ActionButton onClick={() => onOpen(bot)} icon={<Eye className="size-4" />} label="Open" />
@@ -119,7 +114,7 @@ export const BotCard = memo(function BotCard({
       </div>
 
       {statsEntries.length ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
           {statsEntries.map((entry) => (
             <div
               key={entry.key}
@@ -149,10 +144,35 @@ export const BotCard = memo(function BotCard({
   )
 })
 
-function describeBotMeta(bot, key) {
+function describeBotMeta(bot, strategyLookup, key) {
+  if (!bot) return null
+
+  const fromStrategies = new Set()
+  for (const strategyId of bot.strategy_ids || []) {
+    const strategy = strategyLookup.get(strategyId)
+    if (!strategy) continue
+    const value = strategy[key]
+    if (!value && Array.isArray(strategy?.symbols) && key === 'symbol') {
+      strategy.symbols.forEach((sym) => fromStrategies.add(sym))
+    }
+    if (value) {
+      if (Array.isArray(value)) {
+        value.forEach((val) => fromStrategies.add(val))
+      } else {
+        fromStrategies.add(value)
+      }
+    }
+  }
+
+  if (fromStrategies.size) {
+    const label = Array.from(fromStrategies).join(', ')
+    return key === 'timeframe' ? label.toUpperCase() : label
+  }
+
   const raw = bot?.[key] || bot?.config?.[key] || bot?.runtime?.[key]
   if (!raw) return null
   if (key === 'timeframe') return String(raw).toUpperCase()
+  if (Array.isArray(raw)) return raw.join(', ')
   return raw
 }
 
@@ -168,10 +188,10 @@ function MetaPill({ label, value }) {
 function ActionButton({ onClick, icon, label, busy, variant = 'ghost' }) {
   const variantClass = {
     accent:
-      'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-white hover:border-[color:var(--accent-alpha-80)]',
+      'border-[color:var(--accent-alpha-50)] bg-transparent text-white hover:border-[color:var(--accent-alpha-70)] hover:bg-[color:var(--accent-alpha-10)]',
     danger:
-      'border-rose-400/60 bg-rose-500/10 text-rose-100 hover:border-rose-300 hover:bg-rose-500/15',
-    ghost: 'border-white/20 bg-white/5 text-white hover:border-white/40',
+      'border-rose-400/50 bg-transparent text-rose-100 hover:border-rose-300 hover:bg-rose-500/10',
+    ghost: 'border-white/15 bg-transparent text-white hover:border-white/35 hover:bg-white/5',
   }[variant]
 
   return (
@@ -188,7 +208,7 @@ function ActionButton({ onClick, icon, label, busy, variant = 'ghost' }) {
 }
 
 function buildStats(bot) {
-  const source = bot?.last_stats || bot?.runtime?.stats || {}
+  const source = bot?.runtime?.stats || bot?.last_stats || {}
   const entries = [
     { key: 'net_pnl', label: 'NET PNL', value: source.net_pnl },
     { key: 'total_trades', label: 'TOTAL TRADES', value: source.total_trades },
