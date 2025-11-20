@@ -742,7 +742,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                   </div>
                 ) : null}
               </div>
-              <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="ml-auto flex items-center gap-3">
                 <div className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 shadow">
                   <button
                     type="button"
@@ -774,7 +774,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     playbackDisabled ? 'pointer-events-none opacity-60' : ''
                   }`}
                 >
-                  <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Speed</span>
+                  <span className="text-[10px] uppercase tracking-[0.25em] text-slate-200">Speed</span>
                   <input
                     type="range"
                     min="0"
@@ -783,7 +783,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     value={playbackDraft}
                     onChange={handlePlaybackInput}
                     disabled={playbackDisabled}
-                    className="h-1 w-28 accent-sky-400 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-runnable-track]:h-1"
+                    className="h-1 w-28 self-center accent-white [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-white/30"
                   />
                   <span className="text-xs font-semibold text-white">
                     {playbackLabel}
