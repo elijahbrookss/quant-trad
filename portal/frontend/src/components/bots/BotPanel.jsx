@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
@@ -8,6 +8,7 @@ import {
   deleteBot as deleteBotApi,
   pauseBot as pauseBotApi,
   resumeBot as resumeBotApi,
+  openBotsStream,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
@@ -50,6 +51,8 @@ export function BotPanel() {
   const [strategyError, setStrategyError] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
   const [search, setSearch] = useState('')
+  const [botStreamState, setBotStreamState] = useState('idle')
+  const botStreamRef = useRef(null)
   const formatPlaybackValue = useCallback((value) => {
     const numeric = Number(value)
     if (!Number.isFinite(numeric)) return '—'
@@ -113,9 +116,58 @@ export function BotPanel() {
   }, [loadBots, loadStrategies])
 
   useEffect(() => {
-    const id = setInterval(() => loadBots(false), 5000)
+    let retryTimer = null
+    const connectStream = () => {
+      if (botStreamRef.current) {
+        botStreamRef.current.close()
+        botStreamRef.current = null
+      }
+      const source = openBotsStream()
+      if (!source) {
+        setBotStreamState('error')
+        return
+      }
+      botStreamRef.current = source
+      setBotStreamState('connecting')
+      const handlePayload = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (Array.isArray(data)) {
+            setBots(data)
+          } else if (data?.id) {
+            upsertBot(data)
+          }
+          setBotStreamState('open')
+        } catch (err) {
+          console.warn('bot stream payload parse failed', err)
+        }
+      }
+      const handleError = () => {
+        setBotStreamState('error')
+        retryTimer = setTimeout(connectStream, 2500)
+      }
+      source.onmessage = handlePayload
+      source.addEventListener('snapshot', handlePayload)
+      source.addEventListener('update', handlePayload)
+      source.onerror = handleError
+      source.onopen = () => setBotStreamState('open')
+    }
+    connectStream()
+    return () => {
+      if (retryTimer) clearTimeout(retryTimer)
+      if (botStreamRef.current) {
+        botStreamRef.current.close()
+        botStreamRef.current = null
+      }
+    }
+  }, [upsertBot])
+
+  useEffect(() => {
+    if (botStreamState === 'open') return undefined
+    const intervalMs = botStreamState === 'error' ? 2000 : 4000
+    const id = setInterval(() => loadBots(false), intervalMs)
     return () => clearInterval(id)
-  }, [loadBots])
+  }, [botStreamState, loadBots])
 
   const handleChange = (event) => {
     const { name, value } = event.target

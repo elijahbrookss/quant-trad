@@ -94,3 +94,13 @@ export function openBotStream(botId) {
     return null
   }
 }
+
+export function openBotsStream() {
+  try {
+    const url = new URL('/api/bots/stream', BASE)
+    return new EventSource(url, { withCredentials: false })
+  } catch (err) {
+    log.warn('bots_stream_init_failed', err)
+    return null
+  }
+}
