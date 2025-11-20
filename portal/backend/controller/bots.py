@@ -254,3 +254,31 @@ async def stream_bot(bot_id: str) -> StreamingResponse:
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
+
+
+@router.get("/stream")
+async def stream_bots() -> StreamingResponse:
+    """Stream bot status updates across all bots via server-sent events."""
+
+    release, channel, initial = bot_service.bots_stream()
+
+    async def event_iterator():
+        try:
+            yield _format_sse(initial.get("type", "snapshot"), initial)
+            while True:
+                try:
+                    payload = await asyncio.to_thread(channel.get)
+                except asyncio.CancelledError:
+                    break
+                if not payload:
+                    continue
+                event_type = payload.get("type", "update")
+                yield _format_sse(event_type, payload)
+        finally:
+            release()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)

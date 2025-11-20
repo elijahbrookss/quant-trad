@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from queue import Queue
+from threading import Lock
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import instrument_service
@@ -14,6 +15,36 @@ from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
 
 _RUNTIME: Dict[str, BotRuntime] = {}
+_BOTS_STREAM_SUBSCRIBERS: Dict[str, Queue] = {}
+_BOTS_STREAM_LOCK = Lock()
+
+
+def _drain_queue(channel: Queue) -> None:
+    """Empty a Queue without blocking."""
+
+    try:
+        while True:
+            channel.get_nowait()
+    except Exception:
+        return
+
+
+def _broadcast_bot_stream(event: str, payload: Mapping[str, Any]) -> None:
+    """Fan out bot-level updates to SSE subscribers."""
+
+    message = dict(payload or {})
+    message.setdefault("type", event)
+    with _BOTS_STREAM_LOCK:
+        channels = list(_BOTS_STREAM_SUBSCRIBERS.values())
+    for channel in channels:
+        try:
+            channel.put_nowait(message)
+        except Exception:
+            _drain_queue(channel)
+            try:
+                channel.put_nowait(message)
+            except Exception:
+                continue
 
 
 def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
@@ -31,6 +62,11 @@ def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
         return
     mutable.update(updates)
     upsert_bot(mutable)
+    snapshot = dict(mutable)
+    runtime = _RUNTIME.get(bot_id)
+    if runtime:
+        snapshot["runtime"] = runtime.snapshot()
+    _broadcast_bot_stream("bot_status", {"bot": snapshot})
 
 
 def _now_iso() -> str:
@@ -228,6 +264,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
     }
     _validate_backtest_window(record)
     upsert_bot(record)
+    _broadcast_bot_stream("bot", {"bot": record})
     return record
 
 
@@ -271,6 +308,7 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     runtime = _RUNTIME.get(bot_id)
     if runtime:
         runtime.apply_config(record)
+    _broadcast_bot_stream("bot", {"bot": record})
     return record
 
 
@@ -281,6 +319,7 @@ def delete_bot_record(bot_id: str) -> None:
     if runtime:
         runtime.stop()
     delete_bot(bot_id)
+    _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
 
 
 def start_bot(bot_id: str) -> Dict[str, object]:
@@ -302,6 +341,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["status"] = "running"
     bot["last_run_at"] = _now_iso()
     upsert_bot(bot)
+    _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
@@ -317,6 +357,7 @@ def stop_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "stopped"
     upsert_bot(bot)
+    _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
@@ -333,6 +374,7 @@ def pause_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "paused"
     upsert_bot(bot)
+    _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
@@ -349,6 +391,7 @@ def resume_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "running"
     upsert_bot(bot)
+    _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
@@ -407,6 +450,24 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
     initial = runtime.chart_payload()
     initial.setdefault("meta", _performance_meta(bot))
     initial.setdefault("type", "snapshot")
+    return _release, channel, initial
+
+
+def bots_stream() -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
+    """Return a release callback, queue, and initial payload for all-bots SSE."""
+
+    channel: Queue = Queue(maxsize=256)
+    token = str(uuid.uuid4())
+    with _BOTS_STREAM_LOCK:
+        _BOTS_STREAM_SUBSCRIBERS[token] = channel
+
+    def _release() -> None:
+        with _BOTS_STREAM_LOCK:
+            existing = _BOTS_STREAM_SUBSCRIBERS.pop(token, None)
+        if existing:
+            _drain_queue(existing)
+
+    initial = {"type": "snapshot", "bots": list_bots()}
     return _release, channel, initial
 
 
