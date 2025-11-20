@@ -387,6 +387,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       const tradeSegments = []
       const polylines = []
       const bubbles = []
+      const priceLines = []
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
       const normaliseSegment = (segment = {}) => {
         const x1 = toSec(coalesce(segment.x1, segment.start, segment.start_date, segment.startDate, segment.time))
@@ -406,22 +407,12 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           payload.price_lines.forEach((pl) => {
             const price = toFiniteNumber(pl?.price)
             if (!Number.isFinite(price)) return
-            try {
-              const handle = seriesRef.current.createPriceLine({
-                price,
-                color: pl.color ?? color ?? '#a5b4fc',
-                lineWidth:
-                  pl.title?.toLowerCase?.().includes('sl') || pl.title?.toLowerCase?.().includes('stop')
-                    ? 2.5
-                    : pl.lineWidth ?? 1,
-                lineStyle: pl.lineStyle ?? 0,
-                axisLabelVisible: pl.axisLabelVisible ?? false,
-                title: pl.title || type || '',
-              })
-              overlayHandlesRef.current.priceLines.push(handle)
-            } catch {
-              /* ignore */
-            }
+            priceLines.push({
+              ...pl,
+              price,
+              color: pl.color ?? color,
+              source: type || pl.title || 'overlay',
+            })
           })
         }
         if (Array.isArray(norm.markers)) {
@@ -555,11 +546,82 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }
       }
 
+      const groupedPriceLines = (() => {
+        const normalised = []
+        const seen = new Map()
+        const toRole = (title = '') => {
+          const value = typeof title === 'string' ? title.toLowerCase() : ''
+          if (value.includes('sl') || value.includes('stop')) return 'sl'
+          if (value.includes('tp') || value.includes('target')) return 'tp'
+          return 'level'
+        }
+        const toPrecision = (pl) => {
+          const precise = Number(pl?.precision)
+          if (Number.isFinite(precise)) return precise
+          return 2
+        }
+        for (const line of priceLines) {
+          const role = toRole(line?.title)
+          const price = line.price
+          const key = `${role}-${price}`
+          const existing = seen.get(key)
+          if (existing) {
+            existing.count += 1
+            existing.labels.push(line?.title)
+          } else {
+            seen.set(key, {
+              price,
+              role,
+              count: 1,
+              labels: [line?.title].filter(Boolean),
+              precision: toPrecision(line),
+              color: line?.color,
+            })
+          }
+        }
+        seen.forEach((value) => normalised.push(value))
+        return normalised
+      })()
+
+      const applyPriceLines = () => {
+        if (!seriesRef.current) return
+        groupedPriceLines.forEach((line) => {
+          const isStop = line.role === 'sl'
+          const isTarget = line.role === 'tp'
+          const baseColor = line.color || (isStop ? '#ef4444' : isTarget ? '#22c55e' : '#94a3b8')
+          const lineColor = toRgba(baseColor, 0.45) || 'rgba(148,163,184,0.35)'
+          const labelBg = toRgba(baseColor, 0.2) || 'rgba(148,163,184,0.2)'
+          const precision = Number.isFinite(line.precision) ? line.precision : 2
+          const priceLabel = Number(line.price).toFixed(precision)
+          const labelSource = line.labels[0] || (isTarget ? 'TP' : isStop ? 'SL' : 'Level')
+          const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
+          const title = `${labelSource}${labelCount ? labelCount : ''} @ ${priceLabel}`
+          try {
+            const handle = seriesRef.current.createPriceLine({
+              price: line.price,
+              color: lineColor,
+              lineWidth: isStop ? 1.5 : 1,
+              lineStyle: isTarget ? 2 : 0,
+              axisLabelVisible: true,
+              axisLabelColor: labelBg,
+              axisLabelTextColor: '#f8fafc',
+              title,
+            })
+            overlayHandlesRef.current.priceLines.push(handle)
+          } catch {
+            /* ignore */
+          }
+        })
+      }
+
       applyMarkers(baseMarkers, true)
       if (hasAnyEntry) {
         overlayDelayRef.current = setTimeout(() => {
           applyMarkers([...baseMarkers, ...overlayMarkers], true)
+          applyPriceLines()
         }, 180)
+      } else {
+        applyPriceLines()
       }
 
       paneMgrRef.current.setTouchPoints(touchPoints)
