@@ -5,46 +5,27 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from queue import Queue
-from threading import Lock
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+
+import logging
 
 from . import instrument_service
 from .atm import DEFAULT_ATM_TEMPLATE, merge_templates, template_metrics
 from .bot_runtime import BotRuntime, DEFAULT_RISK
+from .bot_stream import BotStreamManager
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 
 
+logger = logging.getLogger(__name__)
+
 _RUNTIME: Dict[str, BotRuntime] = {}
-_BOTS_STREAM_SUBSCRIBERS: Dict[str, Queue] = {}
-_BOTS_STREAM_LOCK = Lock()
-
-
-def _drain_queue(channel: Queue) -> None:
-    """Empty a Queue without blocking."""
-
-    try:
-        while True:
-            channel.get_nowait()
-    except Exception:
-        return
+_BOT_STREAM_MANAGER = BotStreamManager()
 
 
 def _broadcast_bot_stream(event: str, payload: Mapping[str, Any]) -> None:
     """Fan out bot-level updates to SSE subscribers."""
 
-    message = dict(payload or {})
-    message.setdefault("type", event)
-    with _BOTS_STREAM_LOCK:
-        channels = list(_BOTS_STREAM_SUBSCRIBERS.values())
-    for channel in channels:
-        try:
-            channel.put_nowait(message)
-        except Exception:
-            _drain_queue(channel)
-            try:
-                channel.put_nowait(message)
-            except Exception:
-                continue
+    _BOT_STREAM_MANAGER.broadcast(event, payload)
 
 
 def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
@@ -270,6 +251,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
     }
     _validate_backtest_window(record)
     upsert_bot(record)
+    logger.info("[BotService] bot created", extra={"bot_id": bot_id, "run_type": run_type})
     _broadcast_bot_stream("bot", {"bot": record})
     return record
 
@@ -314,6 +296,7 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     runtime = _RUNTIME.get(bot_id)
     if runtime:
         runtime.apply_config(record)
+    logger.info("[BotService] bot updated", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": record})
     return record
 
@@ -325,6 +308,7 @@ def delete_bot_record(bot_id: str) -> None:
     if runtime:
         runtime.stop()
     delete_bot(bot_id)
+    logger.info("[BotService] bot deleted", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
 
 
@@ -348,6 +332,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["last_run_at"] = _now_iso()
     bot["runtime"] = runtime.snapshot()
     upsert_bot(bot)
+    logger.info("[BotService] bot started", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
@@ -364,6 +349,7 @@ def stop_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "stopped"
     upsert_bot(bot)
+    logger.info("[BotService] bot stopped", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
@@ -381,6 +367,7 @@ def pause_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "paused"
     upsert_bot(bot)
+    logger.info("[BotService] bot paused", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
@@ -398,6 +385,7 @@ def resume_bot(bot_id: str) -> Dict[str, object]:
     bot = bots[bot_id]
     bot["status"] = "running"
     upsert_bot(bot)
+    logger.info("[BotService] bot resumed", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
@@ -463,19 +451,7 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
 def bots_stream() -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
     """Return a release callback, queue, and initial payload for all-bots SSE."""
 
-    channel: Queue = Queue(maxsize=256)
-    token = str(uuid.uuid4())
-    with _BOTS_STREAM_LOCK:
-        _BOTS_STREAM_SUBSCRIBERS[token] = channel
-
-    def _release() -> None:
-        with _BOTS_STREAM_LOCK:
-            existing = _BOTS_STREAM_SUBSCRIBERS.pop(token, None)
-        if existing:
-            _drain_queue(existing)
-
-    initial = {"type": "snapshot", "bots": list_bots()}
-    return _release, channel, initial
+    return _BOT_STREAM_MANAGER.subscribe_all(list_bots)
 
 
 def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
