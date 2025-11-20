@@ -118,15 +118,15 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
-  const streamEligible = ['running', 'starting', 'paused'].includes(runtimeStatus)
+  const streamEligible = ['running', 'starting', 'paused', 'booting', 'initialising'].includes(runtimeStatus)
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
-  const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
+  const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
+  const isBooting = (isBootingStatus || loading || streamStatus === 'connecting')
+  const showInactiveState = !isBooting && (Boolean(payload?.inactive) || (!streamEligible && !chartHasData))
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
   const runtimeInitialising = runtimeStatus === 'initialising'
-  const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
-  const isBooting = (isBootingStatus || loading) && !showInactiveState
   const bootStage = useMemo(() => {
     if (runtimeInitialising || isBootingStatus) return 'runtime'
     if (streamStatus === 'connecting') return 'datasource'
