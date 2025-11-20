@@ -1,121 +1,150 @@
-import { PlusCircle } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
+import { Bot, CheckSquare, PlusCircle, Search, X } from 'lucide-react'
 import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from '../atm/ATMConfigForm.jsx'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
+import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
+
+function StrategySelector({ strategies, selectedIds, onToggle, loading, error }) {
+  const [query, setQuery] = useState('')
+
+  const filteredStrategies = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return strategies
+    return strategies.filter((strategy) => {
+      const haystack = [strategy.name, strategy.timeframe, strategy.exchange, strategy.datasource]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(needle)
+    })
+  }, [query, strategies])
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-400">
+          <CheckSquare className="size-4" /> Strategies
+        </div>
+        {loading ? <span className="text-[11px] text-slate-500">Loading…</span> : null}
+      </div>
+      <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200">
+        <Search className="size-4 text-slate-500" />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search strategies by name, timeframe, or venue"
+          className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+        />
+      </label>
+      {error ? <p className="text-xs text-rose-300">{error}</p> : null}
+      <div className="max-h-72 space-y-2 overflow-y-auto rounded-xl border border-white/10 bg-black/30 p-2">
+        {strategies.length === 0 ? (
+          <p className="px-2 py-1 text-xs text-slate-400">Create a strategy to start a bot.</p>
+        ) : filteredStrategies.length === 0 ? (
+          <p className="px-2 py-1 text-xs text-slate-400">No strategies match your search.</p>
+        ) : (
+          filteredStrategies.map((strategy) => {
+            const checked = selectedIds.includes(strategy.id)
+            return (
+              <label
+                key={strategy.id}
+                className="flex cursor-pointer items-start gap-3 rounded-lg px-2 py-2 transition hover:bg-white/5"
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 rounded border border-white/30 bg-transparent"
+                  checked={checked}
+                  onChange={() => onToggle(strategy.id)}
+                />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm font-semibold text-white">{strategy.name}</span>
+                  <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                    {strategy.timeframe} • {strategy.exchange || strategy.datasource || '—'}
+                  </span>
+                </div>
+              </label>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
+function RunTypeField({ value, onChange }) {
+  const options = [
+    { value: 'backtest', label: 'Backtest', description: 'Replay historical data in Bot Lens' },
+    { value: 'sim', label: 'Sim', description: 'Paper trading (coming soon)', disabled: true },
+    { value: 'live', label: 'Live', description: 'Exchange-connected (coming soon)', disabled: true },
+  ]
+
+  return (
+    <DropdownSelect
+      label="Run type"
+      value={value}
+      onChange={onChange}
+      options={options}
+      placeholder="Select run type"
+    />
+  )
+}
 
 export function BotCreateForm({
   form,
   strategies,
   strategiesLoading,
   strategyError,
-  hasStrategies,
   onSubmit,
   onChange,
   onBacktestRangeChange,
   onStrategyToggle,
   onATMTemplateChange,
   onToggleCustomATM,
+  submitDisabled,
+  error,
 }) {
   return (
-    <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950/80 via-slate-900/40 to-slate-900/20 p-6 md:grid-cols-2 lg:grid-cols-3">
-      <div className="space-y-3">
-        <div>
-          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
-          <input
-            type="text"
-            name="name"
-            value={form.name}
-            onChange={onChange}
-            className="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
-            placeholder="My walk-forward bot"
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Timeframe</label>
+    <form onSubmit={onSubmit} className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+          <div className="space-y-2">
+            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
             <input
               type="text"
-              name="timeframe"
-              value={form.timeframe}
+              name="name"
+              value={form.name}
               onChange={onChange}
-              className="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
+              className="w-full rounded-xl border border-white/10 bg-[#0f1524] px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              placeholder="My walk-forward bot"
             />
           </div>
-          <div>
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Run type</label>
-            <div className="mt-1 flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white">
-              <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] uppercase tracking-[0.3em]">Walk-forward</span>
-              <span className="text-xs text-slate-400">Instant playback available in Bot Lens</span>
-            </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <RunTypeField value={form.run_type} onChange={(value) => onChange({ target: { name: 'run_type', value } })} />
+            {form.run_type === 'backtest' ? (
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Backtest range</span>
+                <DateRangePickerComponent
+                  className="rounded-xl border border-white/10 bg-[#0f1524]"
+                  startValue={form.backtest_start}
+                  endValue={form.backtest_end}
+                  onChange={onBacktestRangeChange}
+                />
+                <p className="text-[11px] text-slate-500">Provide start/end dates to walk through history.</p>
+              </div>
+            ) : null}
           </div>
-        </div>
-        <div>
-          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Playback speed (Bot Lens)</label>
-          <input
-            type="number"
-            step="0.1"
-            min="0"
-            name="playback_speed"
-            value={form.playback_speed}
-            onChange={onChange}
-            className="mt-1 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
+          <StrategySelector
+            strategies={strategies}
+            selectedIds={form.strategy_ids}
+            onToggle={onStrategyToggle}
+            loading={strategiesLoading}
+            error={strategyError}
           />
-          <p className="mt-1 text-[11px] text-slate-500">Use 0 for instant playback inside Bot Lens.</p>
         </div>
-        <div>
-          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Backtest range</label>
-          <DateRangePickerComponent
-            className="mt-1"
-            startValue={form.backtest_start}
-            endValue={form.backtest_end}
-            onChange={onBacktestRangeChange}
-          />
-          <p className="mt-1 text-[11px] text-slate-500">Walk-forward requires both a start and end date.</p>
-        </div>
-      </div>
 
-      <div className="space-y-3 lg:col-span-1">
-        <div>
-          <div className="flex items-center justify-between">
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Strategies</label>
-            {strategiesLoading ? <span className="text-[11px] text-slate-500">Loading…</span> : null}
-          </div>
-          {strategyError ? (
-            <p className="mt-1 text-xs text-rose-300">{strategyError}</p>
-          ) : hasStrategies ? (
-            <div className="mt-2 space-y-2 rounded-xl border border-white/10 bg-black/30 p-2">
-              {strategies.map((strategy) => (
-                <label key={strategy.id} className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 hover:bg-white/5">
-                  <input
-                    type="checkbox"
-                    className="size-4 rounded border border-white/30 bg-transparent"
-                    checked={form.strategy_ids.includes(strategy.id)}
-                    onChange={() => onStrategyToggle(strategy.id)}
-                  />
-                  <div className="flex flex-col">
-                    <span className="text-sm font-medium text-white">{strategy.name}</span>
-                    <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                      {strategy.timeframe} • {strategy.exchange || strategy.datasource || '—'}
-                    </span>
-                  </div>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-slate-400">Create a strategy in the Strategies tab to unlock bot creation.</p>
-          )}
-        </div>
-      </div>
-
-      <div className="space-y-3 lg:col-span-1">
-        <button
-          type="submit"
-          className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[color:var(--accent-alpha-40)] px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
-          disabled={!hasStrategies || !form.name || !form.strategy_ids.length || (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end))}
-        >
-          <PlusCircle className="size-4" /> Create bot
-        </button>
-
-        <div className="rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
+        <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">ATM override</p>
@@ -124,31 +153,111 @@ export function BotCreateForm({
             <button
               type="button"
               onClick={onToggleCustomATM}
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${form.use_custom_atm ? 'border-emerald-400/40 text-emerald-200' : 'border-white/20 text-slate-300'}`}
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${
+                form.use_custom_atm ? 'border-emerald-400/40 text-emerald-200' : 'border-white/20 text-slate-300'
+              }`}
             >
               {form.use_custom_atm ? 'Disable override' : 'Use override'}
             </button>
           </div>
           {form.use_custom_atm ? (
-            <div className="mt-3">
+            <div className="rounded-xl border border-white/10 bg-[#0f1524] p-3">
               <ATMConfigForm value={form.atm_template} onChange={onATMTemplateChange} />
             </div>
           ) : (
-            <p className="mt-3 text-xs text-slate-400">Bots will reuse each strategy's ATM template unless you enable an override.</p>
+            <p className="text-xs text-slate-400">Bots reuse each strategy's ATM template unless you enable an override.</p>
           )}
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-alpha-50)] disabled:opacity-40"
+              disabled={submitDisabled}
+            >
+              <PlusCircle className="size-4" /> Create bot
+            </button>
+          </div>
+          {error ? <p className="text-sm text-rose-300">{error}</p> : null}
         </div>
       </div>
     </form>
   )
 }
 
+export function BotCreateModal({
+  open,
+  onClose,
+  form,
+  strategies,
+  strategiesLoading,
+  strategyError,
+  onSubmit,
+  onChange,
+  onBacktestRangeChange,
+  onStrategyToggle,
+  onATMTemplateChange,
+  onToggleCustomATM,
+  error,
+}) {
+  const submitDisabled =
+    !strategies.length ||
+    !form.name ||
+    !form.strategy_ids.length ||
+    (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end))
+
+  return (
+    <Dialog open={open} onClose={onClose} className="relative z-50">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-5xl rounded-3xl border border-white/10 bg-[#0b1020] p-6 shadow-2xl shadow-black/50">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <DialogTitle className="flex items-center gap-2 text-lg font-semibold text-white">
+                <Bot className="size-5 text-[color:var(--accent-text-strong)]" /> Create bot
+              </DialogTitle>
+              <p className="text-sm text-slate-400">Attach strategies, pick a run type, and optionally override ATM.</p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full p-2 text-slate-400 hover:bg-white/5 hover:text-white"
+              aria-label="Close create bot"
+            >
+              <X className="size-5" />
+            </button>
+          </div>
+          <div className="mt-4 rounded-2xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-300">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="rounded-full bg-white/10 px-2 py-1 text-[10px] uppercase tracking-[0.3em] text-white">Guided modal</span>
+              <span>Timeframe and playback speed are inherited from the attached strategies and Bot Lens settings.</span>
+            </div>
+          </div>
+          <div className="mt-6">
+            <BotCreateForm
+              form={form}
+              strategies={strategies}
+              strategiesLoading={strategiesLoading}
+              strategyError={strategyError}
+              onSubmit={onSubmit}
+              onChange={onChange}
+              onBacktestRangeChange={onBacktestRangeChange}
+              onStrategyToggle={onStrategyToggle}
+              onATMTemplateChange={onATMTemplateChange}
+              onToggleCustomATM={onToggleCustomATM}
+              submitDisabled={submitDisabled}
+              error={error}
+            />
+          </div>
+        </DialogPanel>
+      </div>
+    </Dialog>
+  )
+}
+
 export function buildDefaultForm() {
   return {
     name: '',
-    timeframe: '15m',
     mode: 'walk-forward',
     run_type: 'backtest',
-    playback_speed: 10,
     backtest_start: '',
     backtest_end: '',
     strategy_ids: [],

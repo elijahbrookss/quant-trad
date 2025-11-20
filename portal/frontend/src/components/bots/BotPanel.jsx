@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { RefreshCw, Search } from 'lucide-react'
+import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
   createBot,
@@ -11,7 +11,7 @@ import {
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
-import { BotCreateForm, buildDefaultForm } from './BotCreateForm.jsx'
+import { BotCreateModal, buildDefaultForm } from './BotCreateForm.jsx'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 import { cloneATMTemplate, DEFAULT_ATM_TEMPLATE } from '../atm/ATMConfigForm.jsx'
@@ -22,6 +22,8 @@ export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
   const [form, setForm] = useState(buildDefaultForm())
+  const [createOpen, setCreateOpen] = useState(false)
+  const [createError, setCreateError] = useState(null)
   const [lensBot, setLensBot] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
@@ -185,6 +187,11 @@ export function BotPanel() {
     })
   }
 
+  const closeCreateModal = useCallback(() => {
+    setCreateOpen(false)
+    setCreateError(null)
+  }, [])
+
   const handleBacktestRangeChange = useCallback((range) => {
     const [start, end] = Array.isArray(range) ? range : []
     const normalize = (value) => {
@@ -219,13 +226,14 @@ export function BotPanel() {
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
+    setCreateError(null)
     if (!form.name) return
     if (!form.strategy_ids.length) {
-      setError('Select at least one strategy for this bot.')
+      setCreateError('Select at least one strategy for this bot.')
       return
     }
     if (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end)) {
-      setError('Provide both a start and end date for backtests.')
+      setCreateError('Provide both a start and end date for backtests.')
       return
     }
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
@@ -234,9 +242,6 @@ export function BotPanel() {
       const { use_custom_atm, atm_template, ...rest } = form
       const payloadBody = {
         ...rest,
-        playback_speed: Number.isFinite(Number(form.playback_speed))
-          ? Number(form.playback_speed)
-          : 0,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
       }
@@ -250,14 +255,14 @@ export function BotPanel() {
         ...buildDefaultForm(),
         strategy_ids: prev.strategy_ids,
         run_type: prev.run_type,
-        playback_speed: prev.playback_speed,
         atm_template: use_custom_atm
           ? cloneATMTemplate(atm_template)
           : cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
         use_custom_atm: use_custom_atm && Boolean(payloadBody.risk),
       }))
+      closeCreateModal()
     } catch (err) {
-      setError(err?.message || 'Unable to create bot')
+      setCreateError(err?.message || 'Unable to create bot')
     }
   }
 
@@ -415,8 +420,6 @@ export function BotPanel() {
     })
   }, [search, sortedBots, strategyLookup])
 
-  const hasStrategies = strategies.length > 0
-
   const describeBotMeta = useCallback(
     (botItem, field) => {
       if (!botItem) return ''
@@ -434,76 +437,56 @@ export function BotPanel() {
     [strategyLookup],
   )
 
-  const [defaultBacktestStart, defaultBacktestEnd] = useMemo(() => {
-    const now = new Date()
-    const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    return [start, now]
-  }, [])
-
-  const backtestRange = useMemo(() => {
-    const parse = (value) => {
-      if (!value) return null
-      const date = new Date(value)
-      return Number.isNaN(date.getTime()) ? null : date
-    }
-    const start = parse(form.backtest_start)
-    const end = parse(form.backtest_end)
-    return start && end ? [start, end] : null
-  }, [form.backtest_start, form.backtest_end])
-
-  const refreshSummary = `${filteredBots.length} of ${sortedBots.length} bots`
-
-    return (
-      <section className="space-y-6">
-        <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
-              <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
-              <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
-            </div>
+  return (
+    <section className="space-y-6">
+      <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
+            <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
+            <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
+          </div>
+          <div className="flex items-center gap-3">
             <div className="text-xs text-slate-400">
               {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                console.info('[BotPanel] open create bot modal')
+                setCreateError(null)
+                setCreateOpen(true)
+              }}
+              className="inline-flex items-center gap-2 rounded-full bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-alpha-50)]"
+            >
+              <PlusCircle className="size-4" /> Create bot
+            </button>
           </div>
-          <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-1 flex-wrap items-center gap-3">
-              <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
-                <Search className="size-4 text-slate-500" />
-                <input
-                  type="search"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search bots by name, status, or strategy"
-                  className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => loadBots()}
-                className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
-                disabled={loading}
-              >
-                <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
-              </button>
-            </div>
-            <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{`${filteredBots.length} of ${sortedBots.length} bots`}</span>
+        </div>
+        <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 flex-wrap items-center gap-3">
+            <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
+              <Search className="size-4 text-slate-500" />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search bots by name, status, or strategy"
+                className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => loadBots()}
+              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
+              disabled={loading}
+            >
+              <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
           </div>
-
-          <BotCreateForm
-            form={form}
-            strategies={sortedStrategies}
-            strategiesLoading={strategiesLoading}
-            strategyError={strategyError}
-            hasStrategies={hasStrategies}
-            onSubmit={handleCreate}
-            onChange={handleChange}
-            onBacktestRangeChange={handleBacktestRangeChange}
-            onStrategyToggle={handleStrategyToggle}
-            onATMTemplateChange={handleATMTemplateChange}
-            onToggleCustomATM={toggleCustomATM}
-          />
-        </header>
+          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{`${filteredBots.length} of ${sortedBots.length} bots`}</span>
+        </div>
+      </header>
 
         {error ? (
           <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
@@ -539,6 +522,21 @@ export function BotPanel() {
         </div>
 
         <BotPerformanceModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} onRefresh={loadBots} />
+        <BotCreateModal
+          open={createOpen}
+          onClose={closeCreateModal}
+          form={form}
+          strategies={sortedStrategies}
+          strategiesLoading={strategiesLoading}
+          strategyError={strategyError}
+          onSubmit={handleCreate}
+          onChange={handleChange}
+          onBacktestRangeChange={handleBacktestRangeChange}
+          onStrategyToggle={handleStrategyToggle}
+          onATMTemplateChange={handleATMTemplateChange}
+          onToggleCustomATM={toggleCustomATM}
+          error={createError}
+        />
       </section>
     )
   }
