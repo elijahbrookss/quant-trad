@@ -198,7 +198,7 @@ function ActionButton({ onClick, icon, label, busy, variant = 'ghost' }) {
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold transition ${variantClass} disabled:cursor-not-allowed disabled:opacity-60`}
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold transition ${variantClass} disabled:cursor-not-allowed disabled:opacity-60`}
       disabled={busy}
     >
       {icon}

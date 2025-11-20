@@ -445,7 +445,7 @@ export function BotPanel() {
                 setCreateError(null)
                 setCreateOpen(true)
               }}
-              className="inline-flex items-center gap-2 rounded-full bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-alpha-50)]"
+              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
             >
               <PlusCircle className="size-4" /> Create bot
             </button>
