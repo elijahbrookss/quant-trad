@@ -82,6 +82,17 @@ export function BotPanel() {
     })
   }, [])
 
+  const applyRuntime = useCallback((botId, runtime) => {
+    if (!botId || !runtime) return
+    setBots((prev) =>
+      prev.map((bot) =>
+        bot.id === botId
+          ? { ...bot, runtime: { ...(bot.runtime || {}), ...runtime } }
+          : bot,
+      ),
+    )
+  }, [])
+
   const loadBots = useCallback(
     async (withSpinner = true) => {
       if (withSpinner) setLoading(true)
@@ -135,12 +146,37 @@ export function BotPanel() {
           const data = JSON.parse(event.data)
           if (Array.isArray(data)) {
             setBots(data)
+          } else if (Array.isArray(data?.bots)) {
+            setBots(data.bots)
+          } else if (data?.bot) {
+            upsertBot(data.bot)
+            if (data.bot?.id && data.bot?.runtime) {
+              applyRuntime(data.bot.id, data.bot.runtime)
+            }
           } else if (data?.id) {
             upsertBot(data)
+            if (data?.id && data?.runtime) {
+              applyRuntime(data.id, data.runtime)
+            }
+          } else if (data?.bot_id && data?.runtime) {
+            applyRuntime(data.bot_id, data.runtime)
           }
           setBotStreamState('open')
         } catch (err) {
           console.warn('bot stream payload parse failed', err)
+        }
+      }
+      const handleRuntime = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          const botId = data?.bot_id || data?.bot?.id
+          const runtime = data?.runtime || data?.bot?.runtime
+          if (botId && runtime) {
+            applyRuntime(botId, runtime)
+            setBotStreamState('open')
+          }
+        } catch (err) {
+          console.warn('bot runtime payload parse failed', err)
         }
       }
       const handleError = () => {
@@ -150,6 +186,7 @@ export function BotPanel() {
       source.onmessage = handlePayload
       source.addEventListener('snapshot', handlePayload)
       source.addEventListener('update', handlePayload)
+      source.addEventListener('bot_runtime', handleRuntime)
       source.onerror = handleError
       source.onopen = () => setBotStreamState('open')
     }
@@ -161,7 +198,7 @@ export function BotPanel() {
         botStreamRef.current = null
       }
     }
-  }, [upsertBot])
+  }, [applyRuntime, upsertBot])
 
   useEffect(() => {
     if (botStreamState === 'open') return undefined
@@ -674,7 +711,6 @@ export function BotPanel() {
               datasourceLabel ? `DS ${datasourceLabel}` : null,
               exchangeLabel ? `EX ${exchangeLabel}` : null,
               `speed ${playbackLabelFor(bot)}`,
-              (bot.run_type || 'backtest').replace('_', ' '),
             ].filter(Boolean)
             const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
             const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
@@ -683,27 +719,47 @@ export function BotPanel() {
             const statsEntries = keyStats
               .map((key) => ({ key, value: bot.last_stats?.[key] ?? bot.runtime?.stats?.[key] }))
               .filter((entry) => entry.value !== undefined && entry.value !== null)
+            const runTypeLabel = (bot.run_type || 'backtest').replace('_', ' ')
+            const runTypePill = runTypeLabel.toUpperCase()
 
             return (
-              <article key={bot.id} className="flex flex-col gap-3 rounded-2xl border border-white/5 bg-black/30 p-4 shadow-sm">
-                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                  <div>
+              <article
+                key={bot.id}
+                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 via-black/30 to-black/50 p-5 shadow-lg shadow-black/30"
+              >
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.32em] text-slate-300">
+                      <span className="inline-flex items-center gap-2 rounded-full border border-white/30 bg-white/10 px-3 py-1 text-[10px] font-semibold text-white">
+                        {runTypePill}
+                      </span>
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">{bot.mode}</span>
+                      {timeframeLabel ? (
+                        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">TF {timeframeLabel}</span>
+                      ) : null}
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">{playbackLabelFor(bot)}</span>
+                    </div>
                     <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
                       {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
                     </p>
                     <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
-                    <p className="text-xs text-slate-400">{summaryParts.join(' • ')}</p>
-                    <p className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{describeRange(bot)}</p>
+                    <p className="text-xs text-slate-300">{summaryParts.join(' • ')}</p>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">{describeRange(bot)}</p>
                   </div>
                   {statusBadge(runtimeStatus)}
                 </div>
-                <div className="flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.25em] text-slate-500">
-                  <span>
-                    Progress: <span className="text-slate-200">{progressPct}</span>
-                  </span>
-                </div>
-                <div className="h-2 w-full rounded-full bg-white/5">
-                  <div className="h-full rounded-full bg-emerald-500/60 transition-all" style={{ width: progressWidth }} />
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/5 bg-black/40 px-3 py-2 text-[11px] uppercase tracking-[0.25em] text-slate-400">
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <span className="text-slate-300">Progress</span>
+                    <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-200">
+                      {progressPct}
+                    </span>
+                    {datasourceLabel ? <span className="text-slate-400">DS {datasourceLabel}</span> : null}
+                    {exchangeLabel ? <span className="text-slate-400">EX {exchangeLabel}</span> : null}
+                  </div>
+                  <div className="h-1.5 w-40 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-emerald-400/80 transition-all" style={{ width: progressWidth }} />
+                  </div>
                 </div>
                 {statsEntries.length ? (
                   <div className="flex flex-wrap gap-3 text-xs text-slate-300">

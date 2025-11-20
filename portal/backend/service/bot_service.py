@@ -52,6 +52,12 @@ def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
 
     if not patch:
         return
+    runtime_payload = patch.get("runtime")
+    if runtime_payload:
+        _broadcast_bot_stream(
+            "bot_runtime",
+            {"bot_id": bot_id, "runtime": dict(runtime_payload)},
+        )
     bots = {bot["id"]: bot for bot in load_bots()}
     record = bots.get(bot_id)
     if not record:
@@ -340,6 +346,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     runtime.start()
     bot["status"] = "running"
     bot["last_run_at"] = _now_iso()
+    bot["runtime"] = runtime.snapshot()
     upsert_bot(bot)
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot

@@ -1783,6 +1783,11 @@ class BotRuntime:
         }
         with self._lock:
             self.state.update(snapshot)
+        if self._state_callback:
+            try:
+                self._state_callback({"runtime": self.snapshot()})
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("bot_runtime_stream_callback_failed", exc_info=exc)
 
     def _seconds_until_next_bar(self) -> Optional[float]:
         if not self._next_bar_at:
