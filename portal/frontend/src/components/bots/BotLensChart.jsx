@@ -155,7 +155,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const tradeSegmentsRef = useRef([])
   const diagLoggedRef = useRef(false)
   const markerCacheRef = useRef([])
-  const overlayDelayRef = useRef(null)
+  const prevPriceLinesRef = useRef([])
   const focusTimeoutRef = useRef(null)
   const pulseTimeoutRef = useRef(null)
   const markerDetailsRef = useRef([])
@@ -380,22 +380,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const syncOverlays = useCallback(
     (overlayPayloads = [], tradeMarkerPayload = [], markerDetails = []) => {
       if (!seriesRef.current || !paneMgrRef.current) return
-      if (overlayDelayRef.current) {
-        clearTimeout(overlayDelayRef.current)
-        overlayDelayRef.current = null
-      }
-      overlayHandlesRef.current.priceLines.forEach((handle) => {
-        try {
-          seriesRef.current.removePriceLine(handle)
-        } catch {
-          /* noop */
-        }
-      })
-      overlayHandlesRef.current.priceLines = []
       if (!markersApiRef.current) {
         markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
-      } else {
-        markersApiRef.current.setMarkers([])
       }
       paneMgrRef.current.clearFrame()
 
@@ -438,7 +424,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         return { ...segment, x1, x2, y1, y2 }
       }
 
-      for (const overlay of hasAnyEntry ? overlayPayloads : []) {
+      for (const overlay of overlayPayloads || []) {
         const { type, payload, color } = overlay || {}
         if (!payload) continue
         const paneViews = getPaneViewsFor(type)
@@ -626,44 +612,71 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
       const applyPriceLines = () => {
         if (!seriesRef.current) return
-        groupedPriceLines.forEach((line) => {
-          const isStop = line.role === 'sl'
-          const isTarget = line.role === 'tp'
-          const baseColor = line.color || (isStop ? '#ef4444' : isTarget ? '#22c55e' : '#94a3b8')
-          const lineColor = toRgba(baseColor, 0.45) || 'rgba(148,163,184,0.35)'
-          const labelBg = toRgba(baseColor, 0.2) || 'rgba(148,163,184,0.2)'
-          const precision = Number.isFinite(line.precision) ? line.precision : 2
-          const priceLabel = Number(line.price).toFixed(precision)
-          const labelSource = line.labels[0] || (isTarget ? 'TP' : isStop ? 'SL' : 'Level')
-          const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
-          const title = `${labelSource}${labelCount ? labelCount : ''} @ ${priceLabel}`
-          try {
-            const handle = seriesRef.current.createPriceLine({
-              price: line.price,
-              color: lineColor,
-              lineWidth: isStop ? 1.5 : 1,
-              lineStyle: isTarget ? 2 : 0,
-              axisLabelVisible: true,
-              axisLabelColor: labelBg,
-              axisLabelTextColor: '#f8fafc',
-              title,
-            })
-            overlayHandlesRef.current.priceLines.push(handle)
-          } catch {
-            /* ignore */
-          }
-        })
+        const signature = groupedPriceLines.map((line) => ({
+          price: line.price,
+          role: line.role,
+          count: line.count,
+          labels: line.labels.join('|'),
+          precision: line.precision,
+          color: line.color,
+        }))
+        const prevSignature = prevPriceLinesRef.current
+        const unchanged =
+          prevSignature.length === signature.length &&
+          signature.every((entry, idx) => {
+            const prev = prevSignature[idx]
+            return (
+              prev &&
+              prev.price === entry.price &&
+              prev.role === entry.role &&
+              prev.count === entry.count &&
+              prev.labels === entry.labels &&
+              prev.precision === entry.precision &&
+              prev.color === entry.color
+            )
+          })
+        if (!unchanged) {
+          overlayHandlesRef.current.priceLines.forEach((handle) => {
+            try {
+              seriesRef.current.removePriceLine(handle)
+            } catch {
+              /* noop */
+            }
+          })
+          overlayHandlesRef.current.priceLines = []
+          groupedPriceLines.forEach((line) => {
+            const isStop = line.role === 'sl'
+            const isTarget = line.role === 'tp'
+            const baseColor = line.color || (isStop ? '#ef4444' : isTarget ? '#22c55e' : '#94a3b8')
+            const lineColor = toRgba(baseColor, 0.45) || 'rgba(148,163,184,0.35)'
+            const labelBg = toRgba(baseColor, 0.2) || 'rgba(148,163,184,0.2)'
+            const precision = Number.isFinite(line.precision) ? line.precision : 2
+            const priceLabel = Number(line.price).toFixed(precision)
+            const labelSource = line.labels[0] || (isTarget ? 'TP' : isStop ? 'SL' : 'Level')
+            const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
+            const title = `${labelSource}${labelCount ? labelCount : ''} @ ${priceLabel}`
+            try {
+              const handle = seriesRef.current.createPriceLine({
+                price: line.price,
+                color: lineColor,
+                lineWidth: isStop ? 1.5 : 1,
+                lineStyle: isTarget ? 2 : 0,
+                axisLabelVisible: true,
+                axisLabelColor: labelBg,
+                axisLabelTextColor: '#f8fafc',
+                title,
+              })
+              overlayHandlesRef.current.priceLines.push(handle)
+            } catch {
+              /* ignore */
+            }
+          })
+          prevPriceLinesRef.current = signature
+        }
       }
 
-      applyMarkers(baseMarkers, true)
-      if (hasAnyEntry) {
-        overlayDelayRef.current = setTimeout(() => {
-          applyMarkers([...baseMarkers, ...overlayMarkers], true)
-          applyPriceLines()
-        }, 180)
-      } else {
-        applyPriceLines()
-      }
+      applyMarkers([...baseMarkers, ...overlayMarkers], true)
+      applyPriceLines()
 
       paneMgrRef.current.setTouchPoints(touchPoints)
       paneMgrRef.current.setVABlocks(boxes, {
@@ -849,10 +862,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     return () => {
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
-      if (overlayDelayRef.current) {
-        clearTimeout(overlayDelayRef.current)
-        overlayDelayRef.current = null
-      }
       if (focusTimeoutRef.current) {
         clearTimeout(focusTimeoutRef.current)
         focusTimeoutRef.current = null
@@ -895,20 +904,13 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     const next = candleData
     const prevLast = previous[previous.length - 1]
     const nextLast = next[next.length - 1]
-    const sameLength = previous.length === next.length && next.length > 0
-    if (
-      sameLength &&
-      prevLast &&
-      nextLast &&
-      Number.isFinite(prevLast.time) &&
-      Number.isFinite(nextLast.time) &&
-      prevLast.time === nextLast.time &&
-      activeTradeAtLastCandle &&
-      !instantPlayback
-    ) {
+    const prevMatch = nextLast
+      ? previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLast.time)
+      : null
+    if (prevMatch && nextLast && activeTradeAtLastCandle && !instantPlayback) {
       const base = next.slice(0, -1)
       seriesRef.current.setData(base)
-      animateCandle(prevLast, nextLast)
+      animateCandle(prevMatch, nextLast)
     } else {
       seriesRef.current.setData(next)
     }
