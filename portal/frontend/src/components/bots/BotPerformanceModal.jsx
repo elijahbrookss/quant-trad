@@ -12,6 +12,19 @@ import {
 } from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
+const BOOTLINE_POOL = {
+  runtime: ['Spinning up bot runtime…', 'Teaching the bot patience…'],
+  strategy: ['Warming up indicators…', 'Wiring strategy overlays…'],
+  datasource: ['Syncing datasource with exchange…', 'Counting R multiples…'],
+  generic: [
+    'Teaching the bot patience…',
+    'Counting R multiples…',
+    'Syncing datasource with exchange…',
+    'Warming up indicators…',
+    'Wiring strategy overlays…',
+  ],
+}
+
 const logCandleDiagnostics = (label, candles, botId) => {
   if (!Array.isArray(candles) || candles.length === 0) {
     return
@@ -67,6 +80,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const chipHideTimeoutRef = useRef(null)
   const [chipVisible, setChipVisible] = useState(false)
   const [renderedChip, setRenderedChip] = useState(null)
+  const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
+  const [bootDots, setBootDots] = useState(1)
 
   const strategies = payload?.meta?.strategies || []
   const botMeta = payload?.meta?.bot || {}
@@ -107,9 +122,18 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
   const showInactiveState = Boolean(payload?.inactive) || (!streamEligible && !chartHasData)
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
-  const runtimeInitialising = runtimeStatus === 'initialising'
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
+  const runtimeInitialising = runtimeStatus === 'initialising'
+  const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
+  const isBooting = (isBootingStatus || loading) && !showInactiveState
+  const bootStage = useMemo(() => {
+    if (runtimeInitialising || isBootingStatus) return 'runtime'
+    if (streamStatus === 'connecting') return 'datasource'
+    if (!strategiesReady) return 'strategy'
+    if (!atmReady) return 'strategy'
+    return 'generic'
+  }, [runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
   const chartHandle = useChartValue(`bot-${bot?.id}`)
   const lastCandle = useMemo(() => {
     if (!Array.isArray(payload?.candles) || payload.candles.length === 0) return null
@@ -133,36 +157,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     })
     return `Sim Time: ${dateLabel} — ${timeLabel} UTC`
   }, [lastCandle?.time])
-  const bootstrapTimeline = useMemo(() => {
-    const stateFor = (done, active) => {
-      if (done) return 'done'
-      if (active) return 'active'
-      return 'pending'
-    }
-    return [
-      {
-        id: 'runtime',
-        label: 'Spinning up bot runtime',
-        state: stateFor(!runtimeInitialising, runtimeInitialising || loading),
-      },
-      {
-        id: 'strategy',
-        label: 'Loading strategy details',
-        state: stateFor(strategiesReady, !strategiesReady && !runtimeInitialising),
-      },
-      {
-        id: 'atm',
-        label: 'Loading ATM rules',
-        state: stateFor(atmReady, strategiesReady && !atmReady),
-      },
-    ]
-  }, [runtimeInitialising, loading, strategiesReady, atmReady])
-  const showBootstrapTimeline = bootstrapTimeline.some((step) => step.state !== 'done')
-  const bootstrapStyles = {
-    done: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-100',
-    active: 'border-sky-400/40 bg-sky-400/10 text-sky-100',
-    pending: 'border-white/10 text-slate-300',
-  }
   const activeTrade = useMemo(() => {
     const trades = Array.isArray(payload?.trades) ? payload.trades : []
     return (
@@ -313,6 +307,42 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return entries
   }, [payload?.stats, tradeMetrics])
   const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
+  const statusDisplay = isBooting ? 'booting' : runtimeStatus
+  const bootOverlayVisible = isBooting && !error && !showInactiveState
+
+  useEffect(() => {
+    if (!isBooting) {
+      setBootDots(1)
+      return undefined
+    }
+    const stagePool = BOOTLINE_POOL[bootStage] || []
+    const genericPool = BOOTLINE_POOL.generic
+    const choosePhrase = () => {
+      const options = [...stagePool, ...genericPool].filter(Boolean)
+      if (!options.length) return
+      const candidate = options[Math.floor(Math.random() * options.length)]
+      setBootLine((previous) => {
+        if (options.length > 1 && candidate === previous) {
+          const alternate = options.find((option) => option !== previous) || candidate
+          return alternate
+        }
+        return candidate
+      })
+    }
+    choosePhrase()
+    const phraseTimer = setInterval(choosePhrase, 3200)
+    const dotsTimer = setInterval(() => {
+      setBootDots((value) => (value % 3) + 1)
+    }, 480)
+    return () => {
+      clearInterval(phraseTimer)
+      clearInterval(dotsTimer)
+    }
+  }, [bootStage, isBooting])
+
+  const bootLineDisplay = useMemo(() => {
+    return `${bootLine}${'.'.repeat(Math.max(1, bootDots))}`
+  }, [bootDots, bootLine])
 
   const formatTimestamp = useCallback((value) => {
     if (!value) return '—'
@@ -603,6 +633,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     typeof runtime?.next_bar_in_seconds === 'number'
       ? `${Math.max(0, Math.round(runtime.next_bar_in_seconds))}s`
       : '—'
+  const playbackDisabled = isBooting
   const canPause = runtimeStatus === 'running' && (bot?.mode || '').toLowerCase() === 'walk-forward'
   const canResume = runtimeStatus === 'paused'
 
@@ -632,7 +663,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               <div className="flex items-center gap-2">
                 <span>Status</span>
                 <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
-                  {runtimeStatus}
+                  {statusDisplay}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -655,30 +686,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </div>
             </div>
           </div>
-          {showBootstrapTimeline ? (
-            <div className="rounded-3xl border border-dashed border-white/10 bg-black/20 p-4">
-              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Boot sequence</p>
-              <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                {bootstrapTimeline.map((step) => (
-                  <div
-                    key={step.id}
-                    className={`rounded-2xl border px-3 py-2 text-sm font-semibold ${bootstrapStyles[step.state]}`}
-                  >
-                    <p>{step.label}</p>
-                    <p className="text-[10px] font-normal uppercase tracking-[0.35em] text-white/60">
-                      {step.state}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
           <div className="flex flex-wrap gap-2">
             {canPause ? (
               <button
                 type="button"
                 onClick={handlePause}
-                disabled={action === 'pause'}
+                disabled={action === 'pause' || playbackDisabled}
                 className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/10 disabled:opacity-40"
               >
                 <Pause className="size-4" /> Pause walk-forward
@@ -688,14 +701,18 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               <button
                 type="button"
                 onClick={handleResume}
-                disabled={action === 'resume'}
+                disabled={action === 'resume' || playbackDisabled}
                 className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
               >
                 <RotateCw className="size-4" /> Resume
               </button>
             ) : null}
           </div>
-          <div className="rounded-2xl border border-white/5 bg-black/15 px-3 py-3">
+          <div
+            className={`rounded-2xl border border-white/5 bg-black/15 px-3 py-3 transition-opacity ${
+              playbackDisabled ? 'pointer-events-none opacity-60' : ''
+            }`}
+          >
             <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-slate-400">
               <span>Playback speed</span>
               <span className="text-sm font-semibold text-white">
@@ -710,6 +727,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               step="0.25"
               value={playbackDraft}
               onChange={handlePlaybackInput}
+              disabled={playbackDisabled}
               className="mt-2 w-full accent-sky-400 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-runnable-track]:h-1"
             />
             <div className="mt-1 flex justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
@@ -742,7 +760,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 >
                   <span
                     className={`h-2.5 w-2.5 rounded-full ${
-                      renderedChip.direction === 'short' ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20' : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
+                      renderedChip.direction === 'short'
+                        ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20'
+                        : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
                     }`}
                   />
                   <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
@@ -753,33 +773,49 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 </div>
               ) : null}
             </div>
-            {loading ? <LoadingOverlay label={loadingLabel} /> : null}
-            {error ? (
-              <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-            ) : showInactiveState ? (
-              <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                {idleMessage}
+            <div className="relative min-h-[360px]">
+              <div
+                className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
+                  bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+                }`}
+              >
+                <div className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-base font-semibold text-slate-100 shadow-sm animate-pulse">
+                  {bootLineDisplay}
+                </div>
               </div>
-            ) : chartHasData ? (
-              <BotLensChart
-                chartId={`bot-${bot?.id}`}
-                candles={payload?.candles || []}
-                trades={payload?.trades || []}
-                overlays={payload?.overlays || []}
-                playbackSpeed={playbackDraft}
-              />
-            ) : (
-              <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                Awaiting the first candle…
+              <div
+                className={`transition-opacity duration-300 ${
+                  bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`}
+              >
+                {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
+                {error ? (
+                  <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
+                ) : showInactiveState ? (
+                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                    {idleMessage}
+                  </div>
+                ) : chartHasData ? (
+                  <BotLensChart
+                    chartId={`bot-${bot?.id}`}
+                    candles={payload?.candles || []}
+                    trades={payload?.trades || []}
+                    overlays={payload?.overlays || []}
+                    playbackSpeed={playbackDraft}
+                  />
+                ) : (
+                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                    Awaiting the first candle…
+                  </div>
+                )}
               </div>
-            )}
+            </div>
             {streamStatus === 'connecting' && streamEligible ? (
               <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-xs text-slate-200">
                 Establishing live feed…
               </div>
             ) : null}
           </div>
-
           {strategies.length ? (
             <div className="space-y-4 rounded-3xl border border-white/5 bg-black/30 p-4">
               <div className="flex items-center justify-between">
