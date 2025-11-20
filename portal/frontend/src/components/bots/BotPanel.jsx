@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw, RefreshCw, Search, Loader2 } from 'lucide-react'
+import { RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
   createBot,
@@ -8,42 +8,20 @@ import {
   deleteBot as deleteBotApi,
   pauseBot as pauseBotApi,
   resumeBot as resumeBotApi,
-  openBotsStream,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
-import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
-import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from '../atm/ATMConfigForm.jsx'
-
-const defaultForm = {
-  name: '',
-  timeframe: '15m',
-  mode: 'walk-forward',
-  run_type: 'backtest',
-  playback_speed: 10,
-  backtest_start: '',
-  backtest_end: '',
-  strategy_ids: [],
-  use_custom_atm: false,
-  atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
-}
-
-const STATUS_ORDER = {
-  running: 0,
-  starting: 1,
-  paused: 2,
-  completed: 3,
-  idle: 4,
-  stopped: 5,
-  error: 6,
-}
+import { BotCreateForm, buildDefaultForm } from './BotCreateForm.jsx'
+import { BotCard, sortBots } from './BotCard.jsx'
+import { useBotStream } from './useBotStream.js'
+import { cloneATMTemplate, DEFAULT_ATM_TEMPLATE } from '../atm/ATMConfigForm.jsx'
 
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
 
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
-  const [form, setForm] = useState(defaultForm)
+  const [form, setForm] = useState(buildDefaultForm())
   const [lensBot, setLensBot] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
@@ -52,8 +30,6 @@ export function BotPanel() {
   const [pendingDelete, setPendingDelete] = useState(null)
   const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
-  const [botStreamState, setBotStreamState] = useState('idle')
-  const botStreamRef = useRef(null)
   const runtimeQueueRef = useRef(new Map())
   const runtimeFrame = useRef(null)
   const formatPlaybackValue = useCallback((value) => {
@@ -188,91 +164,14 @@ export function BotPanel() {
   useEffect(() => {
     loadBots()
     loadStrategies()
+    console.info('[BotPanel] mounted, loading bots and strategies')
   }, [loadBots, loadStrategies])
 
   useEffect(() => () => {
     if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
   }, [])
 
-  useEffect(() => {
-    let retryTimer = null
-    const connectStream = () => {
-      if (botStreamRef.current) {
-        botStreamRef.current.close()
-        botStreamRef.current = null
-      }
-      const source = openBotsStream()
-      if (!source) {
-        setBotStreamState('error')
-        return
-      }
-      botStreamRef.current = source
-      setBotStreamState('connecting')
-      const handlePayload = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          if (Array.isArray(data)) {
-            mergeBots(data)
-          } else if (Array.isArray(data?.bots)) {
-            mergeBots(data.bots)
-          } else if (data?.bot) {
-            upsertBot(data.bot)
-            if (data.bot?.id && data.bot?.runtime) {
-              applyRuntime(data.bot.id, data.bot.runtime)
-            }
-          } else if (data?.id) {
-            upsertBot(data)
-            if (data?.id && data?.runtime) {
-              applyRuntime(data.id, data.runtime)
-            }
-          } else if (data?.bot_id && data?.runtime) {
-            applyRuntime(data.bot_id, data.runtime)
-          }
-          setBotStreamState('open')
-        } catch (err) {
-          console.warn('bot stream payload parse failed', err)
-        }
-      }
-      const handleRuntime = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          const botId = data?.bot_id || data?.bot?.id
-          const runtime = data?.runtime || data?.bot?.runtime
-          if (botId && runtime) {
-            applyRuntime(botId, runtime)
-            setBotStreamState('open')
-          }
-        } catch (err) {
-          console.warn('bot runtime payload parse failed', err)
-        }
-      }
-      const handleError = () => {
-        setBotStreamState('error')
-        retryTimer = setTimeout(connectStream, 2500)
-      }
-      source.onmessage = handlePayload
-      source.addEventListener('snapshot', handlePayload)
-      source.addEventListener('update', handlePayload)
-      source.addEventListener('bot_runtime', handleRuntime)
-      source.onerror = handleError
-      source.onopen = () => setBotStreamState('open')
-    }
-    connectStream()
-    return () => {
-      if (retryTimer) clearTimeout(retryTimer)
-      if (botStreamRef.current) {
-        botStreamRef.current.close()
-        botStreamRef.current = null
-      }
-    }
-  }, [applyRuntime, mergeBots, upsertBot])
-
-  useEffect(() => {
-    if (botStreamState === 'open') return undefined
-    const intervalMs = botStreamState === 'error' ? 2000 : 4000
-    const id = setInterval(() => loadBots(false), intervalMs)
-    return () => clearInterval(id)
-  }, [botStreamState, loadBots])
+  const botStreamState = useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots })
 
   const handleChange = (event) => {
     const { name, value } = event.target
@@ -317,11 +216,6 @@ export function BotPanel() {
     setForm((prev) => ({ ...prev, use_custom_atm: !prev.use_custom_atm }))
   }
 
-  const handlePlaybackSpeedChange = (event) => {
-    const value = Number(event?.target?.value)
-    setForm((prev) => ({ ...prev, playback_speed: Number.isFinite(value) ? value : 0 }))
-  }
-
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
@@ -350,9 +244,10 @@ export function BotPanel() {
         payloadBody.risk = atm_template
       }
       const payload = await createBot(payloadBody)
+      console.info('[BotPanel] bot created', { id: payload?.id })
       upsertBot(payload)
       setForm((prev) => ({
-        ...defaultForm,
+        ...buildDefaultForm(),
         strategy_ids: prev.strategy_ids,
         run_type: prev.run_type,
         playback_speed: prev.playback_speed,
@@ -373,6 +268,7 @@ export function BotPanel() {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
+    console.info('[BotPanel] start requested', { botId })
     setPendingStart(botId)
     setBots((prev) =>
       prev.map((bot) =>
@@ -397,6 +293,7 @@ export function BotPanel() {
 
   const handleStop = async (botId) => {
     setError(null)
+    console.info('[BotPanel] stop requested', { botId })
     try {
       const payload = await stopBotApi(botId)
       upsertBot(payload)
@@ -408,6 +305,7 @@ export function BotPanel() {
 
   const handlePause = async (botId) => {
     setError(null)
+    console.info('[BotPanel] pause requested', { botId })
     try {
       const payload = await pauseBotApi(botId)
       upsertBot(payload)
@@ -419,6 +317,7 @@ export function BotPanel() {
 
   const handleResume = async (botId) => {
     setError(null)
+    console.info('[BotPanel] resume requested', { botId })
     try {
       const payload = await resumeBotApi(botId)
       upsertBot(payload)
@@ -432,6 +331,7 @@ export function BotPanel() {
     if (!botId) return
     if (!window.confirm('Delete this bot? This cannot be undone.')) return
     setError(null)
+    console.info('[BotPanel] delete requested', { botId })
     setPendingDelete(botId)
     try {
       await deleteBotApi(botId)
@@ -476,14 +376,7 @@ export function BotPanel() {
     return 'Sim trade (live)'
   }
 
-  const sortedBots = useMemo(() => {
-    return [...bots].sort((a, b) => {
-      const sa = STATUS_ORDER[computeStatus(a)] ?? 10
-      const sb = STATUS_ORDER[computeStatus(b)] ?? 10
-      if (sa !== sb) return sa - sb
-      return (a.name || '').localeCompare(b.name || '')
-    })
-  }, [bots])
+    const sortedBots = useMemo(() => sortBots(bots), [bots])
 
   const sortedStrategies = useMemo(() => {
     return [...strategies].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
@@ -560,336 +453,93 @@ export function BotPanel() {
 
   const refreshSummary = `${filteredBots.length} of ${sortedBots.length} bots`
 
-  return (
-    <section className="space-y-6">
-      <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
-            <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
-            <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
-          </div>
-          <div className="text-xs text-slate-400">
-            {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
-          </div>
-        </div>
-        <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-1 flex-wrap items-center gap-3">
-            <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
-              <Search className="size-4 text-slate-500" />
-              <input
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search bots by name, status, or strategy"
-                className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={() => loadBots()}
-              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
-              disabled={loading}
-            >
-              <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
-            </button>
-          </div>
-          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{refreshSummary}</span>
-        </div>
-        <form onSubmit={handleCreate} className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-slate-200">
-            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <div className="flex flex-col gap-1 flex-1">
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
-                <input
-                  type="text"
-                  name="name"
-                  value={form.name}
-                  onChange={handleChange}
-                  className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-slate-100 focus:border-[color:var(--accent-alpha-50)] focus:outline-none"
-                  placeholder="Market Profile Bot"
-                  required
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Mode</label>
-                <span className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs uppercase tracking-[0.3em] text-slate-200">
-                  Walk-forward
-                </span>
-              </div>
-            </div>
-            <div className="grid gap-2 rounded-xl border border-white/10 bg-black/30 p-3 md:grid-cols-2 md:items-center">
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Run type</label>
-                <select
-                  name="run_type"
-                  value={form.run_type}
-                  onChange={handleChange}
-                  className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-                >
-                  <option value="backtest">Backtest</option>
-                  <option value="sim_trade">Sim trade</option>
-                </select>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Playback speed</label>
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-900/40 px-3 py-2">
-                  <input
-                    type="range"
-                    min="0"
-                    max="25"
-                    step="0.5"
-                    name="playback_speed"
-                    value={form.playback_speed}
-                    onChange={handlePlaybackSpeedChange}
-                    className="w-full accent-[color:var(--accent-alpha-60)]"
-                  />
-                  <span className="ml-3 text-xs font-semibold text-white">{formatPlaybackValue(form.playback_speed)}</span>
-                </div>
-                <p className="text-[11px] text-slate-500">
-                  Drag left for instant skips, right to accelerate walk-forward playback.
-                </p>
-              </div>
-            </div>
-            {form.run_type === 'backtest' ? (
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <DateRangePickerComponent
-                  dateRange={backtestRange}
-                  defaultStart={defaultBacktestStart}
-                  defaultEnd={defaultBacktestEnd}
-                  setDateRange={handleBacktestRangeChange}
-                />
-              </div>
-            ) : null}
-          </div>
-          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-slate-200">
-            <div className="flex items-center justify-between">
-              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Strategies</label>
-              {!hasStrategies ? (
-                <span className="text-[11px] uppercase tracking-[0.2em] text-rose-300">Add a strategy first</span>
-              ) : (
-                <span className="text-[11px] text-slate-500">Select 1+</span>
-              )}
-            </div>
-            {strategyError ? (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-500/5 p-3 text-xs text-rose-200">{strategyError}</div>
-            ) : null}
-            {hasStrategies ? (
-              <div className="max-h-40 space-y-2 overflow-auto pr-2 text-sm">
-                {sortedStrategies.map((strategy) => (
-                  <label key={strategy.id} className="flex items-center gap-3 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-slate-200">
-                    <input
-                      type="checkbox"
-                      className="size-4 rounded border border-white/30 bg-transparent"
-                      checked={form.strategy_ids.includes(strategy.id)}
-                      onChange={() => handleStrategyToggle(strategy.id)}
-                    />
-                    <div className="flex flex-col">
-                      <span className="text-sm font-medium text-white">{strategy.name}</span>
-                      <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                        {strategy.timeframe} • {strategy.exchange || strategy.datasource || '—'}
-                      </span>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400">Create a strategy in the Strategies tab to unlock bot creation.</p>
-            )}
-          </div>
-          <div className="lg:col-span-2">
-            <button
-              type="submit"
-              className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[color:var(--accent-alpha-40)] px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
-              disabled={
-                !hasStrategies
-                || !form.name
-                || !form.strategy_ids.length
-                || (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end))
-              }
-            >
-              <PlusCircle className="size-4" /> Create bot
-            </button>
-          </div>
-        </form>
-        <div className="rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
-          <div className="flex items-center justify-between">
+    return (
+      <section className="space-y-6">
+        <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">ATM override</p>
-              <p className="text-xs text-slate-400">Optional custom contracts/targets for this bot run.</p>
+              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
+              <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
+              <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
             </div>
-            <button
-              type="button"
-              onClick={toggleCustomATM}
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${form.use_custom_atm ? 'border-emerald-400/40 text-emerald-200' : 'border-white/20 text-slate-300'}`}
-            >
-              {form.use_custom_atm ? 'Disable override' : 'Use override'}
-            </button>
+            <div className="text-xs text-slate-400">
+              {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
+            </div>
           </div>
-          {form.use_custom_atm ? (
-            <div className="mt-3">
-              <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+          <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-1 flex-wrap items-center gap-3">
+              <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
+                <Search className="size-4 text-slate-500" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search bots by name, status, or strategy"
+                  className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => loadBots()}
+                className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
+                disabled={loading}
+              >
+                <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+              </button>
             </div>
-          ) : (
-            <p className="mt-3 text-xs text-slate-400">
-              Bots will reuse each strategy's ATM template unless you enable an override.
+            <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{`${filteredBots.length} of ${sortedBots.length} bots`}</span>
+          </div>
+
+          <BotCreateForm
+            form={form}
+            strategies={sortedStrategies}
+            strategiesLoading={strategiesLoading}
+            strategyError={strategyError}
+            hasStrategies={hasStrategies}
+            onSubmit={handleCreate}
+            onChange={handleChange}
+            onBacktestRangeChange={handleBacktestRangeChange}
+            onStrategyToggle={handleStrategyToggle}
+            onATMTemplateChange={handleATMTemplateChange}
+            onToggleCustomATM={toggleCustomATM}
+          />
+        </header>
+
+        {error ? (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
+        ) : null}
+
+        <div className="space-y-3">
+          {loading && sortedBots.length === 0 ? (
+            <p className="text-sm text-slate-400">Loading bots…</p>
+          ) : filteredBots.length === 0 ? (
+            <p className="text-sm text-slate-400">
+              {search.trim() ? 'No bots match your search.' : 'No bots yet. Create one to begin a backtest.'}
             </p>
+          ) : (
+            filteredBots.map((bot) => (
+              <BotCard
+                key={bot.id}
+                bot={bot}
+                strategyLookup={strategyLookup}
+                playbackLabelFor={playbackLabelFor}
+                describeRange={describeRange}
+                statusBadge={statusBadge}
+                onStart={handleStart}
+                onStop={handleStop}
+                onPause={handlePause}
+                onResume={handleResume}
+                onDelete={handleDelete}
+                onOpen={setLensBot}
+                pendingStart={pendingStart}
+                pendingDelete={pendingDelete}
+              />
+            ))
           )}
         </div>
-      </header>
 
-      {error ? (
-        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-      ) : null}
+        <BotPerformanceModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} onRefresh={loadBots} />
+      </section>
+    )
+  }
 
-      <div className="space-y-3">
-        {loading && sortedBots.length === 0 ? (
-          <p className="text-sm text-slate-400">Loading bots…</p>
-        ) : filteredBots.length === 0 ? (
-          <p className="text-sm text-slate-400">
-            {search.trim() ? 'No bots match your search.' : 'No bots yet. Create one to begin a backtest.'}
-          </p>
-        ) : (
-          filteredBots.map((bot) => {
-            const assignedNames = (bot.strategy_ids || [])
-              .map((id) => strategyLookup.get(id)?.name || id)
-              .filter(Boolean)
-            const runtimeStatus = computeStatus(bot)
-            const progressValue =
-              typeof bot.runtime?.progress === 'number'
-                ? bot.runtime.progress
-                : runtimeStatus === 'completed'
-                  ? 1
-                  : 0
-            const progressPct = `${Math.round(progressValue * 1000) / 10}%`
-            const progressWidth = `${Math.min(100, Math.max(0, progressValue * 100))}%`
-            const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
-            const showResume = runtimeStatus === 'paused'
-            const timeframeLabel = describeBotMeta(bot, 'timeframe')
-            const datasourceLabel = describeBotMeta(bot, 'datasource')
-            const exchangeLabel = describeBotMeta(bot, 'exchange')
-            const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
-            const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
-            const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
-            const keyStats = ['total_trades', 'wins', 'losses', 'win_rate']
-            const statsEntries = keyStats
-              .map((key) => ({ key, value: bot.last_stats?.[key] ?? bot.runtime?.stats?.[key] }))
-              .filter((entry) => entry.value !== undefined && entry.value !== null)
-            const runTypeLabel = (bot.run_type || 'backtest').replace('_', ' ')
-            const runTypePill = runTypeLabel.toUpperCase()
-
-            return (
-              <article
-                key={bot.id}
-                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950/80 via-slate-900/40 to-slate-900/20 p-5 shadow-lg shadow-black/30"
-              >
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.32em] text-slate-300">
-                      <span className="inline-flex items-center gap-2 rounded-full border border-white/30 bg-white/10 px-3 py-1 text-[10px] font-semibold text-white">
-                        {runTypePill}
-                      </span>
-                      {timeframeLabel ? (
-                        <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">TF {timeframeLabel}</span>
-                      ) : null}
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">{playbackLabelFor(bot)}</span>
-                    </div>
-                    <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
-                      {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
-                    </p>
-                    <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
-                    <p className="text-xs text-slate-400">
-                      {bot.mode.toUpperCase()}
-                      {datasourceLabel ? ` • DS ${datasourceLabel}` : ''}
-                      {exchangeLabel ? ` • EX ${exchangeLabel}` : ''}
-                    </p>
-                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">{describeRange(bot)}</p>
-                  </div>
-                  {statusBadge(runtimeStatus)}
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/5 bg-black/40 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
-                  <div className="flex flex-wrap items-center gap-3 text-xs">
-                    <span className="text-slate-300">Progress</span>
-                    <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-200">
-                      {progressPct}
-                    </span>
-                  </div>
-                  <div className="h-1.5 w-40 overflow-hidden rounded-full bg-white/10">
-                    <div className="h-full rounded-full bg-emerald-400/80 transition-all" style={{ width: progressWidth }} />
-                  </div>
-                </div>
-                {statsEntries.length ? (
-                  <div className="flex flex-wrap gap-3 text-xs text-slate-300">
-                    {statsEntries.map(({ key, value }) => (
-                      <div key={key} className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-[0.35em] text-slate-500">{key.replace(/_/g, ' ')}</p>
-                        <p className="text-base font-semibold text-white">{value}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap items-center gap-2">
-                  {canStart ? (
-                  <button
-                    type="button"
-                    onClick={() => handleStart(bot.id)}
-                    disabled={pendingStart === bot.id}
-                    className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-60"
-                  >
-                    {pendingStart === bot.id ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-                    {pendingStart === bot.id ? 'Starting…' : startLabel}
-                  </button>
-                  ) : null}
-                  {canStop ? (
-                    <button
-                      type="button"
-                      onClick={() => handleStop(bot.id)}
-                      className="inline-flex items-center gap-2 rounded-full border border-rose-500/30 px-4 py-2 text-sm text-rose-200 hover:bg-rose-500/10"
-                    >
-                      <Square className="size-4" /> Stop
-                    </button>
-                  ) : null}
-                  {showPause ? (
-                    <button
-                      type="button"
-                      onClick={() => handlePause(bot.id)}
-                      className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/10"
-                    >
-                      <Pause className="size-4" /> Pause
-                    </button>
-                  ) : null}
-                  {showResume ? (
-                    <button
-                      type="button"
-                      onClick={() => handleResume(bot.id)}
-                      className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10"
-                    >
-                      <RotateCw className="size-4" /> Resume
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={() => setLensBot(bot)}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/20 px-4 py-2 text-sm text-slate-200 hover:bg-white/10"
-                  >
-                    <Eye className="size-4" /> Lens
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDelete(bot.id)}
-                    disabled={pendingDelete === bot.id}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/20 px-4 py-2 text-sm text-slate-200 hover:bg-white/10 disabled:opacity-40"
-                  >
-                    <Trash2 className="size-4" /> Delete
-                  </button>
-                </div>
-              </article>
-            )
-          })
-        )}
-      </div>
-
-      <BotPerformanceModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} onRefresh={loadBots} />
-    </section>
-  )
-}
