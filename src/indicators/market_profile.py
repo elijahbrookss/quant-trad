@@ -28,23 +28,50 @@ def _to_unix_s(ts):
     return int(pd.Timestamp(ts).tz_convert("UTC").timestamp())
 
 def _find_touch_markers(df, level: float, start_ts: pd.Timestamp, label: str, fmt_time):
-    mks = []
+    start_ts = pd.Timestamp(start_ts)
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize("UTC")
+    else:
+        start_ts = start_ts.tz_convert("UTC")
+
     if df.index.tz is None:
         df = df.tz_localize("UTC")
+    else:
+        df = df.tz_convert("UTC")
+
     window = df.loc[df.index >= start_ts]
-    for t, row in window.iterrows():
-        lo, hi = float(row["low"]), float(row["high"])
-        if lo <= level <= hi:
-            mks.append({
-                "time": int(pd.Timestamp(t).timestamp()),      # <-- 'YYYY-MM-DD'
-                "shape": "circle",
-                "color": "#6b7280", # default color, will be recolored on client,
-                "subtype": "touch",
-                "price": float(level)
-            })
-    return mks
+    if window.empty:
+        return []
+
+    lows = pd.to_numeric(window.get("low"), errors="coerce")
+    highs = pd.to_numeric(window.get("high"), errors="coerce")
+    if lows is None or highs is None:
+        return []
+
+    touches = (lows <= level) & (highs >= level)
+    if not touches.any():
+        return []
+
+    touch_index = window.index[touches]
+    # Convert tz-aware index to epoch seconds in bulk to avoid per-row allocations
+    times = (touch_index.view("int64") // 10**9).astype(int)
+
+    return [
+        {
+            "time": int(ts),
+            "shape": "circle",
+            "color": "#6b7280",
+            "subtype": "touch",
+            "price": float(level),
+        }
+        for ts in times
+    ]
+
+DEFAULT_BREAKOUT_CONFIRMATION_BARS = 3
+
 
 class MarketProfileIndicator(BaseIndicator):
+    _DATAFRAME_CACHE: Dict[Tuple[str, str, str, int, str], Dict[str, Any]] = {}
     """
     Computes daily market profile (TPO) to identify Point of Control (POC),
     Value Area High (VAH), and Value Area Low (VAL), and provides plotting overlays.
@@ -62,12 +89,16 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+        market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         super().__init__(df)
+        self._bin_size_locked = False
         self.bin_size = self._select_bin_size(df, bin_size)
         self._bin_precision = self._infer_precision_from_step(self.bin_size)
         self.price_precision = max(2, self._bin_precision)
         self.mode = mode
+        self.days_back = days_back
         # Compute raw daily profiles on initialization
         self.daily_profiles = self._compute_daily_profiles()
         self.merged_profiles = []
@@ -76,6 +107,72 @@ class MarketProfileIndicator(BaseIndicator):
         self.use_merged_value_areas = bool(use_merged_value_areas)
         self.merge_threshold = float(merge_threshold) if merge_threshold is not None else 0.6
         self.min_merge_sessions = int(min_merge_sessions)
+        self.market_profile_breakout_confirmation_bars = self._normalise_confirmation_bars(
+            market_profile_breakout_confirmation_bars
+        )
+
+    @staticmethod
+    def _normalise_ts(value: Any) -> pd.Timestamp:
+        stamp = pd.Timestamp(value)
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize("UTC")
+        else:
+            stamp = stamp.tz_convert("UTC")
+        return stamp
+
+    @classmethod
+    def _fetch_with_cache(
+        cls,
+        provider,
+        ctx: DataContext,
+        *,
+        days_back: Optional[int],
+    ) -> pd.DataFrame:
+        lookback = max(int(days_back or 0), 0)
+        start_ts = cls._normalise_ts(ctx.start)
+        if lookback:
+            start_ts = start_ts - pd.Timedelta(days=lookback)
+        end_ts = cls._normalise_ts(ctx.end)
+        cache_key = (
+            getattr(provider, "CACHE_KEY", provider.__class__.__name__),
+            getattr(provider, "exchange", None) or getattr(provider, "exchange_id", None) or "",
+            ctx.symbol or "",
+            ctx.interval or "",
+            lookback,
+        )
+        entry = cls._DATAFRAME_CACHE.get(cache_key)
+        if entry is not None:
+            cached_df: pd.DataFrame = entry["df"]
+            cached_start: pd.Timestamp = entry["start"]
+            cached_end: pd.Timestamp = entry["end"]
+            if start_ts >= cached_start and end_ts <= cached_end:
+                window = cached_df.loc[(cached_df.index >= start_ts) & (cached_df.index <= end_ts)]
+                return window.copy()
+
+        request_ctx = DataContext(
+            symbol=ctx.symbol,
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            interval=ctx.interval,
+        )
+        df = provider.get_ohlcv(request_ctx)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.sort_index()
+        cls._DATAFRAME_CACHE[cache_key] = {
+            "df": df,
+            "start": cls._normalise_ts(df.index.min()),
+            "end": cls._normalise_ts(df.index.max()),
+        }
+        return df.copy()
+
+    @staticmethod
+    def _normalise_confirmation_bars(value: Any) -> int:
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_BREAKOUT_CONFIRMATION_BARS
+        return numeric if numeric >= 1 else 1
 
     @staticmethod
     def _normalize_step(value: float) -> float:
@@ -94,8 +191,22 @@ class MarketProfileIndicator(BaseIndicator):
         return mantissa * (10 ** exponent)
 
     def _select_bin_size(self, df: pd.DataFrame, provided: Optional[float]) -> float:
-        if provided and provided > 0:
-            return float(provided)
+        """Return a sane bin size, coercing user supplied values before fallback."""
+
+        candidate = provided
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if not candidate:
+                candidate = None
+        if candidate is not None:
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                numeric = None
+            if numeric is not None and numeric > 0:
+                self._bin_size_locked = True
+                return numeric
+        self._bin_size_locked = False
         return self._infer_bin_size(df)
 
     def _infer_bin_size(self, df: pd.DataFrame) -> float:
@@ -208,6 +319,8 @@ class MarketProfileIndicator(BaseIndicator):
         use_merged_value_areas: bool = True,
         merge_threshold: float = 0.6,
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+        market_profile_breakout_confirmation_bars: int = DEFAULT_BREAKOUT_CONFIRMATION_BARS,
+        days_back: Optional[int] = None,
     ):
         """
         Fetches OHLCV from provider and constructs the indicator.
@@ -216,7 +329,7 @@ class MarketProfileIndicator(BaseIndicator):
         ctx = DataContext(symbol=ctx.symbol, start=ctx.start, end=ctx.end, interval=interval)
         ctx.validate()
 
-        df = provider.get_ohlcv(ctx)
+        df = cls._fetch_with_cache(provider, ctx, days_back=days_back)
         if df is None or df.empty:
             raise ValueError(f"MarketProfileIndicator: No data available for {ctx.symbol} [{ctx.interval}] after ingest")
 
@@ -229,6 +342,8 @@ class MarketProfileIndicator(BaseIndicator):
             use_merged_value_areas=use_merged_value_areas,
             merge_threshold=merge_threshold,
             min_merge_sessions=min_merge_sessions,
+            market_profile_breakout_confirmation_bars=market_profile_breakout_confirmation_bars,
+            days_back=days_back,
         )
 
     def _compute_daily_profiles(self) -> List[Dict[str, float]]:
@@ -496,6 +611,9 @@ class MarketProfileIndicator(BaseIndicator):
             use_merged,
             extend_to_chart_end,
         )
+        poc_series = pd.Series(np.nan, index=full_idx, dtype=float)
+        has_poc_values = False
+
         for idx, prof in enumerate(profiles):
             try:
                 start_ts = prof.get("start")
@@ -553,21 +671,22 @@ class MarketProfileIndicator(BaseIndicator):
             )
 
             if poc is not None:
-                poc_series = pd.Series(index=full_idx, dtype=float)
                 mask = full_idx >= start_ts
                 if not extend_to_chart_end:
                     mask = mask & (full_idx <= end_ts)
                 poc_series.loc[mask] = float(poc)
-
-                ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
-                overlays.append({"kind": "addplot", "plot": ap})
-                legend_entries.add(("POC", "orange"))
+                has_poc_values = True
                 logger.debug(
                     "event=market_profile_poc start=%s end=%s poc=%.4f",
                     start_ts,
                     end_ts,
                     float(poc),
                 )
+
+        if has_poc_values and poc_series.notna().any():
+            ap = make_addplot(poc_series, color="orange", width=1.0, linestyle="--")
+            overlays.append({"kind": "addplot", "plot": ap})
+            legend_entries.add(("POC", "orange"))
 
         logger.info("event=market_profile_overlay_complete overlays=%d", len(overlays))
         return overlays, legend_entries
@@ -685,28 +804,34 @@ class MarketProfileIndicator(BaseIndicator):
                 continue
 
             # start_iso = _ts_iso(start_ts)
-            start_str = fmt_time(start_ts) # either 'YYYY-MM-DD' or unix seconds
-            
+            start_str = fmt_time(start_ts)  # either 'YYYY-MM-DD' or unix seconds
+
+            profile_end_ts = pd.to_datetime(
+                prof.get("end") or prof.get("end_date") or chart_end,
+                utc=True,
+            )
+            if profile_end_ts > chart_end:
+                profile_end_ts = chart_end
+            if profile_end_ts < start_ts:
+                profile_end_ts = start_ts
+
             if extend_boxes_to_chart_end:
                 end_ts = chart_end
             else:
-                end_ts = pd.to_datetime(
-                    prof.get("end") or prof.get("end_date") or chart_end,
-                    utc=True,
-                )
-                if end_ts > chart_end:
-                    end_ts = chart_end
+                end_ts = profile_end_ts
             if end_ts < start_ts:
                 end_ts = start_ts
 
             out_boxes.append({
-                "x1": _to_unix_s(start_ts),   # epoch seconds
-                "x2": _to_unix_s(end_ts),     # epoch seconds
-                "y1": float(val),             # VAL
-                "y2": float(vah),             # VAH
-                "color": "rgba(156,163,175,0.18)",   # neutral grey w/ alpha; UI can recolor later
+                "x1": _to_unix_s(start_ts),  # epoch seconds
+                "x2": _to_unix_s(end_ts),  # epoch seconds
+                "y1": float(val),  # VAL
+                "y2": float(vah),  # VAH
+                "color": "rgba(156,163,175,0.18)",  # neutral grey w/ alpha; UI can recolor later
                 "precision": prof.get("precision", self.price_precision),
                 "extend": bool(extend_boxes_to_chart_end),
+                "start": _to_unix_s(start_ts),
+                "end": _to_unix_s(profile_end_ts),
             })
 
             logger.debug(
@@ -757,8 +882,12 @@ class MarketProfileIndicator(BaseIndicator):
 
             # ----- touchpoint markers (optional) -----
             if include_touches:
-                out_markers.extend(_find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time))
-                out_markers.extend(_find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time))
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(val), start_ts, "VAL", fmt_time)
+                )
+                out_markers.extend(
+                    _find_touch_markers(plot_df, float(vah), start_ts, "VAH", fmt_time)
+                )
 
         logger.info(
             "event=market_profile_lightweight_summary price_lines=%d markers=%d boxes=%d",
