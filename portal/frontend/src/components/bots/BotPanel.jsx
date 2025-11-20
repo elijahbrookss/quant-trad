@@ -54,6 +54,8 @@ export function BotPanel() {
   const [search, setSearch] = useState('')
   const [botStreamState, setBotStreamState] = useState('idle')
   const botStreamRef = useRef(null)
+  const runtimeQueueRef = useRef(new Map())
+  const runtimeFrame = useRef(null)
   const formatPlaybackValue = useCallback((value) => {
     const numeric = Number(value)
     if (!Number.isFinite(numeric)) return '—'
@@ -71,27 +73,88 @@ export function BotPanel() {
     return `${value.toFixed(2)}x`
   }, [])
 
-  const upsertBot = useCallback((payload) => {
-    if (!payload?.id) return
-    setBots((prev) => {
-      const exists = prev.some((bot) => bot.id === payload.id)
-      if (exists) {
-        return prev.map((bot) => (bot.id === payload.id ? { ...bot, ...payload } : bot))
-      }
-      return [...prev, payload]
-    })
+  const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
+    if (next === prev) return true
+    const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
+    for (const key of keys) {
+      if (next?.[key] !== prev?.[key]) return false
+    }
+    return true
   }, [])
 
-  const applyRuntime = useCallback((botId, runtime) => {
-    if (!botId || !runtime) return
-    setBots((prev) =>
-      prev.map((bot) =>
-        bot.id === botId
-          ? { ...bot, runtime: { ...(bot.runtime || {}), ...runtime } }
-          : bot,
-      ),
-    )
-  }, [])
+  const mergeBots = useCallback(
+    (incoming) => {
+      if (!Array.isArray(incoming)) return
+      setBots((prev) => {
+        const prevMap = new Map(prev.map((bot) => [bot.id, bot]))
+        let changed = false
+        const next = incoming.map((bot) => {
+          if (!bot?.id) return bot
+          const current = prevMap.get(bot.id)
+          if (!current) {
+            changed = true
+            return bot
+          }
+          const runtimeSame = shallowEqualRuntime(bot.runtime, current.runtime)
+          const payload = {
+            ...current,
+            ...bot,
+            runtime: runtimeSame
+              ? current.runtime
+              : { ...(current.runtime || {}), ...(bot.runtime || {}) },
+          }
+          const nonRuntimeChanged = Object.keys(bot || {}).some(
+            (key) => key !== 'runtime' && bot[key] !== current[key],
+          )
+          if (!nonRuntimeChanged && runtimeSame) {
+            return current
+          }
+          changed = true
+          return payload
+        })
+        return changed ? next : prev
+      })
+    },
+    [shallowEqualRuntime],
+  )
+
+  const upsertBot = useCallback(
+    (payload) => {
+      if (!payload?.id) return
+      mergeBots([payload])
+    },
+    [mergeBots],
+  )
+
+  const flushRuntimeQueue = useCallback(() => {
+    setBots((prev) => {
+      let nextState = prev
+      runtimeQueueRef.current.forEach((runtime, botId) => {
+        const index = nextState.findIndex((bot) => bot.id === botId)
+        if (index === -1) return
+        const bot = nextState[index]
+        const mergedRuntime = { ...(bot.runtime || {}), ...runtime }
+        if (shallowEqualRuntime(mergedRuntime, bot.runtime)) return
+        if (nextState === prev) nextState = [...prev]
+        nextState[index] = { ...bot, runtime: mergedRuntime }
+      })
+      runtimeQueueRef.current.clear()
+      return nextState
+    })
+    runtimeFrame.current = null
+  }, [shallowEqualRuntime])
+
+  const applyRuntime = useCallback(
+    (botId, runtime) => {
+      if (!botId || !runtime) return
+      const existing = runtimeQueueRef.current.get(botId) || {}
+      runtimeQueueRef.current.set(botId, { ...existing, ...runtime })
+      if (!runtimeFrame.current) {
+        runtimeFrame.current = requestAnimationFrame(flushRuntimeQueue)
+      }
+    },
+    [flushRuntimeQueue],
+  )
 
   const loadBots = useCallback(
     async (withSpinner = true) => {
@@ -99,14 +162,14 @@ export function BotPanel() {
       setError(null)
       try {
         const data = await listBots()
-        setBots(data)
+        mergeBots(data)
       } catch (err) {
         setError(err?.message || 'Unable to load bots')
       } finally {
         if (withSpinner) setLoading(false)
       }
     },
-    [],
+    [mergeBots],
   )
 
   const loadStrategies = useCallback(async () => {
@@ -127,6 +190,10 @@ export function BotPanel() {
     loadStrategies()
   }, [loadBots, loadStrategies])
 
+  useEffect(() => () => {
+    if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
+  }, [])
+
   useEffect(() => {
     let retryTimer = null
     const connectStream = () => {
@@ -145,9 +212,9 @@ export function BotPanel() {
         try {
           const data = JSON.parse(event.data)
           if (Array.isArray(data)) {
-            setBots(data)
+            mergeBots(data)
           } else if (Array.isArray(data?.bots)) {
-            setBots(data.bots)
+            mergeBots(data.bots)
           } else if (data?.bot) {
             upsertBot(data.bot)
             if (data.bot?.id && data.bot?.runtime) {
@@ -198,7 +265,7 @@ export function BotPanel() {
         botStreamRef.current = null
       }
     }
-  }, [applyRuntime, upsertBot])
+  }, [applyRuntime, mergeBots, upsertBot])
 
   useEffect(() => {
     if (botStreamState === 'open') return undefined
@@ -705,13 +772,6 @@ export function BotPanel() {
             const timeframeLabel = describeBotMeta(bot, 'timeframe')
             const datasourceLabel = describeBotMeta(bot, 'datasource')
             const exchangeLabel = describeBotMeta(bot, 'exchange')
-            const summaryParts = [
-              bot.mode,
-              timeframeLabel ? `TF ${timeframeLabel}` : null,
-              datasourceLabel ? `DS ${datasourceLabel}` : null,
-              exchangeLabel ? `EX ${exchangeLabel}` : null,
-              `speed ${playbackLabelFor(bot)}`,
-            ].filter(Boolean)
             const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
             const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
             const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
@@ -725,7 +785,7 @@ export function BotPanel() {
             return (
               <article
                 key={bot.id}
-                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 via-black/30 to-black/50 p-5 shadow-lg shadow-black/30"
+                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 via-white/0 to-slate-900/60 p-5 shadow-lg shadow-black/30"
               >
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="space-y-2">
@@ -733,7 +793,6 @@ export function BotPanel() {
                       <span className="inline-flex items-center gap-2 rounded-full border border-white/30 bg-white/10 px-3 py-1 text-[10px] font-semibold text-white">
                         {runTypePill}
                       </span>
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">{bot.mode}</span>
                       {timeframeLabel ? (
                         <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">TF {timeframeLabel}</span>
                       ) : null}
@@ -743,19 +802,21 @@ export function BotPanel() {
                       {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
                     </p>
                     <h4 className="text-xl font-semibold text-white">{bot.name}</h4>
-                    <p className="text-xs text-slate-300">{summaryParts.join(' • ')}</p>
+                    <p className="text-xs text-slate-400">
+                      {bot.mode.toUpperCase()}
+                      {datasourceLabel ? ` • DS ${datasourceLabel}` : ''}
+                      {exchangeLabel ? ` • EX ${exchangeLabel}` : ''}
+                    </p>
                     <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">{describeRange(bot)}</p>
                   </div>
                   {statusBadge(runtimeStatus)}
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/5 bg-black/40 px-3 py-2 text-[11px] uppercase tracking-[0.25em] text-slate-400">
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/5 bg-black/40 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-slate-400">
                   <div className="flex flex-wrap items-center gap-3 text-xs">
                     <span className="text-slate-300">Progress</span>
                     <span className="rounded-full bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-200">
                       {progressPct}
                     </span>
-                    {datasourceLabel ? <span className="text-slate-400">DS {datasourceLabel}</span> : null}
-                    {exchangeLabel ? <span className="text-slate-400">EX {exchangeLabel}</span> : null}
                   </div>
                   <div className="h-1.5 w-40 overflow-hidden rounded-full bg-white/10">
                     <div className="h-full rounded-full bg-emerald-400/80 transition-all" style={{ width: progressWidth }} />
