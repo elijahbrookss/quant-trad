@@ -99,21 +99,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
   }, [])
 
-  useEffect(() => {
-    if (chipHideTimeoutRef.current) {
-      clearTimeout(chipHideTimeoutRef.current)
-      chipHideTimeoutRef.current = null
-    }
-    if (activeTradeChip) {
-      setRenderedChip(activeTradeChip)
-      requestAnimationFrame(() => setChipVisible(true))
-    } else if (renderedChip) {
-      setChipVisible(false)
-      chipHideTimeoutRef.current = setTimeout(() => {
-        setRenderedChip(null)
-      }, 200)
-    }
-  }, [activeTradeChip, renderedChip])
   const logs = payload?.logs || []
   const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
@@ -238,6 +223,22 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       direction: directionLabel.toLowerCase(),
     }
   }, [activeTrade, lastCandle?.close, lastCandle?.price, quoteCurrency, sumContracts])
+
+  useEffect(() => {
+    if (chipHideTimeoutRef.current) {
+      clearTimeout(chipHideTimeoutRef.current)
+      chipHideTimeoutRef.current = null
+    }
+    if (activeTradeChip) {
+      setRenderedChip(activeTradeChip)
+      requestAnimationFrame(() => setChipVisible(true))
+    } else if (renderedChip) {
+      setChipVisible(false)
+      chipHideTimeoutRef.current = setTimeout(() => {
+        setRenderedChip(null)
+      }, 200)
+    }
+  }, [activeTradeChip, renderedChip])
   const tradeMetrics = useMemo(() => {
     const trades = Array.isArray(payload?.trades) ? payload.trades : []
     const toContracts = (legs = []) => legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
