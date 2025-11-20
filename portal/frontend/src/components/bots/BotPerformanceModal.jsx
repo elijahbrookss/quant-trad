@@ -224,6 +224,19 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
   }, [activeTrade, lastCandle?.close, lastCandle?.price, quoteCurrency, sumContracts])
 
+  const handleChipHover = useCallback(
+    (hovering) => {
+      const handles = chartHandle?.handles || chartHandle
+      if (!handles) return
+      if (hovering && activeTrade) {
+        handles.pulseTrade?.(activeTrade)
+      } else {
+        handles.clearPulse?.()
+      }
+    },
+    [activeTrade, chartHandle],
+  )
+
   useEffect(() => {
     if (chipHideTimeoutRef.current) {
       clearTimeout(chipHideTimeoutRef.current)
@@ -614,22 +627,32 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
         </header>
 
         <div className="flex flex-1 flex-col gap-6 overflow-auto">
-          <div className="grid gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-[13px] text-slate-300 sm:grid-cols-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Status</p>
-              <p className="text-lg font-semibold text-white">{runtimeStatus}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Progress</p>
-              <p className="text-lg font-semibold text-white">{progressDisplay}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Next bar</p>
-              <p className="text-lg font-semibold text-white">{timerDisplay}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Feed</p>
-              <p className="text-lg font-semibold text-white">{streamStatus}</p>
+          <div className="rounded-2xl border border-white/5 bg-black/20 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px] uppercase tracking-[0.25em] text-slate-400">
+              <div className="flex items-center gap-2">
+                <span>Status</span>
+                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
+                  {runtimeStatus}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span>Progress</span>
+                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
+                  {progressDisplay}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span>Next bar</span>
+                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
+                  {timerDisplay}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span>Feed</span>
+                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
+                  {streamStatus}
+                </span>
+              </div>
             </div>
           </div>
           {showBootstrapTimeline ? (
@@ -672,8 +695,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </button>
             ) : null}
           </div>
-          <div className="rounded-3xl border border-white/5 bg-black/40 p-4">
-            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
+          <div className="rounded-2xl border border-white/5 bg-black/15 px-3 py-3">
+            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-slate-400">
               <span>Playback speed</span>
               <span className="text-sm font-semibold text-white">
                 {playbackLabel}
@@ -687,21 +710,18 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               step="0.25"
               value={playbackDraft}
               onChange={handlePlaybackInput}
-              className="mt-3 w-full accent-sky-400"
+              className="mt-2 w-full accent-sky-400 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-runnable-track]:h-1"
             />
             <div className="mt-1 flex justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
               <span>Instant</span>
               <span>10x</span>
               <span>25x</span>
             </div>
-            <div className="mt-2 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-3">
+            <div className="mt-1 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-3">
               <span>Instant = skip visuals</span>
               <span>10x = normal speed</span>
               <span>25x = fast mode (reduced detail)</span>
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              10x is the normal walk-forward pace; changes apply to intra-candle playback instantly.
-            </p>
           </div>
           <div className="relative">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -717,6 +737,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                   className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow transition-all duration-200 ${
                     chipVisible ? 'border-sky-400/30 bg-white/5 opacity-100' : 'border-sky-400/10 bg-white/0 opacity-0'
                   } ${chipVisible ? 'translate-y-0' : '-translate-y-1'}`}
+                  onMouseEnter={() => handleChipHover(true)}
+                  onMouseLeave={() => handleChipHover(false)}
                 >
                   <span
                     className={`h-2.5 w-2.5 rounded-full ${

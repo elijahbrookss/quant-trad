@@ -157,9 +157,11 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const markerCacheRef = useRef([])
   const overlayDelayRef = useRef(null)
   const focusTimeoutRef = useRef(null)
+  const pulseTimeoutRef = useRef(null)
   const markerDetailsRef = useRef([])
   const prevCandleDataRef = useRef([])
   const candleAnimationRef = useRef(null)
+  const pulseLineHandlesRef = useRef([])
   const [markerTooltip, setMarkerTooltip] = useState(null)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
@@ -409,6 +411,25 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       const bubbles = []
       const priceLines = []
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
+      const lastCandle = candleData[candleData.length - 1]
+      const prevCandle = candleData[candleData.length - 2]
+      if (lastCandle && Number.isFinite(lastCandle?.time)) {
+        const halfSpan = (() => {
+          const prevTime = prevCandle?.time
+          if (Number.isFinite(prevTime)) return Math.max(5, Math.abs(lastCandle.time - prevTime) / 2)
+          if (Number.isFinite(barSpacingRef.current)) return Math.max(5, barSpacingRef.current / 2)
+          return 15
+        })()
+        boxes.unshift({
+          x1: lastCandle.time - halfSpan,
+          x2: lastCandle.time + halfSpan,
+          y1: Math.min(lastCandle.low, lastCandle.high, lastCandle.open, lastCandle.close),
+          y2: Math.max(lastCandle.low, lastCandle.high, lastCandle.open, lastCandle.close),
+          color: 'rgba(125,211,252,0.08)',
+          border: { color: 'rgba(125,211,252,0.28)', width: 1 },
+          precision: 4,
+        })
+      }
       const normaliseSegment = (segment = {}) => {
         const x1 = toSec(coalesce(segment.x1, segment.start, segment.start_date, segment.startDate, segment.time))
         const x2 = toSec(coalesce(segment.x2, segment.end, segment.end_date, segment.endDate, segment.time))
@@ -686,6 +707,78 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     [candleLookup],
   )
 
+  const clearPulseArtifacts = useCallback(() => {
+    pulseLineHandlesRef.current.forEach((handle) => {
+      try {
+        seriesRef.current?.removePriceLine(handle)
+      } catch {
+        /* noop */
+      }
+    })
+    pulseLineHandlesRef.current = []
+    if (markersApiRef.current) {
+      markersApiRef.current.setMarkers(markerCacheRef.current)
+    }
+  }, [])
+
+  const pulseTradeElements = useCallback(
+    (trade) => {
+      if (!trade || !seriesRef.current) return
+      clearPulseArtifacts()
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current)
+        pulseTimeoutRef.current = null
+      }
+      const entryTime = toSec(trade?.entry_time)
+      const stopPrice = toFiniteNumber(trade?.stop_price)
+      const targets = Array.from(
+        new Set(
+          (trade.legs || [])
+            .map((leg) => toFiniteNumber(leg?.target_price))
+            .filter((value) => Number.isFinite(value)),
+        ),
+      )
+      const pulseMarkers = []
+      if (Number.isFinite(entryTime)) {
+        pulseMarkers.push({
+          time: entryTime,
+          position: (trade?.direction || '').toLowerCase() === 'short' ? 'aboveBar' : 'belowBar',
+          shape: 'circle',
+          color: 'rgba(125,211,252,0.95)',
+          text: ' ',
+        })
+      }
+      const lineFor = (price, style = 0) => {
+        if (!Number.isFinite(price)) return null
+        return seriesRef.current.createPriceLine({
+          price,
+          color: style === 0 ? 'rgba(248,113,113,0.9)' : 'rgba(52,211,153,0.9)',
+          lineWidth: 2,
+          lineStyle: style,
+          axisLabelVisible: false,
+        })
+      }
+      if (Number.isFinite(stopPrice)) {
+        const handle = lineFor(stopPrice, 0)
+        if (handle) pulseLineHandlesRef.current.push(handle)
+      }
+      targets.forEach((price) => {
+        const handle = lineFor(price, 2)
+        if (handle) pulseLineHandlesRef.current.push(handle)
+      })
+      if (pulseMarkers.length && markersApiRef.current) {
+        markersApiRef.current.setMarkers(
+          [...markerCacheRef.current, ...pulseMarkers].sort((a, b) => (a.time ?? 0) - (b.time ?? 0)),
+        )
+      }
+      pulseTimeoutRef.current = setTimeout(() => {
+        clearPulseArtifacts()
+        pulseTimeoutRef.current = null
+      }, 450)
+    },
+    [clearPulseArtifacts],
+  )
+
   const animateCandle = useCallback((from, to) => {
     if (!seriesRef.current || !to) return
     if (candleAnimationRef.current) {
@@ -742,6 +835,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         return seriesRef.current
       },
       focusAtTime,
+      pulseTrade: pulseTradeElements,
+      clearPulse: clearPulseArtifacts,
     })
 
     resizeObserverRef.current = new ResizeObserver(([entry]) => {
@@ -762,10 +857,15 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         clearTimeout(focusTimeoutRef.current)
         focusTimeoutRef.current = null
       }
+      if (pulseTimeoutRef.current) {
+        clearTimeout(pulseTimeoutRef.current)
+        pulseTimeoutRef.current = null
+      }
       if (candleAnimationRef.current) {
         cancelAnimationFrame(candleAnimationRef.current)
         candleAnimationRef.current = null
       }
+      clearPulseArtifacts()
       markersApiRef.current?.setMarkers?.([])
       markersApiRef.current = null
       paneMgrRef.current?.destroy()
@@ -852,7 +952,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   useEffect(() => {
     syncOverlays(resolvedOverlays, tradeMarkers, tradeMarkerTooltips)
-  }, [resolvedOverlays, tradeMarkerTooltips, tradeMarkers, syncOverlays])
+  }, [candleData, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, syncOverlays])
 
   useEffect(() => {
     updateViewport(tradeSegmentsRef.current || [])
