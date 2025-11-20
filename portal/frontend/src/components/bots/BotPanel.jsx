@@ -39,18 +39,6 @@ export function BotPanel() {
     if (!Number.isFinite(numeric)) return '—'
     return numeric <= 0 ? 'Instant' : `${numeric.toFixed(2)}x`
   }, [])
-  const playbackLabelFor = useCallback((bot) => {
-    const raw =
-      bot?.playback_speed ??
-      bot?.runtime?.playback_speed ??
-      bot?.config?.playback_speed ??
-      10
-    const value = Number(raw)
-    if (!Number.isFinite(value)) return '—'
-    if (value <= 0) return 'Instant'
-    return `${value.toFixed(2)}x`
-  }, [])
-
   const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
     if (next === prev) return true
     const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
@@ -505,7 +493,6 @@ export function BotPanel() {
                 key={bot.id}
                 bot={bot}
                 strategyLookup={strategyLookup}
-                playbackLabelFor={playbackLabelFor}
                 describeRange={describeRange}
                 statusBadge={statusBadge}
                 onStart={handleStart}

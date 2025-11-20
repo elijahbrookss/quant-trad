@@ -16,7 +16,6 @@ const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').t
 export const BotCard = memo(function BotCard({
   bot,
   strategyLookup,
-  playbackLabelFor,
   describeRange,
   statusBadge,
   onStart,
@@ -48,15 +47,11 @@ export const BotCard = memo(function BotCard({
   const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
   const showResume = runtimeStatus === 'paused'
   const timeframeLabel = describeBotMeta(bot, 'timeframe')
-  const datasourceLabel = describeBotMeta(bot, 'datasource')
-  const exchangeLabel = describeBotMeta(bot, 'exchange')
+  const symbolLabel = describeBotMeta(bot, 'symbol')
   const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
   const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
   const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
-  const keyStats = ['total_trades', 'wins', 'losses', 'win_rate']
-  const statsEntries = keyStats
-    .map((key) => ({ key, value: bot.last_stats?.[key] ?? bot.runtime?.stats?.[key] }))
-    .filter((entry) => entry.value !== undefined && entry.value !== null)
+  const statsEntries = buildStats(bot)
   const runTypeLabel = (bot.run_type || 'backtest').replace('_', ' ')
   const runTypePill = runTypeLabel.toUpperCase()
 
@@ -65,13 +60,9 @@ export const BotCard = memo(function BotCard({
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.32em] text-slate-300">
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/30 bg-white/10 px-3 py-1 text-[10px] font-semibold text-white">
+            <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] px-3 py-1 text-[10px] font-semibold text-white">
               {runTypePill}
             </span>
-            {timeframeLabel ? (
-              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">TF {timeframeLabel}</span>
-            ) : null}
-            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-slate-200">{playbackLabelFor(bot)}</span>
           </div>
           <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
             {assignedNames.length ? assignedNames.join(', ') : 'No strategies assigned'}
@@ -80,8 +71,7 @@ export const BotCard = memo(function BotCard({
           <p className="text-xs text-slate-400">{describeRange(bot)}</p>
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
             {timeframeLabel ? <MetaPill label="Timeframe" value={timeframeLabel} /> : null}
-            {datasourceLabel ? <MetaPill label="Datasource" value={datasourceLabel} /> : null}
-            {exchangeLabel ? <MetaPill label="Exchange" value={exchangeLabel} /> : null}
+            {symbolLabel ? <MetaPill label="Symbol" value={symbolLabel} /> : null}
           </div>
         </div>
 
@@ -115,6 +105,7 @@ export const BotCard = memo(function BotCard({
               icon={runtimeStatus === 'completed' ? <RotateCw className="size-4" /> : <Play className="size-4" />}
               label={pendingStart === bot.id ? 'Starting…' : startLabel}
               busy={pendingStart === bot.id}
+              variant="accent"
             />
           ) : null}
           <ActionButton
@@ -122,6 +113,7 @@ export const BotCard = memo(function BotCard({
             icon={<Trash2 className="size-4" />}
             label={pendingDelete === bot.id ? 'Deleting…' : 'Delete'}
             busy={pendingDelete === bot.id}
+            variant="danger"
           />
         </div>
       </div>
@@ -129,9 +121,26 @@ export const BotCard = memo(function BotCard({
       {statsEntries.length ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {statsEntries.map((entry) => (
-            <div key={entry.key} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">{entry.key.replace('_', ' ')}</p>
-              <p className="text-sm text-white">{entry.value}</p>
+            <div
+              key={entry.key}
+              className={`rounded-xl border border-white/10 px-3 py-2 ${
+                entry.key === 'net_pnl' ? 'bg-white/5' : 'bg-white/[0.04]'
+              }`}
+            >
+              <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">{entry.label}</p>
+              <p
+                className={`text-sm font-semibold ${
+                  entry.key === 'net_pnl'
+                    ? entry.tone === 'positive'
+                      ? 'text-emerald-300'
+                      : entry.tone === 'negative'
+                        ? 'text-rose-300'
+                        : 'text-slate-200'
+                    : 'text-white'
+                }`}
+              >
+                {entry.value}
+              </p>
             </div>
           ))}
         </div>
@@ -156,18 +165,60 @@ function MetaPill({ label, value }) {
   )
 }
 
-function ActionButton({ onClick, icon, label, busy }) {
+function ActionButton({ onClick, icon, label, busy, variant = 'ghost' }) {
+  const variantClass = {
+    accent:
+      'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-white hover:border-[color:var(--accent-alpha-80)]',
+    danger:
+      'border-rose-400/60 bg-rose-500/10 text-rose-100 hover:border-rose-300 hover:bg-rose-500/15',
+    ghost: 'border-white/20 bg-white/5 text-white hover:border-white/40',
+  }[variant]
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs font-semibold text-white transition hover:border-white/40"
+      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold transition ${variantClass} disabled:cursor-not-allowed disabled:opacity-60`}
       disabled={busy}
     >
       {icon}
       <span>{label}</span>
     </button>
   )
+}
+
+function buildStats(bot) {
+  const source = bot?.last_stats || bot?.runtime?.stats || {}
+  const entries = [
+    { key: 'net_pnl', label: 'NET PNL', value: source.net_pnl },
+    { key: 'total_trades', label: 'TOTAL TRADES', value: source.total_trades },
+    { key: 'wins', label: 'WINS', value: source.wins },
+    { key: 'losses', label: 'LOSSES', value: source.losses },
+    { key: 'win_rate', label: 'WIN RATE', value: source.win_rate },
+  ]
+
+  return entries
+    .map((entry) => {
+      if (entry.value === undefined || entry.value === null) return null
+      if (entry.key === 'net_pnl') {
+        const numeric = Number(entry.value)
+        const tone = Number.isFinite(numeric)
+          ? numeric > 0
+            ? 'positive'
+            : numeric < 0
+              ? 'negative'
+              : 'neutral'
+          : 'neutral'
+        return {
+          ...entry,
+          tone,
+          value: Number.isFinite(numeric) ? numeric.toFixed(2) : entry.value,
+        }
+      }
+
+      return { ...entry, value: entry.value }
+    })
+    .filter(Boolean)
 }
 
 export function sortBots(bots) {
