@@ -152,6 +152,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const overlayHandlesRef = useRef({ priceLines: [] })
   const barSpacingRef = useRef(null)
   const levelSeriesRef = useRef(null)
+  const latestCandlesRef = useRef([])
   const tradeSegmentsRef = useRef([])
   const diagLoggedRef = useRef(false)
   const markerCacheRef = useRef([])
@@ -203,6 +204,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
     return normalized.sort((a, b) => a.time - b.time)
   }, [resolvedCandles])
+
+  useEffect(() => {
+    latestCandlesRef.current = candleData
+  }, [candleData])
 
   const activeTradeAtLastCandle = useMemo(() => {
     const lastTime = candleData[candleData.length - 1]?.time
@@ -720,6 +725,31 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     [candleLookup],
   )
 
+  const zoomIn = useCallback(() => {
+    const ts = chartRef.current?.timeScale?.()
+    ts?.zoomIn?.()
+  }, [])
+
+  const zoomOut = useCallback(() => {
+    const ts = chartRef.current?.timeScale?.()
+    ts?.zoomOut?.()
+  }, [])
+
+  const centerView = useCallback(() => {
+    const ts = chartRef.current?.timeScale?.()
+    if (!ts) return
+    const candles = latestCandlesRef.current || []
+    const last = candles[candles.length - 1]?.time
+    const first = candles[0]?.time
+    if (Number.isFinite(last) && Number.isFinite(first)) {
+      const span = Math.max(90, Math.round((last - first) / 4))
+      ts.setVisibleRange({ from: last - span, to: last })
+      ts.scrollToPosition(0, false)
+    } else {
+      ts.scrollToRealTime()
+    }
+  }, [])
+
   const clearPulseArtifacts = useCallback(() => {
     pulseLineHandlesRef.current.forEach((handle) => {
       try {
@@ -850,6 +880,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       focusAtTime,
       pulseTrade: pulseTradeElements,
       clearPulse: clearPulseArtifacts,
+      zoomIn,
+      zoomOut,
+      centerView,
     })
 
     resizeObserverRef.current = new ResizeObserver(([entry]) => {

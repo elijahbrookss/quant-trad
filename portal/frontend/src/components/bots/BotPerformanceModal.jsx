@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { X, Pause, RotateCw, ChevronDown } from 'lucide-react'
+import { X, Pause, RotateCw, ChevronDown, ZoomIn, ZoomOut, Crosshair } from 'lucide-react'
 import { BotLensChart, toSec } from './BotLensChart.jsx'
 import { useChartValue } from '../../contexts/ChartStateContext.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
@@ -434,6 +434,21 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const playbackLabel = playbackDraft <= 0 ? 'Instant' : `${playbackDraft.toFixed(2)}x`
 
+  const handleZoomIn = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.zoomIn?.()
+  }, [chartHandle])
+
+  const handleZoomOut = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.zoomOut?.()
+  }, [chartHandle])
+
+  const handleCenterView = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.centerView?.()
+  }, [chartHandle])
+
   const toggleStrategyDetails = useCallback((strategyId) => {
     if (!strategyId) return
     setExpandedStrategies((prev) => {
@@ -629,10 +644,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const progressDisplay =
     typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
-  const timerDisplay =
-    typeof runtime?.next_bar_in_seconds === 'number'
-      ? `${Math.max(0, Math.round(runtime.next_bar_in_seconds))}s`
-      : '—'
   const playbackDisabled = isBooting
   const canPause = runtimeStatus === 'running' && (bot?.mode || '').toLowerCase() === 'walk-forward'
   const canResume = runtimeStatus === 'paused'
@@ -659,34 +670,22 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
         <div className="flex flex-1 flex-col gap-6 overflow-auto">
           <div className="rounded-2xl border border-white/5 bg-black/20 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px] uppercase tracking-[0.25em] text-slate-400">
-              <div className="flex items-center gap-2">
-                <span>Status</span>
-                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
-                  {statusDisplay}
-                </span>
+            <div className="flex flex-wrap items-center gap-3 text-[10px] uppercase tracking-[0.25em] text-slate-400">
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
+                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Status</span>
+                <span className="font-semibold tracking-normal text-white">{statusDisplay}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <span>Progress</span>
-                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
-                  {progressDisplay}
-                </span>
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
+                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Progress</span>
+                <span className="font-semibold tracking-normal text-white">{progressDisplay}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <span>Next bar</span>
-                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
-                  {timerDisplay}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span>Feed</span>
-                <span className="rounded-md bg-white/5 px-2 py-1 text-sm font-semibold tracking-normal text-white">
-                  {streamStatus}
-                </span>
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
+                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Feed</span>
+                <span className="font-semibold tracking-normal text-white">{streamStatus}</span>
               </div>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {canPause ? (
               <button
                 type="button"
@@ -708,70 +707,90 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </button>
             ) : null}
           </div>
-          <div
-            className={`rounded-2xl border border-white/5 bg-black/15 px-3 py-3 transition-opacity ${
-              playbackDisabled ? 'pointer-events-none opacity-60' : ''
-            }`}
-          >
-            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-slate-400">
-              <span>Playback speed</span>
-              <span className="text-sm font-semibold text-white">
-                {playbackLabel}
-                {speedSaving ? ' • syncing…' : ''}
-              </span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="25"
-              step="0.25"
-              value={playbackDraft}
-              onChange={handlePlaybackInput}
-              disabled={playbackDisabled}
-              className="mt-2 w-full accent-sky-400 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-runnable-track]:h-1"
-            />
-            <div className="mt-1 flex justify-between text-[10px] uppercase tracking-[0.2em] text-slate-500">
-              <span>Instant</span>
-              <span>10x</span>
-              <span>25x</span>
-            </div>
-            <div className="mt-1 grid gap-1 text-[11px] text-slate-500 sm:grid-cols-3">
-              <span>Instant = skip visuals</span>
-              <span>10x = normal speed</span>
-              <span>25x = fast mode (reduced detail)</span>
-            </div>
-          </div>
           <div className="relative">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              {simTimeLabel ? (
-                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
-                  {simTimeLabel}
+            <div className="mb-3 flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                {simTimeLabel ? (
+                  <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
+                    {simTimeLabel}
+                  </div>
+                ) : (
+                  <span className="text-xs text-slate-500">&nbsp;</span>
+                )}
+              </div>
+              <div className="flex flex-1 justify-center">
+                {renderedChip ? (
+                  <div
+                    className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow transition-all duration-200 ${
+                      chipVisible ? 'border-sky-400/30 bg-white/5 opacity-100' : 'border-sky-400/10 bg-white/0 opacity-0'
+                    } ${chipVisible ? 'translate-y-0' : '-translate-y-1'}`}
+                    onMouseEnter={() => handleChipHover(true)}
+                    onMouseLeave={() => handleChipHover(false)}
+                  >
+                    <span
+                      className={`h-2.5 w-2.5 rounded-full ${
+                        renderedChip.direction === 'short'
+                          ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20'
+                          : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
+                      }`}
+                    />
+                    <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
+                    <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{renderedChip.r}</span>
+                    <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{renderedChip.pnl}</span>
+                    <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {renderedChip.sl}</span>
+                    <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {renderedChip.tp}</span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 shadow">
+                  <button
+                    type="button"
+                    onClick={handleZoomOut}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
+                    aria-label="Zoom out"
+                  >
+                    <ZoomOut className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCenterView}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
+                    aria-label="Center view"
+                  >
+                    <Crosshair className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleZoomIn}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
+                    aria-label="Zoom in"
+                  >
+                    <ZoomIn className="size-4" />
+                  </button>
                 </div>
-              ) : (
-                <span className="text-xs text-slate-500">&nbsp;</span>
-              )}
-              {renderedChip ? (
                 <div
-                  className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow transition-all duration-200 ${
-                    chipVisible ? 'border-sky-400/30 bg-white/5 opacity-100' : 'border-sky-400/10 bg-white/0 opacity-0'
-                  } ${chipVisible ? 'translate-y-0' : '-translate-y-1'}`}
-                  onMouseEnter={() => handleChipHover(true)}
-                  onMouseLeave={() => handleChipHover(false)}
+                  className={`inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white shadow transition ${
+                    playbackDisabled ? 'pointer-events-none opacity-60' : ''
+                  }`}
                 >
-                  <span
-                    className={`h-2.5 w-2.5 rounded-full ${
-                      renderedChip.direction === 'short'
-                        ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20'
-                        : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
-                    }`}
+                  <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Speed</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="25"
+                    step="0.25"
+                    value={playbackDraft}
+                    onChange={handlePlaybackInput}
+                    disabled={playbackDisabled}
+                    className="h-1 w-28 accent-sky-400 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-runnable-track]:h-1"
                   />
-                  <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
-                  <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{renderedChip.r}</span>
-                  <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{renderedChip.pnl}</span>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {renderedChip.sl}</span>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {renderedChip.tp}</span>
+                  <span className="text-xs font-semibold text-white">
+                    {playbackLabel}
+                    {speedSaving ? ' •' : ''}
+                  </span>
                 </div>
-              ) : null}
+              </div>
             </div>
             <div className="relative min-h-[360px]">
               <div

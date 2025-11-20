@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw, RefreshCw, Search } from 'lucide-react'
+import { Play, Square, Eye, PlusCircle, Trash2, Pause, RotateCw, RefreshCw, Search, Loader2 } from 'lucide-react'
 import {
   listBots,
   createBot,
@@ -50,6 +50,7 @@ export function BotPanel() {
   const [strategiesLoading, setStrategiesLoading] = useState(false)
   const [strategyError, setStrategyError] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
+  const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
   const [botStreamState, setBotStreamState] = useState('idle')
   const botStreamRef = useRef(null)
@@ -268,12 +269,25 @@ export function BotPanel() {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
+    setPendingStart(botId)
+    setBots((prev) =>
+      prev.map((bot) =>
+        bot.id === botId
+          ? {
+              ...bot,
+              runtime: { ...(bot.runtime || {}), status: 'starting' },
+            }
+          : bot,
+      ),
+    )
     try {
       const payload = await startBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
       setError(err?.message || 'Unable to start bot')
+    } finally {
+      setPendingStart(null)
     }
   }
 
@@ -336,7 +350,7 @@ export function BotPanel() {
             ? 'bg-sky-500/10 text-sky-200 border-sky-400/30'
             : 'bg-slate-600/20 text-slate-200 border-white/10'
     return (
-      <span className={`inline-flex items-center rounded-full border px-3 py-0.5 text-[11px] uppercase tracking-[0.3em] ${tone}`}>
+      <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.25em] ${tone}`}>
         {status || 'idle'}
       </span>
     )
@@ -649,10 +663,6 @@ export function BotPanel() {
                   : 0
             const progressPct = `${Math.round(progressValue * 1000) / 10}%`
             const progressWidth = `${Math.min(100, Math.max(0, progressValue * 100))}%`
-            const nextBarLabel =
-              typeof bot.runtime?.next_bar_in_seconds === 'number'
-                ? `${Math.max(0, Math.round(bot.runtime.next_bar_in_seconds))}s`
-                : '—'
             const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
             const showResume = runtimeStatus === 'paused'
             const timeframeLabel = describeBotMeta(bot, 'timeframe')
@@ -675,7 +685,7 @@ export function BotPanel() {
               .filter((entry) => entry.value !== undefined && entry.value !== null)
 
             return (
-              <article key={bot.id} className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-5">
+              <article key={bot.id} className="flex flex-col gap-3 rounded-2xl border border-white/5 bg-black/30 p-4 shadow-sm">
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
                     <p className="text-sm uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
@@ -691,11 +701,6 @@ export function BotPanel() {
                   <span>
                     Progress: <span className="text-slate-200">{progressPct}</span>
                   </span>
-                  {bot.mode === 'walk-forward' ? (
-                    <span>
-                      Next bar: <span className="text-slate-200">{nextBarLabel}</span>
-                    </span>
-                  ) : null}
                 </div>
                 <div className="h-2 w-full rounded-full bg-white/5">
                   <div className="h-full rounded-full bg-emerald-500/60 transition-all" style={{ width: progressWidth }} />
@@ -712,13 +717,15 @@ export function BotPanel() {
                 ) : null}
                 <div className="flex flex-wrap items-center gap-2">
                   {canStart ? (
-                    <button
-                      type="button"
-                      onClick={() => handleStart(bot.id)}
-                      className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10"
-                    >
-                      <Play className="size-4" /> {startLabel}
-                    </button>
+                  <button
+                    type="button"
+                    onClick={() => handleStart(bot.id)}
+                    disabled={pendingStart === bot.id}
+                    className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-60"
+                  >
+                    {pendingStart === bot.id ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                    {pendingStart === bot.id ? 'Starting…' : startLabel}
+                  </button>
                   ) : null}
                   {canStop ? (
                     <button
