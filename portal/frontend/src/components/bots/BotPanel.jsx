@@ -567,7 +567,7 @@ export function BotPanel() {
           <div>
             <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
             <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
-            <p className="text-sm text-slate-400">Launch instant or walk-forward backtests wired to live strategies.</p>
+            <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
           </div>
           <div className="text-xs text-slate-400">
             {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
@@ -597,63 +597,59 @@ export function BotPanel() {
           <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{refreshSummary}</span>
         </div>
         <form onSubmit={handleCreate} className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
-              <input
-                type="text"
-                name="name"
-                value={form.name}
-                onChange={handleChange}
-                className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-slate-100 focus:border-[color:var(--accent-alpha-50)] focus:outline-none"
-                placeholder="Market Profile Bot"
-                required
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Mode</label>
-              <select
-                name="mode"
-                value={form.mode}
-                onChange={handleChange}
-                className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-              >
-                <option value="instant">Instant</option>
-                <option value="walk-forward">Walk-forward</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Run type</label>
-              <select
-                name="run_type"
-                value={form.run_type}
-                onChange={handleChange}
-                className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-              >
-                <option value="backtest">Backtest</option>
-                <option value="sim_trade">Sim trade</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-400">
-                <span>Playback speed</span>
-                <span className="text-xs normal-case tracking-normal text-white">
-                  {formatPlaybackValue(form.playback_speed)}
+          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-slate-200">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-col gap-1 flex-1">
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
+                <input
+                  type="text"
+                  name="name"
+                  value={form.name}
+                  onChange={handleChange}
+                  className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-slate-100 focus:border-[color:var(--accent-alpha-50)] focus:outline-none"
+                  placeholder="Market Profile Bot"
+                  required
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Mode</label>
+                <span className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs uppercase tracking-[0.3em] text-slate-200">
+                  Walk-forward
                 </span>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="25"
-                step="0.5"
-                name="playback_speed"
-                value={form.playback_speed}
-                onChange={handlePlaybackSpeedChange}
-                className="w-full accent-[color:var(--accent-alpha-60)]"
-              />
-              <p className="text-[11px] text-slate-500">
-                0 = instant playback. 10x is the normal pace; drag right to accelerate walk-forward loops.
-              </p>
+            </div>
+            <div className="grid gap-2 rounded-xl border border-white/10 bg-black/30 p-3 md:grid-cols-2 md:items-center">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Run type</label>
+                <select
+                  name="run_type"
+                  value={form.run_type}
+                  onChange={handleChange}
+                  className="rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                >
+                  <option value="backtest">Backtest</option>
+                  <option value="sim_trade">Sim trade</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Playback speed</label>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-900/40 px-3 py-2">
+                  <input
+                    type="range"
+                    min="0"
+                    max="25"
+                    step="0.5"
+                    name="playback_speed"
+                    value={form.playback_speed}
+                    onChange={handlePlaybackSpeedChange}
+                    className="w-full accent-[color:var(--accent-alpha-60)]"
+                  />
+                  <span className="ml-3 text-xs font-semibold text-white">{formatPlaybackValue(form.playback_speed)}</span>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Drag left for instant skips, right to accelerate walk-forward playback.
+                </p>
+              </div>
             </div>
             {form.run_type === 'backtest' ? (
               <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
@@ -666,7 +662,7 @@ export function BotPanel() {
               </div>
             ) : null}
           </div>
-          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
+          <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-slate-200">
             <div className="flex items-center justify-between">
               <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Strategies</label>
               {!hasStrategies ? (
@@ -785,7 +781,7 @@ export function BotPanel() {
             return (
               <article
                 key={bot.id}
-                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 via-white/0 to-slate-900/60 p-5 shadow-lg shadow-black/30"
+                className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950/80 via-slate-900/40 to-slate-900/20 p-5 shadow-lg shadow-black/30"
               >
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="space-y-2">
