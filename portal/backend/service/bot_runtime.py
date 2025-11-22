@@ -772,14 +772,27 @@ class BotRuntime:
         else:
             start_iso, end_iso = self._resolve_live_window()
 
-        df = fetch_ohlcv(
-            symbol,
-            start_iso,
-            end_iso,
-            timeframe,
-            datasource=datasource,
-            exchange=exchange,
-        )
+        try:
+            df = fetch_ohlcv(
+                symbol,
+                start_iso,
+                end_iso,
+                timeframe,
+                datasource=datasource,
+                exchange=exchange,
+            )
+        except ValueError as exc:
+            if not self.allow_placeholder_candles:
+                raise
+            logger.warning(
+                "bot_runtime_fetch_failed | bot=%s | strategy=%s | symbol=%s | timeframe=%s | error=%s",
+                self.bot_id,
+                strategy.get("id"),
+                symbol,
+                timeframe,
+                exc,
+            )
+            df = None
         candles: List[Candle]
         if df is None or getattr(df, "empty", False):
             logger.warning(
@@ -1170,7 +1183,12 @@ class BotRuntime:
 
     def _intrabar_cache_key(self, series: StrategySeries, start: datetime, interval: str) -> str:
         epoch = int(start.timestamp())
-        return f"{series.strategy_id}:{series.symbol}:{series.timeframe}:{interval}:{epoch}"
+        strategy_key = self._strategy_key(series)
+        return f"{strategy_key}:{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{epoch}"
+
+    @staticmethod
+    def _strategy_key(series: StrategySeries) -> str:
+        return str(getattr(series, "strategy_id", getattr(series, "id", id(series))))
 
     def _fetch_intrabar_candles(
         self,
@@ -1233,12 +1251,13 @@ class BotRuntime:
         return sub_candles
 
     def _ensure_intrabar_snapshot(self, series: StrategySeries, candle: Candle) -> Dict[str, Any]:
-        snapshot = self._intrabar_snapshots.get(series.strategy_id)
+        strategy_key = self._strategy_key(series)
+        snapshot = self._intrabar_snapshots.get(strategy_key)
         if snapshot:
             return snapshot
         open_price = _coerce_float(candle.open, 0.0) or 0.0
         entry = {
-            "strategy_id": series.strategy_id,
+            "strategy_id": getattr(series, "strategy_id", None) or strategy_key,
             "time": candle.time,
             "open": open_price,
             "high": open_price,
@@ -1246,7 +1265,7 @@ class BotRuntime:
             "close": open_price,
             "end": candle.end or candle.time,
         }
-        self._intrabar_snapshots[series.strategy_id] = entry
+        self._intrabar_snapshots[strategy_key] = entry
         return entry
 
     def _update_intrabar_snapshot(

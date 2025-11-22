@@ -189,6 +189,13 @@ class CCXTProvider(BaseDataProvider):
 
             try:
                 batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+            except TypeError as exc:
+                if "params" in fetch_kwargs and "unexpected keyword" in str(exc):
+                    supports_params = False
+                    fetch_kwargs.pop("params", None)
+                    batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+                else:
+                    raise
             except Exception as exc:  # pragma: no cover - network interaction
                 raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
 
@@ -209,8 +216,6 @@ class CCXTProvider(BaseDataProvider):
             if cursor > until_ms:
                 break
 
-            if len(batch) < request_limit:
-                break
         else:  # pragma: no cover - defensive guard
             logger.warning(
                 "CCXT pagination limit reached for %s:%s between %s and %s",
