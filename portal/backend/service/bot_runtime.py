@@ -844,13 +844,21 @@ class BotRuntime:
                 config={"mode": self.run_type},
             )
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception(
+            if not self.allow_placeholder_candles:
+                logger.exception(
+                    "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
+                    self.bot_id,
+                    strategy.get("id"),
+                    exc,
+                )
+                return None
+            logger.warning(
                 "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
                 self.bot_id,
                 strategy.get("id"),
                 exc,
             )
-            return None
+            evaluation = {"chart_markers": {}}
 
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
@@ -1340,7 +1348,7 @@ class BotRuntime:
                 break
             self._pace_intrabar_step()
         if snapshot_used:
-            self._intrabar_snapshots.pop(series.strategy_id, None)
+            self._intrabar_snapshots.pop(self._strategy_key(series), None)
         return events
 
     @staticmethod
@@ -1939,7 +1947,7 @@ class BotRuntime:
         slice_candidates = list(primary.candles[:visible])
         ordered = sorted(slice_candidates, key=lambda candle: candle.time.timestamp())
         candles = [candle.to_dict() for candle in ordered]
-        snapshot = self._intrabar_snapshots.get(getattr(primary, "strategy_id", None))
+        snapshot = self._intrabar_snapshots.get(self._strategy_key(primary))
         if snapshot and candles:
             candles[-1] = self._merge_intrabar_snapshot_payload(candles[-1], snapshot)
         self._log_candle_sequence(
