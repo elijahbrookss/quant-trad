@@ -3,7 +3,7 @@ import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import pytest
 
@@ -27,6 +27,7 @@ def make_runtime(**overrides):
         "playback_speed": 10.0,
         "symbol": "ES",
         "timeframe": "15m",
+        "allow_placeholder_candles": True,
         "strategies_meta": [
             {
                 "id": "strategy-1",

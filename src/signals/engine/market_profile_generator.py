@@ -544,7 +544,9 @@ def _market_profile_overlay_adapter(
                     "accentColor": color,
                     "backgroundColor": _rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
                     "textColor": "#ffffff",
-                    "direction": metadata.get("pointer_direction") or bubble_direction,
+                    "direction": metadata.get("pointer_direction")
+                    or metadata.get("direction")
+                    or bubble_direction,
                     "bias": bias_label,
                     "subtype": "bubble",
                 }

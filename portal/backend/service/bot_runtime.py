@@ -32,6 +32,8 @@ DEFAULT_RISK = {
     "tick_size": 0.01,
 }
 
+DEFAULT_SIM_LOOKBACK_DAYS = 7
+
 MAX_LOG_ENTRIES = 500
 
 TRADE_OVERLAY_SOURCE = "trade_levels"
@@ -386,9 +388,10 @@ class LadderRiskEngine:
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
     ):
-        self.template = merge_templates(config)
+        provided_template = config or {}
+        self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
-        config_tick = _coerce_float(self.template.get("tick_size"))
+        config_tick = _coerce_float(provided_template.get("tick_size"))
         instrument_tick = _coerce_float(self.instrument.get("tick_size"))
         fallback_tick = _coerce_float(DEFAULT_RISK.get("tick_size"), 0.01)
         if config_tick not in (None, 0):
@@ -655,6 +658,7 @@ class BotRuntime:
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles", False))
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -705,6 +709,41 @@ class BotRuntime:
                 overlays.append(series.trade_overlay)
         self._chart_overlays = overlays
 
+    @staticmethod
+    def _placeholder_candles(
+        timeframe: Optional[str], start_iso: Optional[str], end_iso: Optional[str]
+    ) -> List[Candle]:
+        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
+
+        def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+            if not value:
+                return None
+            try:
+                cleaned = str(value).replace("Z", "+00:00")
+                return datetime.fromisoformat(cleaned)
+            except Exception:
+                return None
+
+        end_time = _parse_iso(end_iso) or datetime.now(timezone.utc)
+        start_time = _parse_iso(start_iso) or end_time - duration
+        start_time = start_time.astimezone(timezone.utc)
+        end_time = end_time.astimezone(timezone.utc)
+        base_prices = [100.0, 100.25, 100.5]
+        candles = []
+        for idx, price in enumerate(base_prices):
+            open_price = price
+            close_price = price + 0.05
+            candles.append(
+                Candle(
+                    time=start_time + idx * duration,
+                    open=open_price,
+                    high=max(open_price, close_price) + 0.05,
+                    low=min(open_price, close_price) - 0.05,
+                    close=close_price,
+                )
+            )
+        return candles
+
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
         for strategy in strategies:
@@ -741,7 +780,8 @@ class BotRuntime:
             datasource=datasource,
             exchange=exchange,
         )
-        if df is None or df.empty:
+        candles: List[Candle]
+        if df is None or getattr(df, "empty", False):
             logger.warning(
                 "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
                 self.bot_id,
@@ -749,25 +789,34 @@ class BotRuntime:
                 symbol,
                 timeframe,
             )
-            return None
+            if not self.allow_placeholder_candles:
+                return None
+            candles = self._placeholder_candles(timeframe, start_iso, end_iso)
+            if not candles:
+                return None
 
-        if not df.index.is_monotonic_increasing:
-            first_idx = df.index[0] if len(df.index) else None
-            second_idx = df.index[1] if len(df.index) > 1 else None
-            logger.warning(
-                "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
-                self.bot_id,
-                strategy.get("id"),
-                symbol,
-                timeframe,
-                first_idx,
-                second_idx,
-                len(df.index),
-            )
+        else:
+            if not df.index.is_monotonic_increasing:
+                first_idx = df.index[0] if len(df.index) else None
+                second_idx = df.index[1] if len(df.index) > 1 else None
+                logger.warning(
+                    "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
+                    self.bot_id,
+                    strategy.get("id"),
+                    symbol,
+                    timeframe,
+                    first_idx,
+                    second_idx,
+                    len(df.index),
+                )
 
-        candles = self._build_candles(df, timeframe)
-        if not candles:
-            return None
+            candles = self._build_candles(df, timeframe)
+            if not candles:
+                if not self.allow_placeholder_candles:
+                    return None
+                candles = self._placeholder_candles(timeframe, start_iso, end_iso)
+                if not candles:
+                    return None
         self._log_candle_sequence("build_series", strategy.get("id"), candles)
 
         try:
