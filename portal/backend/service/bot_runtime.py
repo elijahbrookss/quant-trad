@@ -632,6 +632,7 @@ class BotRuntime:
         self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
         self.state["playback_speed"] = self.playback_speed
+        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles"))
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -674,6 +675,8 @@ class BotRuntime:
             self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
             with self._lock:
                 self.state["playback_speed"] = self.playback_speed
+        if "allow_placeholder_candles" in payload:
+            self.allow_placeholder_candles = bool(payload.get("allow_placeholder_candles"))
 
     def _ensure_prepared(self) -> None:
         if self._prepared:
@@ -741,6 +744,8 @@ class BotRuntime:
             datasource=datasource,
             exchange=exchange,
         )
+        allow_placeholders = bool(self.config.get("allow_placeholder_candles", self.allow_placeholder_candles))
+        self.allow_placeholder_candles = allow_placeholders
         if df is None or df.empty:
             logger.warning(
                 "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
@@ -749,9 +754,15 @@ class BotRuntime:
                 symbol,
                 timeframe,
             )
-            return None
+            if not allow_placeholders:
+                return None
+            candles = self._placeholder_candles(start_iso, end_iso, timeframe)
+        else:
+            candles = self._build_candles(df, timeframe)
+            if not candles:
+                return None
 
-        if not df.index.is_monotonic_increasing:
+        if df is not None and not df.index.is_monotonic_increasing:
             first_idx = df.index[0] if len(df.index) else None
             second_idx = df.index[1] if len(df.index) > 1 else None
             logger.warning(
@@ -765,9 +776,6 @@ class BotRuntime:
                 len(df.index),
             )
 
-        candles = self._build_candles(df, timeframe)
-        if not candles:
-            return None
         self._log_candle_sequence("build_series", strategy.get("id"), candles)
 
         try:
@@ -1067,6 +1075,58 @@ class BotRuntime:
             "source": TRADE_OVERLAY_SOURCE,
             "payload": {"segments": segments},
         }
+
+    def _placeholder_candles(
+        self,
+        start_iso: Optional[str],
+        end_iso: Optional[str],
+        timeframe: Optional[str],
+    ) -> List[Candle]:
+        """Construct synthetic candles when historical data is unavailable."""
+
+        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
+        end_ts = pd.to_datetime(end_iso, utc=True).to_pydatetime() if end_iso else None
+        start_ts = pd.to_datetime(start_iso, utc=True).to_pydatetime() if start_iso else None
+        if end_ts is None:
+            end_ts = datetime.utcnow().replace(tzinfo=timezone.utc)
+        if start_ts is None:
+            start_ts = end_ts - duration * 10
+        if start_ts > end_ts:
+            start_ts, end_ts = end_ts, start_ts
+        max_candles = int(((end_ts - start_ts) / duration) + 1) if duration else 1
+        max_candles = max(1, min(max_candles, 500))
+        candles: List[Candle] = []
+        current = start_ts
+        price = 100.0
+        for _ in range(max_candles):
+            end_time = current + duration if duration else current
+            candles.append(
+                Candle(
+                    time=current,
+                    open=price,
+                    high=price + 0.5,
+                    low=price - 0.5,
+                    close=price + 0.1,
+                    end=end_time,
+                )
+            )
+            current = end_time
+            price += 0.1
+            if current >= end_ts:
+                break
+        if not candles:
+            fallback_end = start_ts + duration if duration else start_ts
+            candles.append(
+                Candle(
+                    time=start_ts,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    end=fallback_end,
+                )
+            )
+        return candles
 
     @staticmethod
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:

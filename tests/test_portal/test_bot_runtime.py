@@ -25,6 +25,7 @@ def make_runtime(**overrides):
         "runtime_mode": "backtest",
         "mode": "walk-forward",
         "playback_speed": 10.0,
+        "allow_placeholder_candles": True,
         "symbol": "ES",
         "timeframe": "15m",
         "strategies_meta": [
@@ -38,6 +39,33 @@ def make_runtime(**overrides):
     }
     config.update(overrides)
     return BotRuntime("bot-test", config, **runtime_kwargs)
+
+
+@pytest.mark.unit
+def test_build_series_placeholder_flag(monkeypatch):
+    runtime = make_runtime(allow_placeholder_candles=False)
+    strategy = runtime.config["strategies_meta"][0]
+
+    monkeypatch.setattr(
+        "portal.backend.service.bot_runtime.fetch_ohlcv",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "portal.backend.service.bot_runtime.strategy_service.generate_strategy_signals",
+        lambda **kwargs: {"chart_markers": {}},
+    )
+    monkeypatch.setattr(BotRuntime, "_indicator_overlay_entries", lambda *args, **kwargs: [])
+
+    series = runtime._build_series_for_strategy(strategy)
+
+    assert series is None
+
+    runtime.config["allow_placeholder_candles"] = True
+
+    series = runtime._build_series_for_strategy(strategy)
+
+    assert series is not None
+    assert series.candles
 
 
 @pytest.mark.unit
