@@ -417,6 +417,7 @@ def _evaluate_level(
             "prior_confirmed_side": prior_confirmed_side,
             "trigger_bar_index": position,
             "trigger_index_label": breakout_end_idx,
+            "direction": detected_level_kind,
         }
 
         for column in ("open", "high", "low", "volume"):
@@ -424,7 +425,7 @@ def _evaluate_level(
                 meta[f"trigger_{column}"] = float(last_bar[column])
 
         if trade_direction:
-            meta["direction"] = trade_direction
+            meta["trade_direction"] = trade_direction
 
         meta.setdefault("rule_id", _PIVOT_BREAKOUT_RULE_ID)
         meta.setdefault("pattern_id", _PIVOT_BREAKOUT_RULE_ID)
@@ -888,7 +889,7 @@ def pivot_signals_to_overlays(
             elif lookback:
                 meta_label = f"LB {lookback}"
 
-            direction_hint = str(metadata.get("direction", "")).strip().lower()
+            direction_hint = str(metadata.get("trade_direction") or metadata.get("direction", "")).strip().lower()
             if direction_hint not in {"long", "short"}:
                 breakout_dir = str(metadata.get("breakout_direction", "")).lower()
                 if breakout_dir == "above":

@@ -196,9 +196,20 @@ class InteractiveBrokersProvider(BaseDataProvider):
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
         frame["timestamp"] = pd.to_datetime(frame["date"], utc=True)
-        frame = frame[(frame["timestamp"] >= start_dt) & (frame["timestamp"] <= end_dt)]
+        filtered = frame[(frame["timestamp"] >= start_dt) & (frame["timestamp"] <= end_dt)]
 
-        return frame[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+        if filtered.empty:
+            logger.info(
+                "ibkr_fetch_preserve_unfiltered | symbol=%s | interval=%s | start=%s | end=%s | bars=%s",
+                symbol,
+                interval,
+                start_dt.isoformat(),
+                end_dt.isoformat(),
+                len(frame),
+            )
+            filtered = frame
+
+        return filtered[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
