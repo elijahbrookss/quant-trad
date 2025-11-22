@@ -168,19 +168,17 @@ class CCXTProvider(BaseDataProvider):
             approx_points = max(1, math.ceil(remaining_ms / step_ms))
             request_limit = max(1, min(limit_hint, approx_points))
 
-            params = {}
+            fetch_kwargs = {
+                "timeframe": interval,
+                "since": cursor,
+                "limit": request_limit,
+            }
             if end_param:
                 capped_end = min(until_ms, cursor + request_limit * step_ms)
-                params[end_param] = capped_end
+                fetch_kwargs["params"] = {end_param: capped_end}
 
             try:
-                batch = self._exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=interval,
-                    since=cursor,
-                    limit=request_limit,
-                    params=params or None,
-                )
+                batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
             except Exception as exc:  # pragma: no cover - network interaction
                 raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
 
