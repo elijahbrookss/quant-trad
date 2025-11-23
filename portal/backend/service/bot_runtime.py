@@ -1648,8 +1648,7 @@ class BotRuntime:
         return True
 
     def pause(self) -> None:
-        if not self._prepared:
-            return
+        self._ensure_prepared()
         self._paused = True
         self._pause_event.clear()
         self._next_bar_at = None
@@ -1659,8 +1658,7 @@ class BotRuntime:
         self._push_update("pause")
 
     def resume(self) -> None:
-        if not self._prepared:
-            return
+        self._ensure_prepared()
         self._paused = False
         self._pause_event.set()
         with self._lock:
