@@ -1,11 +1,14 @@
 from datetime import date
-from notion_client import create_release_page
-
+from .notion_client import create_release_page
+import json
 if __name__ == "__main__":
     page = create_release_page(
-        name="Test Release via Script",
-        summary="Testing simple Notion schema wiring.",
+        name="v0.0.4 Single DB responses",
+        summary="Testing responses stored in the release page body.",
+        branch="feature/single-db",
         release_date=date.today(),
-        branch="feature/jorge/notion-integration",
+        #social_post="We now store response content directly inside the release page ",
+        json_obj= None,
     )
-    print("Created page:", page["id"])
+
+    print("Created release page:", page["id"])
