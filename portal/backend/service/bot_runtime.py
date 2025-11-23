@@ -1553,9 +1553,18 @@ class BotRuntime:
         if interval <= 0:
             if update_next_bar:
                 self._next_bar_at = None
+                with self._lock:
+                    self.state.update({"next_bar_at": None, "next_bar_in_seconds": None})
             return
         if update_next_bar:
             self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
+            with self._lock:
+                self.state.update(
+                    {
+                        "next_bar_at": _isoformat(self._next_bar_at),
+                        "next_bar_in_seconds": self._seconds_until_next_bar(),
+                    }
+                )
         target = time.time() + interval
         while not self._stop.is_set():
             if not self._pause_event.wait(timeout=0.2):
@@ -1876,6 +1885,8 @@ class BotRuntime:
         with self._lock:
             payload = dict(self.state)
         payload.setdefault("stats", self._last_stats)
+        if "next_bar_at" not in payload:
+            payload["next_bar_at"] = _isoformat(self._next_bar_at)
         if "next_bar_in_seconds" not in payload:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
         return payload
