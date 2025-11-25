@@ -8,7 +8,6 @@ if __name__ == "__main__":
         branch="feature/single-db",
         release_date=date.today(),
         #social_post="We now store response content directly inside the release page ",
-        json_obj= None,
     )
 
     print("Created release page:", page["id"])

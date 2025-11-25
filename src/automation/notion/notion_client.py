@@ -49,7 +49,7 @@ def create_release_page(
     summary: str,
     release_date: date,
     branch: str,
-    json_obj: Optional[str] = None,
+    full_summary: str,
     social_post: Optional[str] = None,
     dev_post: Optional[str] = None,
 ):
@@ -57,7 +57,6 @@ def create_release_page(
     - Create a release row in the Releases DB
     - Write social post + JSON into the page body for that row
     """
-    json_blob = json.dumps(json_obj, indent=2) if json_obj is not None else None
     
     if release_date is None:
         release_date = date.today()
@@ -68,7 +67,6 @@ def create_release_page(
         summary=summary,
         release_date=release_date,
         branch=branch,
-        json_obj=json_blob,  # Optional, handy for scripts
     )
     
 
@@ -88,9 +86,9 @@ def create_release_page(
     page_id = page["id"]
     
     blocks = build_response_blocks(
+        full_summary=full_summary or "",
         social_post=social_post or "",
         dev_post=dev_post or "",
-        json_obj=json_blob,
     )
 
     content_resp = requests.patch(

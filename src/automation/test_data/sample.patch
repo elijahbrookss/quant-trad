@@ -11,4 +11,5 @@ index 1234567..abcdefg 100644
 +        """Set maximum number of trades per day"""
 +        self.max_trades = limit
 +        return True
+
 EOF

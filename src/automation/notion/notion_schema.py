@@ -14,7 +14,6 @@ RELEASE_DB_PROPERTIES = {
     "summary": "Summary",        # Text
     "release_date": "Release Date",  # Date
     "branch": "Branch",          # Text
-    "json_obj": "Metadata JSON",    # Text (optional)
 }
 
 RESPONSE_CHILD_PAGE_TITLE = "Changelog Responses"
@@ -28,7 +27,6 @@ def build_release_properties(
     summary: str,
     release_date: date,
     branch: str,
-    json_obj: str | None = None,
 ) -> dict:
     """
     Return the Notion 'properties' payload for a Release row.
@@ -58,22 +56,15 @@ def build_release_properties(
         },
     }
 
-    if json_obj is not None:
-        props[json_obj] = {
-            "rich_text": [
-                {"type": "text", "text": {"content": json_obj}}
-            ]
-        }
-
     return props
 
 
 
 def build_response_blocks(
     *,
+    full_summary: str,
     social_post: str,
     dev_post: str,
-    json_obj: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Blocks that go inside the release page as the 'response dump'."""
     blocks: List[Dict[str, Any]] = [
@@ -86,6 +77,24 @@ def build_response_blocks(
                 ]
             },
         },
+        {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": "Full Summary"}}
+                ]
+            },
+        },
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": full_summary}}
+                ]
+            },
+        },        
         {
             "object": "block",
             "type": "heading_3",
@@ -123,33 +132,5 @@ def build_response_blocks(
             },
         },
     ]
-
-    if json_obj is not None:
-        blocks.extend(
-            [
-                {
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {
-                        "rich_text": [
-                            {"type": "text", "text": {"content": "Metadata JSON"}}
-                        ]
-                    },
-                },
-                {
-                    "object": "block",
-                    "type": "code",
-                    "code": {
-                        "language": "json",
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": json_obj},
-                            }
-                        ],
-                    },
-                },
-            ]
-        )
 
     return blocks
