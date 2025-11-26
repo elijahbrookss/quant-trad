@@ -44,7 +44,7 @@ def make_runtime(**overrides):
 @pytest.mark.unit
 def test_bot_runtime_snapshot_exposes_timer_fields():
     runtime = make_runtime()
-    future = datetime.utcnow() + timedelta(seconds=3)
+    future = datetime.now(timezone.utc) + timedelta(seconds=3)
     runtime._next_bar_at = future  # emulate scheduled bar
 
     snapshot = runtime.snapshot()
@@ -458,7 +458,7 @@ def test_ladder_risk_engine_uses_strategy_template():
     instrument = {"tick_size": 0.25, "quote_currency": "USD"}
     engine = LadderRiskEngine(template, instrument=instrument)
     candle = Candle(
-        time=datetime.utcnow(),
+        time=datetime.now(timezone.utc),
         open=100.0,
         high=101.0,
         low=99.5,

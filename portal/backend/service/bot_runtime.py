@@ -969,7 +969,7 @@ class BotRuntime:
     def _resolve_live_window(self) -> Tuple[str, str]:
         lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
         lookback_days = max(lookback_days, 1)
-        end_dt = datetime.utcnow()
+        end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(days=lookback_days)
         return _isoformat(start_dt), _isoformat(end_dt)
 
@@ -1557,7 +1557,7 @@ class BotRuntime:
                     self.state.update({"next_bar_at": None, "next_bar_in_seconds": None})
             return
         if update_next_bar:
-            self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
+            self._next_bar_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
             with self._lock:
                 self.state.update(
                     {
@@ -1582,7 +1582,7 @@ class BotRuntime:
 
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
-        end_iso = _isoformat(datetime.utcnow())
+        end_iso = _isoformat(datetime.now(timezone.utc))
         for series in self._series:
             last_time = series.candles[-1].time if series.candles else None
             if last_time is None:
@@ -1750,7 +1750,7 @@ class BotRuntime:
         entry: Dict[str, object] = {
             "id": str(uuid.uuid4()),
             "event": event,
-            "timestamp": _isoformat(datetime.utcnow()),
+            "timestamp": _isoformat(datetime.now(timezone.utc)),
         }
         if series is not None:
             entry["strategy_id"] = series.strategy_id
@@ -1839,7 +1839,7 @@ class BotRuntime:
         payload = {
             "status": status,
             "last_stats": dict(self._last_stats or {}),
-            "last_run_at": _isoformat(datetime.utcnow()),
+            "last_run_at": _isoformat(datetime.now(timezone.utc)),
         }
         try:
             self._state_callback(payload)
@@ -1875,7 +1875,7 @@ class BotRuntime:
     def _seconds_until_next_bar(self) -> Optional[float]:
         if not self._next_bar_at:
             return None
-        delta = (self._next_bar_at - datetime.utcnow()).total_seconds()
+        delta = (self._next_bar_at - datetime.now(timezone.utc)).total_seconds()
         return round(delta, 2) if delta > 0 else 0.0
 
     def snapshot(self) -> Dict[str, object]:
