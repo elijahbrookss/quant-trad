@@ -5,16 +5,155 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = SimpleNamespace(DataFrame=object, to_datetime=lambda *_, **__: [])
+if "numpy" not in sys.modules:
+    sys.modules["numpy"] = SimpleNamespace(
+        array=lambda *_, **__: [],
+        nan=float("nan"),
+        isscalar=lambda value: not isinstance(value, (list, tuple, dict, set)),
+        bool_=bool,
+    )
+sys.modules.setdefault(
+    "portal.backend.service.indicator_service",
+    SimpleNamespace(overlays_for_instance=lambda *_, **__: {}),
+)
+sys.modules.setdefault(
+    "portal.backend.service.storage",
+    SimpleNamespace(record_bot_trade=lambda *_, **__: None, record_bot_trade_event=lambda *_, **__: None),
+)
+sys.modules.setdefault(
+    "portal.backend.service.strategy_service",
+    SimpleNamespace(generate_strategy_signals=lambda **__: {"chart_markers": {}}),
+)
+sys.modules.setdefault("ib_insync", SimpleNamespace(IB=object, Contract=object, util=SimpleNamespace()))
+sys.modules.setdefault("data_providers", SimpleNamespace())
+sys.modules.setdefault("data_providers.factory", SimpleNamespace(get_provider=lambda *_: None))
+sys.modules.setdefault("data_providers.base_provider", SimpleNamespace(DataSource=object))
+sys.modules.setdefault("data_providers.alpaca_provider", SimpleNamespace(AlpacaProvider=object))
+sys.modules.setdefault(
+    "data_providers.interactive_brokers_provider",
+    SimpleNamespace(InteractiveBrokersProvider=object),
+)
+_bot_service_stub = SimpleNamespace(load_strategies=lambda: [])
+
+
+def _performance_meta_stub(bot):
+    strategies_meta = bot.get("strategies_meta") or []
+    stored_map = {entry.get("id"): entry for entry in _bot_service_stub.load_strategies()}
+    entries = []
+    for meta in strategies_meta:
+        stored = stored_map.get(meta.get("id"), {})
+        indicators = []
+        for entry in stored.get("indicator_links", []):
+            ind_id = entry.get("indicator_id") or entry.get("id")
+            if ind_id:
+                indicators.append({"id": ind_id})
+        entries.append(
+            {
+                "id": meta.get("id"),
+                "indicators": indicators,
+                "atm_template": stored.get("atm_template", {}),
+            }
+        )
+    return {"strategies": entries}
+
+
+_bot_service_stub._performance_meta = _performance_meta_stub
+sys.modules.setdefault("portal.backend.service.bot_service", _bot_service_stub)
+
 import pytest
 
-if "pandas" not in sys.modules:  # pragma: no cover - testing convenience
-    sys.modules["pandas"] = SimpleNamespace(
-        DataFrame=object,
-        to_datetime=lambda *args, **kwargs: None,
-    )
-
-from portal.backend.service.bot_runtime import BotRuntime, Candle, LadderRiskEngine, StrategySeries
+from portal.backend.service.bot_runtime import (
+    BotRuntime,
+    Candle,
+    LadderRiskEngine,
+    StrategySeries,
+    _timeframe_to_seconds,
+)
 from portal.backend.service import bot_service
+
+
+@pytest.fixture(autouse=True)
+def _stub_runtime_services(monkeypatch):
+    class StubTimestamp:
+        def __init__(self, dt: datetime):
+            self._dt = dt
+
+        def to_pydatetime(self) -> datetime:
+            return self._dt
+
+        def __le__(self, other):
+            target = getattr(other, "_dt", other)
+            return self._dt <= target
+
+        def __lt__(self, other):
+            target = getattr(other, "_dt", other)
+            return self._dt < target
+
+        def __ge__(self, other):
+            target = getattr(other, "_dt", other)
+            return self._dt >= target
+
+        def __gt__(self, other):
+            target = getattr(other, "_dt", other)
+            return self._dt > target
+
+    class StubIndex(list):
+        @property
+        def is_monotonic_increasing(self) -> bool:
+            return all(self[idx] <= self[idx + 1] for idx in range(len(self) - 1))
+
+    class StubFrame:
+        def __init__(self, index, data):
+            self.index = StubIndex(index)
+            self._data = data
+            self.empty = not bool(index)
+
+        def copy(self):
+            return StubFrame(list(self.index), {key: list(values) for key, values in self._data.items()})
+
+        def sort_index(self):
+            ordered = sorted(zip(self.index, range(len(self.index))))
+            ordered_indices = [entry[0] for entry in ordered]
+            positions = [entry[1] for entry in ordered]
+            sorted_data = {col: [self._data[col][pos] for pos in positions] for col in self._data}
+            return StubFrame(ordered_indices, sorted_data)
+
+        def iterrows(self):
+            for idx, ts in enumerate(self.index):
+                yield ts, {col: self._data[col][idx] for col in self._data}
+
+    def to_datetime(index, utc=True):
+        converted = []
+        for entry in index:
+            base = entry.astimezone(timezone.utc) if entry.tzinfo else entry.replace(tzinfo=timezone.utc)
+            converted.append(StubTimestamp(base))
+        return StubIndex(converted)
+
+    stub_pandas = SimpleNamespace(DataFrame=StubFrame, to_datetime=to_datetime)
+
+    def fake_fetch(symbol, start, end, timeframe, datasource=None, exchange=None):
+        seconds = _timeframe_to_seconds(timeframe) or 60
+        base = datetime.now(timezone.utc) - timedelta(seconds=seconds * 5)
+        index = [base + timedelta(seconds=seconds * idx) for idx in range(5)]
+        data = {
+            "open": [100.0 + idx for idx in range(len(index))],
+            "high": [100.5 + idx for idx in range(len(index))],
+            "low": [99.5 + idx for idx in range(len(index))],
+            "close": [100.25 + idx for idx in range(len(index))],
+        }
+        return StubFrame(index, data)
+
+    monkeypatch.setattr(
+        "portal.backend.service.bot_runtime.fetch_ohlcv",
+        fake_fetch,
+    )
+    monkeypatch.setattr("portal.backend.service.bot_runtime.pd", stub_pandas)
+    monkeypatch.setattr(
+        "portal.backend.service.bot_runtime.strategy_service.generate_strategy_signals",
+        lambda **kwargs: {"chart_markers": {}},
+    )
 
 
 def make_runtime(**overrides):
@@ -25,10 +164,8 @@ def make_runtime(**overrides):
         "runtime_mode": "backtest",
         "mode": "walk-forward",
         "playback_speed": 10.0,
-        "allow_placeholder_candles": True,
         "symbol": "ES",
         "timeframe": "15m",
-        "allow_placeholder_candles": True,
         "strategies_meta": [
             {
                 "id": "strategy-1",
@@ -43,30 +180,18 @@ def make_runtime(**overrides):
 
 
 @pytest.mark.unit
-def test_build_series_placeholder_flag(monkeypatch):
-    runtime = make_runtime(allow_placeholder_candles=False)
+def test_build_series_missing_data_sets_error_state(monkeypatch):
+    runtime = make_runtime()
     strategy = runtime.config["strategies_meta"][0]
 
-    monkeypatch.setattr(
-        "portal.backend.service.bot_runtime.fetch_ohlcv",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "portal.backend.service.bot_runtime.strategy_service.generate_strategy_signals",
-        lambda **kwargs: {"chart_markers": {}},
-    )
-    monkeypatch.setattr(BotRuntime, "_indicator_overlay_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr("portal.backend.service.bot_runtime.fetch_ohlcv", lambda *args, **kwargs: None)
+    runtime._broadcast = lambda event, payload=None: runtime._logs.append({"event": event, "payload": payload})
 
-    series = runtime._build_series_for_strategy(strategy)
+    with pytest.raises(RuntimeError):
+        runtime._ensure_prepared()
 
-    assert series is None
-
-    runtime.config["allow_placeholder_candles"] = True
-
-    series = runtime._build_series_for_strategy(strategy)
-
-    assert series is not None
-    assert series.candles
+    assert runtime.state["status"] == "error"
+    assert runtime.state.get("error", {}).get("strategy_id") == strategy["id"]
 
 
 @pytest.mark.unit

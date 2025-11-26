@@ -635,7 +635,6 @@ class BotRuntime:
         self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
         self.state["playback_speed"] = self.playback_speed
-        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles"))
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -659,7 +658,7 @@ class BotRuntime:
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
-        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles", False))
+        self._prepare_error: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -679,20 +678,47 @@ class BotRuntime:
             self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
             with self._lock:
                 self.state["playback_speed"] = self.playback_speed
-        if "allow_placeholder_candles" in payload:
-            self.allow_placeholder_candles = bool(payload.get("allow_placeholder_candles"))
+
+    def _set_error_state(
+        self,
+        message: str,
+        *,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        error_payload: Dict[str, Any] = {"message": message}
+        if strategy_id:
+            error_payload["strategy_id"] = strategy_id
+        if symbol:
+            error_payload["symbol"] = symbol
+        if timeframe:
+            error_payload["timeframe"] = timeframe
+        with self._lock:
+            self.state.update({"status": "error", "progress": 0.0, "paused": False, "error": error_payload})
+        self._log_event("error", **error_payload)
+        self._broadcast("error", {"runtime": self._state_payload(), "error": error_payload})
+        return error_payload
 
     def _ensure_prepared(self) -> None:
-        if self._prepared:
+        if self._prepared or self.state.get("status") == "error":
             return
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
         meta = self.config.get("strategies_meta")
         if not meta:
             raise ValueError("Runtime requires strategy metadata to initialise")
-        streams = self._build_series(meta)
+        self._prepare_error = None
+        try:
+            streams = self._build_series(meta)
+        except Exception as exc:
+            details = self._prepare_error or {"message": str(exc)}
+            self._set_error_state(details.get("message", str(exc)), **{k: details.get(k) for k in ("strategy_id", "symbol", "timeframe")})
+            raise
         if not streams:
-            raise ValueError("No strategy streams could be prepared for this bot")
+            message = (self._prepare_error or {}).get("message") or "No strategy streams could be prepared for this bot"
+            self._set_error_state(message)
+            raise RuntimeError(message)
         self._series = streams
         self._primary_series = self._series[0]
         self._total_bars = len(self._primary_series.candles)
@@ -712,58 +738,19 @@ class BotRuntime:
                 overlays.append(series.trade_overlay)
         self._chart_overlays = overlays
 
-    @staticmethod
-    def _placeholder_candles(
-        timeframe: Optional[str], start_iso: Optional[str], end_iso: Optional[str]
-    ) -> List[Candle]:
-        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
-
-        def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-            if not value:
-                return None
-            try:
-                cleaned = str(value).replace("Z", "+00:00")
-                return datetime.fromisoformat(cleaned)
-            except Exception:
-                return None
-
-        end_time = _parse_iso(end_iso) or datetime.now(timezone.utc)
-        start_time = _parse_iso(start_iso) or end_time - duration
-        start_time = start_time.astimezone(timezone.utc)
-        end_time = end_time.astimezone(timezone.utc)
-        base_prices = [100.0, 100.25, 100.5]
-        candles = []
-        for idx, price in enumerate(base_prices):
-            open_price = price
-            close_price = price + 0.05
-            candles.append(
-                Candle(
-                    time=start_time + idx * duration,
-                    open=open_price,
-                    high=max(open_price, close_price) + 0.05,
-                    low=min(open_price, close_price) - 0.05,
-                    close=close_price,
-                )
-            )
-        return candles
-
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
         for strategy in strategies:
-            try:
-                stream = self._build_series_for_strategy(strategy)
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.exception("bot_runtime_series_failed | bot=%s | strategy=%s | error=%s", self.bot_id, strategy.get("id"), exc)
-                continue
-            if stream:
-                series_list.append(stream)
+            stream = self._build_series_for_strategy(strategy)
+            series_list.append(stream)
         return series_list
 
     def _build_series_for_strategy(self, strategy: Mapping[str, Any]) -> Optional[StrategySeries]:
         symbol = self._resolve_symbol(strategy)
         if not symbol:
-            logger.warning("bot_runtime_missing_symbol | bot=%s | strategy=%s", self.bot_id, strategy.get("id"))
-            return None
+            message = "Strategy missing symbol"
+            self._prepare_error = {"message": message, "strategy_id": strategy.get("id")}
+            raise RuntimeError(message)
         timeframe = self._resolve_timeframe(strategy)
         datasource = self._resolve_datasource(strategy)
         exchange = self._resolve_exchange(strategy)
@@ -784,55 +771,55 @@ class BotRuntime:
                 datasource=datasource,
                 exchange=exchange,
             )
-        except ValueError as exc:
-            if not self.allow_placeholder_candles:
-                raise
-            logger.warning(
-                "bot_runtime_fetch_failed | bot=%s | strategy=%s | symbol=%s | timeframe=%s | error=%s",
-                self.bot_id,
-                strategy.get("id"),
-                symbol,
-                timeframe,
-                exc,
-            )
-            df = None
-        candles: List[Candle]
+        except Exception as exc:
+            message = f"Failed to fetch OHLCV data: {exc}"
+            self._prepare_error = {
+                "message": message,
+                "strategy_id": strategy.get("id"),
+                "symbol": symbol,
+                "timeframe": timeframe,
+            }
+            raise RuntimeError(message) from exc
         if df is None or getattr(df, "empty", False):
-            logger.warning(
+            message = "No OHLCV data returned for strategy"
+            self._prepare_error = {
+                "message": message,
+                "strategy_id": strategy.get("id"),
+                "symbol": symbol,
+                "timeframe": timeframe,
+            }
+            logger.error(
                 "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
                 self.bot_id,
                 strategy.get("id"),
                 symbol,
                 timeframe,
             )
-            if not self.allow_placeholder_candles:
-                return None
-            candles = self._placeholder_candles(timeframe, start_iso, end_iso)
-            if not candles:
-                return None
+            raise RuntimeError(message)
+        if not df.index.is_monotonic_increasing:
+            first_idx = df.index[0] if len(df.index) else None
+            second_idx = df.index[1] if len(df.index) > 1 else None
+            logger.warning(
+                "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
+                self.bot_id,
+                strategy.get("id"),
+                symbol,
+                timeframe,
+                first_idx,
+                second_idx,
+                len(df.index),
+            )
 
-        else:
-            if not df.index.is_monotonic_increasing:
-                first_idx = df.index[0] if len(df.index) else None
-                second_idx = df.index[1] if len(df.index) > 1 else None
-                logger.warning(
-                    "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
-                    self.bot_id,
-                    strategy.get("id"),
-                    symbol,
-                    timeframe,
-                    first_idx,
-                    second_idx,
-                    len(df.index),
-                )
-
-            candles = self._build_candles(df, timeframe)
-            if not candles:
-                if not self.allow_placeholder_candles:
-                    return None
-                candles = self._placeholder_candles(timeframe, start_iso, end_iso)
-                if not candles:
-                    return None
+        candles = self._build_candles(df, timeframe)
+        if not candles:
+            message = "No valid candles could be built for strategy"
+            self._prepare_error = {
+                "message": message,
+                "strategy_id": strategy.get("id"),
+                "symbol": symbol,
+                "timeframe": timeframe,
+            }
+            raise RuntimeError(message)
         self._log_candle_sequence("build_series", strategy.get("id"), candles)
 
         try:
@@ -847,21 +834,20 @@ class BotRuntime:
                 config={"mode": self.run_type},
             )
         except Exception as exc:  # pragma: no cover - defensive logging
-            if not self.allow_placeholder_candles:
-                logger.exception(
-                    "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
-                    self.bot_id,
-                    strategy.get("id"),
-                    exc,
-                )
-                return None
-            logger.warning(
+            message = f"Strategy evaluation failed: {exc}"
+            self._prepare_error = {
+                "message": message,
+                "strategy_id": strategy.get("id"),
+                "symbol": symbol,
+                "timeframe": timeframe,
+            }
+            logger.exception(
                 "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
                 self.bot_id,
                 strategy.get("id"),
                 exc,
             )
-            evaluation = {"chart_markers": {}}
+            raise RuntimeError(message)
 
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
@@ -1140,58 +1126,6 @@ class BotRuntime:
             "source": TRADE_OVERLAY_SOURCE,
             "payload": {"segments": segments},
         }
-
-    def _placeholder_candles(
-        self,
-        start_iso: Optional[str],
-        end_iso: Optional[str],
-        timeframe: Optional[str],
-    ) -> List[Candle]:
-        """Construct synthetic candles when historical data is unavailable."""
-
-        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
-        end_ts = pd.to_datetime(end_iso, utc=True).to_pydatetime() if end_iso else None
-        start_ts = pd.to_datetime(start_iso, utc=True).to_pydatetime() if start_iso else None
-        if end_ts is None:
-            end_ts = datetime.utcnow().replace(tzinfo=timezone.utc)
-        if start_ts is None:
-            start_ts = end_ts - duration * 10
-        if start_ts > end_ts:
-            start_ts, end_ts = end_ts, start_ts
-        max_candles = int(((end_ts - start_ts) / duration) + 1) if duration else 1
-        max_candles = max(1, min(max_candles, 500))
-        candles: List[Candle] = []
-        current = start_ts
-        price = 100.0
-        for _ in range(max_candles):
-            end_time = current + duration if duration else current
-            candles.append(
-                Candle(
-                    time=current,
-                    open=price,
-                    high=price + 0.5,
-                    low=price - 0.5,
-                    close=price + 0.1,
-                    end=end_time,
-                )
-            )
-            current = end_time
-            price += 0.1
-            if current >= end_ts:
-                break
-        if not candles:
-            fallback_end = start_ts + duration if duration else start_ts
-            candles.append(
-                Candle(
-                    time=start_ts,
-                    open=price,
-                    high=price,
-                    low=price,
-                    close=price,
-                    end=fallback_end,
-                )
-            )
-        return candles
 
     @staticmethod
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
@@ -1933,10 +1867,7 @@ class BotRuntime:
         delta = (self._next_bar_at - datetime.now(timezone.utc)).total_seconds()
         return round(delta, 2) if delta > 0 else 0.0
 
-    def snapshot(self) -> Dict[str, object]:
-        """Return a thread-safe snapshot of runtime state."""
-
-        self._ensure_prepared()
+    def _state_payload(self) -> Dict[str, object]:
         with self._lock:
             payload = dict(self.state)
         payload.setdefault("stats", self._last_stats)
@@ -1945,6 +1876,13 @@ class BotRuntime:
         if "next_bar_in_seconds" not in payload:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
         return payload
+
+    def snapshot(self) -> Dict[str, object]:
+        """Return a thread-safe snapshot of runtime state."""
+
+        if self.state.get("status") != "error":
+            self._ensure_prepared()
+        return self._state_payload()
 
     def chart_payload(self) -> Dict[str, object]:
         """Return the latest candle, trade, overlay, and stat data for the lens."""
