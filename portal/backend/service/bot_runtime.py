@@ -701,8 +701,11 @@ class BotRuntime:
         return error_payload
 
     def _ensure_prepared(self) -> None:
-        if self._prepared or self.state.get("status") == "error":
+        if self._prepared:
             return
+        if self.state.get("status") == "error":
+            message = (self._prepare_error or {}).get("message") or "Runtime is in an error state; reset before preparing"
+            raise RuntimeError(message)
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
         meta = self.config.get("strategies_meta")
@@ -713,6 +716,7 @@ class BotRuntime:
             streams = self._build_series(meta)
         except Exception as exc:
             details = self._prepare_error or {"message": str(exc)}
+            self._prepare_error = details
             self._set_error_state(details.get("message", str(exc)), **{k: details.get(k) for k in ("strategy_id", "symbol", "timeframe")})
             raise
         if not streams:

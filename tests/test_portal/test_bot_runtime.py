@@ -195,6 +195,23 @@ def test_build_series_missing_data_sets_error_state(monkeypatch):
 
 
 @pytest.mark.unit
+def test_start_after_prepare_failure_raises(monkeypatch):
+    runtime = make_runtime()
+    strategy = runtime.config["strategies_meta"][0]
+
+    monkeypatch.setattr("portal.backend.service.bot_runtime.fetch_ohlcv", lambda *args, **kwargs: None)
+    runtime._broadcast = lambda event, payload=None: runtime._logs.append({"event": event, "payload": payload})
+
+    with pytest.raises(RuntimeError):
+        runtime.start()
+
+    assert runtime.state["status"] == "error"
+    assert runtime.state.get("error", {}).get("strategy_id") == strategy["id"]
+    assert runtime._prepared is False
+    assert not runtime._thread or not runtime._thread.is_alive()
+
+
+@pytest.mark.unit
 def test_bot_runtime_snapshot_exposes_timer_fields():
     runtime = make_runtime()
     future = datetime.now(timezone.utc) + timedelta(seconds=3)
