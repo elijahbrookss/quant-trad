@@ -18,7 +18,7 @@ def test_collect_missing_ranges_handles_exclusive_end_without_gap():
 
     start = pd.Timestamp("2024-01-01T00:00:00Z")
     end = pd.Timestamp("2024-01-01T05:00:00Z")
-    timestamps = _ts_range("2024-01-01T00:00:00Z", 5, "1H")
+    timestamps = _ts_range("2024-01-01T00:00:00Z", 5, "1h")
 
     missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
 
@@ -30,7 +30,7 @@ def test_collect_missing_ranges_reports_trailing_gap_only_when_missing():
 
     start = pd.Timestamp("2024-01-01T00:00:00Z")
     end = pd.Timestamp("2024-01-01T05:00:00Z")
-    timestamps = _ts_range("2024-01-01T00:00:00Z", 3, "1H")
+    timestamps = _ts_range("2024-01-01T00:00:00Z", 3, "1h")
 
     missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
 

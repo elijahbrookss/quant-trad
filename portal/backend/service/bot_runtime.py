@@ -32,6 +32,8 @@ DEFAULT_RISK = {
     "tick_size": 0.01,
 }
 
+DEFAULT_SIM_LOOKBACK_DAYS = 7
+
 MAX_LOG_ENTRIES = 500
 
 TRADE_OVERLAY_SOURCE = "trade_levels"
@@ -386,9 +388,10 @@ class LadderRiskEngine:
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
     ):
-        self.template = merge_templates(config)
+        provided_template = config or {}
+        self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
-        config_tick = _coerce_float(self.template.get("tick_size"))
+        config_tick = _coerce_float(provided_template.get("tick_size"))
         instrument_tick = _coerce_float(self.instrument.get("tick_size"))
         fallback_tick = _coerce_float(DEFAULT_RISK.get("tick_size"), 0.01)
         if config_tick not in (None, 0):
@@ -496,12 +499,12 @@ class LadderRiskEngine:
 
     def _breakeven_threshold(self) -> int:
         config = self.template.get("breakeven") or {}
-        ticks = _coerce_float(config.get("ticks"))
-        if ticks and ticks > 0:
-            return int(ticks)
         if config.get("target_index") is not None and self.targets:
             index = max(0, min(int(config.get("target_index") or 0), len(self.targets) - 1))
             return int(self.targets[index])
+        ticks = _coerce_float(config.get("ticks"))
+        if ticks and ticks > 0:
+            return int(ticks)
         fallback = self.template.get("breakeven_trigger_ticks")
         value = _coerce_float(fallback) or DEFAULT_RISK["breakeven_trigger_ticks"]
         return int(value)
@@ -632,6 +635,7 @@ class BotRuntime:
         self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
         self.state["playback_speed"] = self.playback_speed
+        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles"))
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -655,6 +659,7 @@ class BotRuntime:
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.allow_placeholder_candles = bool(self.config.get("allow_placeholder_candles", False))
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -674,6 +679,8 @@ class BotRuntime:
             self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
             with self._lock:
                 self.state["playback_speed"] = self.playback_speed
+        if "allow_placeholder_candles" in payload:
+            self.allow_placeholder_candles = bool(payload.get("allow_placeholder_candles"))
 
     def _ensure_prepared(self) -> None:
         if self._prepared:
@@ -705,6 +712,41 @@ class BotRuntime:
                 overlays.append(series.trade_overlay)
         self._chart_overlays = overlays
 
+    @staticmethod
+    def _placeholder_candles(
+        timeframe: Optional[str], start_iso: Optional[str], end_iso: Optional[str]
+    ) -> List[Candle]:
+        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
+
+        def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+            if not value:
+                return None
+            try:
+                cleaned = str(value).replace("Z", "+00:00")
+                return datetime.fromisoformat(cleaned)
+            except Exception:
+                return None
+
+        end_time = _parse_iso(end_iso) or datetime.now(timezone.utc)
+        start_time = _parse_iso(start_iso) or end_time - duration
+        start_time = start_time.astimezone(timezone.utc)
+        end_time = end_time.astimezone(timezone.utc)
+        base_prices = [100.0, 100.25, 100.5]
+        candles = []
+        for idx, price in enumerate(base_prices):
+            open_price = price
+            close_price = price + 0.05
+            candles.append(
+                Candle(
+                    time=start_time + idx * duration,
+                    open=open_price,
+                    high=max(open_price, close_price) + 0.05,
+                    low=min(open_price, close_price) - 0.05,
+                    close=close_price,
+                )
+            )
+        return candles
+
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
         series_list: List[StrategySeries] = []
         for strategy in strategies:
@@ -733,15 +775,29 @@ class BotRuntime:
         else:
             start_iso, end_iso = self._resolve_live_window()
 
-        df = fetch_ohlcv(
-            symbol,
-            start_iso,
-            end_iso,
-            timeframe,
-            datasource=datasource,
-            exchange=exchange,
-        )
-        if df is None or df.empty:
+        try:
+            df = fetch_ohlcv(
+                symbol,
+                start_iso,
+                end_iso,
+                timeframe,
+                datasource=datasource,
+                exchange=exchange,
+            )
+        except ValueError as exc:
+            if not self.allow_placeholder_candles:
+                raise
+            logger.warning(
+                "bot_runtime_fetch_failed | bot=%s | strategy=%s | symbol=%s | timeframe=%s | error=%s",
+                self.bot_id,
+                strategy.get("id"),
+                symbol,
+                timeframe,
+                exc,
+            )
+            df = None
+        candles: List[Candle]
+        if df is None or getattr(df, "empty", False):
             logger.warning(
                 "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
                 self.bot_id,
@@ -749,25 +805,34 @@ class BotRuntime:
                 symbol,
                 timeframe,
             )
-            return None
+            if not self.allow_placeholder_candles:
+                return None
+            candles = self._placeholder_candles(timeframe, start_iso, end_iso)
+            if not candles:
+                return None
 
-        if not df.index.is_monotonic_increasing:
-            first_idx = df.index[0] if len(df.index) else None
-            second_idx = df.index[1] if len(df.index) > 1 else None
-            logger.warning(
-                "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
-                self.bot_id,
-                strategy.get("id"),
-                symbol,
-                timeframe,
-                first_idx,
-                second_idx,
-                len(df.index),
-            )
+        else:
+            if not df.index.is_monotonic_increasing:
+                first_idx = df.index[0] if len(df.index) else None
+                second_idx = df.index[1] if len(df.index) > 1 else None
+                logger.warning(
+                    "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
+                    self.bot_id,
+                    strategy.get("id"),
+                    symbol,
+                    timeframe,
+                    first_idx,
+                    second_idx,
+                    len(df.index),
+                )
 
-        candles = self._build_candles(df, timeframe)
-        if not candles:
-            return None
+            candles = self._build_candles(df, timeframe)
+            if not candles:
+                if not self.allow_placeholder_candles:
+                    return None
+                candles = self._placeholder_candles(timeframe, start_iso, end_iso)
+                if not candles:
+                    return None
         self._log_candle_sequence("build_series", strategy.get("id"), candles)
 
         try:
@@ -782,13 +847,21 @@ class BotRuntime:
                 config={"mode": self.run_type},
             )
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception(
+            if not self.allow_placeholder_candles:
+                logger.exception(
+                    "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
+                    self.bot_id,
+                    strategy.get("id"),
+                    exc,
+                )
+                return None
+            logger.warning(
                 "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
                 self.bot_id,
                 strategy.get("id"),
                 exc,
             )
-            return None
+            evaluation = {"chart_markers": {}}
 
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
@@ -899,7 +972,7 @@ class BotRuntime:
     def _resolve_live_window(self) -> Tuple[str, str]:
         lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
         lookback_days = max(lookback_days, 1)
-        end_dt = datetime.utcnow()
+        end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(days=lookback_days)
         return _isoformat(start_dt), _isoformat(end_dt)
 
@@ -1068,6 +1141,58 @@ class BotRuntime:
             "payload": {"segments": segments},
         }
 
+    def _placeholder_candles(
+        self,
+        start_iso: Optional[str],
+        end_iso: Optional[str],
+        timeframe: Optional[str],
+    ) -> List[Candle]:
+        """Construct synthetic candles when historical data is unavailable."""
+
+        duration = _timeframe_duration(timeframe) or timedelta(minutes=1)
+        end_ts = pd.to_datetime(end_iso, utc=True).to_pydatetime() if end_iso else None
+        start_ts = pd.to_datetime(start_iso, utc=True).to_pydatetime() if start_iso else None
+        if end_ts is None:
+            end_ts = datetime.utcnow().replace(tzinfo=timezone.utc)
+        if start_ts is None:
+            start_ts = end_ts - duration * 10
+        if start_ts > end_ts:
+            start_ts, end_ts = end_ts, start_ts
+        max_candles = int(((end_ts - start_ts) / duration) + 1) if duration else 1
+        max_candles = max(1, min(max_candles, 500))
+        candles: List[Candle] = []
+        current = start_ts
+        price = 100.0
+        for _ in range(max_candles):
+            end_time = current + duration if duration else current
+            candles.append(
+                Candle(
+                    time=current,
+                    open=price,
+                    high=price + 0.5,
+                    low=price - 0.5,
+                    close=price + 0.1,
+                    end=end_time,
+                )
+            )
+            current = end_time
+            price += 0.1
+            if current >= end_ts:
+                break
+        if not candles:
+            fallback_end = start_ts + duration if duration else start_ts
+            candles.append(
+                Candle(
+                    time=start_ts,
+                    open=price,
+                    high=price,
+                    low=price,
+                    close=price,
+                    end=fallback_end,
+                )
+            )
+        return candles
+
     @staticmethod
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
         frame = df.copy()
@@ -1121,7 +1246,12 @@ class BotRuntime:
 
     def _intrabar_cache_key(self, series: StrategySeries, start: datetime, interval: str) -> str:
         epoch = int(start.timestamp())
-        return f"{series.strategy_id}:{series.symbol}:{series.timeframe}:{interval}:{epoch}"
+        strategy_key = self._strategy_key(series)
+        return f"{strategy_key}:{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{epoch}"
+
+    @staticmethod
+    def _strategy_key(series: StrategySeries) -> str:
+        return str(getattr(series, "strategy_id", getattr(series, "id", id(series))))
 
     def _fetch_intrabar_candles(
         self,
@@ -1184,12 +1314,13 @@ class BotRuntime:
         return sub_candles
 
     def _ensure_intrabar_snapshot(self, series: StrategySeries, candle: Candle) -> Dict[str, Any]:
-        snapshot = self._intrabar_snapshots.get(series.strategy_id)
+        strategy_key = self._strategy_key(series)
+        snapshot = self._intrabar_snapshots.get(strategy_key)
         if snapshot:
             return snapshot
         open_price = _coerce_float(candle.open, 0.0) or 0.0
         entry = {
-            "strategy_id": series.strategy_id,
+            "strategy_id": getattr(series, "strategy_id", None) or strategy_key,
             "time": candle.time,
             "open": open_price,
             "high": open_price,
@@ -1197,7 +1328,7 @@ class BotRuntime:
             "close": open_price,
             "end": candle.end or candle.time,
         }
-        self._intrabar_snapshots[series.strategy_id] = entry
+        self._intrabar_snapshots[strategy_key] = entry
         return entry
 
     def _update_intrabar_snapshot(
@@ -1272,7 +1403,7 @@ class BotRuntime:
                 break
             self._pace_intrabar_step()
         if snapshot_used:
-            self._intrabar_snapshots.pop(series.strategy_id, None)
+            self._intrabar_snapshots.pop(self._strategy_key(series), None)
         return events
 
     @staticmethod
@@ -1477,9 +1608,18 @@ class BotRuntime:
         if interval <= 0:
             if update_next_bar:
                 self._next_bar_at = None
+                with self._lock:
+                    self.state.update({"next_bar_at": None, "next_bar_in_seconds": None})
             return
         if update_next_bar:
-            self._next_bar_at = datetime.utcnow() + timedelta(seconds=interval)
+            self._next_bar_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
+            with self._lock:
+                self.state.update(
+                    {
+                        "next_bar_at": _isoformat(self._next_bar_at),
+                        "next_bar_in_seconds": self._seconds_until_next_bar(),
+                    }
+                )
         target = time.time() + interval
         while not self._stop.is_set():
             if not self._pause_event.wait(timeout=0.2):
@@ -1497,7 +1637,7 @@ class BotRuntime:
 
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
-        end_iso = _isoformat(datetime.utcnow())
+        end_iso = _isoformat(datetime.now(timezone.utc))
         for series in self._series:
             last_time = series.candles[-1].time if series.candles else None
             if last_time is None:
@@ -1572,8 +1712,7 @@ class BotRuntime:
         return True
 
     def pause(self) -> None:
-        if not self._prepared:
-            return
+        self._ensure_prepared()
         self._paused = True
         self._pause_event.clear()
         self._next_bar_at = None
@@ -1583,8 +1722,7 @@ class BotRuntime:
         self._push_update("pause")
 
     def resume(self) -> None:
-        if not self._prepared:
-            return
+        self._ensure_prepared()
         self._paused = False
         self._pause_event.set()
         with self._lock:
@@ -1667,7 +1805,7 @@ class BotRuntime:
         entry: Dict[str, object] = {
             "id": str(uuid.uuid4()),
             "event": event,
-            "timestamp": _isoformat(datetime.utcnow()),
+            "timestamp": _isoformat(datetime.now(timezone.utc)),
         }
         if series is not None:
             entry["strategy_id"] = series.strategy_id
@@ -1756,7 +1894,7 @@ class BotRuntime:
         payload = {
             "status": status,
             "last_stats": dict(self._last_stats or {}),
-            "last_run_at": _isoformat(datetime.utcnow()),
+            "last_run_at": _isoformat(datetime.now(timezone.utc)),
         }
         try:
             self._state_callback(payload)
@@ -1792,7 +1930,7 @@ class BotRuntime:
     def _seconds_until_next_bar(self) -> Optional[float]:
         if not self._next_bar_at:
             return None
-        delta = (self._next_bar_at - datetime.utcnow()).total_seconds()
+        delta = (self._next_bar_at - datetime.now(timezone.utc)).total_seconds()
         return round(delta, 2) if delta > 0 else 0.0
 
     def snapshot(self) -> Dict[str, object]:
@@ -1802,6 +1940,8 @@ class BotRuntime:
         with self._lock:
             payload = dict(self.state)
         payload.setdefault("stats", self._last_stats)
+        if "next_bar_at" not in payload:
+            payload["next_bar_at"] = _isoformat(self._next_bar_at)
         if "next_bar_in_seconds" not in payload:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
         return payload
@@ -1871,7 +2011,7 @@ class BotRuntime:
         slice_candidates = list(primary.candles[:visible])
         ordered = sorted(slice_candidates, key=lambda candle: candle.time.timestamp())
         candles = [candle.to_dict() for candle in ordered]
-        snapshot = self._intrabar_snapshots.get(getattr(primary, "strategy_id", None))
+        snapshot = self._intrabar_snapshots.get(self._strategy_key(primary))
         if snapshot and candles:
             candles[-1] = self._merge_intrabar_snapshot_payload(candles[-1], snapshot)
         self._log_candle_sequence(

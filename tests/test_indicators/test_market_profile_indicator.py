@@ -411,7 +411,7 @@ class _CacheProvider:
             end = end.tz_localize("UTC")
         else:
             end = end.tz_convert("UTC")
-        idx = pd.date_range(start=start, end=end, freq="1H", tz="UTC")
+        idx = pd.date_range(start=start, end=end, freq="1h", tz="UTC")
         data = {
             "open": pd.Series(range(len(idx)), index=idx).astype(float),
             "high": pd.Series(range(len(idx)), index=idx).astype(float) + 0.5,
