@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Any, Dict, List, Mapping, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -171,11 +171,12 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.delete("/{bot_id}", status_code=204)
-async def delete_bot(bot_id: str) -> None:
+@router.delete("/{bot_id}", status_code=204, response_class=Response)
+async def delete_bot(bot_id: str) -> Response:
     """Delete a bot."""
 
     bot_service.delete_bot_record(bot_id)
+    return Response(status_code=204)
 
 
 @router.post("/{bot_id}/start", response_model=BotResponse)
