@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from ..service import instrument_service
@@ -76,8 +76,10 @@ async def update_instrument(instrument_id: str, payload: InstrumentPayload) -> D
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.delete("/{instrument_id}", status_code=204)
-async def delete_instrument(instrument_id: str) -> None:
+@router.delete("/{instrument_id}", status_code=204, response_class=Response)
+async def delete_instrument(instrument_id: str) -> Response:
     """Delete an instrument record."""
 
     instrument_service.delete_instrument_record(instrument_id)
+
+    return Response(status_code=204)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from ..service import strategy_service
@@ -207,14 +207,16 @@ async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.delete("/{strategy_id}", status_code=204)
-async def delete_strategy(strategy_id: str) -> None:
+@router.delete("/{strategy_id}", status_code=204, response_class=Response)
+async def delete_strategy(strategy_id: str) -> Response:
     """Delete a strategy."""
 
     try:
         strategy_service.delete_strategy(strategy_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+    return Response(status_code=204)
 
 
 @router.post("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyOut)
@@ -334,9 +336,11 @@ async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
         raise HTTPException(500, str(exc)) from exc
 
 
-@router.delete("/presets/symbols/{preset_id}", status_code=204)
-async def delete_symbol_preset(preset_id: str) -> None:
+@router.delete("/presets/symbols/{preset_id}", status_code=204, response_class=Response)
+async def delete_symbol_preset(preset_id: str) -> Response:
     """Delete a stored symbol preset."""
 
     strategy_service.delete_symbol_preset_service(preset_id)
+
+    return Response(status_code=204)
 

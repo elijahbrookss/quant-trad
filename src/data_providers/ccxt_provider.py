@@ -1,3 +1,4 @@
+import inspect
 import os
 import math
 import datetime as dt
@@ -159,6 +160,15 @@ class CCXTProvider(BaseDataProvider):
         previous_last = None
         limit_hint = self._resolve_ohlcv_limit()
         end_param = self._resolve_end_param()
+        supports_params = False
+        try:
+            signature = inspect.signature(self._exchange.fetch_ohlcv)
+            supports_params = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "params"
+                for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):  # pragma: no cover - best effort
+            supports_params = True
 
         for _ in range(1000):
             remaining_ms = max(until_ms - cursor, 0)
@@ -173,12 +183,19 @@ class CCXTProvider(BaseDataProvider):
                 "since": cursor,
                 "limit": request_limit,
             }
-            if end_param:
+            if end_param and supports_params:
                 capped_end = min(until_ms, cursor + request_limit * step_ms)
                 fetch_kwargs["params"] = {end_param: capped_end}
 
             try:
                 batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+            except TypeError as exc:
+                if "params" in fetch_kwargs and "unexpected keyword" in str(exc):
+                    supports_params = False
+                    fetch_kwargs.pop("params", None)
+                    batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+                else:
+                    raise
             except Exception as exc:  # pragma: no cover - network interaction
                 raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
 
@@ -199,8 +216,6 @@ class CCXTProvider(BaseDataProvider):
             if cursor > until_ms:
                 break
 
-            if len(batch) < request_limit:
-                break
         else:  # pragma: no cover - defensive guard
             logger.warning(
                 "CCXT pagination limit reached for %s:%s between %s and %s",

@@ -3,7 +3,7 @@ import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import pytest
 
@@ -28,6 +28,7 @@ def make_runtime(**overrides):
         "allow_placeholder_candles": True,
         "symbol": "ES",
         "timeframe": "15m",
+        "allow_placeholder_candles": True,
         "strategies_meta": [
             {
                 "id": "strategy-1",
@@ -71,7 +72,7 @@ def test_build_series_placeholder_flag(monkeypatch):
 @pytest.mark.unit
 def test_bot_runtime_snapshot_exposes_timer_fields():
     runtime = make_runtime()
-    future = datetime.utcnow() + timedelta(seconds=3)
+    future = datetime.now(timezone.utc) + timedelta(seconds=3)
     runtime._next_bar_at = future  # emulate scheduled bar
 
     snapshot = runtime.snapshot()
@@ -485,7 +486,7 @@ def test_ladder_risk_engine_uses_strategy_template():
     instrument = {"tick_size": 0.25, "quote_currency": "USD"}
     engine = LadderRiskEngine(template, instrument=instrument)
     candle = Candle(
-        time=datetime.utcnow(),
+        time=datetime.now(timezone.utc),
         open=100.0,
         high=101.0,
         low=99.5,

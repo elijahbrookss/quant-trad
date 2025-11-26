@@ -2,7 +2,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from ..service.indicator_service import (
@@ -127,12 +127,14 @@ async def get_indicator_strategies(inst_id: str):
     return list_indicator_strategies(inst_id)
 
 
-@router.delete("/{inst_id}", status_code=204)
-async def delete(inst_id: str):
+@router.delete("/{inst_id}", status_code=204, response_class=Response)
+async def delete(inst_id: str) -> Response:
     try:
         delete_instance(inst_id)
     except KeyError:
         raise HTTPException(404, "Indicator not found")
+
+    return Response(status_code=204)
 
 
 @router.post("/{inst_id}/duplicate", response_model=IndicatorInstanceOut)
