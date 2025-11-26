@@ -499,12 +499,12 @@ class LadderRiskEngine:
 
     def _breakeven_threshold(self) -> int:
         config = self.template.get("breakeven") or {}
-        ticks = _coerce_float(config.get("ticks"))
-        if ticks and ticks > 0:
-            return int(ticks)
         if config.get("target_index") is not None and self.targets:
             index = max(0, min(int(config.get("target_index") or 0), len(self.targets) - 1))
             return int(self.targets[index])
+        ticks = _coerce_float(config.get("ticks"))
+        if ticks and ticks > 0:
+            return int(ticks)
         fallback = self.template.get("breakeven_trigger_ticks")
         value = _coerce_float(fallback) or DEFAULT_RISK["breakeven_trigger_ticks"]
         return int(value)
