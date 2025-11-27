@@ -268,7 +268,7 @@ changelog-pr: ## Generate changelog using the first open PR for the current bran
 	dry_flag=$${DRY_RUN:+--dry-run}; \
 	config_path=$${CHANGELOG_CONFIG:-scripts/automation/config/prompts.yaml}; \
 	echo "📝 Writing diff for $$base_ref...$$head_ref to $$diff_file"; \
-	git diff "$$base_ref...$$head_ref" > "$$diff_file"; \
+	git log --no-merges --pretty=format:'%h%n%s%n%b%n---' "$$base_ref...$$head_ref" > "$$diff_file"; \
 	if [ ! -s "$$diff_file" ]; then echo "⚠️ Generated diff is empty"; exit 1; fi; \
 	echo "🚀 Generating changelog for PR $$pr_number (head: $$head_ref, base: $$base_ref)"; \
 	PYTHONPATH=scripts $(PY) scripts/automation/llm_changelog.py --diff-file "$$diff_file" --branch "$$head_ref" --release-name "$$release_name" --model "$$model" --config "$$config_path" $$dry_flag
