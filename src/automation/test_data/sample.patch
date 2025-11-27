@@ -1,0 +1,15 @@
+diff --git a/src/trading.py b/src/trading.py
+index 1234567..abcdefg 100644
+--- a/src/trading.py
++++ b/src/trading.py
+@@ -10,6 +10,12 @@ class TradingBot:
+     def __init__(self):
+         self.status = "active"
++        self.max_trades = 100
++    
++    def set_limit(self, limit):
++        """Set maximum number of trades per day"""
++        self.max_trades = limit
++        return True
+
+EOF
