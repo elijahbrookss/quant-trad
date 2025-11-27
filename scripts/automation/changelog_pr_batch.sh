@@ -61,8 +61,8 @@ main() {
     log INFO "Listing merged PRs based on base branch '$base_branch' (limit: $pr_limit)"
     local pr_lines
     if ! pr_lines=$(gh pr list --state merged --base "$base_branch" --limit "$pr_limit" \
-        --json number,title,headRefName,baseRefName,mergedAt --sort mergedAt --order asc \
-        --template '{{range .}}{{.number}}\t{{.title}}\t{{.headRefName}}\t{{.baseRefName}}\t{{.mergedAt}}\n{{end}}'); then
+        --json number,title,headRefName,baseRefName,mergedAt \
+        --template '{{range .}}{{.number}}{{"\t"}}{{.title}}{{"\t"}}{{.headRefName}}{{"\t"}}{{.baseRefName}}{{"\t"}}{{.mergedAt}}{{"\n"}}{{end}}'); then
         log ERROR "Failed to list merged PRs for base '$base_branch'"
         exit 1
     fi
@@ -76,33 +76,44 @@ main() {
         [[ -z "$pr_number" ]] && continue
         log INFO "Processing PR #$pr_number ($merged_at): $pr_title"
 
-        local diff_file
-        diff_file=$(mktemp "/tmp/changelog_pr_${pr_number}_XXXX.diff")
-        if ! gh pr diff "$pr_number" --color=never >"$diff_file"; then
-            log ERROR "Failed to fetch diff for PR #$pr_number"
-            rm -f "$diff_file"
+        # Instead of diff, build a file containing commit messages for this PR.
+        local context_file
+        context_file=$(mktemp "/tmp/changelog_pr_${pr_number}_XXXX.log")
+
+        # Fetch commit messages for this PR via GitHub API.
+        # We include headline + body (if present) for richer context.
+        if ! gh pr view "$pr_number" --json commits \
+            --jq '
+                "Commit messages for PR #\(.number):" as $header
+                | $header, ( .commits[]
+                    | "- " + .messageHeadline
+                    + (if (.messageBody != null and .messageBody != "") then "\n  " + (.messageBody | gsub("\n"; "\n  ")) else "" end)
+                  )
+            ' >"$context_file"; then
+            log ERROR "Failed to fetch commit messages for PR #$pr_number"
+            rm -f "$context_file"
             continue
         fi
 
-        if [[ ! -s "$diff_file" ]]; then
-            log WARN "Empty diff for PR #$pr_number, skipping"
-            rm -f "$diff_file"
+        if [[ ! -s "$context_file" ]]; then
+            log WARN "No commit messages produced for PR #$pr_number, skipping"
+            rm -f "$context_file"
             continue
         fi
 
         local release_name
         release_name=${RELEASE_NAME:-$pr_title}
 
-        log INFO "Generating changelog for PR #$pr_number (head: $head_ref, base: $base_ref)"
+        log INFO "Generating changelog for PR #$pr_number (head: $head_ref, base: $base_ref) using commit messages"
         if ! PYTHONPATH=scripts "$python_bin" scripts/automation/llm_changelog.py \
-            --diff-file "$diff_file" --branch "$head_ref" --release-name "$release_name" \
+            --diff-file "$context_file" --branch "$head_ref" --release-name "$release_name" \
             --model "$model" --config "$config_path" $dry_flag; then
             log ERROR "Changelog generation failed for PR #$pr_number"
-            rm -f "$diff_file"
+            rm -f "$context_file"
             continue
         fi
 
-        rm -f "$diff_file"
+        rm -f "$context_file"
         log INFO "Completed PR #$pr_number"
     done <<<"$pr_lines"
 }

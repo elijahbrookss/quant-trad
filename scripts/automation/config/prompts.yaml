@@ -124,7 +124,7 @@ model_config:
   top_p: 0.9             # Nucleus sampling for better quality
 
 # Truncation settings
-max_diff_chars: 20000      # Maximum diff characters to send to model
+max_diff_chars: 10000      # Maximum diff characters to send to model
 
 # Output formatting hints
 formatting:
