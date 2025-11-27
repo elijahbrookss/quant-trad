@@ -3,11 +3,12 @@
 
 import sys
 import argparse
-import subprocess
 import yaml
 from datetime import date
 from pathlib import Path
 from typing import Dict
+
+import ollama
 
 # Import the Notion client function
 from automation.notion.notion_client import create_release_page
@@ -79,41 +80,35 @@ def read_diff(diff_path: str) -> str:
 
 
 def call_ollama(model: str, system_prompt: str, user_prompt: str) -> str:
-    """Call Ollama CLI with system and user prompts and return the response.
-    
-    Uses subprocess to invoke the ollama CLI command with a combined prompt.
-    
+    """Call Ollama via the Python client and return the response content.
+
     Args:
-        model: The Ollama model name (e.g., "llama3.2)
+        model: The Ollama model name (e.g., "llama3.2")
         system_prompt: The system-level instructions for the model
         user_prompt: The user query/request with the diff content
-        
+
     Returns:
         The model's response as a string
-        
+
     Raises:
-        RuntimeError: If the ollama command fails or there's an error
+        RuntimeError: If the Ollama client call fails or an error occurs
     """
-    # Combine system and user prompts for the CLI
-    # Format: System instructions followed by the user request
-    combined_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-    
     try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=combined_prompt,
-            capture_output=True,
-            text=True,
-            check=True
+        response = ollama.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
         )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Ollama command failed with exit code {e.returncode}:\n"
-            f"stderr: {e.stderr}"
-        ) from e
     except Exception as e:
         raise RuntimeError(f"Error calling Ollama: {e}") from e
+
+    message = response.get("message")
+    if not message or "content" not in message:
+        raise RuntimeError("Ollama response did not contain message content")
+
+    return str(message["content"]).strip()
 
 
 def build_prompt(diff_text: str, config: Dict) -> tuple[str, str]:
