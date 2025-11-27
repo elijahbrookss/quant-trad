@@ -62,7 +62,7 @@ system_prompt: |
 
 
 user_prompt_template: |
- You will receive a unified git diff or structured changelog describing recent changes.
+  You will receive a unified git diff or structured changelog describing recent changes.
 
   Your task is to analyze it and produce FOUR sections using the exact labels and format below.
   The output must be plain text only (no markdown, no bold, no headings, no bullets).
@@ -113,10 +113,7 @@ user_prompt_template: |
   DEV_POST:
   <your three Substack topic ideas here>
 
-  Do not add any extra sections, headers, or markup before or after these four labeled sections.
-
   Here is the changelog/diff to analyze:
-  GIT DIFF:
   {diff_content}
   {truncation_notice}
 
@@ -127,7 +124,7 @@ model_config:
   top_p: 0.9             # Nucleus sampling for better quality
 
 # Truncation settings
-max_diff_chars: 20000      # Maximum diff characters to send to model
+max_diff_chars: 25000000      # Maximum diff characters to send to model
 
 # Output formatting hints
 formatting:
