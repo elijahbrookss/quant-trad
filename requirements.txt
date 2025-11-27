@@ -19,3 +19,5 @@ pytest-cov
 fastapi
 uvicorn
 httpx
+ib-insync
+ollama

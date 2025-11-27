@@ -1,3 +1,4 @@
+import inspect
 import os
 import math
 import datetime as dt
@@ -63,6 +64,49 @@ class CCXTProvider(BaseDataProvider):
 
         return exchange
 
+    def _resolve_ohlcv_limit(self) -> int:
+        env_value = os.getenv("CCXT_OHLCV_LIMIT")
+        if env_value is not None:
+            try:
+                return max(1, int(env_value))
+            except ValueError:
+                logger.warning(
+                    "Invalid CCXT_OHLCV_LIMIT value '%s'; falling back to default.",
+                    env_value,
+                )
+
+        candidates = []
+        for attr in ("limit", "maxLimit", "defaultLimit"):
+            value = getattr(self._exchange, attr, None)
+            if isinstance(value, int) and value > 0:
+                candidates.append(value)
+
+        options = getattr(self._exchange, "options", {}) or {}
+        for attr in ("limit", "maxLimit", "defaultLimit"):
+            value = options.get(attr)
+            if isinstance(value, int) and value > 0:
+                candidates.append(value)
+
+        ohlcv_opts = options.get("OHLCV") or options.get("ohlcv") or {}
+        for attr in ("max", "maxLimit", "limit", "defaultLimit"):
+            value = ohlcv_opts.get(attr)
+            if isinstance(value, int) and value > 0:
+                candidates.append(value)
+
+        if candidates:
+            return max(1, min(max(candidates), 5000))
+
+        return 1000
+
+    def _resolve_end_param(self) -> Optional[str]:
+        mapping = {
+            "binance": "endTime",
+            "binanceus": "endTime",
+            "binanceusdm": "endTime",
+            "binancecoinm": "endTime",
+        }
+        return mapping.get(self._exchange_id)
+
     @staticmethod
     def _parse_datetime(value: Union[dt.datetime, str]) -> pd.Timestamp:
         ts = pd.to_datetime(value, utc=True)
@@ -109,20 +153,84 @@ class CCXTProvider(BaseDataProvider):
         seconds = self._timeframe_to_seconds(interval)
         since_ms = int(start_ts.timestamp() * 1000)
         until_ms = int(end_ts.timestamp() * 1000)
+        step_ms = max(int(seconds * 1000), 1)
 
-        estimated_bars = math.ceil((until_ms - since_ms) / (seconds * 1000)) + 2
-        limit = max(1, min(estimated_bars, 1500))
-
+        batches = []
+        cursor = since_ms
+        previous_last = None
+        limit_hint = self._resolve_ohlcv_limit()
+        end_param = self._resolve_end_param()
+        supports_params = False
         try:
-            raw = self._exchange.fetch_ohlcv(symbol, timeframe=interval, since=since_ms, limit=limit)
-        except Exception as exc:  # pragma: no cover - network interaction
-            raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+            signature = inspect.signature(self._exchange.fetch_ohlcv)
+            supports_params = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "params"
+                for parameter in signature.parameters.values()
+            )
+        except (TypeError, ValueError):  # pragma: no cover - best effort
+            supports_params = True
 
-        if not raw:
+        for _ in range(1000):
+            remaining_ms = max(until_ms - cursor, 0)
+            if remaining_ms <= 0:
+                break
+
+            approx_points = max(1, math.ceil(remaining_ms / step_ms))
+            request_limit = max(1, min(limit_hint, approx_points))
+
+            fetch_kwargs = {
+                "timeframe": interval,
+                "since": cursor,
+                "limit": request_limit,
+            }
+            if end_param and supports_params:
+                capped_end = min(until_ms, cursor + request_limit * step_ms)
+                fetch_kwargs["params"] = {end_param: capped_end}
+
+            try:
+                batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+            except TypeError as exc:
+                if "params" in fetch_kwargs and "unexpected keyword" in str(exc):
+                    supports_params = False
+                    fetch_kwargs.pop("params", None)
+                    batch = self._exchange.fetch_ohlcv(symbol, **fetch_kwargs)
+                else:
+                    raise
+            except Exception as exc:  # pragma: no cover - network interaction
+                raise RuntimeError(f"CCXT fetch failed for {self._exchange_id}:{symbol} -> {exc}") from exc
+
+            if not batch:
+                break
+
+            batches.extend(batch)
+
+            last_ts = int(batch[-1][0])
+            if previous_last is not None and last_ts <= previous_last:
+                break
+
+            previous_last = last_ts
+            if last_ts >= until_ms:
+                break
+
+            cursor = last_ts + 1
+            if cursor > until_ms:
+                break
+
+        else:  # pragma: no cover - defensive guard
+            logger.warning(
+                "CCXT pagination limit reached for %s:%s between %s and %s",
+                self._exchange_id,
+                symbol,
+                start_ts.isoformat(),
+                end_ts.isoformat(),
+            )
+
+        if not batches:
             return pd.DataFrame()
 
-        df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(batches, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.drop_duplicates(subset="timestamp", keep="last")
         df = df[(df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)]
 
         # Align with downstream expectations

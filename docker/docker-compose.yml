@@ -4,14 +4,15 @@ services:
     build:
       context: ..
       dockerfile: portal/frontend/Dockerfile
+      target: dev
     hostname: frontend.quanttrad
     labels:
       loki.job: quanttrad
       loki.service: frontend
     environment:
-      - VITE_API_BASE_URL=http://backend.quanttrad:8000
+      - VITE_API_BASE_URL=http://localhost:8000 #http://backend.quanttrad:8000
     ports:
-      - "5173:80"
+      - "5173:5173"
     depends_on:
       - backend
     networks:
@@ -35,6 +36,8 @@ services:
       PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
       OHLC_TABLE: ohlc_raw
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
+      DEBUG: ${DEBUG:-true}
+      ENV: ${ENV:-dev}
     ports:
       - "8000:8000"
     depends_on:
@@ -136,10 +139,54 @@ services:
     networks:
       - quanttrad
 
+  ibkr-gateway:
+    profiles: [brokers]
+    build:
+      context: ..
+      dockerfile: docker/ibkr-gateway/Dockerfile
+      args:
+        IBC_VERSION: ${IBKR_IBC_VERSION:-3.23.0}
+        IBC_DOWNLOAD_URL: ${IBKR_IBC_DOWNLOAD_URL:-https://github.com/IbcAlpha/IBC/releases/download/3.23.0/IBCLinux-3.23.0.zip}
+        IB_GATEWAY_VERSION: ${IBKR_GATEWAY_VERSION:-1037} # 10.37.1l is the latest as of June 2024 - 1037 is how the script refers to it
+        IB_GATEWAY_DOWNLOAD_URL: ${IBKR_GATEWAY_DOWNLOAD_URL:-https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/ibgateway-stable-standalone-linux-x64.sh}
+    hostname: ibkr-gateway.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: ibkr-gateway
+    env_file:
+      - ../secrets.env
+    environment:
+      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME}
+      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD}
+      IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
+      IBC_READONLY_API: ${IBKR_READONLY_API:-yes}
+      IBC_ACCEPT_INCOMING_ACTION: ${IBKR_ACCEPT_INCOMING_ACTION:-accept}
+      IBC_EXISTING_SESSION_ACTION: ${IBKR_EXISTING_SESSION_ACTION:-primary}
+      IBC_LOG_LEVEL: ${IBKR_LOG_LEVEL:-info}
+      IBC_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-4002}
+      IBC_GATEWAY_LIVE_PORT: ${IBKR_GATEWAY_LIVE_PORT:-4001}
+      TWS_CONFIG_PATH: /config/jts.ini
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    ports:
+      - "${IBKR_GATEWAY_PORT:-4002}:4002"
+      - "${IBKR_GATEWAY_LIVE_PORT:-4001}:4001"
+      - "5900:5900"  # VNC port
+    volumes:
+      - ibkr-gateway-config:/config
+      - ibkr-gateway-logs:/var/log/ibgateway
+      - ../secrets.env:/app/secrets.env:ro
+    networks:
+      quanttrad:
+        aliases:
+          - ibkr-gateway.quanttrad
+
 volumes:
   tsdb-data:
   pgadmin-data:
   grafana-data:
+  ibkr-gateway-config:
+  ibkr-gateway-logs:
 
 networks:
   quanttrad:

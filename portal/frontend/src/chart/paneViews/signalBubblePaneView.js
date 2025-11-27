@@ -122,7 +122,9 @@ export function createSignalBubblePaneView(timeScaleApi) {
         const shadow = hexToRgba(accent, 0.2);
 
         const label = bubble.label ?? 'Signal';
-        const detail = bubble.detail ?? '';
+        const bias = typeof bubble.bias === 'string' ? bubble.bias.trim() : '';
+        const detailLine = typeof bubble.detail === 'string' ? bubble.detail : '';
+        const detail = [detailLine, bias ? `Bias: ${bias}` : ''].filter(Boolean).join(' • ');
         const meta = bubble.meta ?? '';
 
         const direction = bubble.direction === 'below' ? 'below' : 'above';

@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 ## ---------- Config ----------
-PYTHONPATH ?= src
+PYTHONPATH ?= .:src
 PY          ?= python3
 VENV        ?= .venv
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV)/bin/python
@@ -10,6 +10,7 @@ PIP         := $(VENV)/bin/pip
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
+CHANGELOG_MODEL ?= llama3.1
 
 UVICORN_APP ?= portal.backend.main:app
 UVICORN_OPTS?= --reload --host 0.0.0.0 --port 8000
@@ -26,10 +27,11 @@ TSDB_PORT ?= 15432
 export TSDB_PORT
 
 # Docker stack profile helpers
-STACK_PRESET_all           := core,database,observability
+STACK_PRESET_all           := core,database,observability # ,brokers removed brokers
 STACK_PRESET_core          := core,database
 STACK_PRESET_database      := database
 STACK_PRESET_observability := observability
+STACK_PRESET_brokers       := brokers
 STACK_PROFILES             ?= all
 
 empty :=
@@ -248,3 +250,31 @@ clean: ## Remove caches/build artifacts
 	@find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	@rm -rf .coverage htmlcov dist build $(PID_DIR) $(LOG_DIR) 2>/dev/null || true
 	@echo "🧹 Cleaned"
+
+## ============================= AUTOMATION ============================== ##
+.PHONY: changelog-pr
+changelog-pr: ## Generate changelog using the first open PR for the current branch (requires gh CLI)
+	@set -euo pipefail; \
+	command -v gh >/dev/null 2>&1 || { echo "❌ GitHub CLI (gh) is required"; exit 1; }; \
+	branch=$$(git branch --show-current); \
+	# Capture the first open PR for the current branch as TSV: number, title, head, base
+	pr_line=$$(gh pr list --state open --head "$$branch" --limit 1 --json number,title,headRefName,baseRefName --jq 'if length > 0 then [.[0].number, .[0].title, .[0].headRefName, .[0].baseRefName] | @tsv else "" end'); \
+	if [ -z "$$pr_line" ]; then echo "ℹ️ No open PR found for branch $$branch"; exit 1; fi; \
+	IFS=$$'\t' read -r pr_number pr_title head_ref base_ref <<<"$$pr_line"; \
+	diff_file=$${DIFF_FILE:-/tmp/changelog.diff}; \
+	model=$${CHANGELOG_MODEL:-$(CHANGELOG_MODEL)}; \
+	if [ -z "$$model" ]; then echo "❌ CHANGELOG_MODEL is empty"; exit 1; fi; \
+	release_name=$${RELEASE_NAME:-$$pr_title}; \
+	dry_flag=$${DRY_RUN:+--dry-run}; \
+	config_path=$${CHANGELOG_CONFIG:-scripts/automation/config/prompts.yaml}; \
+	echo "📝 Writing diff for $$base_ref...$$head_ref to $$diff_file"; \
+	git log --no-merges --pretty=format:'%h%n%s%n%b%n---' "$$base_ref...$$head_ref" > "$$diff_file"; \
+	if [ ! -s "$$diff_file" ]; then echo "⚠️ Generated diff is empty"; exit 1; fi; \
+	echo "🚀 Generating changelog for PR $$pr_number (head: $$head_ref, base: $$base_ref)"; \
+	PYTHONPATH=scripts $(PY) scripts/automation/llm_changelog.py --diff-file "$$diff_file" --branch "$$head_ref" --release-name "$$release_name" --model "$$model" --config "$$config_path" $$dry_flag
+
+.PHONY: changelog-pr-batch
+changelog-pr-batch: ## Generate changelog entries for merged PRs since BASE_BRANCH (requires gh CLI, e.g., BASE_BRANCH=develop)
+	@set -euo pipefail; \
+	if [ -z "$${BASE_BRANCH:-}" ]; then echo "❌ BASE_BRANCH is required (e.g., BASE_BRANCH=develop)"; exit 1; fi; \
+	scripts/automation/changelog_pr_batch.sh "$$BASE_BRANCH"

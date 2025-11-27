@@ -13,3 +13,4 @@ logs/
 .pids/
 .coverage
 coverage.xml
+docker/ibkr-gateway/ibgateway-installer.sh
