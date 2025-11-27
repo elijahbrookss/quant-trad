@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict
 
 # Import the Notion client function
-from notion.notion_client import create_release_page
+from automation.notion.notion_client import create_release_page
 
 
 def load_config(config_path: str) -> Dict:
