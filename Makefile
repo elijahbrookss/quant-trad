@@ -272,3 +272,9 @@ changelog-pr: ## Generate changelog using the first open PR for the current bran
 	if [ ! -s "$$diff_file" ]; then echo "⚠️ Generated diff is empty"; exit 1; fi; \
 	echo "🚀 Generating changelog for PR $$pr_number (head: $$head_ref, base: $$base_ref)"; \
 	PYTHONPATH=scripts $(PY) scripts/automation/llm_changelog.py --diff-file "$$diff_file" --branch "$$head_ref" --release-name "$$release_name" --model "$$model" --config "$$config_path" $$dry_flag
+
+.PHONY: changelog-pr-batch
+changelog-pr-batch: ## Generate changelog entries for merged PRs since BASE_BRANCH (requires gh CLI, e.g., BASE_BRANCH=develop)
+	@set -euo pipefail; \
+	if [ -z "$${BASE_BRANCH:-}" ]; then echo "❌ BASE_BRANCH is required (e.g., BASE_BRANCH=develop)"; exit 1; fi; \
+	scripts/automation/changelog_pr_batch.sh "$$BASE_BRANCH"
