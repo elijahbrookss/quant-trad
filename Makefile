@@ -2,7 +2,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 ## ---------- Config ----------
-PYTHONPATH ?= src
+PYTHONPATH ?= .:src
 PY          ?= python3
 VENV        ?= .venv
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV)/bin/python

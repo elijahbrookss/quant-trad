@@ -5,21 +5,21 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service.indicator_service import (
-    list_types,
-    get_type_details,
-    list_instances_meta,
-    get_instance_meta,
-    delete_instance,
-    create_instance,
-    update_instance,
-    duplicate_instance,
-    set_instance_enabled,
-    bulk_set_enabled,
+from portal.backend.service.indicator_service import (
     bulk_delete_instances,
-    overlays_for_instance,
+    bulk_set_enabled,
+    create_instance,
+    delete_instance,
+    duplicate_instance,
     generate_signals_for_instance,
+    get_instance_meta,
+    get_type_details,
     list_indicator_strategies,
+    list_instances_meta,
+    list_types,
+    overlays_for_instance,
+    set_instance_enabled,
+    update_instance,
 )
 
 router = APIRouter()
