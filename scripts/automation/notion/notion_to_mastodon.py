@@ -12,9 +12,16 @@ Env vars required:
 """
 
 import argparse
+import sys
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import requests
+
+SCRIPTS_ROOT = Path(__file__).resolve().parents[2]
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
 from automation.config.settings import NotionSettings, MastodonSettings
 
 

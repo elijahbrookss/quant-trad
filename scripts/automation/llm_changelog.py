@@ -8,10 +8,18 @@ from datetime import date
 from pathlib import Path
 from typing import Dict
 
+# Ensure the scripts/ directory is available for package imports when run directly
+SCRIPTS_ROOT = Path(__file__).resolve().parent.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
 import ollama
 
 # Import the Notion client function
 from automation.notion.notion_client import create_release_page
+
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "prompts.yaml"
 
 
 def load_config(config_path: str) -> Dict:
@@ -358,8 +366,8 @@ Example usage:
     )
     parser.add_argument(
         "--config",
-        default="src/automation/config/prompts.yaml",
-        help="Path to YAML config file with prompts (default: src/automation/config/prompts.yaml)"
+        default=str(DEFAULT_CONFIG_PATH),
+        help=f"Path to YAML config file with prompts (default: {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument(
         "--model",

@@ -1,11 +1,7 @@
-import os
-import json
 from datetime import date
-from pathlib import Path
 from typing import Optional, Any
 
 import requests
-from dotenv import load_dotenv
 from automation.config.settings import NotionSettings
 
 # --- Load env once, from project root ---------------------------------

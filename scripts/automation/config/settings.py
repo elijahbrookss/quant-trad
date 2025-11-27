@@ -1,4 +1,4 @@
-# src/automation/config/settings.py
+# scripts/automation/config/settings.py
 from __future__ import annotations
 
 import os
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # load_dotenv(dotenv_path="/home/jorge/projects/quant-trad/secrets.env")
 # parents[0] = notion
 # parents[1] = automation
-# parents[2] = src
+# parents[2] = scripts
 # parents[3] = quant-trad (repo root)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
