@@ -1,3 +1,4 @@
+import importlib
 import math
 import sys
 from collections import deque
@@ -5,42 +6,10 @@ from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
 
-if "pandas" not in sys.modules:
-    sys.modules["pandas"] = SimpleNamespace(DataFrame=object, to_datetime=lambda *_, **__: [])
-if "numpy" not in sys.modules:
-    sys.modules["numpy"] = SimpleNamespace(
-        array=lambda *_, **__: [],
-        nan=float("nan"),
-        isscalar=lambda value: not isinstance(value, (list, tuple, dict, set)),
-        bool_=bool,
-    )
-_indicator_service_stub = ModuleType("portal.backend.service.indicator_service")
-_indicator_service_stub.overlays_for_instance = lambda *_, **__: {}
-_indicator_service_stub.bulk_delete_instances = lambda *_, **__: None
-sys.modules.setdefault("portal.backend.service.indicator_service", _indicator_service_stub)
-sys.modules.setdefault(
-    "portal.backend.service.storage",
-    SimpleNamespace(record_bot_trade=lambda *_, **__: None, record_bot_trade_event=lambda *_, **__: None),
-)
-sys.modules.setdefault(
-    "portal.backend.service.strategy_service",
-    SimpleNamespace(generate_strategy_signals=lambda **__: {"chart_markers": {}}),
-)
-sys.modules.setdefault("ib_insync", SimpleNamespace(IB=object, Contract=object, util=SimpleNamespace()))
-sys.modules.setdefault("data_providers", SimpleNamespace())
-sys.modules.setdefault("data_providers.factory", SimpleNamespace(get_provider=lambda *_: None))
-sys.modules.setdefault("data_providers.base_provider", SimpleNamespace(DataSource=object))
-sys.modules.setdefault("data_providers.alpaca_provider", SimpleNamespace(AlpacaProvider=object))
-sys.modules.setdefault(
-    "data_providers.interactive_brokers_provider",
-    SimpleNamespace(InteractiveBrokersProvider=object),
-)
-_bot_service_stub = SimpleNamespace(load_strategies=lambda: [])
 
-
-def _performance_meta_stub(bot):
+def _performance_meta_stub(bot, *, load_strategies):
     strategies_meta = bot.get("strategies_meta") or []
-    stored_map = {entry.get("id"): entry for entry in _bot_service_stub.load_strategies()}
+    stored_map = {entry.get("id"): entry for entry in load_strategies()}
     entries = []
     for meta in strategies_meta:
         stored = stored_map.get(meta.get("id"), {})
@@ -58,20 +27,63 @@ def _performance_meta_stub(bot):
         )
     return {"strategies": entries}
 
-
-_bot_service_stub._performance_meta = _performance_meta_stub
-sys.modules.setdefault("portal.backend.service.bot_service", _bot_service_stub)
-
 import pytest
 
-from portal.backend.service.bot_runtime import (
-    BotRuntime,
-    Candle,
-    LadderRiskEngine,
-    StrategySeries,
-    _timeframe_to_seconds,
-)
-from portal.backend.service import bot_service
+
+@pytest.fixture(autouse=True)
+def _load_bot_runtime(monkeypatch):
+    pandas_stub = SimpleNamespace(DataFrame=object, to_datetime=lambda *_, **__: [])
+    numpy_stub = SimpleNamespace(
+        array=lambda *_, **__: [],
+        nan=float("nan"),
+        isscalar=lambda value: not isinstance(value, (list, tuple, dict, set)),
+        bool_=bool,
+    )
+    indicator_service_stub = ModuleType("portal.backend.service.indicator_service")
+    indicator_service_stub.overlays_for_instance = lambda *_, **__: {}
+    indicator_service_stub.bulk_delete_instances = lambda *_, **__: None
+    indicator_service_stub.bulk_set_enabled = lambda *_, **__: None
+    indicator_service_stub._build_market_profile_overlay_indicator = lambda *_, **__: None
+    storage_stub = ModuleType("portal.backend.service.storage")
+    storage_stub.record_bot_trade = lambda *_, **__: None
+    storage_stub.record_bot_trade_event = lambda *_, **__: None
+    storage_stub.delete_instrument = lambda *_, **__: None
+    strategy_service_stub = ModuleType("portal.backend.service.strategy_service")
+    strategy_service_stub.generate_strategy_signals = lambda **__: {"chart_markers": {}}
+    strategy_service_stub.RuleCondition = type("RuleCondition", (), {})
+    monkeypatch.setitem(sys.modules, "pandas", pandas_stub)
+    monkeypatch.setitem(sys.modules, "numpy", numpy_stub)
+    monkeypatch.setitem(sys.modules, "portal.backend.service.indicator_service", indicator_service_stub)
+    monkeypatch.setitem(sys.modules, "portal.backend.service.storage", storage_stub)
+    monkeypatch.setitem(sys.modules, "portal.backend.service.strategy_service", strategy_service_stub)
+    monkeypatch.setitem(sys.modules, "ib_insync", SimpleNamespace(IB=object, Contract=object, util=SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "data_providers", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "data_providers.factory", SimpleNamespace(get_provider=lambda *_: None))
+    monkeypatch.setitem(sys.modules, "data_providers.base_provider", SimpleNamespace(DataSource=object))
+    monkeypatch.setitem(sys.modules, "data_providers.alpaca_provider", SimpleNamespace(AlpacaProvider=object))
+    monkeypatch.setitem(
+        sys.modules,
+        "data_providers.interactive_brokers_provider",
+        SimpleNamespace(InteractiveBrokersProvider=object),
+    )
+    bot_service_stub = SimpleNamespace(load_strategies=lambda: [])
+    bot_service_stub._performance_meta = lambda bot: _performance_meta_stub(
+        bot, load_strategies=bot_service_stub.load_strategies
+    )
+    monkeypatch.setitem(sys.modules, "portal.backend.service.bot_service", bot_service_stub)
+
+    runtime = importlib.import_module("portal.backend.service.bot_runtime")
+    globals().update(
+        {
+            "BotRuntime": runtime.BotRuntime,
+            "Candle": runtime.Candle,
+            "LadderRiskEngine": runtime.LadderRiskEngine,
+            "StrategySeries": runtime.StrategySeries,
+            "_timeframe_to_seconds": runtime._timeframe_to_seconds,
+            "bot_service": bot_service_stub,
+        }
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)
