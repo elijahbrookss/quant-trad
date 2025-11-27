@@ -2,7 +2,7 @@ import math
 import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
 
 if "pandas" not in sys.modules:
@@ -14,10 +14,10 @@ if "numpy" not in sys.modules:
         isscalar=lambda value: not isinstance(value, (list, tuple, dict, set)),
         bool_=bool,
     )
-sys.modules.setdefault(
-    "portal.backend.service.indicator_service",
-    SimpleNamespace(overlays_for_instance=lambda *_, **__: {}),
-)
+_indicator_service_stub = ModuleType("portal.backend.service.indicator_service")
+_indicator_service_stub.overlays_for_instance = lambda *_, **__: {}
+_indicator_service_stub.bulk_delete_instances = lambda *_, **__: None
+sys.modules.setdefault("portal.backend.service.indicator_service", _indicator_service_stub)
 sys.modules.setdefault(
     "portal.backend.service.storage",
     SimpleNamespace(record_bot_trade=lambda *_, **__: None, record_bot_trade_event=lambda *_, **__: None),
