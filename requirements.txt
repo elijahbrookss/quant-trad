@@ -20,3 +20,4 @@ fastapi
 uvicorn
 httpx
 ib-insync
+ollama

@@ -1,7 +1,5 @@
-# src/automation/notion/notion_schema.py
-import os
+# scripts/automation/notion/notion_schema.py
 from datetime import date
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
