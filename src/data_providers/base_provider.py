@@ -64,6 +64,8 @@ class BaseDataProvider(ABC):
             low   DOUBLE PRECISION,
             close DOUBLE PRECISION,
             volume DOUBLE PRECISION,
+            tr DOUBLE PRECISION,
+            atr_wilder DOUBLE PRECISION,
             data_ingested_ts TIMESTAMPTZ DEFAULT now(),
             interval TEXT NOT NULL,
             PRIMARY KEY (symbol, timestamp, datasource, interval)
@@ -117,6 +119,21 @@ class BaseDataProvider(ABC):
             return dt.timedelta(days=max(1, int(unit[:-1])) * 365)
 
         raise ValueError(f"Unsupported interval string: {interval}")
+
+    @staticmethod
+    def _compute_tr_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        required_cols = {"high", "low", "close"}
+        if df is None or df.empty or not required_cols.issubset(df.columns):
+            return df
+
+        hl = df["high"] - df["low"]
+        h_cp = (df["high"] - df["close"].shift()).abs()
+        l_cp = (df["low"] - df["close"].shift()).abs()
+
+        tr = pd.concat([hl, h_cp, l_cp], axis=1).max(axis=1)
+        df["tr"] = tr
+        df["atr_wilder"] = tr.ewm(alpha=1 / period, adjust=False).mean()
+        return df
 
     @staticmethod
     def _collect_missing_ranges(
@@ -549,6 +566,8 @@ class BaseDataProvider(ABC):
         combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
         combined.sort_values("timestamp", inplace=True)
 
+        combined = self._compute_tr_atr(combined)
+
         now_ts = dt.datetime.now(dt.timezone.utc)
         combined["data_ingested_ts"] = now_ts
         combined["datasource"] = self.get_datasource()
@@ -571,7 +590,7 @@ class BaseDataProvider(ABC):
         def query_ohlcv():
             try:
                 query = text(f"""
-                    SELECT timestamp, open, high, low, close, volume
+                    SELECT timestamp, open, high, low, close, volume, tr, atr_wilder
                     FROM {self._table}
                     WHERE symbol = :symbol
                     AND datasource = :ds
@@ -688,6 +707,8 @@ class BaseDataProvider(ABC):
                     self._record_closure_range(ctx, start, end)
                     continue
 
+                segment.sort_values("timestamp", inplace=True)
+                segment = self._compute_tr_atr(segment)
                 segment["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
                 segment["datasource"] = self.get_datasource()
                 segment["interval"] = ctx.interval
@@ -699,7 +720,20 @@ class BaseDataProvider(ABC):
                     # _write_dataframe already logged the failure.
                     pass
 
-                supplemental_frames.append(segment[["timestamp", "open", "high", "low", "close", "volume"]])
+                supplemental_frames.append(
+                    segment[
+                        [
+                            "timestamp",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                            "tr",
+                            "atr_wilder",
+                        ]
+                    ]
+                )
 
             if supplemental_frames:
                 combined = pd.concat([df] + supplemental_frames, ignore_index=True)
@@ -755,6 +789,8 @@ class BaseDataProvider(ABC):
             logger.warning("Fallback fetch returned no data for %s [%s].", ctx.symbol, ctx.interval)
             return pd.DataFrame()
 
+        df = df.sort_values("timestamp")
+        df = self._compute_tr_atr(df)
         df["datasource"] = self.get_datasource()
         df["interval"] = ctx.interval
         df["symbol"] = ctx.symbol
