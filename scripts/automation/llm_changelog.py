@@ -240,7 +240,8 @@ def orchestrate(
     release_name: str,
     config_path: str,
     model: str = "llama3.2",
-    dry_run: bool = False
+    dry_run: bool = False,
+    release_date: date | None = None,
 ) -> Dict[str, str]:
     """End-to-end orchestrator for the changelog automation pipeline.
     
@@ -271,6 +272,9 @@ def orchestrate(
         - raw_model_output
         - notion_page_id (only if dry_run=False)
     """
+    if release_date is None:
+        release_date = date.today()
+
     print(f"[1/6] Loading config from: {config_path}", file=sys.stderr)
     config = load_config(config_path)
     print(f"  ✓ Config loaded", file=sys.stderr)
@@ -309,7 +313,7 @@ def orchestrate(
         print(f"{'='*60}", file=sys.stderr)
         print(f"Release name: {release_name}", file=sys.stderr)
         print(f"Branch: {branch}", file=sys.stderr)
-        print(f"Release date: {date.today()}", file=sys.stderr)
+        print(f"Release date: {release_date}", file=sys.stderr)
         print(f"\nTLDR:\n{parsed['tldr']}\n", file=sys.stderr)
         print(f"Summary preview:\n{parsed['summary'][:150]}...\n", file=sys.stderr)
         print(f"Social post preview:\n{parsed['social_post'][:150]}...\n", file=sys.stderr)
@@ -323,7 +327,7 @@ def orchestrate(
         summary=parsed["tldr"],
         branch=branch,
         full_summary=parsed["summary"],
-        release_date=date.today(),
+        release_date=release_date,
         social_post=parsed["social_post"],
         dev_post=parsed["dev_post"]
     )
@@ -379,9 +383,20 @@ Example usage:
         action="store_true",
         help="Run pipeline without calling Notion API (for testing)"
     )
+    parser.add_argument(
+        "--release-date",
+        help="Release date in YYYY-MM-DD format (defaults to today if omitted)",
+    )
+
     
     args = parser.parse_args()
     
+    try:
+        release_date = date.fromisoformat(args.release_date) if args.release_date else None
+    except ValueError as e:
+        print(f"ERROR: Invalid date format for --release-date. Use YYYY-MM-DD.", file=sys.stderr)
+        sys.exit(1)
+
     try:
         result = orchestrate(
             diff_path=args.diff_file,
@@ -389,7 +404,8 @@ Example usage:
             release_name=args.release_name,
             config_path=args.config,
             model=args.model,
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
+            release_date=release_date
         )
         
         # Print summary to stdout (structured for potential parsing)

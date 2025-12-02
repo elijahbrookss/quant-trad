@@ -104,10 +104,13 @@ main() {
         local release_name
         release_name=${RELEASE_NAME:-$pr_title}
 
+        local release_date
+        release_date=$(date -d "$merged_at" +"%Y-%m-%d")
+
         log INFO "Generating changelog for PR #$pr_number (head: $head_ref, base: $base_ref) using commit messages"
         if ! PYTHONPATH=scripts "$python_bin" scripts/automation/llm_changelog.py \
             --diff-file "$context_file" --branch "$head_ref" --release-name "$release_name" \
-            --model "$model" --config "$config_path" $dry_flag; then
+            --model "$model" --config "$config_path" --release-date "$release_date" $dry_flag; then
             log ERROR "Changelog generation failed for PR #$pr_number"
             rm -f "$context_file"
             continue
