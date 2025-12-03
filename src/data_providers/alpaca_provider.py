@@ -7,8 +7,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from core.logger import logger
-from .base_provider import DataSource
-from .base_provider import BaseDataProvider
+from .base_provider import DataSource, BaseDataProvider, InstrumentMetadata, InstrumentType
 
 
 load_dotenv("secrets.env")
@@ -65,3 +64,14 @@ class AlpacaProvider(BaseDataProvider):
     
     def get_datasource(self):
         return DataSource.ALPACA.value
+
+    def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Alpaca's equities API only delivers spot instruments."""
+
+        return InstrumentType.SPOT
+
+    def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
+        """Return tick and contract details for Alpaca equities."""
+
+        # US equities trade in $0.01 increments; one share is one trading unit.
+        return self._normalize_metadata(tick_size=0.01, contract_size=1.0)

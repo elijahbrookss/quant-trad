@@ -2,13 +2,13 @@ import inspect
 import os
 import math
 import datetime as dt
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Dict, Any
 
 import pandas as pd
 import ccxt
 
 from core.logger import logger
-from .base_provider import BaseDataProvider
+from .base_provider import BaseDataProvider, InstrumentMetadata, InstrumentType
 
 
 class CCXTProvider(BaseDataProvider):
@@ -26,6 +26,62 @@ class CCXTProvider(BaseDataProvider):
         # Store the actual exchange identifier in the datasource column so downstream
         # consumers can differentiate between venues.
         return self._exchange_id.upper()
+
+    def _load_market(self, symbol: str) -> Dict[str, Any]:
+        """Return the CCXT market metadata for *symbol* if available."""
+
+        try:
+            if not getattr(self._exchange, "markets", None):
+                self._exchange.load_markets()
+            market = self._exchange.market(symbol)
+            return market or {}
+        except Exception as exc:  # pragma: no cover - network interaction
+            logger.warning("ccxt_market_load_failed | exchange=%s | symbol=%s | error=%s", self._exchange_id, symbol, exc)
+            return {}
+
+    def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Identify spot vs. derivatives using CCXT market flags."""
+
+        market = self._load_market(symbol)
+        market_type = str(market.get("type", "")).lower()
+
+        if market.get("contract") or market.get("future") or market.get("swap"):
+            return InstrumentType.FUTURE
+
+        if market_type in {"future", "swap"}:
+            return InstrumentType.FUTURE
+
+        if market.get("spot") is False and market_type:
+            return InstrumentType.FUTURE
+
+        return InstrumentType.SPOT
+
+    def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
+        """Return tick/contract details derived from CCXT market metadata."""
+
+        market = self._load_market(symbol)
+        instrument_type = self.get_instrument_type(venue, symbol) if market else InstrumentType.SPOT
+
+        precision = market.get("precision") or {}
+        limits = market.get("limits") or {}
+        price_limits = limits.get("price") or {}
+
+        tick_size = (
+            market.get("tickSize")
+            or price_limits.get("min")
+            or precision.get("price")
+        )
+        tick_value = market.get("tickValue")
+
+        contract_size = market.get("contractSize")
+        if contract_size is None and instrument_type == InstrumentType.SPOT:
+            contract_size = 1.0
+
+        return self._normalize_metadata(
+            tick_size=tick_size,
+            contract_size=contract_size,
+            tick_value=tick_value,
+        )
 
     def _sandbox_flag(self) -> bool:
         flag = os.getenv("CCXT_SANDBOX_MODE", "false").strip().lower()
