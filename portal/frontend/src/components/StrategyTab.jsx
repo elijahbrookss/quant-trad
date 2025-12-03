@@ -17,6 +17,7 @@ import { createInstrument } from '../adapters/instrument.adapter.js'
 import { fetchProviders, fetchTickMetadata, validateProviderSelection } from '../adapters/provider.adapter.js'
 import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from './atm/ATMConfigForm.jsx'
 import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
+import InstrumentDetailsPanel from './InstrumentDetailsPanel.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
@@ -30,7 +31,7 @@ const STRATEGY_FORM_DEFAULT = {
   timeframe: '15m',
   provider_id: '',
   venue_id: '',
-  symbols: '',
+  instrument_slots: [],
   atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
 }
 
@@ -66,6 +67,14 @@ const INSTRUMENT_FORM_DEFAULT = {
 }
 
 const EMPTY_LIST = Object.freeze([])
+
+const newSlot = (symbol = '') => ({
+  uid: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
+  symbol,
+  enabled: true,
+  risk_multiplier: '',
+  metadata: {},
+})
 
 
 const ActionButton = ({ variant = 'default', className = '', ...props }) => {
@@ -104,6 +113,8 @@ function StrategyFormModal({
   const [atmPrefillWarning, setAtmPrefillWarning] = useState(null)
   const [providers, setProviders] = useState([])
   const [providersLoading, setProvidersLoading] = useState(false)
+  const [slotStatus, setSlotStatus] = useState({})
+  const [expandedSlots, setExpandedSlots] = useState([])
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
   const providerOptions = useMemo(
@@ -162,26 +173,62 @@ function StrategyFormModal({
     }
   }, [open, modalLogger])
 
-  const normalizeSymbol = useCallback((rawSymbols) => {
-    if (!rawSymbols) return ''
-    return rawSymbols
+  const normalizeSymbol = useCallback((rawSymbol) => {
+    if (!rawSymbol) return ''
+    const candidate = String(rawSymbol)
       .split(/[\s,;]+/)
       .map((token) => token.trim())
       .filter(Boolean)[0]
-      ?.toUpperCase()
-      ?.trim()
-      ?.replace(/\s+/g, '')
-      ?.replace(/,+$/, '')
-      ?.replace(/^,/, '')
-      ?.trim() ?? ''
+    if (!candidate) return ''
+    return candidate
+      .toUpperCase()
+      .trim()
+      .replace(/\s+/g, '')
+      .replace(/,+$/, '')
+      .replace(/^,/, '')
+      .trim()
   }, [])
+
+  const normaliseSlot = useCallback(
+    (value, index = 0) => {
+      if (!value) return newSlot()
+      const symbol = normalizeSymbol(typeof value === 'object' ? value.symbol : value)
+      const riskValue =
+        value && typeof value === 'object' && value.risk_multiplier !== undefined && value.risk_multiplier !== null
+          ? String(value.risk_multiplier)
+          : ''
+      const metadata =
+        value && typeof value === 'object' && value.metadata && typeof value.metadata === 'object'
+          ? { ...value.metadata }
+          : {}
+      return {
+        ...newSlot(symbol),
+        enabled: value && typeof value === 'object' ? Boolean(value.enabled) : true,
+        risk_multiplier: riskValue,
+        metadata,
+        uid: `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`,
+      }
+    },
+    [normalizeSymbol],
+  )
+
+  const inflateSlots = useCallback(
+    (rawSlots) => {
+      const list = Array.isArray(rawSlots) ? rawSlots : []
+      const mapped = list.map((slot, index) => normaliseSlot(slot, index))
+      const cleaned = mapped.filter((slot, index) => slot.symbol || index === 0)
+      return cleaned.length ? cleaned : [newSlot('')]
+    },
+    [normaliseSlot],
+  )
 
   const validateStep1 = useCallback(
     (state) => {
       const errors = {}
       const providerId = (state.provider_id || '').toUpperCase()
       const venueId = (state.venue_id || '').toUpperCase()
-      const symbol = normalizeSymbol(state.symbols || '')
+      const slots = Array.isArray(state.instrument_slots) ? state.instrument_slots : []
+      const slotIssues = {}
 
       const hasProviderOptions = providerOptions.length > 0
       const validProviders = new Set(providerOptions.map((option) => option.value))
@@ -199,10 +246,30 @@ function StrategyFormModal({
         errors.venue_id = 'Choose a venue supported by the selected provider.'
       }
 
-      if (!symbol) {
-        errors.symbols = 'Symbol is required.'
-      } else if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(symbol)) {
-        errors.symbols = 'Use letters/numbers with - or / separators.'
+      const seenSymbols = new Set()
+      slots.forEach((slot, index) => {
+        const symbol = normalizeSymbol(slot.symbol)
+        if (!symbol) {
+          slotIssues[slot.uid || index] = 'Symbol is required.'
+          return
+        }
+        if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(symbol)) {
+          slotIssues[slot.uid || index] = 'Use letters/numbers with - or / separators.'
+          return
+        }
+        const key = symbol.toUpperCase()
+        if (seenSymbols.has(key)) {
+          slotIssues[slot.uid || index] = 'Symbols must be unique.'
+        } else {
+          seenSymbols.add(key)
+        }
+      })
+
+      if (!slots.length || !seenSymbols.size) {
+        errors.instrument_slots = 'Add at least one symbol.'
+      }
+      if (Object.keys(slotIssues).length) {
+        errors.slotIssues = slotIssues
       }
 
       return errors
@@ -280,6 +347,7 @@ function StrategyFormModal({
       setForm({
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+        instrument_slots: [newSlot('')],
       })
       setCurrentStep(0)
       setAtmMode('new')
@@ -288,10 +356,18 @@ function StrategyFormModal({
       setShowValidation(false)
       setPrefetchingMeta(false)
       setAtmPrefillWarning(null)
+      setSlotStatus({})
+      setExpandedSlots([])
       return
     }
 
     if (initialValues) {
+      const initialSlots = (() => {
+        if (Array.isArray(initialValues.instrument_slots)) return inflateSlots(initialValues.instrument_slots)
+        if (Array.isArray(initialValues.symbols)) return inflateSlots(initialValues.symbols)
+        if (initialValues.symbols) return inflateSlots([initialValues.symbols])
+        return inflateSlots([])
+      })()
       const fallbackTemplate = cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE)
       const match = templateOptions.find(
         (option) => option.key && option.key === templateKey(initialValues.atm_template),
@@ -303,9 +379,7 @@ function StrategyFormModal({
         timeframe: initialValues.timeframe || '15m',
         provider_id: (initialValues.provider_id || initialValues.datasource || '').toUpperCase() || '',
         venue_id: (initialValues.venue_id || initialValues.exchange || '').toUpperCase() || '',
-        symbols: Array.isArray(initialValues.symbols)
-          ? initialValues.symbols.join(', ')
-          : initialValues.symbols || '',
+        instrument_slots: initialSlots,
         atm_template: match ? cloneATMTemplate(match.template) : fallbackTemplate,
       })
       setAtmMode(match ? 'existing' : 'new')
@@ -315,6 +389,7 @@ function StrategyFormModal({
       setForm({
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
+        instrument_slots: [newSlot('')],
       })
       setCurrentStep(0)
       setAtmMode('new')
@@ -323,7 +398,9 @@ function StrategyFormModal({
     setTouched({})
     setShowValidation(false)
     setAtmPrefillWarning(null)
-  }, [open, initialValues, templateOptions, templateKey])
+    setSlotStatus({})
+    setExpandedSlots([])
+  }, [open, initialValues, templateOptions, templateKey, inflateSlots])
 
   const handleChange = (field) => (input) => {
     let value = input
@@ -337,13 +414,22 @@ function StrategyFormModal({
       setForm((prev) => {
         const allowedVenues = new Set(getVenueOptions(nextProvider).map((option) => option.value))
         const nextVenue = allowedVenues.size === 1 ? [...allowedVenues][0] : allowedVenues.has(prev.venue_id) ? prev.venue_id : ''
-        return { ...prev, provider_id: nextProvider, venue_id: nextVenue }
+        const clearedSlots = (prev.instrument_slots || []).map((slot) => ({ ...slot, metadata: {} }))
+        return { ...prev, provider_id: nextProvider, venue_id: nextVenue, instrument_slots: clearedSlots }
       })
+      setSlotStatus({})
       return
     }
 
     if (field === 'venue_id' && typeof value === 'string') {
       value = value.toUpperCase()
+      setSlotStatus({})
+      setForm((prev) => ({
+        ...prev,
+        venue_id: value,
+        instrument_slots: (prev.instrument_slots || []).map((slot) => ({ ...slot, metadata: {} })),
+      }))
+      return
     }
 
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
@@ -356,6 +442,101 @@ function StrategyFormModal({
     }))
     setAtmMode('new')
   }, [])
+
+  const slotIssues = useMemo(() => step1Errors.slotIssues || {}, [step1Errors])
+
+  const updateSlots = useCallback((updater) => {
+    setForm((prev) => {
+      const current = Array.isArray(prev.instrument_slots) ? prev.instrument_slots : []
+      const next = updater(current)
+      return { ...prev, instrument_slots: next.length ? next : [newSlot('')] }
+    })
+  }, [])
+
+  const handleAddSlot = () => {
+    markTouched('instrument_slots')
+    updateSlots((slots) => [...slots, newSlot('')])
+  }
+
+  const handleRemoveSlot = (uid) => {
+    markTouched('instrument_slots')
+    updateSlots((slots) => slots.filter((slot) => slot.uid !== uid))
+    setSlotStatus((prev) => {
+      const next = { ...prev }
+      delete next[uid]
+      return next
+    })
+    setExpandedSlots((prev) => prev.filter((id) => id !== uid))
+  }
+
+  const handleSlotChange = useCallback(
+    (uid, updates) => {
+      markTouched('instrument_slots')
+      updateSlots((slots) => slots.map((slot) => (slot.uid === uid ? { ...slot, ...updates } : slot)))
+    },
+    [markTouched, updateSlots],
+  )
+
+  const handleToggleSlot = (uid) => {
+    markTouched('instrument_slots')
+    updateSlots((slots) => slots.map((slot) => (slot.uid === uid ? { ...slot, enabled: !slot.enabled } : slot)))
+  }
+
+  const handleReorderSlot = (uid, direction) => {
+    markTouched('instrument_slots')
+    updateSlots((slots) => {
+      const index = slots.findIndex((slot) => slot.uid === uid)
+      if (index < 0) return slots
+      const nextIndex = direction === 'up' ? index - 1 : index + 1
+      if (nextIndex < 0 || nextIndex >= slots.length) return slots
+      const next = [...slots]
+      const [moved] = next.splice(index, 1)
+      next.splice(nextIndex, 0, moved)
+      return next
+    })
+  }
+
+  const toggleSlotDetails = (uid) => {
+    setExpandedSlots((prev) => (prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid]))
+  }
+
+  const handleRefreshMetadata = useCallback(
+    async (slot) => {
+      if (!slot) return
+      const symbol = normalizeSymbol(slot.symbol)
+      if (!symbol) {
+        setSlotStatus((prev) => ({ ...prev, [slot.uid]: { error: 'Enter a symbol before loading metadata.' } }))
+        return
+      }
+      if (!form.provider_id || !form.venue_id) {
+        setSlotStatus((prev) => ({ ...prev, [slot.uid]: { error: 'Select provider and venue first.' } }))
+        return
+      }
+      setSlotStatus((prev) => ({ ...prev, [slot.uid]: { loading: true, error: null } }))
+      try {
+        const metadata = await lookupTickMetadata({
+          symbol,
+          provider_id: form.provider_id,
+          venue_id: form.venue_id,
+          timeframe: form.timeframe,
+        })
+        if (metadata) {
+          handleSlotChange(slot.uid, {
+            metadata: { ...metadata, provider_id: form.provider_id, venue_id: form.venue_id },
+          })
+          setSlotStatus((prev) => ({ ...prev, [slot.uid]: { loading: false, error: null, updatedAt: Date.now() } }))
+        } else {
+          setSlotStatus((prev) => ({ ...prev, [slot.uid]: { loading: false, error: 'No metadata returned.' } }))
+        }
+      } catch (err) {
+        setSlotStatus((prev) => ({
+          ...prev,
+          [slot.uid]: { loading: false, error: err?.message || 'Metadata lookup failed.' },
+        }))
+      }
+    },
+    [form.provider_id, form.timeframe, form.venue_id, handleSlotChange, lookupTickMetadata, normalizeSymbol],
+  )
 
   useEffect(() => {
     const allowedVenues = new Set(getVenueOptions(form.provider_id).map((option) => option.value))
@@ -378,7 +559,27 @@ function StrategyFormModal({
     event.preventDefault()
     const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
     const name = form.name.trim() || fallbackName
-    const primarySymbol = normalizeSymbol(form.symbols || '')
+    const cleanedSlots = (form.instrument_slots || [])
+      .map((slot, index) => {
+        const symbol = normalizeSymbol(slot.symbol)
+        if (!symbol) return null
+        const riskValue =
+          slot.risk_multiplier === '' || slot.risk_multiplier === null || slot.risk_multiplier === undefined
+            ? null
+            : Number(slot.risk_multiplier)
+        const payload = {
+          symbol,
+          enabled: Boolean(slot.enabled),
+        }
+        if (Number.isFinite(riskValue)) {
+          payload.risk_multiplier = riskValue
+        }
+        if (slot.metadata && Object.keys(slot.metadata).length) {
+          payload.metadata = slot.metadata
+        }
+        return payload
+      })
+      .filter(Boolean)
     const payload = {
       name,
       description: form.description.trim() || null,
@@ -387,7 +588,8 @@ function StrategyFormModal({
       venue_id: (form.venue_id || '').trim().toUpperCase() || null,
       datasource: null,
       exchange: null,
-      symbols: primarySymbol ? [primarySymbol] : [],
+      symbols: cleanedSlots.map((slot) => slot.symbol),
+      instrument_slots: cleanedSlots,
       atm_template: cloneATMTemplate(form.atm_template),
     }
     await onSubmit(payload)
@@ -401,19 +603,36 @@ function StrategyFormModal({
     if (!isStep1Valid) return
 
     setPrefetchingMeta(true)
-    const symbol = normalizeSymbol(form.symbols || '')
+    const primarySlot = (form.instrument_slots || []).find((slot) => normalizeSymbol(slot.symbol))
+    const symbol = normalizeSymbol(primarySlot?.symbol || '')
+    if (!symbol) {
+      setPrefetchingMeta(false)
+      setCurrentStep(1)
+      return
+    }
+    const hasStoredMeta = primarySlot?.metadata && Object.keys(primarySlot.metadata || {}).length > 0
     try {
-      const metadata = await lookupTickMetadata({
-        symbol,
-        provider_id: form.provider_id,
-        venue_id: form.venue_id,
-        timeframe: form.timeframe,
-      })
-      if (metadata) {
-        applyTickDefaults(metadata)
+      if (hasStoredMeta) {
+        applyTickDefaults(primarySlot.metadata)
         setAtmPrefillWarning(null)
       } else {
-        setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
+        const metadata = await lookupTickMetadata({
+          symbol,
+          provider_id: form.provider_id,
+          venue_id: form.venue_id,
+          timeframe: form.timeframe,
+        })
+        if (metadata) {
+          applyTickDefaults(metadata)
+          setAtmPrefillWarning(null)
+          if (primarySlot?.uid) {
+            handleSlotChange(primarySlot.uid, {
+              metadata: { ...metadata, provider_id: form.provider_id, venue_id: form.venue_id },
+            })
+          }
+        } else {
+          setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
+        }
       }
     } catch (err) {
       modalLogger?.warn('atm_tick_prefill_failed', { provider_id: form.provider_id, venue_id: form.venue_id, symbol }, err)
@@ -532,20 +751,132 @@ function StrategyFormModal({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbol</label>
-                <input
-                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                  value={form.symbols}
-                  onChange={handleChange('symbols')}
-                  onBlur={() => markTouched('symbols')}
-                  placeholder="e.g. BTC/USD"
-                />
-                {showFieldError('symbols') ? (
-                  <p className="mt-1 text-xs text-rose-400">{step1Errors.symbols}</p>
-                ) : (
-                  <p className="mt-1 text-[11px] text-slate-500">Provide one symbol to start; you can add more later.</p>
-                )}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbols</p>
+                    <p className="text-xs text-slate-500">All symbols share this provider, venue, and timeframe.</p>
+                  </div>
+                  <ActionButton type="button" variant="ghost" onClick={handleAddSlot}>
+                    Add symbol
+                  </ActionButton>
+                </div>
+
+                <div className="space-y-3">
+                  {(form.instrument_slots || []).map((slot, index) => {
+                    const slotError = (showValidation || touched.instrument_slots) && slotIssues[slot.uid || index]
+                    const status = slotStatus[slot.uid] || {}
+                    return (
+                      <div
+                        key={slot.uid || index}
+                        className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3"
+                      >
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start">
+                          <div className="flex-1">
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Symbol</label>
+                            <input
+                              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                              value={slot.symbol}
+                              onChange={(event) => handleSlotChange(slot.uid, { symbol: event.target.value })}
+                              placeholder="e.g. BTC/USD"
+                            />
+                            {slotError ? (
+                              <p className="mt-1 text-xs text-rose-400">{slotIssues[slot.uid || index]}</p>
+                            ) : null}
+                          </div>
+                          <div className="w-full md:w-40">
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Risk multiplier</label>
+                            <input
+                              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                              type="number"
+                              step="0.1"
+                              placeholder="Optional"
+                              value={slot.risk_multiplier}
+                              onChange={(event) => handleSlotChange(slot.uid, { risk_multiplier: event.target.value })}
+                            />
+                          </div>
+                          <div className="flex flex-col items-end gap-2 md:w-40">
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Enabled</label>
+                            <label className="relative inline-flex cursor-pointer items-center">
+                              <input
+                                type="checkbox"
+                                className="peer sr-only"
+                                checked={Boolean(slot.enabled)}
+                                onChange={() => handleToggleSlot(slot.uid)}
+                              />
+                              <div className="peer h-6 w-11 rounded-full bg-white/10 after:absolute after:left-[4px] after:top-[4px] after:h-4 after:w-4 after:rounded-full after:border after:border-white/20 after:bg-white after:transition-all peer-checked:bg-[color:var(--accent-alpha-40)] peer-checked:after:translate-x-full" />
+                            </label>
+                            <div className="flex gap-2 text-xs">
+                              <button
+                                type="button"
+                                className="rounded-lg bg-white/10 px-2 py-1 text-slate-100 hover:bg-white/20"
+                                onClick={() => handleReorderSlot(slot.uid, 'up')}
+                                disabled={index === 0}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-lg bg-white/10 px-2 py-1 text-slate-100 hover:bg-white/20"
+                                onClick={() => handleReorderSlot(slot.uid, 'down')}
+                                disabled={index === (form.instrument_slots || []).length - 1}
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-lg bg-white/10 px-2 py-1 text-rose-100 hover:bg-rose-500/60"
+                                onClick={() => handleRemoveSlot(slot.uid)}
+                                disabled={(form.instrument_slots || []).length === 1}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                            <div className="flex gap-2">
+                              <ActionButton
+                                type="button"
+                                variant="ghost"
+                                className="text-xs"
+                                onClick={() => toggleSlotDetails(slot.uid)}
+                              >
+                                {expandedSlots.includes(slot.uid) ? 'Hide details' : 'Show details'}
+                              </ActionButton>
+                              <ActionButton
+                                type="button"
+                                variant="subtle"
+                                className="text-xs"
+                                onClick={() => handleRefreshMetadata(slot)}
+                                disabled={status.loading}
+                              >
+                                {status.loading ? 'Loading…' : 'Refresh'}
+                              </ActionButton>
+                            </div>
+                          </div>
+                        </div>
+                        {expandedSlots.includes(slot.uid) ? (
+                          <div className="border-t border-white/5 pt-3">
+                            <InstrumentDetailsPanel
+                              symbol={normalizeSymbol(slot.symbol) || slot.symbol}
+                              metadata={slot.metadata}
+                              providerId={form.provider_id}
+                              venueId={form.venue_id}
+                              timeframe={form.timeframe}
+                              status={status}
+                              onRefresh={() => handleRefreshMetadata(slot)}
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    )
+                  })}
+                  {showFieldError('instrument_slots') ? (
+                    <p className="text-xs text-rose-400">{step1Errors.instrument_slots}</p>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">
+                      Add, remove, or reorder symbols. Each symbol can expose metadata in its details panel.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           )}
