@@ -34,7 +34,13 @@ function renderTargets(targets) {
             <p className="text-base text-white">{target.label || `TP +${target.ticks}`}</p>
           </div>
           <div className="text-right text-xs text-slate-400">
-            <p>{formatNumber(target.ticks)} ticks</p>
+            {target.r_multiple !== null && target.r_multiple !== undefined ? (
+              <p>{formatNumber(target.r_multiple)} R</p>
+            ) : target.price !== null && target.price !== undefined ? (
+              <p>@ {formatNumber(target.price)}</p>
+            ) : (
+              <p>{formatNumber(target.ticks)} ticks</p>
+            )}
             <p>{formatNumber(target.contracts)} contracts</p>
           </div>
         </li>
@@ -49,6 +55,22 @@ export default function ATMTemplateSummary({ template }) {
   const breakeven = config.breakeven || {}
   const trailing = config.trailing || {}
   const meta = config._meta || {}
+
+  const resolvedTickSize = config.tick_size ?? meta.tick_size ?? null
+  const latestAtrValue = meta.latest_atr ?? meta.atr_preview ?? meta.atr ?? null
+  const rMode = config.rMode || 'atr'
+  const riskTicks = config.rRiskTicks
+  const rAtrMultiplier = config.rAtrMultiplier ?? 1
+
+  const oneRPrice =
+    rMode === 'ticks'
+      ? riskTicks && resolvedTickSize
+        ? riskTicks * resolvedTickSize
+        : null
+      : latestAtrValue
+        ? rAtrMultiplier * Number(latestAtrValue)
+        : null
+  const oneRTicks = resolvedTickSize && oneRPrice ? oneRPrice / resolvedTickSize : riskTicks ?? null
 
   const describeField = (value, flag) => {
     if (flag) {
@@ -65,17 +87,38 @@ export default function ATMTemplateSummary({ template }) {
           <p className="text-lg font-semibold text-white">{formatNumber(config.contracts)}</p>
         </div>
         <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Risk unit</p>
+          <p className="text-sm text-white">
+            {rMode === 'ticks'
+              ? `${formatNumber(riskTicks)} ticks${oneRPrice ? ` (${formatNumber(oneRPrice)} pts)` : ''}`
+              : oneRPrice
+                ? `${formatNumber(oneRPrice)} per R`
+                : `${formatNumber(rAtrMultiplier)} x ATR`}
+          </p>
+          <p className="text-[11px] text-slate-500">1R definition for R-based stops and targets.</p>
+        </div>
+        <div>
           <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Initial stop</p>
-          <p className="text-lg font-semibold text-white">{formatNumber(config.stop_ticks)} ticks</p>
+          <p className="text-lg font-semibold text-white">
+            {config.stop_r_multiple !== null && config.stop_r_multiple !== undefined
+              ? `${formatNumber(config.stop_r_multiple)} R`
+              : config.stop_price !== null && config.stop_price !== undefined
+                ? `@ ${formatNumber(config.stop_price)}`
+                : `${formatNumber(config.stop_ticks)} ticks`}
+          </p>
         </div>
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Breakeven</p>
           <p className="text-sm text-white">
-            {breakeven?.target_index !== undefined && breakeven?.target_index !== null
-              ? `After target ${Number(breakeven.target_index) + 1}`
-              : breakeven?.ticks
-                ? `${formatNumber(breakeven.ticks)} ticks`
-                : 'Manual'}
+            {breakeven?.enabled === false
+              ? 'Disabled'
+              : breakeven?.target_index !== undefined && breakeven?.target_index !== null
+                ? `After target ${Number(breakeven.target_index) + 1}`
+                : breakeven?.r_multiple !== null && breakeven?.r_multiple !== undefined
+                  ? `${formatNumber(breakeven.r_multiple)} R`
+                  : breakeven?.ticks
+                    ? `${formatNumber(breakeven.ticks)} ticks`
+                    : 'Manual'}
           </p>
         </div>
       </div>
@@ -109,9 +152,11 @@ export default function ATMTemplateSummary({ template }) {
               <dd className="text-base text-white">
                 {trailing.target_index !== undefined && trailing.target_index !== null
                   ? `Target ${Number(trailing.target_index) + 1}`
-                  : trailing.ticks
-                    ? `${formatNumber(trailing.ticks)} ticks`
-                    : 'Manual'}
+                  : trailing.r_multiple !== null && trailing.r_multiple !== undefined
+                    ? `${formatNumber(trailing.r_multiple)} R`
+                    : trailing.ticks
+                      ? `${formatNumber(trailing.ticks)} ticks`
+                      : 'Manual'}
               </dd>
             </div>
             <div>

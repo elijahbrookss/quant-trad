@@ -16,7 +16,7 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from . import indicator_service, storage, strategy_service
+from . import indicator_service, risk_math, storage, strategy_service
 from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
 from .candle_service import fetch_ohlcv
 
@@ -121,6 +121,10 @@ class Candle:
     low: float
     close: float
     end: Optional[datetime] = None
+    atr: Optional[float] = None
+    volume: Optional[float] = None
+    range: Optional[float] = None
+    lookback_15: Optional[Dict[str, Optional[float]]] = None
 
     def to_dict(self) -> Dict[str, float]:
         payload = {
@@ -132,6 +136,10 @@ class Candle:
         }
         if self.end:
             payload["end"] = _isoformat(self.end)
+        if self.atr is not None:
+            payload["atr"] = round(self.atr, 6)
+        if self.volume is not None:
+            payload["volume"] = round(self.volume, 6)
         return payload
 
     @property
@@ -187,7 +195,7 @@ class LadderPosition:
     stop_price: float
     tick_size: float
     legs: List[Leg] = field(default_factory=list)
-    breakeven_trigger_ticks: int = 20
+    breakeven_trigger_ticks: float = 20.0
     tick_value: float = 1.0
     contract_size: float = 1.0
     maker_fee_rate: float = 0.0
@@ -199,10 +207,39 @@ class LadderPosition:
     gross_pnl: float = 0.0
     fees_paid: float = 0.0
     net_pnl: float = 0.0
+    atr_at_entry: Optional[float] = None
+    r_multiple_at_entry: Optional[float] = None
+    r_value: Optional[float] = None
+    r_ticks: Optional[float] = None
+    mae_ticks: float = 0.0
+    mfe_ticks: float = 0.0
+    bars_held: int = 0
+    best_price: float = 0.0
+    worst_price: float = 0.0
+    trailing_activation_ticks: Optional[float] = None
+    trailing_distance_ticks: Optional[float] = None
+    trailing_active: bool = False
+    trailing_atr_multiple: float = 0.0
+    pre_entry_context: Optional[Dict[str, Optional[float]]] = None
+
+    def __post_init__(self) -> None:
+        self.best_price = self.entry_price
+        self.worst_price = self.entry_price
 
     def register_entry_fee(self) -> None:
         total_contracts = sum(max(leg.contracts, 0) for leg in self.legs) or 1
         self._apply_fee(self.entry_price, total_contracts)
+
+    def _update_excursions(self, candle: Candle) -> None:
+        favorable_price = candle.high if self.direction == "long" else candle.low
+        adverse_price = candle.low if self.direction == "long" else candle.high
+        self.best_price = max(self.best_price, favorable_price) if self.direction == "long" else min(self.best_price, favorable_price)
+        self.worst_price = min(self.worst_price, adverse_price) if self.direction == "long" else max(self.worst_price, adverse_price)
+        favorable_ticks = self._ticks_from_entry(favorable_price)
+        adverse_ticks = self._ticks_from_entry(adverse_price)
+        self.mfe_ticks = max(self.mfe_ticks, favorable_ticks)
+        self.mae_ticks = min(self.mae_ticks, adverse_ticks)
+        self.bars_held += 1
 
     def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
         events: List[Dict[str, str]] = []
@@ -267,6 +304,27 @@ class LadderPosition:
                         self.moved_to_breakeven = True
         return events
 
+    def _maybe_move_breakeven(self) -> None:
+        if self.moved_to_breakeven:
+            return
+        if self.breakeven_trigger_ticks and self.mfe_ticks >= self.breakeven_trigger_ticks:
+            self.stop_price = risk_math.clamp_stop(self.stop_price, self.entry_price, self.direction)
+            self.moved_to_breakeven = True
+
+    def _maybe_trail_stop(self) -> None:
+        if self.trailing_distance_ticks in (None, 0):
+            return
+        if self.trailing_activation_ticks is not None and self.mfe_ticks < self.trailing_activation_ticks:
+            return
+        distance_price = self.trailing_distance_ticks * self.tick_size
+        if distance_price <= 0:
+            return
+        self.trailing_active = True
+        candidate = (
+            self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
+        )
+        self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
+
     def _apply_stop(self, candle: Candle) -> List[Dict[str, str]]:
         events: List[Dict[str, str]] = []
         triggered = False
@@ -307,7 +365,12 @@ class LadderPosition:
     def apply_bar(self, candle: Candle) -> List[Dict[str, str]]:
         """Advance the position with the latest candle."""
 
-        events = self._apply_leg_fills(candle)
+        events: List[Dict[str, str]] = []
+        self._update_excursions(candle)
+        leg_events = self._apply_leg_fills(candle)
+        events.extend(leg_events)
+        self._maybe_move_breakeven()
+        self._maybe_trail_stop()
         stop_events = self._apply_stop(candle)
         if stop_events:
             events.extend(stop_events)
@@ -323,6 +386,7 @@ class LadderPosition:
                     "currency": self.quote_currency,
                     "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
                     "direction": self.direction,
+                    "metrics": self._metrics_snapshot(),
                 }
             )
         return events
@@ -347,6 +411,13 @@ class LadderPosition:
             "fees_paid": round(self.fees_paid, 4),
             "net_pnl": round(self.net_pnl, 4),
             "currency": self.quote_currency,
+            "atr_at_entry": None if self.atr_at_entry is None else round(self.atr_at_entry, 6),
+            "r_value": None if self.r_value is None else round(self.r_value, 6),
+            "r_ticks": None if self.r_ticks is None else round(self.r_ticks, 4),
+            "mae_ticks": round(self.mae_ticks, 4),
+            "mfe_ticks": round(self.mfe_ticks, 4),
+            "bars_held": self.bars_held,
+            "metrics": self._metrics_snapshot(),
         }
 
     def _pnl_for_exit(self, exit_price: float, contracts: int) -> float:
@@ -379,6 +450,22 @@ class LadderPosition:
     def _update_net(self) -> None:
         self.net_pnl = self.gross_pnl - self.fees_paid
 
+    def _metrics_snapshot(self) -> Dict[str, object]:
+        mae_r = (self.mae_ticks / self.r_ticks) if self.r_ticks else None
+        mfe_r = (self.mfe_ticks / self.r_ticks) if self.r_ticks else None
+        return {
+            "atr_at_entry": None if self.atr_at_entry is None else round(self.atr_at_entry, 6),
+            "r_multiple_at_entry": self.r_multiple_at_entry,
+            "r_value": None if self.r_value is None else round(self.r_value, 6),
+            "r_ticks": None if self.r_ticks is None else round(self.r_ticks, 4),
+            "mae_ticks": round(self.mae_ticks, 4),
+            "mfe_ticks": round(self.mfe_ticks, 4),
+            "mae_r": None if mae_r is None else round(mae_r, 6),
+            "mfe_r": None if mfe_r is None else round(mfe_r, 6),
+            "bars_held": self.bars_held,
+            "pre_entry_context": dict(self.pre_entry_context or {}),
+        }
+
 
 class LadderRiskEngine:
     """Create and manage laddered trades for simulated bots."""
@@ -403,9 +490,12 @@ class LadderRiskEngine:
         else:
             self.tick_size = 0.01
         self.orders = self._orders_from_template()
-        self.targets = [int(order["ticks"]) for order in self.orders]
+        self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
-        self.breakeven_trigger = self._breakeven_threshold()
+        self.stop_r_multiple = _coerce_float(self.template.get("stop_r_multiple"))
+        self.r_multiple = float(self.template.get("atr_r_multiple") or 1.0)
+        self.breakeven_config: Dict[str, Any] = dict(self.template.get("breakeven") or {})
+        self.trailing_config: Dict[str, Any] = dict(self.template.get("trailing") or {})
         config_contract = _coerce_float(self.template.get("contract_size"))
         instrument_contract = _coerce_float(self.instrument.get("contract_size"))
         self.contract_size = (
@@ -444,7 +534,7 @@ class LadderRiskEngine:
         self.trades: List[LadderPosition] = []
         logger.info(
             "ladder_risk_configured | targets=%s | stop_ticks=%s | tick=%.5f | instrument=%s",
-            ",".join(str(order["ticks"]) for order in self.orders),
+            ",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
             self.stop_ticks,
             self.tick_size,
             self.instrument.get("symbol"),
@@ -455,14 +545,18 @@ class LadderRiskEngine:
         entries = self.template.get("take_profit_orders") or []
         for idx, entry in enumerate(entries):
             ticks = _coerce_float(entry.get("ticks"))
-            if ticks is None:
+            r_multiple = _coerce_float(entry.get("r_multiple"))
+            price = _coerce_float(entry.get("price"))
+            if ticks is None and r_multiple is None and price is None:
                 continue
             label = entry.get("label") or f"Target {idx + 1}"
             contracts = int(entry.get("contracts") or 0)
             orders.append(
                 {
                     "label": label,
-                    "ticks": int(ticks),
+                    "ticks": int(ticks) if ticks is not None else None,
+                    "r_multiple": r_multiple,
+                    "price": price,
                     "contracts": max(contracts, 1),
                 }
             )
@@ -497,37 +591,103 @@ class LadderRiskEngine:
             slots[idx % count] += 1
         return slots
 
-    def _breakeven_threshold(self) -> int:
-        config = self.template.get("breakeven") or {}
-        if config.get("target_index") is not None and self.targets:
-            index = max(0, min(int(config.get("target_index") or 0), len(self.targets) - 1))
-            return int(self.targets[index])
+    def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
+        config = self.breakeven_config
+        if config.get("enabled") is False:
+            return 0.0
+        if config.get("target_index") is not None and legs:
+            index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
+            target_ticks = legs[index].ticks
+            if target_ticks is not None:
+                return float(target_ticks)
         ticks = _coerce_float(config.get("ticks"))
         if ticks and ticks > 0:
-            return int(ticks)
+            return float(ticks)
+        r_multiple = _coerce_float(config.get("r_multiple"))
+        if r_multiple is not None and r_ticks:
+            return float(r_multiple) * float(r_ticks)
         fallback = self.template.get("breakeven_trigger_ticks")
         value = _coerce_float(fallback) or DEFAULT_RISK["breakeven_trigger_ticks"]
-        return int(value)
+        return float(value)
+
+    def _trailing_activation_ticks(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> Optional[float]:
+        config = self.trailing_config or {}
+        if not config.get("enabled"):
+            return None
+        if config.get("target_index") is not None and legs:
+            index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
+            target_ticks = legs[index].ticks
+            if target_ticks is not None:
+                return float(target_ticks)
+        ticks = _coerce_float(config.get("ticks"))
+        if ticks and ticks > 0:
+            return float(ticks)
+        r_multiple = _coerce_float(config.get("r_multiple"))
+        if r_multiple is not None and r_ticks:
+            return float(r_multiple) * float(r_ticks)
+        return None
+
+    def _trailing_distance_ticks(self, atr_at_entry: Optional[float]) -> Optional[float]:
+        if not (self.trailing_config.get("enabled") and atr_at_entry not in (None, 0)):
+            ticks = _coerce_float(self.trailing_config.get("ticks"))
+            return float(ticks) if ticks else None
+        atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
+        if atr_multiple == 0:
+            return None
+        distance_price = float(atr_at_entry) * atr_multiple
+        return risk_math.ticks_for_r(distance_price, self.tick_size)
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
         direction = "long" if direction == "long" else "short"
-        stop_distance = self.stop_ticks * self.tick_size
-        stop_price = (
-            candle.close - stop_distance if direction == "long" else candle.close + stop_distance
-        )
+        atr_at_entry = getattr(candle, "atr", None)
+        r_value = risk_math.r_value_from_atr(atr_at_entry, self.r_multiple)
+        r_ticks = risk_math.ticks_for_r(r_value, self.tick_size)
+        stop_price = None
+        explicit_stop = _coerce_float(self.template.get("stop_price"))
+        if explicit_stop not in (None, 0):
+            stop_price = float(explicit_stop)
+        if self.stop_r_multiple is not None and r_value is not None and stop_price is None:
+            stop_price = risk_math.price_from_r(candle.close, direction, r_value, self.stop_r_multiple)
+        if stop_price is None:
+            stop_distance = self.stop_ticks * self.tick_size
+            stop_price = (
+                candle.close - stop_distance if direction == "long" else candle.close + stop_distance
+            )
         legs: List[Leg] = []
         for idx, order in enumerate(self.orders):
-            ticks = order.get("ticks", 0)
-            distance = ticks * self.tick_size
-            target = candle.close + distance if direction == "long" else candle.close - distance
+            ticks = order.get("ticks")
+            r_multiple = order.get("r_multiple")
+            price = order.get("price")
+            target_price: Optional[float] = None
+            target_ticks: Optional[int] = ticks if ticks is not None else None
+            if r_multiple is not None and r_value is not None:
+                target_price = risk_math.price_from_r(candle.close, direction, r_value, r_multiple)
+                computed_ticks = risk_math.ticks_from_entry(
+                    candle.close, target_price, direction, self.tick_size
+                )
+                target_ticks = int(round(computed_ticks))
+            elif ticks is not None:
+                distance = ticks * self.tick_size
+                target_price = candle.close + distance if direction == "long" else candle.close - distance
+            elif price is not None:
+                target_price = float(price)
+                computed_ticks = risk_math.ticks_from_entry(
+                    candle.close, target_price, direction, self.tick_size
+                )
+                target_ticks = int(round(computed_ticks))
+            if target_price is None:
+                continue
             legs.append(
                 Leg(
-                    name=order.get("label") or f"TP{ticks}",
-                    ticks=ticks,
-                    target_price=target,
+                    name=order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
+                    ticks=target_ticks or 0,
+                    target_price=target_price,
                     contracts=order.get("contracts", 1),
                 )
             )
+        breakeven_ticks = self._breakeven_threshold(legs, r_ticks)
+        trailing_activation_ticks = self._trailing_activation_ticks(legs, r_ticks)
+        trailing_distance_ticks = self._trailing_distance_ticks(atr_at_entry)
         position = LadderPosition(
             entry_time=candle.time,
             entry_price=candle.close,
@@ -535,12 +695,20 @@ class LadderRiskEngine:
             stop_price=stop_price,
             tick_size=self.tick_size,
             legs=legs,
-            breakeven_trigger_ticks=self.breakeven_trigger,
+            breakeven_trigger_ticks=breakeven_ticks,
             tick_value=self.tick_value,
             contract_size=self.contract_size,
             maker_fee_rate=self.maker_fee,
             taker_fee_rate=self.taker_fee,
             quote_currency=self.quote_currency,
+            atr_at_entry=atr_at_entry,
+            r_multiple_at_entry=self.r_multiple,
+            r_value=r_value,
+            r_ticks=r_ticks,
+            trailing_activation_ticks=trailing_activation_ticks,
+            trailing_distance_ticks=trailing_distance_ticks,
+            trailing_atr_multiple=float(self.trailing_config.get("atr_multiplier") or 0.0),
+            pre_entry_context=getattr(candle, "lookback_15", None),
         )
         position.register_entry_fee()
         return position
@@ -1137,6 +1305,23 @@ class BotRuntime:
         frame.index = pd.to_datetime(frame.index, utc=True)
         if not frame.index.is_monotonic_increasing:
             frame = frame.sort_index()
+        range_series = frame.get("high", frame.get("High")) - frame.get("low", frame.get("Low"))
+        frame["__range__"] = range_series
+        atr_col = None
+        for candidate in ("ATR_Wilder", "atr", "atr_wilder"):
+            if candidate in frame.columns:
+                atr_col = candidate
+                break
+        volume_col = None
+        for candidate in ("volume", "Volume"):
+            if candidate in frame.columns:
+                volume_col = candidate
+                break
+        if atr_col:
+            frame["__avg_atr_15"] = frame[atr_col].rolling(window=15).mean().shift(1)
+        frame["__avg_range_15"] = range_series.rolling(window=15).mean().shift(1)
+        if volume_col:
+            frame["__avg_volume_15"] = frame[volume_col].rolling(window=15).mean().shift(1)
         candles: List[Candle] = []
         duration = _timeframe_duration(timeframe)
         for ts, row in frame.iterrows():
@@ -1149,6 +1334,23 @@ class BotRuntime:
                 continue
             start_dt = ts.to_pydatetime()
             end_dt = start_dt + duration if duration else None
+            atr_value = None
+            if atr_col and row.get(atr_col) is not None:
+                try:
+                    atr_value = float(row.get(atr_col))
+                except (TypeError, ValueError):
+                    atr_value = None
+            volume_value = None
+            if volume_col and row.get(volume_col) is not None:
+                try:
+                    volume_value = float(row.get(volume_col))
+                except (TypeError, ValueError):
+                    volume_value = None
+            lookback = {
+                "avg_range_15": row.get("__avg_range_15"),
+                "avg_atr_15": row.get("__avg_atr_15"),
+                "avg_volume_15": row.get("__avg_volume_15"),
+            }
             candles.append(
                 Candle(
                     time=start_dt,
@@ -1157,6 +1359,10 @@ class BotRuntime:
                     low=low_price,
                     close=close_price,
                     end=end_dt,
+                    atr=atr_value,
+                    volume=volume_value,
+                    range=float(high_price - low_price),
+                    lookback_15={k: float(v) if v is not None and not pd.isna(v) else None for k, v in lookback.items()},
                 )
             )
         return candles
@@ -1784,6 +1990,7 @@ class BotRuntime:
                 "status": "open",
                 "atm_template": series.atm_template,
                 "quote_currency": trade.quote_currency,
+                "metrics": trade._metrics_snapshot(),
             }
         )
 
@@ -1821,6 +2028,7 @@ class BotRuntime:
                     "fees_paid": event.get("fees_paid"),
                     "net_pnl": event.get("net_pnl"),
                     "quote_currency": event.get("currency"),
+                    "metrics": event.get("metrics"),
                 }
             )
 

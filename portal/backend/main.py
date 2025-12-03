@@ -7,7 +7,7 @@ from typing import List
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .controller import bots, candles, indicators, instruments, strategies
+from .controller import bots, candles, indicators, instruments, providers, strategies
 
 
 def _allowed_origins() -> List[str]:
@@ -49,6 +49,7 @@ app.include_router(indicators.router, prefix="/api/indicators")
 app.include_router(strategies.router, prefix="/api/strategies")
 app.include_router(instruments.router, prefix="/api/instruments")
 app.include_router(bots.router, prefix="/api/bots")
+app.include_router(providers.router, prefix="/api/providers")
 
 
 @app.get("/api/health")

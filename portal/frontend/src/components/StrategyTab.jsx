@@ -14,23 +14,22 @@ import {
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
 import { createInstrument } from '../adapters/instrument.adapter.js'
+import { fetchProviders, fetchTickMetadata, validateProviderSelection } from '../adapters/provider.adapter.js'
 import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from './atm/ATMConfigForm.jsx'
 import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
-import {
-  DATASOURCE_OPTIONS,
-  DEFAULT_DATASOURCE,
-} from '../constants/datasources.js'
+import { TimeframeSelect } from './ChartComponent/TimeframeSelectComponent.jsx'
+import { DEFAULT_DATASOURCE } from '../constants/datasources.js'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
   description: '',
   timeframe: '15m',
-  datasource: '',
-  exchange: '',
+  provider_id: '',
+  venue_id: '',
   symbols: '',
   atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
 }
@@ -53,6 +52,8 @@ const RULE_FORM_DEFAULT = {
 
 const INSTRUMENT_FORM_DEFAULT = {
   symbol: '',
+  provider_id: '',
+  venue_id: '',
   datasource: '',
   exchange: '',
   tick_size: '',
@@ -82,11 +83,191 @@ const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   return <button className={classes} {...props} />
 }
 
-function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting }) {
+function StrategyFormModal({
+  open,
+  initialValues,
+  onSubmit,
+  onCancel,
+  submitting,
+  availableATMTemplates = [],
+}) {
   const [form, setForm] = useState(() => ({
     ...STRATEGY_FORM_DEFAULT,
     atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
   }))
+  const [currentStep, setCurrentStep] = useState(0)
+  const [atmMode, setAtmMode] = useState('new')
+  const [selectedATMTemplateId, setSelectedATMTemplateId] = useState('')
+  const [touched, setTouched] = useState({})
+  const [showValidation, setShowValidation] = useState(false)
+  const [prefetchingMeta, setPrefetchingMeta] = useState(false)
+  const [atmPrefillWarning, setAtmPrefillWarning] = useState(null)
+  const [providers, setProviders] = useState([])
+  const [providersLoading, setProvidersLoading] = useState(false)
+  const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
+
+  const providerOptions = useMemo(
+    () => (providers || []).map((provider) => ({ value: provider.id, label: provider.label })),
+    [providers],
+  )
+
+  const getVenueOptions = useCallback(
+    (providerId) => {
+      const normalizedProvider = (providerId || '').toUpperCase()
+      const provider = (providers || []).find((item) => item.id === normalizedProvider)
+      return (provider?.venues || []).map((venue) => ({ value: venue.id, label: venue.label }))
+    },
+    [providers],
+  )
+
+  useEffect(() => {
+    if (!open) return undefined
+    let cancelled = false
+    setProvidersLoading(true)
+    fetchProviders()
+      .then((response) => {
+        if (cancelled) return
+        const items = response?.providers || []
+        setProviders(items)
+        setForm((prev) => {
+          if (prev.provider_id) return prev
+          const firstProvider = items[0]
+          const defaultVenue = (firstProvider?.venues || []).length === 1 ? firstProvider?.venues?.[0]?.id || '' : ''
+          return {
+            ...prev,
+            provider_id: prev.provider_id || firstProvider?.id || '',
+            venue_id: prev.venue_id || defaultVenue,
+          }
+        })
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          modalLogger?.warn('provider_fetch_failed', err)
+          const fallbackProviders = [
+            { id: 'ALPACA', label: 'Alpaca', venues: [{ id: 'ALPACA', label: 'Alpaca' }] },
+          ]
+          setProviders(fallbackProviders)
+          setForm((prev) => ({
+            ...prev,
+            provider_id: prev.provider_id || 'ALPACA',
+            venue_id: prev.venue_id || 'ALPACA',
+          }))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setProvidersLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, modalLogger])
+
+  const normalizeSymbol = useCallback((rawSymbols) => {
+    if (!rawSymbols) return ''
+    return rawSymbols
+      .split(/[\s,;]+/)
+      .map((token) => token.trim())
+      .filter(Boolean)[0]
+      ?.toUpperCase()
+      ?.trim()
+      ?.replace(/\s+/g, '')
+      ?.replace(/,+$/, '')
+      ?.replace(/^,/, '')
+      ?.trim() ?? ''
+  }, [])
+
+  const validateStep1 = useCallback(
+    (state) => {
+      const errors = {}
+      const providerId = (state.provider_id || '').toUpperCase()
+      const venueId = (state.venue_id || '').toUpperCase()
+      const symbol = normalizeSymbol(state.symbols || '')
+
+      const hasProviderOptions = providerOptions.length > 0
+      const validProviders = new Set(providerOptions.map((option) => option.value))
+      if (!providerId) {
+        errors.provider_id = 'Select a data provider to continue.'
+      } else if (hasProviderOptions && !validProviders.has(providerId)) {
+        errors.provider_id = 'Select a data provider to continue.'
+      }
+
+      const venueOptionsForProvider = getVenueOptions(providerId)
+      const validVenues = new Set(venueOptionsForProvider.map((option) => option.value))
+      if (!venueId) {
+        errors.venue_id = 'Select an exchange for this provider.'
+      } else if (venueOptionsForProvider.length && !validVenues.has(venueId)) {
+        errors.venue_id = 'Choose a venue supported by the selected provider.'
+      }
+
+      if (!symbol) {
+        errors.symbols = 'Symbol is required.'
+      } else if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(symbol)) {
+        errors.symbols = 'Use letters/numbers with - or / separators.'
+      }
+
+      return errors
+    },
+    [getVenueOptions, normalizeSymbol, providerOptions],
+  )
+
+  const step1Errors = useMemo(() => validateStep1(form), [form, validateStep1])
+  const isStep1Valid = useMemo(() => Object.keys(step1Errors).length === 0, [step1Errors])
+  const showFieldError = useCallback((field) => (showValidation || touched[field]) && step1Errors[field], [showValidation, step1Errors, touched])
+
+  const markTouched = useCallback((field) => setTouched((prev) => ({ ...prev, [field]: true })), [])
+
+  const applyTickDefaults = useCallback((defaults) => {
+    if (!defaults) return
+    setForm((prev) => {
+      const template = cloneATMTemplate(prev.atm_template)
+      const meta = { ...(template._meta || {}) }
+
+      const applyField = (field) => {
+        if (meta[`${field}_override`]) return
+        const value = defaults[field]
+        if (value === undefined || value === null) return
+        template[field] = value
+        meta[`${field}_override`] = true
+      }
+
+      applyField('tick_size')
+      applyField('tick_value')
+      applyField('contract_size')
+      template._meta = meta
+      return { ...prev, atm_template: template }
+    })
+  }, [])
+
+  const lookupTickMetadata = useCallback(async ({ symbol, provider_id, venue_id, timeframe }) => {
+    const response = await fetchTickMetadata({ provider_id, venue_id, symbol, timeframe })
+    if (response?.metadata) return response.metadata
+    return null
+  }, [])
+
+  const templateKey = useCallback((template) => {
+    try {
+      return JSON.stringify(template || {})
+    } catch (err) {
+      console.error('Failed to stringify ATM template', err)
+      return ''
+    }
+  }, [])
+
+  const templateOptions = useMemo(
+    () =>
+      (availableATMTemplates || []).map((item, index) => ({
+        value: item.id || `atm-${index + 1}`,
+        label: item.label || `ATM template ${index + 1}`,
+        template: cloneATMTemplate(item.template || DEFAULT_ATM_TEMPLATE),
+        key: templateKey(item.template),
+      })),
+    [availableATMTemplates, templateKey],
+  )
+
+  const selectedTemplate = useMemo(
+    () => templateOptions.find((option) => option.value === selectedATMTemplateId),
+    [selectedATMTemplateId, templateOptions],
+  )
 
   useEffect(() => {
     if (!open) {
@@ -94,36 +275,68 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
+      setCurrentStep(0)
+      setAtmMode('new')
+      setSelectedATMTemplateId('')
+      setTouched({})
+      setShowValidation(false)
+      setPrefetchingMeta(false)
+      setAtmPrefillWarning(null)
       return
     }
 
     if (initialValues) {
+      const fallbackTemplate = cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE)
+      const match = templateOptions.find(
+        (option) => option.key && option.key === templateKey(initialValues.atm_template),
+      )
+
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
         timeframe: initialValues.timeframe || '15m',
-        datasource: (initialValues.datasource || '').toUpperCase(),
-        exchange: initialValues.exchange || '',
+        provider_id: (initialValues.provider_id || initialValues.datasource || '').toUpperCase() || '',
+        venue_id: (initialValues.venue_id || initialValues.exchange || '').toUpperCase() || '',
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
           : initialValues.symbols || '',
-        atm_template: cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE),
+        atm_template: match ? cloneATMTemplate(match.template) : fallbackTemplate,
       })
+      setAtmMode(match ? 'existing' : 'new')
+      setSelectedATMTemplateId(match?.value || '')
+      setCurrentStep(0)
     } else {
       setForm({
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
+      setCurrentStep(0)
+      setAtmMode('new')
+      setSelectedATMTemplateId('')
     }
-  }, [open, initialValues])
+    setTouched({})
+    setShowValidation(false)
+    setAtmPrefillWarning(null)
+  }, [open, initialValues, templateOptions, templateKey])
 
   const handleChange = (field) => (input) => {
     let value = input
     if (input && typeof input === 'object' && 'target' in input) {
       value = input.target?.value ?? ''
     }
+    markTouched(field)
 
-    if (field === 'datasource' && typeof value === 'string') {
+    if (field === 'provider_id' && typeof value === 'string') {
+      const nextProvider = value.toUpperCase()
+      setForm((prev) => {
+        const allowedVenues = new Set(getVenueOptions(nextProvider).map((option) => option.value))
+        const nextVenue = allowedVenues.size === 1 ? [...allowedVenues][0] : allowedVenues.has(prev.venue_id) ? prev.venue_id : ''
+        return { ...prev, provider_id: nextProvider, venue_id: nextVenue }
+      })
+      return
+    }
+
+    if (field === 'venue_id' && typeof value === 'string') {
       value = value.toUpperCase()
     }
 
@@ -135,140 +348,302 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
       ...prev,
       atm_template: cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE),
     }))
+    setAtmMode('new')
   }, [])
+
+  useEffect(() => {
+    const allowedVenues = new Set(getVenueOptions(form.provider_id).map((option) => option.value))
+    if (form.venue_id && !allowedVenues.has(form.venue_id)) {
+      setForm((prev) => ({ ...prev, venue_id: '' }))
+      setTouched((prev) => ({ ...prev, venue_id: true }))
+    }
+  }, [form.provider_id, form.venue_id, getVenueOptions])
+
+  const handleATMTemplateSelect = (value) => {
+    const option = templateOptions.find((candidate) => candidate.value === value)
+    setSelectedATMTemplateId(value || '')
+    if (option) {
+      handleATMTemplateChange(option.template)
+      setAtmMode('existing')
+    }
+  }
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
+    const name = form.name.trim() || fallbackName
+    const primarySymbol = normalizeSymbol(form.symbols || '')
     const payload = {
-      name: form.name.trim(),
+      name,
       description: form.description.trim() || null,
       timeframe: form.timeframe.trim() || '15m',
-      datasource: form.datasource.trim() || null,
-      exchange: form.exchange.trim() || null,
-      symbols: form.symbols
-        .split(/[\s,;]+/)
-        .map((token) => token.trim())
-        .filter(Boolean),
+      provider_id: (form.provider_id || '').trim().toUpperCase() || null,
+      venue_id: (form.venue_id || '').trim().toUpperCase() || null,
+      datasource: null,
+      exchange: null,
+      symbols: primarySymbol ? [primarySymbol] : [],
       atm_template: cloneATMTemplate(form.atm_template),
-    }
-    if (Array.isArray(payload.symbols) && payload.symbols.length > 1) {
-      payload.symbols = payload.symbols.slice(0, 1)
     }
     await onSubmit(payload)
   }
 
+  const venueOptions = useMemo(() => getVenueOptions(form.provider_id), [form.provider_id, getVenueOptions])
+
+  const handleStepAdvance = async (event) => {
+    event.preventDefault()
+    setShowValidation(true)
+    if (!isStep1Valid) return
+
+    setPrefetchingMeta(true)
+    const symbol = normalizeSymbol(form.symbols || '')
+    try {
+      const metadata = await lookupTickMetadata({
+        symbol,
+        provider_id: form.provider_id,
+        venue_id: form.venue_id,
+        timeframe: form.timeframe,
+      })
+      if (metadata) {
+        applyTickDefaults(metadata)
+        setAtmPrefillWarning(null)
+      } else {
+        setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
+      }
+    } catch (err) {
+      modalLogger?.warn('atm_tick_prefill_failed', { provider_id: form.provider_id, venue_id: form.venue_id, symbol }, err)
+      setAtmPrefillWarning('Tick defaults could not be loaded; using Auto values instead.')
+    } finally {
+      setPrefetchingMeta(false)
+      setCurrentStep(1)
+    }
+  }
+
+  const handleStepBack = (event) => {
+    event.preventDefault()
+    setCurrentStep(0)
+    setShowValidation(false)
+  }
+
   if (!open) return null
+
+  const steps = [
+    { id: 0, title: 'Details', description: 'Describe your strategy and trading venue.' },
+    { id: 1, title: 'ATM template', description: 'Choose or build risk/target settings.' },
+  ]
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
-        <header className="space-y-1">
-          <h3 className="text-lg font-semibold">
-            {initialValues ? 'Edit strategy' : 'Create strategy'}
-          </h3>
-          <p className="text-sm text-slate-400">
-            Define the baseline symbol universe and metadata for this strategy blueprint.
-          </p>
-        </header>
-
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Name
-            </label>
-            <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.name}
-              onChange={handleChange('name')}
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Description
-            </label>
-            <textarea
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              rows={3}
-              value={form.description}
-              onChange={handleChange('description')}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Timeframe
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.timeframe}
-                onChange={handleChange('timeframe')}
-              />
-            </div>
-            <div>
-              <DropdownSelect
-                label="Datasource"
-                value={form.datasource || ''}
-                onChange={handleChange('datasource')}
-                options={[{ value: '', label: 'Use chart defaults' }, ...DATASOURCE_OPTIONS]}
-                className="mt-1 w-full"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Exchange
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.exchange}
-                onChange={handleChange('exchange')}
-                placeholder="optional"
-              />
-            </div>
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Symbols
-            </label>
-            <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.symbols}
-              onChange={handleChange('symbols')}
-              placeholder="e.g. BTCUSD, ETHUSD"
-            />
-          </div>
-        </div>
-
-        <div className="space-y-3">
+      <div className="w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
+        <header className="border-b border-white/5 px-6 py-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
-              <p className="text-xs text-slate-500">
-                Configure contracts, profit targets, breakeven, and trailing rules per entry.
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                {initialValues ? 'Edit strategy' : 'Create strategy'}
               </p>
+              <h3 className="text-lg font-semibold text-white">{steps[currentStep].title}</h3>
+              <p className="text-sm text-slate-400">{steps[currentStep].description}</p>
             </div>
-            <button
-              type="button"
-              className="text-xs font-semibold text-[color:var(--accent-text-strong)] hover:underline"
-              onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}
-            >
-              Reset
-            </button>
+            <div className="flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+              {steps.map((step) => (
+                <div
+                  key={step.id}
+                  className={`flex items-center gap-2 rounded-full px-3 py-1 ${
+                    currentStep === step.id
+                      ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
+                      : 'bg-white/5'
+                  }`}
+                >
+                  <span
+                    className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
+                      currentStep === step.id ? 'bg-[color:var(--accent-alpha-40)] text-white' : 'bg-white/10 text-slate-200'
+                    }`}
+                  >
+                    {step.id + 1}
+                  </span>
+                  <span>{step.title}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
-        </div>
+        </header>
 
-        <footer className="flex items-center justify-end gap-2">
-          <ActionButton type="button" variant="ghost" onClick={onCancel}>
-            Cancel
-          </ActionButton>
-            <ActionButton type="submit" disabled={submitting}>
-              {submitting ? 'Saving…' : 'Save strategy'}
-            </ActionButton>
+        <form className="max-h-[70vh] space-y-6 overflow-y-auto px-6 py-4" onSubmit={handleSubmit}>
+          {currentStep === 0 && (
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Name</label>
+                  <input
+                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                    value={form.name}
+                    onChange={handleChange('name')}
+                    onBlur={() => markTouched('name')}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Description</label>
+                  <input
+                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                    value={form.description}
+                    onChange={handleChange('description')}
+                    placeholder="Optional context for your notes"
+                    onBlur={() => markTouched('description')}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <TimeframeSelect
+                  selected={form.timeframe || '15m'}
+                  onChange={(value) => handleChange('timeframe')(value)}
+                  variant="dropdown"
+                  className="md:col-span-1"
+                />
+                <div className="md:col-span-1">
+                  <DropdownSelect
+                    label="Data Provider"
+                    value={form.provider_id || ''}
+                    onChange={handleChange('provider_id')}
+                    options={providerOptions}
+                    className="mt-1 w-full"
+                  />
+                  {showFieldError('provider_id') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.provider_id}</p>
+                  ) : null}
+                </div>
+                <div className="md:col-span-1">
+                  <DropdownSelect
+                    label="Exchange / Venue"
+                    value={form.venue_id || ''}
+                    onChange={handleChange('venue_id')}
+                    options={venueOptions}
+                    className="mt-1 w-full"
+                  />
+                  {showFieldError('venue_id') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.venue_id}</p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbol</label>
+                <input
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  value={form.symbols}
+                  onChange={handleChange('symbols')}
+                  onBlur={() => markTouched('symbols')}
+                  placeholder="e.g. BTC/USD"
+                />
+                {showFieldError('symbols') ? (
+                  <p className="mt-1 text-xs text-rose-400">{step1Errors.symbols}</p>
+                ) : (
+                  <p className="mt-1 text-[11px] text-slate-500">Provide one symbol to start; you can add more later.</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {currentStep === 1 && (
+            <div className="space-y-4">
+              {templateOptions.length > 0 && (
+                <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Reuse ATM template</p>
+                      <p className="text-xs text-slate-500">
+                        Start from an existing configuration or switch to a fresh layout below.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          className="h-4 w-4 accent-[color:var(--accent-text-strong)]"
+                          checked={atmMode === 'existing'}
+                          onChange={() => setAtmMode('existing')}
+                        />
+                        Use existing
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          className="h-4 w-4 accent-[color:var(--accent-text-strong)]"
+                          checked={atmMode === 'new'}
+                          onChange={() => setAtmMode('new')}
+                        />
+                        Create new
+                      </label>
+                    </div>
+                  </div>
+
+                  {atmMode === 'existing' && (
+                    <div className="mt-3 space-y-3">
+                      <DropdownSelect
+                        label="Existing templates"
+                        value={selectedATMTemplateId}
+                        onChange={handleATMTemplateSelect}
+                        options={templateOptions.map((option) => ({ value: option.value, label: option.label }))}
+                        className="mt-1 w-full"
+                      />
+                      {selectedTemplate && <ATMTemplateSummary template={selectedTemplate.template} />}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {atmPrefillWarning ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  {atmPrefillWarning}
+                </div>
+              ) : null}
+
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM builder</p>
+                    <p className="text-xs text-slate-500">Contracts, stops, targets, breakeven, and trailing.</p>
+                  </div>
+                  <ActionButton type="button" variant="subtle" onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}>
+                    Reset
+                  </ActionButton>
+                </div>
+                <ATMTemplateSummary template={form.atm_template} />
+                {atmMode !== 'existing' && (
+                  <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+                )}
+                {atmMode === 'existing' && !selectedTemplate && (
+                  <p className="text-xs text-amber-200/80">
+                    Select an existing template above or switch to "Create new" to edit the fields directly.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <footer className="flex items-center justify-between border-t border-white/5 pt-4">
+            <div className="text-xs text-slate-500">
+              Step {currentStep + 1} of {steps.length}
+            </div>
+            <div className="flex items-center gap-2">
+              <ActionButton type="button" variant="ghost" onClick={onCancel}>
+                Cancel
+              </ActionButton>
+              {currentStep === 1 && (
+                <ActionButton type="button" variant="subtle" onClick={handleStepBack}>
+                  Back
+                </ActionButton>
+              )}
+              {currentStep === 0 && (
+                <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta || providersLoading}>
+                  {prefetchingMeta || providersLoading ? 'Loading…' : 'Next'}
+                </ActionButton>
+              )}
+              {currentStep === 1 && (
+                <ActionButton type="submit" disabled={submitting}>
+                  {submitting ? 'Saving…' : 'Save strategy'}
+                </ActionButton>
+              )}
+            </div>
           </footer>
         </form>
       </div>
@@ -706,10 +1081,14 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    const providerId = (form.provider_id || form.datasource || '').trim().toUpperCase()
+    const venueId = (form.venue_id || form.exchange || '').trim()
     const payload = {
       symbol: (form.symbol || '').trim().toUpperCase(),
-      datasource: (form.datasource || '').trim().toUpperCase() || null,
-      exchange: (form.exchange || '').trim() || null,
+      provider_id: providerId || null,
+      venue_id: venueId ? venueId.toUpperCase() : null,
+      datasource: providerId || null,
+      exchange: venueId || null,
       quote_currency: (form.quote_currency || '').trim().toUpperCase() || null,
     }
     const numericFields = [
@@ -1729,6 +2108,36 @@ const StrategyTab = ({ chartId }) => {
     [strategies, selectedId],
   )
 
+  const atmTemplateKey = useCallback((template) => {
+    try {
+      return JSON.stringify(template || {})
+    } catch (err) {
+      console.error('Failed to stringify ATM template', err)
+      return ''
+    }
+  }, [])
+
+  const availableATMTemplates = useMemo(() => {
+    const seen = new Set()
+    const uniqueTemplates = []
+
+    const pushTemplate = (id, label, template) => {
+      const key = atmTemplateKey(template)
+      if (!key || seen.has(key)) return
+      seen.add(key)
+      uniqueTemplates.push({ id, label, template })
+    }
+
+    pushTemplate('default-atm', 'Default ATM template', DEFAULT_ATM_TEMPLATE)
+    strategies.forEach((strategy, index) => {
+      if (!strategy?.atm_template) return
+      const label = strategy.name ? `${strategy.name} ATM` : `Strategy ATM ${index + 1}`
+      pushTemplate(`strategy-${strategy.id || index}`, label, strategy.atm_template)
+    })
+
+    return uniqueTemplates
+  }, [atmTemplateKey, strategies])
+
   const openInstrumentModal = useCallback(
     (defaults = {}) => {
       const fallbackSymbol = defaults.symbol || selectedStrategy?.symbols?.[0] || ''
@@ -2170,6 +2579,7 @@ const StrategyTab = ({ chartId }) => {
         onSubmit={handleStrategySubmit}
         onCancel={closeStrategyModal}
         submitting={savingStrategy}
+        availableATMTemplates={availableATMTemplates}
       />
 
       <RuleFormModal

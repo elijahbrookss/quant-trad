@@ -733,6 +733,65 @@ def test_ladder_risk_engine_prefers_template_tick_size():
 
 
 @pytest.mark.unit
+def test_ladder_risk_engine_supports_r_stops_and_targets():
+    template = {
+        "atr_r_multiple": 1.5,
+        "stop_r_multiple": -1,
+        "take_profit_orders": [
+            {"label": "R2", "r_multiple": 2, "contracts": 1},
+        ],
+    }
+    instrument = {"tick_size": 0.5}
+    engine = LadderRiskEngine(template, instrument=instrument)
+    candle = Candle(
+        time=datetime.now(timezone.utc),
+        open=100.0,
+        high=100.0,
+        low=100.0,
+        close=100.0,
+        atr=2.0,
+    )
+
+    trade = engine.maybe_enter(candle, "long")
+
+    assert trade is not None
+    # 1R = ATR * multiple = 3.0, stop at -1R for long
+    assert trade.stop_price == pytest.approx(97.0)
+    assert trade.legs[0].target_price == pytest.approx(106.0)
+    assert trade.r_value == pytest.approx(3.0)
+
+
+@pytest.mark.unit
+def test_trade_tracks_mae_mfe_in_r_units():
+    template = {
+        "atr_r_multiple": 1.0,
+        "stop_r_multiple": -1.0,
+        "stop_ticks": 10,
+        "take_profit_orders": [{"ticks": 100, "contracts": 1}],
+    }
+    instrument = {"tick_size": 1.0}
+    engine = LadderRiskEngine(template, instrument=instrument)
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    entry = Candle(time=start, open=100.0, high=100.0, low=100.0, close=100.0, atr=2.0)
+    trade = engine.maybe_enter(entry, "long")
+    assert trade is not None
+
+    engine.step(Candle(time=start + timedelta(minutes=1), open=101.0, high=103.0, low=99.0, close=102.0))
+    events = engine.step(
+        Candle(time=start + timedelta(minutes=2), open=101.0, high=101.5, low=97.0, close=97.5)
+    )
+
+    close_events = [event for event in events if event.get("type") == "close"]
+    assert close_events, "Expected closing event"
+    metrics = close_events[0].get("metrics") or {}
+    assert metrics.get("atr_at_entry") == pytest.approx(2.0)
+    assert metrics.get("mfe_r") == pytest.approx(1.5)
+    assert metrics.get("mae_r") == pytest.approx(-1.5)
+    assert metrics.get("bars_held") == 2
+
+
+@pytest.mark.unit
 def test_trade_ray_overlays_follow_active_trade():
     runtime = make_runtime()
     runtime.state["status"] = "running"
