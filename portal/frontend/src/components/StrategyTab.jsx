@@ -910,7 +910,7 @@ function StrategyFormModal({
                 )}
               </div>
             </div>
-          )
+          )}
 
           {currentStep === 1 && (
             <div className="space-y-4">
