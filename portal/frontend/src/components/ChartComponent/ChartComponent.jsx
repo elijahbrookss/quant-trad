@@ -18,17 +18,8 @@ import DropdownSelect from './DropdownSelect.jsx';
 import DataModeToggle from './DataModeToggle.jsx';
 import { useLiveDataMode } from './hooks/useLiveDataMode.js';
 import { HistoricalLookbackControl } from './LookbackControls.jsx';
-import {
-  DATASOURCE_OPTIONS,
-  DATASOURCE_IDS,
-  MARKET_PROVIDERS,
-  CRYPTO_EXCHANGES,
-  IB_EXCHANGES,
-  DEFAULT_DATASOURCE,
-  DEFAULT_MARKET_PROVIDER,
-  DEFAULT_CRYPTO_EXCHANGE,
-  DEFAULT_IB_EXCHANGE,
-} from '../../constants/datasources.js';
+import { fetchProviders } from '../../adapters/provider.adapter.js';
+import { DATASOURCE_IDS, DEFAULT_DATASOURCE } from '../../constants/datasources.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
@@ -128,6 +119,30 @@ const formatPriceDisplay = (value, precision = 2) => {
   return numeric.toFixed(digits);
 };
 
+const providerToDatasource = (providerId) => {
+  const normalized = (providerId || '').toString().trim().toUpperCase();
+  if (normalized === 'YAHOO') return DATASOURCE_IDS.YFINANCE;
+  if (normalized === 'INTERACTIVE_BROKERS') return DATASOURCE_IDS.IBKR;
+  if (normalized) return normalized;
+  return DEFAULT_DATASOURCE;
+};
+
+const venueSlug = (venue) => {
+  if (!venue) return null;
+  const slug = venue.adapter_id || venue.id || venue.value;
+  return typeof slug === 'string' && slug.trim() ? slug.trim().toLowerCase() : null;
+};
+
+const venueOptionsForProvider = (providers, providerId) => {
+  const normalized = (providerId || '').toString().trim().toUpperCase();
+  const provider = (providers || []).find((item) => item.id === normalized);
+  return (provider?.venues || []).map((venue) => ({
+    value: venue.id,
+    label: venue.label,
+    slug: venueSlug(venue),
+  }));
+};
+
 const normalizeExchangeId = (value) => (value ?? '').toString().trim().toLowerCase();
 
 const deriveCcxtPriceFormat = (candles = []) => {
@@ -211,9 +226,12 @@ export const ChartComponent = ({ chartId }) => {
   const [symbol, setSymbol] = useState('CL');
   const [symbolDraft, setSymbolDraft] = useState('CL');
   const [interval, setInterval] = useState('15m');
+  const [providers, setProviders] = useState([]);
+  const [providersLoading, setProvidersLoading] = useState(false);
+  const [providerId, setProviderId] = useState('');
+  const [venueId, setVenueId] = useState('');
   const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
-  const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
-  const [marketProvider, setMarketProvider] = useState(DEFAULT_MARKET_PROVIDER);
+  const [exchange, setExchange] = useState('');
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
@@ -299,6 +317,55 @@ export const ChartComponent = ({ chartId }) => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isFullscreen, setIsFullscreen]);
 
+  useEffect(() => {
+    let mounted = true;
+    const loadProviders = async () => {
+      setProvidersLoading(true);
+      try {
+        const response = await fetchProviders();
+        const items = response?.providers || [];
+        if (!mounted) return;
+        setProviders(items);
+        if (!providerId && items.length > 0) {
+          const fallback = items[0];
+          setProviderId(fallback.id);
+          const firstVenue = (fallback.venues || [])[0];
+          if (firstVenue) {
+            setVenueId(firstVenue.id);
+            setExchange(venueSlug(firstVenue) || '');
+          }
+          setDatasource(providerToDatasource(fallback.id));
+        }
+      } catch (err) {
+        logger.warn('provider_fetch_failed', err);
+      } finally {
+        if (mounted) setProvidersLoading(false);
+      }
+    };
+
+    void loadProviders();
+    return () => {
+      mounted = false;
+    };
+  }, [logger, providerId]);
+
+  useEffect(() => {
+    const mapped = providerToDatasource(providerId);
+    setDatasource(mapped);
+  }, [providerId]);
+
+  useEffect(() => {
+    const venueOptions = venueOptionsForProvider(providers, providerId);
+    if (!venueOptions.length) return;
+    const hasMatch = venueOptions.some((item) => item.value === venueId);
+    const nextVenue = hasMatch ? venueId : venueOptions[0].value;
+    if (nextVenue !== venueId) {
+      setVenueId(nextVenue);
+    }
+    const slug = venueOptions.find((item) => item.value === nextVenue)?.slug || null;
+    setExchange(slug || exchange);
+  }, [providers, providerId, venueId, exchange]);
+
   const modeRef = useRef('historical');
   const dataLoadingRef = useRef(false);
 
@@ -353,6 +420,8 @@ export const ChartComponent = ({ chartId }) => {
     symbol: null,
     interval: null,
     datasource: null,
+    provider_id: null,
+    venue_id: null,
     exchange: null,
   });
   const symbolRef = useRef(symbol);
@@ -360,147 +429,51 @@ export const ChartComponent = ({ chartId }) => {
   const dateRangeRef = useRef(dateRange);
   const datasourceRef = useRef(datasource);
   const exchangeRef = useRef(exchange);
-  const marketProviderRef = useRef(marketProvider);
-  const lastCryptoExchangeRef = useRef(DEFAULT_CRYPTO_EXCHANGE);
-  const lastMarketProviderRef = useRef(DEFAULT_MARKET_PROVIDER);
-  const lastIbExchangeRef = useRef(DEFAULT_IB_EXCHANGE);
-  const lastMarketDatasourceRef = useRef(DEFAULT_DATASOURCE);
+  const providerRef = useRef(providerId);
+  const venueRef = useRef(venueId);
 
-  const handleDatasourceChange = useCallback((nextId) => {
-    if (nextId === DATASOURCE_IDS.CCXT) {
-      if (datasourceRef.current !== DATASOURCE_IDS.CCXT) {
-        const previousMarketDatasource =
-          datasourceRef.current === DATASOURCE_IDS.CCXT
-            ? lastMarketDatasourceRef.current || DEFAULT_DATASOURCE
-            : datasourceRef.current || DEFAULT_DATASOURCE;
+  const providerOptions = useMemo(
+    () => (providers || []).map((item) => ({ value: item.id, label: item.label })),
+    [providers],
+  );
 
-        lastMarketDatasourceRef.current = previousMarketDatasource;
-        lastMarketProviderRef.current =
-          marketProviderRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-        lastIbExchangeRef.current = exchangeRef.current || lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
+  const venueOptions = useMemo(() => venueOptionsForProvider(providers, providerId), [providers, providerId]);
+
+  const handleProviderChange = useCallback(
+    (nextId) => {
+      const normalized = (nextId || '').toString().trim().toUpperCase();
+      setProviderId(normalized);
+      const venues = venueOptionsForProvider(providers, normalized);
+      const firstVenue = venues[0];
+      if (firstVenue) {
+        setVenueId(firstVenue.value);
+        setExchange(firstVenue.slug || '');
+      } else {
+        setVenueId('');
+        setExchange('');
       }
+    },
+    [providers],
+  );
 
-      setDatasource(DATASOURCE_IDS.CCXT);
-      setExchange(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
-      return;
-    }
-
-    const storedDatasource =
-      datasourceRef.current === DATASOURCE_IDS.CCXT
-        ? lastMarketDatasourceRef.current || DEFAULT_DATASOURCE
-        : datasourceRef.current || DEFAULT_DATASOURCE;
-
-    const resolvedDatasource =
-      storedDatasource === DATASOURCE_IDS.CCXT ? DEFAULT_DATASOURCE : storedDatasource;
-
-    lastMarketDatasourceRef.current = resolvedDatasource;
-
-    let nextProvider = lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-    if (resolvedDatasource === DATASOURCE_IDS.IBKR) {
-      nextProvider = 'ibkr';
-    } else if (resolvedDatasource === DATASOURCE_IDS.YFINANCE) {
-      nextProvider = 'yfinance';
-    }
-
-    lastMarketProviderRef.current = nextProvider;
-
-    setDatasource(resolvedDatasource);
-    setMarketProvider(nextProvider);
-
-    if (resolvedDatasource === DATASOURCE_IDS.IBKR) {
-      const venue = lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
-      setExchange(venue);
-      lastIbExchangeRef.current = venue;
-    } else if (resolvedDatasource === DATASOURCE_IDS.YFINANCE) {
-      setExchange('yfinance');
-    } else {
-      const fallback = lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-      setExchange(fallback);
-    }
-  }, []);
-
-  const handleExchangeChange = useCallback((nextId) => {
-    if (!nextId) return;
-
-    if (datasourceRef.current === DATASOURCE_IDS.CCXT) {
-      setExchange(nextId);
-      lastCryptoExchangeRef.current = nextId;
-      return;
-    }
-
-    setMarketProvider(nextId);
-    lastMarketProviderRef.current = nextId;
-
-    if (nextId === 'ibkr') {
-      const venue = lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
-      setDatasource(DATASOURCE_IDS.IBKR);
-      setExchange(venue);
-      lastMarketDatasourceRef.current = DATASOURCE_IDS.IBKR;
-      lastIbExchangeRef.current = venue;
-      return;
-    }
-
-    if (nextId === 'yfinance') {
-      setDatasource(DATASOURCE_IDS.YFINANCE);
-      setExchange('yfinance');
-      lastMarketDatasourceRef.current = DATASOURCE_IDS.YFINANCE;
-      return;
-    }
-
-    const resolved = nextId || DEFAULT_MARKET_PROVIDER;
-    setDatasource(DATASOURCE_IDS.ALPACA);
-    setExchange(resolved);
-    lastMarketDatasourceRef.current = DATASOURCE_IDS.ALPACA;
-  }, []);
+  const handleVenueChange = useCallback(
+    (nextVenue) => {
+      const normalized = (nextVenue || '').toString().trim().toUpperCase();
+      setVenueId(normalized);
+      const venue = venueOptions.find((item) => item.value === normalized);
+      setExchange(venue?.slug || '');
+    },
+    [venueOptions],
+  );
 
   const toggleFullscreen = useCallback(() => {
     setIsFullscreen((prev) => !prev);
   }, [setIsFullscreen]);
 
-  const exchangeSelectOptions = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      const centralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'CEX').map((ex) => ({
-        value: ex.value,
-        label: ex.label,
-        badge: 'CEX',
-      }));
-
-      const decentralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'DEX').map((ex) => ({
-        value: ex.value,
-        label: ex.label,
-        badge: 'DEX',
-      }));
-
-      return [
-        ...(centralized.length
-          ? [{ label: 'Centralized Exchanges', options: centralized }]
-          : []),
-        ...(decentralized.length
-          ? [{ label: 'Decentralized Exchanges', options: decentralized }]
-          : []),
-      ];
-    }
-
-    return MARKET_PROVIDERS.map((provider) => ({
-      value: provider.value,
-      label: provider.label,
-    }));
-  }, [datasource]);
-
-  const selectedExchangeValue = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      return exchange || DEFAULT_CRYPTO_EXCHANGE;
-    }
-    return marketProvider || DEFAULT_MARKET_PROVIDER;
-  }, [datasource, exchange, marketProvider]);
-
-  const exchangePlaceholder = datasource === DATASOURCE_IDS.CCXT ? 'Select exchange' : 'Select provider';
-
-  const handleIbVenueChange = useCallback((venue) => {
-    if (!venue) return;
-    setExchange(venue);
-    lastIbExchangeRef.current = venue;
-  }, []);
+  const selectedVenueValue = useMemo(
+    () => venueId || venueOptions[0]?.value || '',
+    [venueId, venueOptions],
+  );
 
   const normalizedExchange = useMemo(() => normalizeExchangeId(exchange), [exchange]);
   const supportsLive = useMemo(() => {
@@ -508,12 +481,11 @@ export const ChartComponent = ({ chartId }) => {
       return true;
     }
     if (datasource === DATASOURCE_IDS.CCXT) {
-      const fallback = normalizeExchangeId(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
-      const candidate = normalizedExchange || fallback;
-      return LIVE_CRYPTO_EXCHANGES.has(candidate);
+      const candidateSlug = normalizedExchange || venueOptions.find((item) => item.value === selectedVenueValue)?.slug;
+      return candidateSlug ? LIVE_CRYPTO_EXCHANGES.has(candidateSlug) : false;
     }
     return false;
-  }, [datasource, normalizedExchange]);
+  }, [datasource, normalizedExchange, selectedVenueValue, venueOptions]);
 
   const liveDisabledReason = useMemo(() => {
     if (supportsLive) return null;
@@ -571,8 +543,12 @@ export const ChartComponent = ({ chartId }) => {
   }, [exchange]);
 
   useEffect(() => {
-    marketProviderRef.current = marketProvider;
-  }, [marketProvider]);
+    providerRef.current = providerId;
+  }, [providerId]);
+
+  useEffect(() => {
+    venueRef.current = venueId;
+  }, [venueId]);
 
   const showWarning = useCallback((message) => {
     setRangeWarning(message);
@@ -585,6 +561,8 @@ export const ChartComponent = ({ chartId }) => {
     targetInterval,
     targetRange,
     targetDatasource,
+    targetProvider,
+    targetVenue,
     targetExchange,
     behavior = 'auto',
     loaderReason,
@@ -593,6 +571,8 @@ export const ChartComponent = ({ chartId }) => {
     const effectiveInterval = targetInterval ?? intervalRef.current;
     const effectiveRange = targetRange ?? dateRangeRef.current;
     const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || DEFAULT_DATASOURCE;
+    const effectiveProvider = targetProvider ?? providerRef.current;
+    const effectiveVenue = targetVenue ?? venueRef.current;
     const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
     const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
 
@@ -646,6 +626,8 @@ export const ChartComponent = ({ chartId }) => {
         startISO,
         endISO,
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
       });
       const resp = await fetchCandleData({
@@ -654,6 +636,8 @@ export const ChartComponent = ({ chartId }) => {
         start: startISO,
         end: endISO,
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider ?? undefined,
+        venue_id: effectiveVenue ?? undefined,
         exchange: effectiveExchange ?? undefined,
       });
 
@@ -787,6 +771,8 @@ export const ChartComponent = ({ chartId }) => {
         interval: effectiveInterval,
         dateRange: [startDate, endDate],
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
         lastUpdatedAt: refreshAt.toISOString(),
       });
@@ -795,6 +781,8 @@ export const ChartComponent = ({ chartId }) => {
         symbol: effectiveSymbol,
         interval: effectiveInterval,
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
       };
 
@@ -953,6 +941,8 @@ export const ChartComponent = ({ chartId }) => {
         interval: initialInterval,
         dateRange: initialRange,
         datasource: datasourceRef.current,
+        provider_id: providerRef.current,
+        venue_id: venueRef.current,
         exchange: exchangeRef.current || null,
       });
       bumpRefresh?.(chartId); // trigger initial indicator load
@@ -1402,6 +1392,8 @@ export const ChartComponent = ({ chartId }) => {
   const handleApply = useCallback(async (overrides = {}, options = {}) => {
     const nextSymbol = overrides.symbol ?? symbol;
     const nextInterval = overrides.interval ?? interval;
+    const nextProvider = overrides.provider_id ?? providerId;
+    const nextVenue = overrides.venue_id ?? venueId;
     const fallbackRange = modeRef.current === 'live' ? dateRangeRef.current : dateRange;
     const rawRange = overrides.dateRange ?? fallbackRange;
     const normalizedRange = Array.isArray(rawRange)
@@ -1434,6 +1426,8 @@ export const ChartComponent = ({ chartId }) => {
       interval: nextInterval,
       dateRange: effectiveRange,
       datasource: nextDatasource,
+      provider_id: nextProvider,
+      venue_id: nextVenue,
       exchange: nextExchange,
     });
     const prevKey = activeSeriesKeyRef.current;
@@ -1442,6 +1436,8 @@ export const ChartComponent = ({ chartId }) => {
       symbolChanged
       || prevKey.interval !== nextInterval
       || prevKey.datasource !== nextDatasource
+      || prevKey.provider_id !== nextProvider
+      || prevKey.venue_id !== nextVenue
       || prevKey.exchange !== nextExchange;
 
     if (isSeriesChange) {
@@ -1459,6 +1455,8 @@ export const ChartComponent = ({ chartId }) => {
       interval: nextInterval,
       dateRange: effectiveRange,
       datasource: nextDatasource,
+      provider_id: nextProvider,
+      venue_id: nextVenue,
       exchange: nextExchange || null,
       overlays: [],
       overlayLoading: false,
@@ -1470,6 +1468,8 @@ export const ChartComponent = ({ chartId }) => {
       targetInterval: nextInterval,
       targetRange: effectiveRange,
       targetDatasource: nextDatasource,
+      targetProvider: nextProvider,
+      targetVenue: nextVenue,
       targetExchange: nextExchange,
       behavior,
       loaderReason: symbolChanged ? 'symbol-change' : undefined,
@@ -1480,7 +1480,7 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     return result;
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning, providerId, venueId]);
 
   const handleSymbolInputCommit = useCallback(() => {
     const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
@@ -1712,44 +1712,14 @@ export const ChartComponent = ({ chartId }) => {
   const symbolDisplay = (symbol || '—').toString().toUpperCase();
   const intervalDisplay = (interval ? interval.toString() : '—').toUpperCase();
   const datasourceDisplay = useMemo(() => {
-    const map = {
-      [DATASOURCE_IDS.ALPACA]: 'Markets data',
-      [DATASOURCE_IDS.YFINANCE]: 'Yahoo Finance',
-      [DATASOURCE_IDS.IBKR]: 'Interactive Brokers',
-      [DATASOURCE_IDS.CCXT]: 'Crypto data',
-    };
-    return map[datasource] || 'Markets data';
-  }, [datasource]);
+    const entry = providerOptions.find((item) => item.value === providerId);
+    return entry?.label || 'Markets data';
+  }, [providerId, providerOptions]);
 
   const venueDisplay = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      const entry = CRYPTO_EXCHANGES.find((ex) => ex.value === exchange);
-      if (entry?.label) {
-        return entry.category ? `${entry.label} (${entry.category})` : entry.label;
-      }
-      return 'Crypto venue';
-    }
-
-    if (datasource === DATASOURCE_IDS.IBKR) {
-      const entry = IB_EXCHANGES.find((ex) => ex.value === exchange);
-      return entry?.label || exchange || 'IBKR routing';
-    }
-
-    if (datasource === DATASOURCE_IDS.YFINANCE) {
-      return 'Yahoo Finance';
-    }
-
-    const providerEntry = MARKET_PROVIDERS.find((provider) => provider.value === marketProvider);
-    if (providerEntry?.label) {
-      return providerEntry.label;
-    }
-
-    if (typeof exchange === 'string' && exchange.trim()) {
-      return exchange.trim().toUpperCase();
-    }
-
-    return null;
-  }, [datasource, exchange, marketProvider]);
+    const entry = venueOptions.find((item) => item.value === selectedVenueValue);
+    return entry?.label || null;
+  }, [selectedVenueValue, venueOptions]);
 
   const instrumentMeta = useMemo(() => {
     const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
@@ -1876,56 +1846,36 @@ export const ChartComponent = ({ chartId }) => {
                 <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-4 shadow-lg shadow-black/25">
                   <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Market access</span>
                   <p className="mt-1 text-sm text-slate-400">
-                    Toggle between exchanges or providers to route historical and live data.
+                    Pick your data provider and venue for historical and live data.
                   </p>
-                  <div className="mt-3 flex flex-col gap-3.5">
-                    <div className="inline-flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-[#050912]/80 p-1">
-                      {DATASOURCE_OPTIONS.map((option) => {
-                        const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
-                        const isActive = isCryptoOption
-                          ? datasource === DATASOURCE_IDS.CCXT
-                          : datasource !== DATASOURCE_IDS.CCXT;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => handleDatasourceChange(option.value)}
-                            className={`min-w-[5.5rem] rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
-                              isActive
-                                ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
-                                : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <DropdownSelect
+                      className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
+                      label="Data Provider"
+                      value={providerId}
+                      onChange={handleProviderChange}
+                      options={providerOptions}
+                      placeholder={providersLoading ? 'Loading providers…' : 'Select provider'}
+                      disabled={providersLoading}
+                    />
 
                     <DropdownSelect
                       className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
-                      label="Exchange"
-                      value={selectedExchangeValue}
-                      onChange={handleExchangeChange}
-                      options={exchangeSelectOptions}
-                      placeholder={exchangePlaceholder}
+                      label="Exchange / Venue"
+                      value={selectedVenueValue}
+                      onChange={handleVenueChange}
+                      options={venueOptions}
+                      placeholder="Select venue"
+                      disabled={!providerId || venueOptions.length === 0}
                     />
-
-                    {marketProvider === 'ibkr' ? (
-                      <DropdownSelect
-                        className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
-                        label="IB Venue"
-                        value={exchange || DEFAULT_IB_EXCHANGE}
-                        onChange={handleIbVenueChange}
-                        options={IB_EXCHANGES.map((entry) => ({
-                          value: entry.value,
-                          label: entry.label,
-                          description: entry.description,
-                        }))}
-                        placeholder="Select venue"
-                      />
-                    ) : null}
                   </div>
+
+                  {providersLoading ? (
+                    <p className="mt-2 text-xs text-slate-400">Loading providers…</p>
+                  ) : null}
+                  {!providersLoading && !providerId ? (
+                    <p className="mt-2 text-xs text-amber-300/80">Choose a provider to continue.</p>
+                  ) : null}
                 </div>
               </div>
             </div>

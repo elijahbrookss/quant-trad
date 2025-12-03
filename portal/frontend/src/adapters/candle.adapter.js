@@ -34,14 +34,18 @@ const API_BASE_URL = resolveApiBase();
  * @param {string} params.end - ISO string
  * @param {string} [params.datasource]
  * @param {string} [params.exchange]
+ * @param {string} [params.provider_id]
+ * @param {string} [params.venue_id]
  * @returns {Promise<Array>} - array of candles
  */
-export async function fetchCandleData({ symbol, timeframe, start, end, datasource, exchange }) {
+export async function fetchCandleData({ symbol, timeframe, start, end, datasource, exchange, provider_id, venue_id }) {
   try {
-    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange, baseUrl: API_BASE_URL });
+    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange, provider_id, venue_id, baseUrl: API_BASE_URL });
     const payload = { symbol, timeframe, start, end };
     if (datasource) payload.datasource = datasource;
     if (exchange) payload.exchange = exchange;
+    if (provider_id) payload.provider_id = provider_id;
+    if (venue_id) payload.venue_id = venue_id;
     const res = await fetch(`${API_BASE_URL}/api/candles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
