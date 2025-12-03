@@ -68,6 +68,14 @@ const INSTRUMENT_FORM_DEFAULT = {
 
 const EMPTY_LIST = Object.freeze([])
 
+const RISK_DEFAULTS = Object.freeze({
+  riskUnitMode: 'atr',
+  atrPeriod: 14,
+  atrMultiplier: 1,
+  globalRiskMultiplier: 1,
+  riskTicks: null,
+})
+
 const newSlot = (symbol = '') => ({
   uid: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
   symbol,
@@ -115,6 +123,9 @@ function StrategyFormModal({
   const [providersLoading, setProvidersLoading] = useState(false)
   const [slotStatus, setSlotStatus] = useState({})
   const [expandedSlots, setExpandedSlots] = useState([])
+  const [symbolsInput, setSymbolsInput] = useState('')
+  const [symbolValidation, setSymbolValidation] = useState({})
+  const [riskSettings, setRiskSettings] = useState(RISK_DEFAULTS)
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
   const providerOptions = useMemo(
@@ -222,13 +233,33 @@ function StrategyFormModal({
     [normaliseSlot],
   )
 
+  const parseSymbolInput = useCallback(
+    (input) => {
+      if (!input) return []
+      const parts = String(input)
+        .split(/[\s,;]+/)
+        .map((item) => normalizeSymbol(item))
+        .filter(Boolean)
+      const unique = []
+      const seen = new Set()
+      parts.forEach((symbol) => {
+        const key = symbol.toUpperCase()
+        if (seen.has(key)) return
+        seen.add(key)
+        unique.push(symbol)
+      })
+      return unique
+    },
+    [normalizeSymbol],
+  )
+
   const validateStep1 = useCallback(
     (state) => {
       const errors = {}
       const providerId = (state.provider_id || '').toUpperCase()
       const venueId = (state.venue_id || '').toUpperCase()
-      const slots = Array.isArray(state.instrument_slots) ? state.instrument_slots : []
       const slotIssues = {}
+      const parsedSymbols = parseSymbolInput(symbolsInput)
 
       const hasProviderOptions = providerOptions.length > 0
       const validProviders = new Set(providerOptions.map((option) => option.value))
@@ -247,25 +278,25 @@ function StrategyFormModal({
       }
 
       const seenSymbols = new Set()
-      slots.forEach((slot, index) => {
-        const symbol = normalizeSymbol(slot.symbol)
-        if (!symbol) {
-          slotIssues[slot.uid || index] = 'Symbol is required.'
+      parsedSymbols.forEach((symbol, index) => {
+        const normalized = normalizeSymbol(symbol)
+        if (!normalized) {
+          slotIssues[index] = 'Symbol is required.'
           return
         }
-        if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(symbol)) {
-          slotIssues[slot.uid || index] = 'Use letters/numbers with - or / separators.'
+        if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(normalized)) {
+          slotIssues[index] = 'Use letters/numbers with - or / separators.'
           return
         }
-        const key = symbol.toUpperCase()
+        const key = normalized.toUpperCase()
         if (seenSymbols.has(key)) {
-          slotIssues[slot.uid || index] = 'Symbols must be unique.'
+          slotIssues[index] = 'Symbols must be unique.'
         } else {
           seenSymbols.add(key)
         }
       })
 
-      if (!slots.length || !seenSymbols.size) {
+      if (!parsedSymbols.length || !seenSymbols.size) {
         errors.instrument_slots = 'Add at least one symbol.'
       }
       if (Object.keys(slotIssues).length) {
@@ -274,7 +305,7 @@ function StrategyFormModal({
 
       return errors
     },
-    [getVenueOptions, normalizeSymbol, providerOptions],
+    [getVenueOptions, normalizeSymbol, parseSymbolInput, providerOptions, symbolsInput],
   )
 
   const step1Errors = useMemo(() => validateStep1(form), [form, validateStep1])
@@ -343,6 +374,10 @@ function StrategyFormModal({
   )
 
   useEffect(() => {
+    setSymbolValidation({})
+  }, [symbolsInput])
+
+  useEffect(() => {
     if (!open) {
       setForm({
         ...STRATEGY_FORM_DEFAULT,
@@ -358,6 +393,9 @@ function StrategyFormModal({
       setAtmPrefillWarning(null)
       setSlotStatus({})
       setExpandedSlots([])
+      setSymbolsInput('')
+      setSymbolValidation({})
+      setRiskSettings(RISK_DEFAULTS)
       return
     }
 
@@ -385,6 +423,14 @@ function StrategyFormModal({
       setAtmMode(match ? 'existing' : 'new')
       setSelectedATMTemplateId(match?.value || '')
       setCurrentStep(0)
+      setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
+      setRiskSettings((prev) => ({
+        ...prev,
+        riskUnitMode: initialValues.atm_template?.rMode || prev.riskUnitMode,
+        atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
+        atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
+        riskTicks: initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
+      }))
     } else {
       setForm({
         ...STRATEGY_FORM_DEFAULT,
@@ -394,12 +440,15 @@ function StrategyFormModal({
       setCurrentStep(0)
       setAtmMode('new')
       setSelectedATMTemplateId('')
+      setSymbolsInput('')
+      setRiskSettings(RISK_DEFAULTS)
     }
     setTouched({})
     setShowValidation(false)
     setAtmPrefillWarning(null)
     setSlotStatus({})
     setExpandedSlots([])
+    setSymbolValidation({})
   }, [open, initialValues, templateOptions, templateKey, inflateSlots])
 
   const handleChange = (field) => (input) => {
@@ -418,6 +467,7 @@ function StrategyFormModal({
         return { ...prev, provider_id: nextProvider, venue_id: nextVenue, instrument_slots: clearedSlots }
       })
       setSlotStatus({})
+      setSymbolValidation({})
       return
     }
 
@@ -429,7 +479,12 @@ function StrategyFormModal({
         venue_id: value,
         instrument_slots: (prev.instrument_slots || []).map((slot) => ({ ...slot, metadata: {} })),
       }))
+      setSymbolValidation({})
       return
+    }
+
+    if (field === 'timeframe') {
+      setSymbolValidation({})
     }
 
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
@@ -444,6 +499,7 @@ function StrategyFormModal({
   }, [])
 
   const slotIssues = useMemo(() => step1Errors.slotIssues || {}, [step1Errors])
+  const parsedSymbolsPreview = useMemo(() => parseSymbolInput(symbolsInput), [parseSymbolInput, symbolsInput])
 
   const updateSlots = useCallback((updater) => {
     setForm((prev) => {
@@ -476,6 +532,23 @@ function StrategyFormModal({
     },
     [markTouched, updateSlots],
   )
+
+  const updateRiskSettings = useCallback((patch) => {
+    setRiskSettings((prev) => {
+      const next = { ...prev, ...patch }
+      setForm((current) => ({
+        ...current,
+        atm_template: cloneATMTemplate({
+          ...current.atm_template,
+          rMode: next.riskUnitMode || current.atm_template?.rMode,
+          rAtrPeriod: next.atrPeriod ?? current.atm_template?.rAtrPeriod,
+          rAtrMultiplier: next.atrMultiplier ?? current.atm_template?.rAtrMultiplier,
+          rRiskTicks: next.riskTicks ?? current.atm_template?.rRiskTicks,
+        }),
+      }))
+      return next
+    })
+  }, [])
 
   const handleToggleSlot = (uid) => {
     markTouched('instrument_slots')
@@ -559,11 +632,13 @@ function StrategyFormModal({
     event.preventDefault()
     const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
     const name = form.name.trim() || fallbackName
+    const rawGlobalRisk = riskSettings.globalRiskMultiplier
+    const globalRisk = rawGlobalRisk === '' ? null : Number(rawGlobalRisk)
     const cleanedSlots = (form.instrument_slots || [])
       .map((slot, index) => {
         const symbol = normalizeSymbol(slot.symbol)
         if (!symbol) return null
-        const riskValue =
+        const overrideValue =
           slot.risk_multiplier === '' || slot.risk_multiplier === null || slot.risk_multiplier === undefined
             ? null
             : Number(slot.risk_multiplier)
@@ -571,8 +646,10 @@ function StrategyFormModal({
           symbol,
           enabled: Boolean(slot.enabled),
         }
-        if (Number.isFinite(riskValue)) {
-          payload.risk_multiplier = riskValue
+        if (Number.isFinite(overrideValue)) {
+          payload.risk_multiplier = overrideValue
+        } else if (Number.isFinite(globalRisk)) {
+          payload.risk_multiplier = globalRisk
         }
         if (slot.metadata && Object.keys(slot.metadata).length) {
           payload.metadata = slot.metadata
@@ -590,7 +667,13 @@ function StrategyFormModal({
       exchange: null,
       symbols: cleanedSlots.map((slot) => slot.symbol),
       instrument_slots: cleanedSlots,
-      atm_template: cloneATMTemplate(form.atm_template),
+      atm_template: cloneATMTemplate({
+        ...form.atm_template,
+        rMode: riskSettings.riskUnitMode || form.atm_template?.rMode,
+        rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
+        rAtrMultiplier: riskSettings.atrMultiplier ?? form.atm_template?.rAtrMultiplier,
+        rRiskTicks: riskSettings.riskTicks ?? form.atm_template?.rRiskTicks,
+      }),
     }
     await onSubmit(payload)
   }
@@ -599,62 +682,71 @@ function StrategyFormModal({
 
   const handleStepAdvance = async (event) => {
     event.preventDefault()
-    setShowValidation(true)
-    if (!isStep1Valid) return
+    if (currentStep === 0) {
+      setShowValidation(true)
+      if (!isStep1Valid) return
+      setPrefetchingMeta(true)
+      const parsedSymbols = parseSymbolInput(symbolsInput)
+      const validationResults = {}
+      const hydratedSlots = []
+      try {
+        for (const symbol of parsedSymbols) {
+          try {
+            const metadata = await lookupTickMetadata({
+              symbol,
+              provider_id: form.provider_id,
+              venue_id: form.venue_id,
+              timeframe: form.timeframe,
+            })
+            const normalizedMeta = metadata
+              ? { ...metadata, provider_id: form.provider_id, venue_id: form.venue_id }
+              : null
+            validationResults[symbol] = { status: 'ok', metadata: normalizedMeta }
+            hydratedSlots.push(
+              normaliseSlot({ symbol, metadata: normalizedMeta || {}, enabled: true, risk_multiplier: '' }, hydratedSlots.length),
+            )
+          } catch (err) {
+            const message =
+              err?.payload?.errors?.symbol || err?.message || 'Symbol not supported for this provider/venue/timeframe.'
+            validationResults[symbol] = { status: 'error', message }
+          }
+        }
+      } finally {
+        setPrefetchingMeta(false)
+      }
 
-    setPrefetchingMeta(true)
-    const primarySlot = (form.instrument_slots || []).find((slot) => normalizeSymbol(slot.symbol))
-    const symbol = normalizeSymbol(primarySlot?.symbol || '')
-    if (!symbol) {
-      setPrefetchingMeta(false)
+      setSymbolValidation(validationResults)
+      const hasErrors = Object.values(validationResults).some((entry) => entry?.status === 'error')
+      if (hasErrors) return
+      const nextSlots = hydratedSlots.length ? hydratedSlots : [newSlot('')]
+      setForm((prev) => ({ ...prev, instrument_slots: nextSlots }))
+      if (nextSlots[0]?.metadata) {
+        applyTickDefaults(nextSlots[0].metadata)
+        setAtmPrefillWarning(null)
+      }
+      setSlotStatus({})
+      setShowValidation(false)
       setCurrentStep(1)
       return
     }
-    const hasStoredMeta = primarySlot?.metadata && Object.keys(primarySlot.metadata || {}).length > 0
-    try {
-      if (hasStoredMeta) {
-        applyTickDefaults(primarySlot.metadata)
-        setAtmPrefillWarning(null)
-      } else {
-        const metadata = await lookupTickMetadata({
-          symbol,
-          provider_id: form.provider_id,
-          venue_id: form.venue_id,
-          timeframe: form.timeframe,
-        })
-        if (metadata) {
-          applyTickDefaults(metadata)
-          setAtmPrefillWarning(null)
-          if (primarySlot?.uid) {
-            handleSlotChange(primarySlot.uid, {
-              metadata: { ...metadata, provider_id: form.provider_id, venue_id: form.venue_id },
-            })
-          }
-        } else {
-          setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
-        }
-      }
-    } catch (err) {
-      modalLogger?.warn('atm_tick_prefill_failed', { provider_id: form.provider_id, venue_id: form.venue_id, symbol }, err)
-      const detail = err?.message || 'Tick defaults could not be loaded; using Auto values instead.'
-      setAtmPrefillWarning(detail)
-    } finally {
-      setPrefetchingMeta(false)
-      setCurrentStep(1)
+
+    if (currentStep === 1) {
+      setCurrentStep(2)
+      return
     }
   }
 
   const handleStepBack = (event) => {
     event.preventDefault()
-    setCurrentStep(0)
-    setShowValidation(false)
+    setCurrentStep((step) => Math.max(0, step - 1))
   }
 
   if (!open) return null
 
   const steps = [
-    { id: 0, title: 'Details', description: 'Describe your strategy and trading venue.' },
-    { id: 1, title: 'ATM template', description: 'Choose or build risk/target settings.' },
+    { id: 0, title: 'Basic setup', description: 'Name, timeframe, provider/venue, and symbols.' },
+    { id: 1, title: 'Risk & ATR', description: 'Define risk unit and per-symbol overrides.' },
+    { id: 2, title: 'ATM template', description: 'Stops, targets, breakeven, and trailing.' },
   ]
 
   return (
@@ -739,7 +831,7 @@ function StrategyFormModal({
                 </div>
                 <div className="md:col-span-1">
                   <DropdownSelect
-                    label="Exchange / Venue"
+                    label="Venue"
                     value={form.venue_id || ''}
                     onChange={handleChange('venue_id')}
                     options={venueOptions}
@@ -751,110 +843,199 @@ function StrategyFormModal({
                 </div>
               </div>
 
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbols</p>
-                    <p className="text-xs text-slate-500">All symbols share this provider, venue, and timeframe.</p>
+                    <p className="text-xs text-slate-500">Comma-separated list validated against the provider and venue.</p>
                   </div>
-                  <ActionButton type="button" variant="ghost" onClick={handleAddSlot}>
-                    Add symbol
-                  </ActionButton>
+                  <div className="text-[11px] text-slate-400">Example: ES,CL,GC,BTCUSD</div>
+                </div>
+                <textarea
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  rows={3}
+                  value={symbolsInput}
+                  onChange={(event) => setSymbolsInput(event.target.value)}
+                  placeholder="ES,CL,GC,BTCUSD"
+                />
+                {showFieldError('instrument_slots') ? (
+                  <p className="text-xs text-rose-400">{step1Errors.instrument_slots}</p>
+                ) : (
+                  <p className="text-[11px] text-slate-500">
+                    We'll validate symbols and fetch metadata before moving to risk settings.
+                  </p>
+                )}
+
+                {parsedSymbolsPreview.length > 0 && (
+                  <div className="rounded-xl border border-white/5 bg-white/5 p-3 text-xs text-slate-300">
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Preview</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {parsedSymbolsPreview.map((symbol, index) => {
+                        const issue = slotIssues[index]
+                        return (
+                          <span
+                            key={`${symbol}-${index}`}
+                            className={`rounded-full px-3 py-1 ${issue ? 'bg-rose-500/20 text-rose-100' : 'bg-white/10 text-slate-100'}`}
+                          >
+                            {symbol}
+                            {issue ? <span className="ml-2 text-[11px] text-rose-200">{issue}</span> : null}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {Object.keys(symbolValidation).length > 0 && (
+                  <div className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Validation</p>
+                    <div className="space-y-2">
+                      {Object.entries(symbolValidation).map(([symbol, info]) => (
+                        <div
+                          key={symbol}
+                          className="flex items-start justify-between rounded-lg bg-black/40 px-3 py-2 text-xs"
+                        >
+                          <div className="font-semibold text-white">{symbol}</div>
+                          <div className="text-right">
+                            {info.status === 'ok' ? (
+                              <span className="text-emerald-300">Validated</span>
+                            ) : (
+                              <span className="text-rose-300">{info.message}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+
+          {currentStep === 1 && (
+            <div className="space-y-4">
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Global risk settings</p>
+                    <p className="text-xs text-slate-500">Applies to all symbols unless an override is provided.</p>
+                  </div>
+                  <div className="text-[11px] text-slate-400">Risk drives sizing; keep position sizing off in the next step.</div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk unit mode</label>
+                    <select
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                      value={riskSettings.riskUnitMode}
+                      onChange={(event) => updateRiskSettings({ riskUnitMode: event.target.value })}
+                    >
+                      <option value="atr">ATR-based</option>
+                      <option value="ticks">Ticks</option>
+                      <option value="explicit">Explicit (manual)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                      type="number"
+                      step="0.1"
+                      min={0}
+                      value={riskSettings.globalRiskMultiplier ?? ''}
+                      onChange={(event) => updateRiskSettings({ globalRiskMultiplier: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">Default multiplier for every symbol.</p>
+                  </div>
+                </div>
+                {riskSettings.riskUnitMode === 'ticks' ? (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk ticks</label>
+                      <input
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                        type="number"
+                        min={1}
+                        value={riskSettings.riskTicks ?? ''}
+                        onChange={(event) => updateRiskSettings({ riskTicks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1) })}
+                      />
+                      <p className="mt-1 text-[11px] text-slate-500">Ticks that define 1R when using tick mode.</p>
+                    </div>
+                    <div className="rounded-lg bg-black/40 p-3 text-[11px] text-slate-300">
+                      Enter tick count used to size stops and targets.</div>
+                  </div>
+                ) : (
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                      <input
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                        type="number"
+                        min={1}
+                        value={riskSettings.atrPeriod ?? 14}
+                        onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                      <input
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                        type="number"
+                        step="0.1"
+                        value={riskSettings.atrMultiplier ?? 1}
+                        onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Per-symbol risk overrides</p>
+                    <p className="text-xs text-slate-500">Leave blank to inherit the global multiplier.</p>
+                  </div>
                 </div>
 
                 <div className="space-y-3">
-                  {(form.instrument_slots || []).map((slot, index) => {
-                    const slotError = (showValidation || touched.instrument_slots) && slotIssues[slot.uid || index]
+                  {(form.instrument_slots || []).map((slot) => {
                     const status = slotStatus[slot.uid] || {}
                     return (
-                      <div
-                        key={slot.uid || index}
-                        className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3"
-                      >
-                        <div className="flex flex-col gap-3 md:flex-row md:items-start">
-                          <div className="flex-1">
-                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Symbol</label>
-                            <input
-                              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              value={slot.symbol}
-                              onChange={(event) => handleSlotChange(slot.uid, { symbol: event.target.value })}
-                              placeholder="e.g. BTC/USD"
-                            />
-                            {slotError ? (
-                              <p className="mt-1 text-xs text-rose-400">{slotIssues[slot.uid || index]}</p>
-                            ) : null}
+                      <div key={slot.uid} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                          <div>
+                            <p className="text-sm font-semibold text-white">{slot.symbol}</p>
+                            <p className="text-[11px] text-slate-400">Metadata available in details.</p>
                           </div>
-                          <div className="w-full md:w-40">
-                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Risk multiplier</label>
+                          <div className="flex items-center gap-2 md:min-w-[240px]">
                             <input
-                              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                              className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                               type="number"
                               step="0.1"
-                              placeholder="Optional"
-                              value={slot.risk_multiplier}
+                              placeholder={String(riskSettings.globalRiskMultiplier || '')}
+                              value={slot.risk_multiplier ?? ''}
                               onChange={(event) => handleSlotChange(slot.uid, { risk_multiplier: event.target.value })}
                             />
-                          </div>
-                          <div className="flex flex-col items-end gap-2 md:w-40">
-                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Enabled</label>
-                            <label className="relative inline-flex cursor-pointer items-center">
-                              <input
-                                type="checkbox"
-                                className="peer sr-only"
-                                checked={Boolean(slot.enabled)}
-                                onChange={() => handleToggleSlot(slot.uid)}
-                              />
-                              <div className="peer h-6 w-11 rounded-full bg-white/10 after:absolute after:left-[4px] after:top-[4px] after:h-4 after:w-4 after:rounded-full after:border after:border-white/20 after:bg-white after:transition-all peer-checked:bg-[color:var(--accent-alpha-40)] peer-checked:after:translate-x-full" />
-                            </label>
-                            <div className="flex gap-2 text-xs">
-                              <button
-                                type="button"
-                                className="rounded-lg bg-white/10 px-2 py-1 text-slate-100 hover:bg-white/20"
-                                onClick={() => handleReorderSlot(slot.uid, 'up')}
-                                disabled={index === 0}
-                              >
-                                ↑
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded-lg bg-white/10 px-2 py-1 text-slate-100 hover:bg-white/20"
-                                onClick={() => handleReorderSlot(slot.uid, 'down')}
-                                disabled={index === (form.instrument_slots || []).length - 1}
-                              >
-                                ↓
-                              </button>
-                              <button
-                                type="button"
-                                className="rounded-lg bg-white/10 px-2 py-1 text-rose-100 hover:bg-rose-500/60"
-                                onClick={() => handleRemoveSlot(slot.uid)}
-                                disabled={(form.instrument_slots || []).length === 1}
-                              >
-                                ✕
-                              </button>
-                            </div>
-                            <div className="flex gap-2">
-                              <ActionButton
-                                type="button"
-                                variant="ghost"
-                                className="text-xs"
-                                onClick={() => toggleSlotDetails(slot.uid)}
-                              >
-                                {expandedSlots.includes(slot.uid) ? 'Hide details' : 'Show details'}
-                              </ActionButton>
-                              <ActionButton
-                                type="button"
-                                variant="subtle"
-                                className="text-xs"
-                                onClick={() => handleRefreshMetadata(slot)}
-                                disabled={status.loading}
-                              >
-                                {status.loading ? 'Loading…' : 'Refresh'}
-                              </ActionButton>
-                            </div>
+                            <span className="text-[11px] text-slate-500">Inherit if empty</span>
                           </div>
                         </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <ActionButton type="button" variant="ghost" className="text-xs" onClick={() => toggleSlotDetails(slot.uid)}>
+                            {expandedSlots.includes(slot.uid) ? 'Hide details' : 'Show details'}
+                          </ActionButton>
+                          <ActionButton
+                            type="button"
+                            variant="subtle"
+                            className="text-xs"
+                            onClick={() => handleRefreshMetadata(slot)}
+                            disabled={status.loading}
+                          >
+                            {status.loading ? 'Loading…' : 'Refresh metadata'}
+                          </ActionButton>
+                        </div>
                         {expandedSlots.includes(slot.uid) ? (
-                          <div className="border-t border-white/5 pt-3">
+                          <div className="border-t border-white/5 pt-2">
                             <InstrumentDetailsPanel
                               symbol={normalizeSymbol(slot.symbol) || slot.symbol}
                               metadata={slot.metadata}
@@ -869,28 +1050,25 @@ function StrategyFormModal({
                       </div>
                     )
                   })}
-                  {showFieldError('instrument_slots') ? (
-                    <p className="text-xs text-rose-400">{step1Errors.instrument_slots}</p>
-                  ) : (
-                    <p className="text-[11px] text-slate-500">
-                      Add, remove, or reorder symbols. Each symbol can expose metadata in its details panel.
-                    </p>
-                  )}
                 </div>
               </div>
             </div>
           )}
 
-          {currentStep === 1 && (
+          {currentStep === 2 && (
             <div className="space-y-4">
+              {atmPrefillWarning ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  {atmPrefillWarning}
+                </div>
+              ) : null}
+
               {templateOptions.length > 0 && (
                 <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
                   <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Reuse ATM template</p>
-                      <p className="text-xs text-slate-500">
-                        Start from an existing configuration or switch to a fresh layout below.
-                      </p>
+                      <p className="text-xs text-slate-500">Start from an existing configuration or build fresh below.</p>
                     </div>
                     <div className="flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
                       <label className="flex items-center gap-2">
@@ -929,17 +1107,11 @@ function StrategyFormModal({
                 </div>
               )}
 
-              {atmPrefillWarning ? (
-                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                  {atmPrefillWarning}
-                </div>
-              ) : null}
-
               <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM builder</p>
-                    <p className="text-xs text-slate-500">Contracts, stops, targets, breakeven, and trailing.</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
+                    <p className="text-xs text-slate-500">Stops, targets, breakeven, and trailing in a compact layout.</p>
                   </div>
                   <ActionButton type="button" variant="subtle" onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}>
                     Reset
@@ -947,7 +1119,13 @@ function StrategyFormModal({
                 </div>
                 <ATMTemplateSummary template={form.atm_template} />
                 {atmMode !== 'existing' && (
-                  <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+                  <ATMConfigForm
+                    value={form.atm_template}
+                    onChange={handleATMTemplateChange}
+                    hidePositionSizing
+                    hideRiskSettings
+                    collapsible
+                  />
                 )}
                 {atmMode === 'existing' && !selectedTemplate && (
                   <p className="text-xs text-amber-200/80">
@@ -957,7 +1135,6 @@ function StrategyFormModal({
               </div>
             </div>
           )}
-
           <footer className="flex items-center justify-between border-t border-white/5 pt-4">
             <div className="text-xs text-slate-500">
               Step {currentStep + 1} of {steps.length}
@@ -966,17 +1143,17 @@ function StrategyFormModal({
               <ActionButton type="button" variant="ghost" onClick={onCancel}>
                 Cancel
               </ActionButton>
-              {currentStep === 1 && (
+              {currentStep > 0 && (
                 <ActionButton type="button" variant="subtle" onClick={handleStepBack}>
                   Back
                 </ActionButton>
               )}
-              {currentStep === 0 && (
+              {currentStep < steps.length - 1 && (
                 <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta || providersLoading}>
                   {prefetchingMeta || providersLoading ? 'Loading…' : 'Next'}
                 </ActionButton>
               )}
-              {currentStep === 1 && (
+              {currentStep === steps.length - 1 && (
                 <ActionButton type="submit" disabled={submitting}>
                   {submitting ? 'Saving…' : 'Save strategy'}
                 </ActionButton>
