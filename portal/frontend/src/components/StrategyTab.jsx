@@ -20,9 +20,12 @@ import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
+import { TimeframeSelect } from './ChartComponent/TimeframeSelectComponent.jsx'
 import {
   DATASOURCE_OPTIONS,
   DEFAULT_DATASOURCE,
+  IB_EXCHANGES,
+  CRYPTO_EXCHANGES,
 } from '../constants/datasources.js'
 
 const STRATEGY_FORM_DEFAULT = {
@@ -87,6 +90,7 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     ...STRATEGY_FORM_DEFAULT,
     atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
   }))
+  const [showATMDetails, setShowATMDetails] = useState(false)
 
   useEffect(() => {
     if (!open) {
@@ -94,6 +98,7 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
+      setShowATMDetails(false)
       return
     }
 
@@ -109,11 +114,13 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
           : initialValues.symbols || '',
         atm_template: cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE),
       })
+      setShowATMDetails(false)
     } else {
       setForm({
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
+      setShowATMDetails(false)
     }
   }, [open, initialValues])
 
@@ -139,8 +146,10 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
+    const name = form.name.trim() || fallbackName
     const payload = {
-      name: form.name.trim(),
+      name,
       description: form.description.trim() || null,
       timeframe: form.timeframe.trim() || '15m',
       datasource: form.datasource.trim() || null,
@@ -159,9 +168,20 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
 
   if (!open) return null
 
+  const datasource = (form.datasource || DEFAULT_DATASOURCE).toUpperCase()
+  const exchangeOptions = useMemo(() => {
+    if (datasource === 'CCXT') {
+      return [{ value: '', label: 'Auto (per symbol)' }, ...CRYPTO_EXCHANGES]
+    }
+    if (datasource === 'IBKR') {
+      return [{ value: '', label: 'Auto (per symbol)' }, ...IB_EXCHANGES]
+    }
+    return [{ value: '', label: 'Use datasource defaults' }, ...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
+  }, [datasource])
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+      <div className="w-full max-w-4xl space-y-6 overflow-y-auto rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl max-h-[90vh]">
         <header className="space-y-1">
           <h3 className="text-lg font-semibold">
             {initialValues ? 'Edit strategy' : 'Create strategy'}
@@ -180,7 +200,7 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
               className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
               value={form.name}
               onChange={handleChange('name')}
-              required
+              placeholder="Optional: auto-generated if blank"
             />
           </div>
 
@@ -196,18 +216,13 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Timeframe
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.timeframe}
-                onChange={handleChange('timeframe')}
-              />
-            </div>
-            <div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <TimeframeSelect
+              selected={form.timeframe || '15m'}
+              onChange={(value) => handleChange('timeframe')(value)}
+              className="md:col-span-1"
+            />
+            <div className="md:col-span-1">
               <DropdownSelect
                 label="Datasource"
                 value={form.datasource || ''}
@@ -216,20 +231,17 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
                 className="mt-1 w-full"
               />
             </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Exchange
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={form.exchange}
+            <div className="md:col-span-1">
+              <DropdownSelect
+                label="Exchange"
+                value={form.exchange || ''}
                 onChange={handleChange('exchange')}
-                placeholder="optional"
+                options={exchangeOptions}
+                className="mt-1 w-full"
               />
             </div>
+          </div>
+
           <div>
             <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
               Symbols
@@ -241,7 +253,6 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
               placeholder="e.g. BTCUSD, ETHUSD"
             />
           </div>
-        </div>
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -251,25 +262,35 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
                 Configure contracts, profit targets, breakeven, and trailing rules per entry.
               </p>
             </div>
-            <button
-              type="button"
-              className="text-xs font-semibold text-[color:var(--accent-text-strong)] hover:underline"
-              onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}
-            >
-              Reset
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="text-xs font-semibold text-slate-300 underline-offset-4 hover:text-white hover:underline"
+                onClick={() => setShowATMDetails((prev) => !prev)}
+              >
+                {showATMDetails ? 'Hide details' : 'Show details'}
+              </button>
+              <button
+                type="button"
+                className="text-xs font-semibold text-[color:var(--accent-text-strong)] hover:underline"
+                onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}
+              >
+                Reset
+              </button>
+            </div>
           </div>
-          <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+          {!showATMDetails && <ATMTemplateSummary template={form.atm_template} />}
+          {showATMDetails && <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />}
         </div>
 
         <footer className="flex items-center justify-end gap-2">
           <ActionButton type="button" variant="ghost" onClick={onCancel}>
             Cancel
           </ActionButton>
-            <ActionButton type="submit" disabled={submitting}>
-              {submitting ? 'Saving…' : 'Save strategy'}
-            </ActionButton>
-          </footer>
+          <ActionButton type="submit" disabled={submitting}>
+            {submitting ? 'Saving…' : 'Save strategy'}
+          </ActionButton>
+        </footer>
         </form>
       </div>
     </div>

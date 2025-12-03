@@ -593,6 +593,8 @@ class LadderRiskEngine:
 
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         config = self.breakeven_config
+        if config.get("enabled") is False:
+            return 0.0
         if config.get("target_index") is not None and legs:
             index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
             target_ticks = legs[index].ticks
@@ -641,7 +643,10 @@ class LadderRiskEngine:
         r_value = risk_math.r_value_from_atr(atr_at_entry, self.r_multiple)
         r_ticks = risk_math.ticks_for_r(r_value, self.tick_size)
         stop_price = None
-        if self.stop_r_multiple is not None and r_value is not None:
+        explicit_stop = _coerce_float(self.template.get("stop_price"))
+        if explicit_stop not in (None, 0):
+            stop_price = float(explicit_stop)
+        if self.stop_r_multiple is not None and r_value is not None and stop_price is None:
             stop_price = risk_math.price_from_r(candle.close, direction, r_value, self.stop_r_multiple)
         if stop_price is None:
             stop_distance = self.stop_ticks * self.tick_size

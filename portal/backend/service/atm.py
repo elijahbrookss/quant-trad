@@ -10,12 +10,13 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "tick_size": 0.01,
     "atr_r_multiple": 1.0,
     "stop_ticks": 35,
+    "stop_price": None,
     "take_profit_orders": [
         {"id": "tp-1", "label": "TP +20", "ticks": 20, "contracts": 1},
         {"id": "tp-2", "label": "TP +40", "ticks": 40, "contracts": 1},
         {"id": "tp-3", "label": "TP +60", "ticks": 60, "contracts": 1},
     ],
-    "breakeven": {"target_index": 0, "ticks": 20},
+    "breakeven": {"enabled": True, "target_index": 0, "ticks": 20},
     "trailing": {
         "enabled": True,
         "target_index": 1,
@@ -118,6 +119,8 @@ def _normalise_breakeven(
     config = dict(base)
     source = payload.get("breakeven")
     if isinstance(source, Mapping):
+        if "enabled" in source:
+            config["enabled"] = bool(source.get("enabled"))
         if source.get("target_index") is not None:
             config["target_index"] = max(_coerce_int(source.get("target_index"), 0) or 0, 0)
         if source.get("ticks") is not None:
@@ -219,6 +222,10 @@ def normalise_template(
     stop_r_multiple = _coerce_float(payload.get("stop_r") or payload.get("stop_r_multiple"))
     if stop_r_multiple is not None:
         result["stop_r_multiple"] = float(stop_r_multiple)
+
+    stop_price = _coerce_float(payload.get("stop_price"))
+    if stop_price is not None:
+        result["stop_price"] = float(stop_price)
 
     result["breakeven"] = _normalise_breakeven(payload, result.get("breakeven", {}))
     result["trailing"] = _normalise_trailing(payload, result.get("trailing", {}))
