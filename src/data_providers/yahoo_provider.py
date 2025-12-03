@@ -2,8 +2,7 @@ import datetime as dt
 import pandas as pd
 import yfinance as yf
 from core.logger import logger
-from .base_provider import DataSource
-from .base_provider import BaseDataProvider
+from .base_provider import DataSource, BaseDataProvider, InstrumentMetadata, InstrumentType
 
 class YahooFinanceProvider(BaseDataProvider):
     def fetch_from_api(
@@ -44,3 +43,13 @@ class YahooFinanceProvider(BaseDataProvider):
     
     def get_datasource(self):
         return DataSource.YFINANCE.value
+
+    def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Yahoo Finance exposes spot instruments (equities, ETFs, FX, crypto)."""
+
+        return InstrumentType.SPOT
+
+    def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
+        """Return spot metadata expressed per share/coin."""
+
+        return self._normalize_metadata(tick_size=0.01, contract_size=1.0)

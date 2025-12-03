@@ -240,6 +240,12 @@ function StrategyFormModal({
 
   const lookupTickMetadata = useCallback(async ({ symbol, provider_id, venue_id, timeframe }) => {
     const response = await fetchTickMetadata({ provider_id, venue_id, symbol, timeframe })
+    if (response?.errors) {
+      const firstError = Object.values(response.errors).find(Boolean)
+      const error = new Error(firstError || 'Tick metadata unavailable')
+      error.payload = response.errors
+      throw error
+    }
     if (response?.metadata) return response.metadata
     return null
   }, [])
@@ -411,7 +417,8 @@ function StrategyFormModal({
       }
     } catch (err) {
       modalLogger?.warn('atm_tick_prefill_failed', { provider_id: form.provider_id, venue_id: form.venue_id, symbol }, err)
-      setAtmPrefillWarning('Tick defaults could not be loaded; using Auto values instead.')
+      const detail = err?.message || 'Tick defaults could not be loaded; using Auto values instead.'
+      setAtmPrefillWarning(detail)
     } finally {
       setPrefetchingMeta(false)
       setCurrentStep(1)

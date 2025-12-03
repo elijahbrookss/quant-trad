@@ -43,7 +43,7 @@ import pandas as pd
 from ib_insync import IB, Contract, util
 
 from core.logger import logger
-from .base_provider import BaseDataProvider, DataSource
+from .base_provider import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,60 @@ class InteractiveBrokersProvider(BaseDataProvider):
         """Return the datasource identifier stored alongside ingested bars."""
 
         return DataSource.IBKR.value
+
+    def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Map IBKR security types into a spot vs futures/perps binary."""
+
+        contract = self._build_contract(symbol)
+        sec_type = (contract.secType or "").upper()
+
+        if sec_type in {"FUT", "OPT"}:
+            return InstrumentType.FUTURE
+
+        return InstrumentType.SPOT
+
+    def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
+        """Return tick size, contract multiplier, and derived tick value."""
+
+        contract = self._build_contract(symbol)
+        instrument_type = self.get_instrument_type(venue, symbol)
+        min_tick: Optional[float] = None
+        multiplier: Optional[float] = None
+
+        with self._lock:
+            self._ensure_connection()
+            try:
+                details = self._ib.reqContractDetails(contract)
+            except Exception as exc:  # pragma: no cover - network interaction
+                logger.warning(
+                    "ibkr_metadata_fetch_failed | symbol=%s | secType=%s | exchange=%s | error=%s",
+                    symbol,
+                    contract.secType,
+                    contract.exchange,
+                    exc,
+                )
+                details = []
+
+        if details:
+            first = details[0]
+            try:
+                min_tick = float(getattr(first, "minTick", None)) if getattr(first, "minTick", None) is not None else None
+            except (TypeError, ValueError):
+                min_tick = None
+
+            multiplier_value = getattr(first.contract, "multiplier", None) or getattr(first, "multiplier", None)
+            try:
+                multiplier = float(multiplier_value) if multiplier_value is not None else None
+            except (TypeError, ValueError):
+                multiplier = None
+
+        if multiplier is None and instrument_type == InstrumentType.SPOT:
+            multiplier = 1.0
+
+        if min_tick is None:
+            min_tick = 0.01
+
+        return self._normalize_metadata(tick_size=min_tick, contract_size=multiplier)
 
     # ------------------------------------------------------------------
     # Public helpers

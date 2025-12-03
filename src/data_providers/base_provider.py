@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 import datetime as dt
 import pandas as pd
 import os
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Optional
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -23,6 +24,27 @@ class DataSource(str, Enum):
     IBKR = "IBKR"
     CCXT = "CCXT"
     UNKNOWN = "UNKNOWN"
+
+
+class InstrumentType(str, Enum):
+    SPOT = "SPOT"
+    FUTURE = "FUTURE"
+
+
+@dataclass(frozen=True)
+class InstrumentMetadata:
+    """Standardized instrument metadata expressed per trading unit."""
+
+    tick_size: Optional[float]
+    contract_size: Optional[float]
+    tick_value: Optional[float]
+
+    def as_dict(self) -> dict:
+        return {
+            "tick_size": self.tick_size,
+            "contract_size": self.contract_size,
+            "tick_value": self.tick_value,
+        }
 
 
 class BaseDataProvider(ABC):
@@ -48,6 +70,41 @@ class BaseDataProvider(ABC):
     @abstractmethod
     def fetch_from_api(self, symbol: str, start: dt.datetime, end: dt.datetime, interval: str) -> pd.DataFrame:
         pass
+
+    @abstractmethod
+    def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Return a binary instrument classification (spot vs futures/perps)."""
+
+    @abstractmethod
+    def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
+        """Return tick_size, contract_size, and tick_value for a trading unit."""
+
+    @staticmethod
+    def _normalize_metadata(
+        *,
+        tick_size: Optional[float] = None,
+        contract_size: Optional[float] = None,
+        tick_value: Optional[float] = None,
+    ) -> InstrumentMetadata:
+        """Derive a consistent metadata triple from the provided inputs."""
+
+        ts = float(tick_size) if tick_size is not None else None
+        cs = float(contract_size) if contract_size is not None else None
+        tv = float(tick_value) if tick_value is not None else None
+
+        if ts is None and tv is None:
+            raise ValueError("At least tick_size or tick_value must be provided")
+
+        if tv is None and ts is not None and cs is not None:
+            tv = ts * cs
+
+        if cs is None and ts is not None and tv is not None and ts != 0:
+            cs = tv / ts
+
+        if ts is None and cs is not None and tv is not None and cs != 0:
+            ts = tv / cs
+
+        return InstrumentMetadata(ts, cs, tv)
 
     def ensure_schema(self):
         if not self._engine:
