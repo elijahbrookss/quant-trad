@@ -166,8 +166,6 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     await onSubmit(payload)
   }
 
-  if (!open) return null
-
   const datasource = (form.datasource || DEFAULT_DATASOURCE).toUpperCase()
   const exchangeOptions = useMemo(() => {
     if (datasource === 'CCXT') {
@@ -178,6 +176,8 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     }
     return [{ value: '', label: 'Use datasource defaults' }, ...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
   }, [datasource])
+
+  if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
