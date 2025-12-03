@@ -71,6 +71,11 @@ class BaseDataProvider(ABC):
             PRIMARY KEY (symbol, timestamp, datasource, interval)
         );
         """
+        ddl_add_columns = f"""
+        ALTER TABLE {self._table}
+            ADD COLUMN IF NOT EXISTS tr DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS atr_wilder DOUBLE PRECISION;
+        """
         ddl_hypertable = f"""
         SELECT create_hypertable('{self._table}', 'timestamp', if_not_exists => TRUE);
         """
@@ -90,6 +95,7 @@ class BaseDataProvider(ABC):
         try:
             with self._engine.begin() as conn:
                 conn.execute(text(ddl_create))
+                conn.execute(text(ddl_add_columns))
                 conn.execute(text(ddl_hypertable))
                 conn.execute(text(ddl_closures))
             logger.info("Schema ensured for table '%s'.", self._table)
@@ -415,6 +421,9 @@ class BaseDataProvider(ABC):
         if not self._engine:
             logger.warning("Database engine unavailable; skipping ingestion for %s [%s].", ctx.symbol, ctx.interval)
             return 0
+
+        # Ensure the target schema exists (including new columns) before creating temp tables.
+        self.ensure_schema()
 
         try:
             with self._engine.connect() as conn:
