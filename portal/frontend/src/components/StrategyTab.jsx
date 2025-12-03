@@ -13,7 +13,7 @@ import {
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
-import { createInstrument } from '../adapters/instrument.adapter.js'
+import { createInstrument, fetchInstruments } from '../adapters/instrument.adapter.js'
 import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from './atm/ATMConfigForm.jsx'
 import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
@@ -32,7 +32,7 @@ const STRATEGY_FORM_DEFAULT = {
   name: '',
   description: '',
   timeframe: '15m',
-  datasource: '',
+  datasource: DEFAULT_DATASOURCE,
   exchange: '',
   symbols: '',
   atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
@@ -100,6 +100,111 @@ function StrategyFormModal({
   const [currentStep, setCurrentStep] = useState(0)
   const [atmMode, setAtmMode] = useState('new')
   const [selectedATMTemplateId, setSelectedATMTemplateId] = useState('')
+  const [touched, setTouched] = useState({})
+  const [showValidation, setShowValidation] = useState(false)
+  const [prefetchingMeta, setPrefetchingMeta] = useState(false)
+  const [atmPrefillWarning, setAtmPrefillWarning] = useState(null)
+  const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
+
+  const validDatasourceValues = useMemo(() => new Set(DATASOURCE_OPTIONS.map((option) => option.value)), [])
+
+  const getExchangeOptions = useCallback(
+    (datasourceValue) => {
+      if (datasourceValue === 'CCXT') return CRYPTO_EXCHANGES
+      if (datasourceValue === 'IBKR') return IB_EXCHANGES
+      return [...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
+    },
+    [],
+  )
+
+  const normalizeSymbol = useCallback((rawSymbols) => {
+    if (!rawSymbols) return ''
+    return rawSymbols
+      .split(/[\s,;]+/)
+      .map((token) => token.trim())
+      .filter(Boolean)[0]
+      ?.toUpperCase()
+      ?.trim()
+      ?.replace(/\s+/g, '')
+      ?.replace(/,+$/, '')
+      ?.replace(/^,/, '')
+      ?.trim() ?? ''
+  }, [])
+
+  const validateStep1 = useCallback(
+    (state) => {
+      const errors = {}
+      const datasource = (state.datasource || '').toUpperCase()
+      const exchange = (state.exchange || '').trim()
+      const symbol = normalizeSymbol(state.symbols || '')
+
+      if (!validDatasourceValues.has(datasource)) {
+        errors.datasource = 'Select a datasource to continue.'
+      }
+
+      const validExchanges = new Set(getExchangeOptions(datasource).map((option) => option.value))
+      if (!exchange) {
+        errors.exchange = 'Select an exchange for this datasource.'
+      } else if (!validExchanges.has(exchange)) {
+        errors.exchange = 'Choose an exchange supported by the selected datasource.'
+      }
+
+      if (!symbol) {
+        errors.symbols = 'Symbol is required.'
+      } else if (!/^[A-Za-z0-9][A-Za-z0-9\-/]*$/.test(symbol)) {
+        errors.symbols = 'Use letters/numbers with - or / separators.'
+      }
+
+      return errors
+    },
+    [getExchangeOptions, normalizeSymbol, validDatasourceValues],
+  )
+
+  const step1Errors = useMemo(() => validateStep1(form), [form, validateStep1])
+  const isStep1Valid = useMemo(() => Object.keys(step1Errors).length === 0, [step1Errors])
+  const showFieldError = useCallback((field) => (showValidation || touched[field]) && step1Errors[field], [showValidation, step1Errors, touched])
+
+  const markTouched = useCallback((field) => setTouched((prev) => ({ ...prev, [field]: true })), [])
+
+  const applyTickDefaults = useCallback((defaults) => {
+    if (!defaults) return
+    setForm((prev) => {
+      const template = cloneATMTemplate(prev.atm_template)
+      const meta = { ...(template._meta || {}) }
+
+      const applyField = (field) => {
+        if (meta[`${field}_override`]) return
+        const value = defaults[field]
+        if (value === undefined || value === null) return
+        template[field] = value
+        meta[`${field}_override`] = true
+      }
+
+      applyField('tick_size')
+      applyField('tick_value')
+      applyField('contract_size')
+      template._meta = meta
+      return { ...prev, atm_template: template }
+    })
+  }, [])
+
+  const lookupTickMetadata = useCallback(async ({ symbol, datasource, exchange }) => {
+    const instruments = await fetchInstruments()
+    const targetSymbol = (symbol || '').toUpperCase()
+    const targetDatasource = (datasource || '').toUpperCase()
+    const targetExchange = (exchange || '').toLowerCase()
+
+    return instruments.find((instrument) => {
+      const instrumentSymbol = (instrument.symbol || '').toUpperCase()
+      const instrumentDatasource = (instrument.datasource || '').toUpperCase()
+      const instrumentExchange = (instrument.exchange || '').toLowerCase()
+
+      const symbolMatch = instrumentSymbol === targetSymbol
+      const datasourceMatch = !targetDatasource || instrumentDatasource === targetDatasource
+      const exchangeMatch = !targetExchange || instrumentExchange === targetExchange
+      return symbolMatch && datasourceMatch && exchangeMatch
+    })
+  }, [])
 
   const templateKey = useCallback((template) => {
     try {
@@ -135,6 +240,10 @@ function StrategyFormModal({
       setCurrentStep(0)
       setAtmMode('new')
       setSelectedATMTemplateId('')
+      setTouched({})
+      setShowValidation(false)
+      setPrefetchingMeta(false)
+      setAtmPrefillWarning(null)
       return
     }
 
@@ -148,7 +257,7 @@ function StrategyFormModal({
         name: initialValues.name || '',
         description: initialValues.description || '',
         timeframe: initialValues.timeframe || '15m',
-        datasource: (initialValues.datasource || '').toUpperCase(),
+        datasource: (initialValues.datasource || '').toUpperCase() || DEFAULT_DATASOURCE,
         exchange: initialValues.exchange || '',
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
@@ -167,6 +276,9 @@ function StrategyFormModal({
       setAtmMode('new')
       setSelectedATMTemplateId('')
     }
+    setTouched({})
+    setShowValidation(false)
+    setAtmPrefillWarning(null)
   }, [open, initialValues, templateOptions, templateKey])
 
   const handleChange = (field) => (input) => {
@@ -174,9 +286,20 @@ function StrategyFormModal({
     if (input && typeof input === 'object' && 'target' in input) {
       value = input.target?.value ?? ''
     }
+    markTouched(field)
 
     if (field === 'datasource' && typeof value === 'string') {
-      value = value.toUpperCase()
+      const nextDatasource = value.toUpperCase()
+      setForm((prev) => {
+        const allowedExchanges = new Set(getExchangeOptions(nextDatasource).map((option) => option.value))
+        const nextExchange = allowedExchanges.has(prev.exchange) ? prev.exchange : ''
+        return { ...prev, datasource: nextDatasource, exchange: nextExchange }
+      })
+      return
+    }
+
+    if (field === 'exchange' && typeof value === 'string') {
+      value = value.trim()
     }
 
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
@@ -189,6 +312,14 @@ function StrategyFormModal({
     }))
     setAtmMode('new')
   }, [])
+
+  useEffect(() => {
+    const allowedExchanges = new Set(getExchangeOptions(form.datasource).map((option) => option.value))
+    if (form.exchange && !allowedExchanges.has(form.exchange)) {
+      setForm((prev) => ({ ...prev, exchange: '' }))
+      setTouched((prev) => ({ ...prev, exchange: true }))
+    }
+  }, [form.datasource, form.exchange, getExchangeOptions])
 
   const handleATMTemplateSelect = (value) => {
     const option = templateOptions.find((candidate) => candidate.value === value)
@@ -203,43 +334,54 @@ function StrategyFormModal({
     event.preventDefault()
     const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
     const name = form.name.trim() || fallbackName
+    const primarySymbol = normalizeSymbol(form.symbols || '')
     const payload = {
       name,
       description: form.description.trim() || null,
       timeframe: form.timeframe.trim() || '15m',
       datasource: form.datasource.trim() || null,
       exchange: form.exchange.trim() || null,
-      symbols: form.symbols
-        .split(/[\s,;]+/)
-        .map((token) => token.trim())
-        .filter(Boolean),
+      symbols: primarySymbol ? [primarySymbol] : [],
       atm_template: cloneATMTemplate(form.atm_template),
-    }
-    if (Array.isArray(payload.symbols) && payload.symbols.length > 1) {
-      payload.symbols = payload.symbols.slice(0, 1)
     }
     await onSubmit(payload)
   }
 
-  const datasource = (form.datasource || DEFAULT_DATASOURCE).toUpperCase()
-  const exchangeOptions = useMemo(() => {
-    if (datasource === 'CCXT') {
-      return [{ value: '', label: 'Auto (per symbol)' }, ...CRYPTO_EXCHANGES]
-    }
-    if (datasource === 'IBKR') {
-      return [{ value: '', label: 'Auto (per symbol)' }, ...IB_EXCHANGES]
-    }
-    return [{ value: '', label: 'Use datasource defaults' }, ...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
-  }, [datasource])
+  const datasource = (form.datasource || '').toUpperCase()
+  const exchangeOptions = useMemo(() => getExchangeOptions(datasource), [datasource, getExchangeOptions])
 
-  const handleStepAdvance = (event) => {
+  const handleStepAdvance = async (event) => {
     event.preventDefault()
-    setCurrentStep(1)
+    setShowValidation(true)
+    if (!isStep1Valid) return
+
+    setPrefetchingMeta(true)
+    const symbol = normalizeSymbol(form.symbols || '')
+    try {
+      const metadata = await lookupTickMetadata({
+        symbol,
+        datasource: form.datasource,
+        exchange: form.exchange,
+      })
+      if (metadata) {
+        applyTickDefaults(metadata)
+        setAtmPrefillWarning(null)
+      } else {
+        setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
+      }
+    } catch (err) {
+      modalLogger?.warn('atm_tick_prefill_failed', { datasource: form.datasource, exchange: form.exchange, symbol }, err)
+      setAtmPrefillWarning('Tick defaults could not be loaded; using Auto values instead.')
+    } finally {
+      setPrefetchingMeta(false)
+      setCurrentStep(1)
+    }
   }
 
   const handleStepBack = (event) => {
     event.preventDefault()
     setCurrentStep(0)
+    setShowValidation(false)
   }
 
   if (!open) return null
@@ -295,7 +437,7 @@ function StrategyFormModal({
                     className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                     value={form.name}
                     onChange={handleChange('name')}
-                    placeholder="Optional: auto-generated if blank"
+                    onBlur={() => markTouched('name')}
                   />
                 </div>
                 <div>
@@ -305,6 +447,7 @@ function StrategyFormModal({
                     value={form.description}
                     onChange={handleChange('description')}
                     placeholder="Optional context for your notes"
+                    onBlur={() => markTouched('description')}
                   />
                 </div>
               </div>
@@ -313,6 +456,7 @@ function StrategyFormModal({
                 <TimeframeSelect
                   selected={form.timeframe || '15m'}
                   onChange={(value) => handleChange('timeframe')(value)}
+                  variant="dropdown"
                   className="md:col-span-1"
                 />
                 <div className="md:col-span-1">
@@ -320,9 +464,12 @@ function StrategyFormModal({
                     label="Datasource"
                     value={form.datasource || ''}
                     onChange={handleChange('datasource')}
-                    options={[{ value: '', label: 'Use chart defaults' }, ...DATASOURCE_OPTIONS]}
+                    options={DATASOURCE_OPTIONS}
                     className="mt-1 w-full"
                   />
+                  {showFieldError('datasource') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.datasource}</p>
+                  ) : null}
                 </div>
                 <div className="md:col-span-1">
                   <DropdownSelect
@@ -332,6 +479,9 @@ function StrategyFormModal({
                     options={exchangeOptions}
                     className="mt-1 w-full"
                   />
+                  {showFieldError('exchange') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.exchange}</p>
+                  ) : null}
                 </div>
               </div>
 
@@ -341,9 +491,14 @@ function StrategyFormModal({
                   className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                   value={form.symbols}
                   onChange={handleChange('symbols')}
-                  placeholder="e.g. BTCUSD"
+                  onBlur={() => markTouched('symbols')}
+                  placeholder="e.g. BTC/USD"
                 />
-                <p className="mt-1 text-[11px] text-slate-500">Provide one symbol to start; you can add more later.</p>
+                {showFieldError('symbols') ? (
+                  <p className="mt-1 text-xs text-rose-400">{step1Errors.symbols}</p>
+                ) : (
+                  <p className="mt-1 text-[11px] text-slate-500">Provide one symbol to start; you can add more later.</p>
+                )}
               </div>
             </div>
           )}
@@ -396,6 +551,12 @@ function StrategyFormModal({
                 </div>
               )}
 
+              {atmPrefillWarning ? (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  {atmPrefillWarning}
+                </div>
+              ) : null}
+
               <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -433,8 +594,8 @@ function StrategyFormModal({
                 </ActionButton>
               )}
               {currentStep === 0 && (
-                <ActionButton type="button" onClick={handleStepAdvance}>
-                  Next
+                <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta}>
+                  {prefetchingMeta ? 'Loading…' : 'Next'}
                 </ActionButton>
               )}
               {currentStep === 1 && (
