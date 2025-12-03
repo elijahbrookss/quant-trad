@@ -8,11 +8,41 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import strategy_service
+from ..service import provider_service, strategy_service
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _apply_market_aliases(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate provider/venue identifiers into legacy datasource/exchange fields."""
+
+    provider_id = payload.pop("provider_id", None)
+    venue_id = payload.pop("venue_id", None)
+    datasource = payload.get("datasource")
+    exchange = payload.get("exchange")
+
+    if provider_id or venue_id:
+        provider, venue_exchange = provider_service.translate_market(provider_id, venue_id)
+        if provider:
+            payload["datasource"] = datasource or provider
+        if venue_exchange:
+            payload["exchange"] = exchange or venue_exchange
+    return payload
+
+
+def _attach_market_aliases(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Add provider/venue hints to strategy responses."""
+
+    datasource = (record.get("datasource") or "").strip().upper() or None
+    exchange = (record.get("exchange") or "").strip().lower() or None
+    venue_id = provider_service.venue_from_exchange_slug(exchange)
+    provider_id = datasource
+    _, _, normalized = provider_service.validate_provider_venue(provider_id, venue_id)
+    record["provider_id"] = normalized.get("provider_id") or provider_id
+    record["venue_id"] = normalized.get("venue_id") or exchange or None
+    return record
 
 
 class RuleConditionOut(BaseModel):
@@ -48,6 +78,8 @@ class StrategyOut(BaseModel):
     timeframe: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
     indicator_ids: List[str]
     indicators: List[Dict[str, Any]]
     missing_indicators: List[str]
@@ -68,6 +100,8 @@ class StrategyCreateRequest(BaseModel):
     description: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
     indicator_ids: List[str] = Field(default_factory=list)
     atm_template: Optional[Dict[str, Any]] = None
 
@@ -81,6 +115,8 @@ class StrategyUpdateRequest(BaseModel):
     description: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
     indicator_ids: Optional[List[str]] = None
     atm_template: Optional[Dict[str, Any]] = None
 
@@ -134,6 +170,8 @@ class StrategySignalRequest(BaseModel):
     symbol: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -144,6 +182,8 @@ class SymbolPresetRequest(BaseModel):
     label: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
     timeframe: str
     symbol: str
 
@@ -160,7 +200,8 @@ class SymbolPresetOut(SymbolPresetRequest):
 async def list_strategies() -> List[Dict[str, Any]]:
     """Return all stored strategies."""
 
-    return strategy_service.list_strategies()
+    records = strategy_service.list_strategies()
+    return [_attach_market_aliases(record) for record in records]
 
 
 @router.post("/", response_model=StrategyOut, status_code=201)
@@ -168,16 +209,18 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
     """Create a new strategy record."""
 
     try:
-        return strategy_service.create_strategy(
-            body.name,
-            symbols=body.symbols,
-            timeframe=body.timeframe,
-            description=body.description,
-            datasource=body.datasource,
-            exchange=body.exchange,
-            indicator_ids=body.indicator_ids,
-            atm_template=body.atm_template,
+        payload = _apply_market_aliases(body.dict())
+        record = strategy_service.create_strategy(
+            payload.get("name") or body.name,
+            symbols=payload.get("symbols") or body.symbols,
+            timeframe=payload.get("timeframe") or body.timeframe,
+            description=payload.get("description"),
+            datasource=payload.get("datasource"),
+            exchange=payload.get("exchange"),
+            indicator_ids=payload.get("indicator_ids") or [],
+            atm_template=payload.get("atm_template"),
         )
+        return _attach_market_aliases(record)
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_create_failed")
         raise HTTPException(400, str(exc)) from exc
@@ -188,7 +231,8 @@ async def get_strategy(strategy_id: str) -> Dict[str, Any]:
     """Retrieve a single strategy."""
 
     try:
-        return strategy_service.get_strategy(strategy_id)
+        record = strategy_service.get_strategy(strategy_id)
+        return _attach_market_aliases(record)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -198,8 +242,9 @@ async def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict
     """Update an existing strategy."""
 
     try:
-        payload = body.dict(exclude_unset=True)
-        return strategy_service.update_strategy(strategy_id, **payload)
+        payload = _apply_market_aliases(body.dict(exclude_unset=True))
+        record = strategy_service.update_strategy(strategy_id, **payload)
+        return _attach_market_aliases(record)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -295,14 +340,15 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
     """Generate buy/sell signal summaries for a strategy."""
 
     try:
+        market = _apply_market_aliases(body.dict())
         return strategy_service.generate_strategy_signals(
             strategy_id,
             start=body.start,
             end=body.end,
             interval=body.interval,
-            symbol=body.symbol,
-            datasource=body.datasource,
-            exchange=body.exchange,
+            symbol=market.get("symbol") or body.symbol,
+            datasource=market.get("datasource"),
+            exchange=market.get("exchange"),
             config=body.config,
         )
     except KeyError as exc:
@@ -316,7 +362,8 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
 async def list_symbol_presets() -> List[Dict[str, Any]]:
     """Return saved symbol presets."""
 
-    return strategy_service.list_symbol_presets_service()
+    presets = strategy_service.list_symbol_presets_service()
+    return [_attach_market_aliases(preset) for preset in presets]
 
 
 @router.post("/presets/symbols", response_model=SymbolPresetOut, status_code=201)
@@ -324,14 +371,16 @@ async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
     """Create or update a symbol preset."""
 
     try:
-        return strategy_service.save_symbol_preset_service(
-            preset_id=body.id,
-            label=body.label,
-            datasource=body.datasource,
-            exchange=body.exchange,
-            timeframe=body.timeframe,
-            symbol=body.symbol,
+        payload = _apply_market_aliases(body.dict())
+        record = strategy_service.save_symbol_preset_service(
+            preset_id=payload.get("id"),
+            label=payload.get("label"),
+            datasource=payload.get("datasource"),
+            exchange=payload.get("exchange"),
+            timeframe=payload.get("timeframe"),
+            symbol=payload.get("symbol"),
         )
+        return _attach_market_aliases(record)
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
 

@@ -13,7 +13,8 @@ import {
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { fetchIndicators, fetchIndicator, fetchIndicatorStrategies } from '../adapters/indicator.adapter.js'
-import { createInstrument, fetchInstruments } from '../adapters/instrument.adapter.js'
+import { createInstrument } from '../adapters/instrument.adapter.js'
+import { fetchProviders, fetchTickMetadata, validateProviderSelection } from '../adapters/provider.adapter.js'
 import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from './atm/ATMConfigForm.jsx'
 import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
@@ -21,19 +22,14 @@ import { createLogger } from '../utils/logger.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 import { TimeframeSelect } from './ChartComponent/TimeframeSelectComponent.jsx'
-import {
-  DATASOURCE_OPTIONS,
-  DEFAULT_DATASOURCE,
-  IB_EXCHANGES,
-  CRYPTO_EXCHANGES,
-} from '../constants/datasources.js'
+import { DEFAULT_DATASOURCE } from '../constants/datasources.js'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
   description: '',
   timeframe: '15m',
-  datasource: DEFAULT_DATASOURCE,
-  exchange: '',
+  provider_id: '',
+  venue_id: '',
   symbols: '',
   atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
 }
@@ -56,6 +52,8 @@ const RULE_FORM_DEFAULT = {
 
 const INSTRUMENT_FORM_DEFAULT = {
   symbol: '',
+  provider_id: '',
+  venue_id: '',
   datasource: '',
   exchange: '',
   tick_size: '',
@@ -104,18 +102,65 @@ function StrategyFormModal({
   const [showValidation, setShowValidation] = useState(false)
   const [prefetchingMeta, setPrefetchingMeta] = useState(false)
   const [atmPrefillWarning, setAtmPrefillWarning] = useState(null)
+  const [providers, setProviders] = useState([])
+  const [providersLoading, setProvidersLoading] = useState(false)
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
-  const validDatasourceValues = useMemo(() => new Set(DATASOURCE_OPTIONS.map((option) => option.value)), [])
-
-  const getExchangeOptions = useCallback(
-    (datasourceValue) => {
-      if (datasourceValue === 'CCXT') return CRYPTO_EXCHANGES
-      if (datasourceValue === 'IBKR') return IB_EXCHANGES
-      return [...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
-    },
-    [],
+  const providerOptions = useMemo(
+    () => (providers || []).map((provider) => ({ value: provider.id, label: provider.label })),
+    [providers],
   )
+
+  const getVenueOptions = useCallback(
+    (providerId) => {
+      const normalizedProvider = (providerId || '').toUpperCase()
+      const provider = (providers || []).find((item) => item.id === normalizedProvider)
+      return (provider?.venues || []).map((venue) => ({ value: venue.id, label: venue.label }))
+    },
+    [providers],
+  )
+
+  useEffect(() => {
+    if (!open) return undefined
+    let cancelled = false
+    setProvidersLoading(true)
+    fetchProviders()
+      .then((response) => {
+        if (cancelled) return
+        const items = response?.providers || []
+        setProviders(items)
+        setForm((prev) => {
+          if (prev.provider_id) return prev
+          const firstProvider = items[0]
+          const defaultVenue = (firstProvider?.venues || []).length === 1 ? firstProvider?.venues?.[0]?.id || '' : ''
+          return {
+            ...prev,
+            provider_id: prev.provider_id || firstProvider?.id || '',
+            venue_id: prev.venue_id || defaultVenue,
+          }
+        })
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          modalLogger?.warn('provider_fetch_failed', err)
+          const fallbackProviders = [
+            { id: 'ALPACA', label: 'Alpaca', venues: [{ id: 'ALPACA', label: 'Alpaca' }] },
+          ]
+          setProviders(fallbackProviders)
+          setForm((prev) => ({
+            ...prev,
+            provider_id: prev.provider_id || 'ALPACA',
+            venue_id: prev.venue_id || 'ALPACA',
+          }))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setProvidersLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, modalLogger])
 
   const normalizeSymbol = useCallback((rawSymbols) => {
     if (!rawSymbols) return ''
@@ -134,19 +179,24 @@ function StrategyFormModal({
   const validateStep1 = useCallback(
     (state) => {
       const errors = {}
-      const datasource = (state.datasource || '').toUpperCase()
-      const exchange = (state.exchange || '').trim()
+      const providerId = (state.provider_id || '').toUpperCase()
+      const venueId = (state.venue_id || '').toUpperCase()
       const symbol = normalizeSymbol(state.symbols || '')
 
-      if (!validDatasourceValues.has(datasource)) {
-        errors.datasource = 'Select a datasource to continue.'
+      const hasProviderOptions = providerOptions.length > 0
+      const validProviders = new Set(providerOptions.map((option) => option.value))
+      if (!providerId) {
+        errors.provider_id = 'Select a data provider to continue.'
+      } else if (hasProviderOptions && !validProviders.has(providerId)) {
+        errors.provider_id = 'Select a data provider to continue.'
       }
 
-      const validExchanges = new Set(getExchangeOptions(datasource).map((option) => option.value))
-      if (!exchange) {
-        errors.exchange = 'Select an exchange for this datasource.'
-      } else if (!validExchanges.has(exchange)) {
-        errors.exchange = 'Choose an exchange supported by the selected datasource.'
+      const venueOptionsForProvider = getVenueOptions(providerId)
+      const validVenues = new Set(venueOptionsForProvider.map((option) => option.value))
+      if (!venueId) {
+        errors.venue_id = 'Select an exchange for this provider.'
+      } else if (venueOptionsForProvider.length && !validVenues.has(venueId)) {
+        errors.venue_id = 'Choose a venue supported by the selected provider.'
       }
 
       if (!symbol) {
@@ -157,7 +207,7 @@ function StrategyFormModal({
 
       return errors
     },
-    [getExchangeOptions, normalizeSymbol, validDatasourceValues],
+    [getVenueOptions, normalizeSymbol, providerOptions],
   )
 
   const step1Errors = useMemo(() => validateStep1(form), [form, validateStep1])
@@ -188,22 +238,10 @@ function StrategyFormModal({
     })
   }, [])
 
-  const lookupTickMetadata = useCallback(async ({ symbol, datasource, exchange }) => {
-    const instruments = await fetchInstruments()
-    const targetSymbol = (symbol || '').toUpperCase()
-    const targetDatasource = (datasource || '').toUpperCase()
-    const targetExchange = (exchange || '').toLowerCase()
-
-    return instruments.find((instrument) => {
-      const instrumentSymbol = (instrument.symbol || '').toUpperCase()
-      const instrumentDatasource = (instrument.datasource || '').toUpperCase()
-      const instrumentExchange = (instrument.exchange || '').toLowerCase()
-
-      const symbolMatch = instrumentSymbol === targetSymbol
-      const datasourceMatch = !targetDatasource || instrumentDatasource === targetDatasource
-      const exchangeMatch = !targetExchange || instrumentExchange === targetExchange
-      return symbolMatch && datasourceMatch && exchangeMatch
-    })
+  const lookupTickMetadata = useCallback(async ({ symbol, provider_id, venue_id, timeframe }) => {
+    const response = await fetchTickMetadata({ provider_id, venue_id, symbol, timeframe })
+    if (response?.metadata) return response.metadata
+    return null
   }, [])
 
   const templateKey = useCallback((template) => {
@@ -257,8 +295,8 @@ function StrategyFormModal({
         name: initialValues.name || '',
         description: initialValues.description || '',
         timeframe: initialValues.timeframe || '15m',
-        datasource: (initialValues.datasource || '').toUpperCase() || DEFAULT_DATASOURCE,
-        exchange: initialValues.exchange || '',
+        provider_id: (initialValues.provider_id || initialValues.datasource || '').toUpperCase() || '',
+        venue_id: (initialValues.venue_id || initialValues.exchange || '').toUpperCase() || '',
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
           : initialValues.symbols || '',
@@ -288,18 +326,18 @@ function StrategyFormModal({
     }
     markTouched(field)
 
-    if (field === 'datasource' && typeof value === 'string') {
-      const nextDatasource = value.toUpperCase()
+    if (field === 'provider_id' && typeof value === 'string') {
+      const nextProvider = value.toUpperCase()
       setForm((prev) => {
-        const allowedExchanges = new Set(getExchangeOptions(nextDatasource).map((option) => option.value))
-        const nextExchange = allowedExchanges.has(prev.exchange) ? prev.exchange : ''
-        return { ...prev, datasource: nextDatasource, exchange: nextExchange }
+        const allowedVenues = new Set(getVenueOptions(nextProvider).map((option) => option.value))
+        const nextVenue = allowedVenues.size === 1 ? [...allowedVenues][0] : allowedVenues.has(prev.venue_id) ? prev.venue_id : ''
+        return { ...prev, provider_id: nextProvider, venue_id: nextVenue }
       })
       return
     }
 
-    if (field === 'exchange' && typeof value === 'string') {
-      value = value.trim()
+    if (field === 'venue_id' && typeof value === 'string') {
+      value = value.toUpperCase()
     }
 
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
@@ -314,12 +352,12 @@ function StrategyFormModal({
   }, [])
 
   useEffect(() => {
-    const allowedExchanges = new Set(getExchangeOptions(form.datasource).map((option) => option.value))
-    if (form.exchange && !allowedExchanges.has(form.exchange)) {
-      setForm((prev) => ({ ...prev, exchange: '' }))
-      setTouched((prev) => ({ ...prev, exchange: true }))
+    const allowedVenues = new Set(getVenueOptions(form.provider_id).map((option) => option.value))
+    if (form.venue_id && !allowedVenues.has(form.venue_id)) {
+      setForm((prev) => ({ ...prev, venue_id: '' }))
+      setTouched((prev) => ({ ...prev, venue_id: true }))
     }
-  }, [form.datasource, form.exchange, getExchangeOptions])
+  }, [form.provider_id, form.venue_id, getVenueOptions])
 
   const handleATMTemplateSelect = (value) => {
     const option = templateOptions.find((candidate) => candidate.value === value)
@@ -339,16 +377,17 @@ function StrategyFormModal({
       name,
       description: form.description.trim() || null,
       timeframe: form.timeframe.trim() || '15m',
-      datasource: form.datasource.trim() || null,
-      exchange: form.exchange.trim() || null,
+      provider_id: (form.provider_id || '').trim().toUpperCase() || null,
+      venue_id: (form.venue_id || '').trim().toUpperCase() || null,
+      datasource: null,
+      exchange: null,
       symbols: primarySymbol ? [primarySymbol] : [],
       atm_template: cloneATMTemplate(form.atm_template),
     }
     await onSubmit(payload)
   }
 
-  const datasource = (form.datasource || '').toUpperCase()
-  const exchangeOptions = useMemo(() => getExchangeOptions(datasource), [datasource, getExchangeOptions])
+  const venueOptions = useMemo(() => getVenueOptions(form.provider_id), [form.provider_id, getVenueOptions])
 
   const handleStepAdvance = async (event) => {
     event.preventDefault()
@@ -360,8 +399,9 @@ function StrategyFormModal({
     try {
       const metadata = await lookupTickMetadata({
         symbol,
-        datasource: form.datasource,
-        exchange: form.exchange,
+        provider_id: form.provider_id,
+        venue_id: form.venue_id,
+        timeframe: form.timeframe,
       })
       if (metadata) {
         applyTickDefaults(metadata)
@@ -370,7 +410,7 @@ function StrategyFormModal({
         setAtmPrefillWarning('Tick defaults not found for this market; falling back to Auto values.')
       }
     } catch (err) {
-      modalLogger?.warn('atm_tick_prefill_failed', { datasource: form.datasource, exchange: form.exchange, symbol }, err)
+      modalLogger?.warn('atm_tick_prefill_failed', { provider_id: form.provider_id, venue_id: form.venue_id, symbol }, err)
       setAtmPrefillWarning('Tick defaults could not be loaded; using Auto values instead.')
     } finally {
       setPrefetchingMeta(false)
@@ -461,26 +501,26 @@ function StrategyFormModal({
                 />
                 <div className="md:col-span-1">
                   <DropdownSelect
-                    label="Datasource"
-                    value={form.datasource || ''}
-                    onChange={handleChange('datasource')}
-                    options={DATASOURCE_OPTIONS}
+                    label="Data Provider"
+                    value={form.provider_id || ''}
+                    onChange={handleChange('provider_id')}
+                    options={providerOptions}
                     className="mt-1 w-full"
                   />
-                  {showFieldError('datasource') ? (
-                    <p className="mt-1 text-xs text-rose-400">{step1Errors.datasource}</p>
+                  {showFieldError('provider_id') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.provider_id}</p>
                   ) : null}
                 </div>
                 <div className="md:col-span-1">
                   <DropdownSelect
-                    label="Exchange"
-                    value={form.exchange || ''}
-                    onChange={handleChange('exchange')}
-                    options={exchangeOptions}
+                    label="Exchange / Venue"
+                    value={form.venue_id || ''}
+                    onChange={handleChange('venue_id')}
+                    options={venueOptions}
                     className="mt-1 w-full"
                   />
-                  {showFieldError('exchange') ? (
-                    <p className="mt-1 text-xs text-rose-400">{step1Errors.exchange}</p>
+                  {showFieldError('venue_id') ? (
+                    <p className="mt-1 text-xs text-rose-400">{step1Errors.venue_id}</p>
                   ) : null}
                 </div>
               </div>
@@ -594,8 +634,8 @@ function StrategyFormModal({
                 </ActionButton>
               )}
               {currentStep === 0 && (
-                <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta}>
-                  {prefetchingMeta ? 'Loading…' : 'Next'}
+                <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta || providersLoading}>
+                  {prefetchingMeta || providersLoading ? 'Loading…' : 'Next'}
                 </ActionButton>
               )}
               {currentStep === 1 && (
@@ -1041,10 +1081,14 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    const providerId = (form.provider_id || form.datasource || '').trim().toUpperCase()
+    const venueId = (form.venue_id || form.exchange || '').trim()
     const payload = {
       symbol: (form.symbol || '').trim().toUpperCase(),
-      datasource: (form.datasource || '').trim().toUpperCase() || null,
-      exchange: (form.exchange || '').trim() || null,
+      provider_id: providerId || null,
+      venue_id: venueId ? venueId.toUpperCase() : null,
+      datasource: providerId || null,
+      exchange: venueId || null,
       quote_currency: (form.quote_currency || '').trim().toUpperCase() || null,
     }
     const numericFields = [
