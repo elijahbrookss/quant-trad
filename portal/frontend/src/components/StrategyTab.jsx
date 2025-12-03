@@ -85,12 +85,46 @@ const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   return <button className={classes} {...props} />
 }
 
-function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting }) {
+function StrategyFormModal({
+  open,
+  initialValues,
+  onSubmit,
+  onCancel,
+  submitting,
+  availableATMTemplates = [],
+}) {
   const [form, setForm] = useState(() => ({
     ...STRATEGY_FORM_DEFAULT,
     atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
   }))
-  const [showATMDetails, setShowATMDetails] = useState(false)
+  const [currentStep, setCurrentStep] = useState(0)
+  const [atmMode, setAtmMode] = useState('new')
+  const [selectedATMTemplateId, setSelectedATMTemplateId] = useState('')
+
+  const templateKey = useCallback((template) => {
+    try {
+      return JSON.stringify(template || {})
+    } catch (err) {
+      console.error('Failed to stringify ATM template', err)
+      return ''
+    }
+  }, [])
+
+  const templateOptions = useMemo(
+    () =>
+      (availableATMTemplates || []).map((item, index) => ({
+        value: item.id || `atm-${index + 1}`,
+        label: item.label || `ATM template ${index + 1}`,
+        template: cloneATMTemplate(item.template || DEFAULT_ATM_TEMPLATE),
+        key: templateKey(item.template),
+      })),
+    [availableATMTemplates, templateKey],
+  )
+
+  const selectedTemplate = useMemo(
+    () => templateOptions.find((option) => option.value === selectedATMTemplateId),
+    [selectedATMTemplateId, templateOptions],
+  )
 
   useEffect(() => {
     if (!open) {
@@ -98,11 +132,18 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
-      setShowATMDetails(false)
+      setCurrentStep(0)
+      setAtmMode('new')
+      setSelectedATMTemplateId('')
       return
     }
 
     if (initialValues) {
+      const fallbackTemplate = cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE)
+      const match = templateOptions.find(
+        (option) => option.key && option.key === templateKey(initialValues.atm_template),
+      )
+
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
@@ -112,17 +153,21 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
         symbols: Array.isArray(initialValues.symbols)
           ? initialValues.symbols.join(', ')
           : initialValues.symbols || '',
-        atm_template: cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE),
+        atm_template: match ? cloneATMTemplate(match.template) : fallbackTemplate,
       })
-      setShowATMDetails(false)
+      setAtmMode(match ? 'existing' : 'new')
+      setSelectedATMTemplateId(match?.value || '')
+      setCurrentStep(0)
     } else {
       setForm({
         ...STRATEGY_FORM_DEFAULT,
         atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
       })
-      setShowATMDetails(false)
+      setCurrentStep(0)
+      setAtmMode('new')
+      setSelectedATMTemplateId('')
     }
-  }, [open, initialValues])
+  }, [open, initialValues, templateOptions, templateKey])
 
   const handleChange = (field) => (input) => {
     let value = input
@@ -142,7 +187,17 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
       ...prev,
       atm_template: cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE),
     }))
+    setAtmMode('new')
   }, [])
+
+  const handleATMTemplateSelect = (value) => {
+    const option = templateOptions.find((candidate) => candidate.value === value)
+    setSelectedATMTemplateId(value || '')
+    if (option) {
+      handleATMTemplateChange(option.template)
+      setAtmMode('existing')
+    }
+  }
 
   const handleSubmit = async (event) => {
     event.preventDefault()
@@ -177,120 +232,218 @@ function StrategyFormModal({ open, initialValues, onSubmit, onCancel, submitting
     return [{ value: '', label: 'Use datasource defaults' }, ...CRYPTO_EXCHANGES, ...IB_EXCHANGES]
   }, [datasource])
 
+  const handleStepAdvance = (event) => {
+    event.preventDefault()
+    setCurrentStep(1)
+  }
+
+  const handleStepBack = (event) => {
+    event.preventDefault()
+    setCurrentStep(0)
+  }
+
   if (!open) return null
+
+  const steps = [
+    { id: 0, title: 'Details', description: 'Describe your strategy and trading venue.' },
+    { id: 1, title: 'ATM template', description: 'Choose or build risk/target settings.' },
+  ]
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-4xl space-y-6 overflow-y-auto rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl max-h-[90vh]">
-        <header className="space-y-1">
-          <h3 className="text-lg font-semibold">
-            {initialValues ? 'Edit strategy' : 'Create strategy'}
-          </h3>
-          <p className="text-sm text-slate-400">
-            Define the baseline symbol universe and metadata for this strategy blueprint.
-          </p>
-        </header>
-
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Name
-            </label>
-            <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.name}
-              onChange={handleChange('name')}
-              placeholder="Optional: auto-generated if blank"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Description
-            </label>
-            <textarea
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              rows={3}
-              value={form.description}
-              onChange={handleChange('description')}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <TimeframeSelect
-              selected={form.timeframe || '15m'}
-              onChange={(value) => handleChange('timeframe')(value)}
-              className="md:col-span-1"
-            />
-            <div className="md:col-span-1">
-              <DropdownSelect
-                label="Datasource"
-                value={form.datasource || ''}
-                onChange={handleChange('datasource')}
-                options={[{ value: '', label: 'Use chart defaults' }, ...DATASOURCE_OPTIONS]}
-                className="mt-1 w-full"
-              />
-            </div>
-            <div className="md:col-span-1">
-              <DropdownSelect
-                label="Exchange"
-                value={form.exchange || ''}
-                onChange={handleChange('exchange')}
-                options={exchangeOptions}
-                className="mt-1 w-full"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Symbols
-            </label>
-            <input
-              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              value={form.symbols}
-              onChange={handleChange('symbols')}
-              placeholder="e.g. BTCUSD, ETHUSD"
-            />
-          </div>
-
-        <div className="space-y-3">
+      <div className="w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
+        <header className="border-b border-white/5 px-6 py-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
-              <p className="text-xs text-slate-500">
-                Configure contracts, profit targets, breakeven, and trailing rules per entry.
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                {initialValues ? 'Edit strategy' : 'Create strategy'}
               </p>
+              <h3 className="text-lg font-semibold text-white">{steps[currentStep].title}</h3>
+              <p className="text-sm text-slate-400">{steps[currentStep].description}</p>
             </div>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                className="text-xs font-semibold text-slate-300 underline-offset-4 hover:text-white hover:underline"
-                onClick={() => setShowATMDetails((prev) => !prev)}
-              >
-                {showATMDetails ? 'Hide details' : 'Show details'}
-              </button>
-              <button
-                type="button"
-                className="text-xs font-semibold text-[color:var(--accent-text-strong)] hover:underline"
-                onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}
-              >
-                Reset
-              </button>
+            <div className="flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-slate-400">
+              {steps.map((step) => (
+                <div
+                  key={step.id}
+                  className={`flex items-center gap-2 rounded-full px-3 py-1 ${
+                    currentStep === step.id
+                      ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
+                      : 'bg-white/5'
+                  }`}
+                >
+                  <span
+                    className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
+                      currentStep === step.id ? 'bg-[color:var(--accent-alpha-40)] text-white' : 'bg-white/10 text-slate-200'
+                    }`}
+                  >
+                    {step.id + 1}
+                  </span>
+                  <span>{step.title}</span>
+                </div>
+              ))}
             </div>
           </div>
-          {!showATMDetails && <ATMTemplateSummary template={form.atm_template} />}
-          {showATMDetails && <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />}
-        </div>
+        </header>
 
-        <footer className="flex items-center justify-end gap-2">
-          <ActionButton type="button" variant="ghost" onClick={onCancel}>
-            Cancel
-          </ActionButton>
-          <ActionButton type="submit" disabled={submitting}>
-            {submitting ? 'Saving…' : 'Save strategy'}
-          </ActionButton>
-        </footer>
+        <form className="max-h-[70vh] space-y-6 overflow-y-auto px-6 py-4" onSubmit={handleSubmit}>
+          {currentStep === 0 && (
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Name</label>
+                  <input
+                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                    value={form.name}
+                    onChange={handleChange('name')}
+                    placeholder="Optional: auto-generated if blank"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Description</label>
+                  <input
+                    className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                    value={form.description}
+                    onChange={handleChange('description')}
+                    placeholder="Optional context for your notes"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <TimeframeSelect
+                  selected={form.timeframe || '15m'}
+                  onChange={(value) => handleChange('timeframe')(value)}
+                  className="md:col-span-1"
+                />
+                <div className="md:col-span-1">
+                  <DropdownSelect
+                    label="Datasource"
+                    value={form.datasource || ''}
+                    onChange={handleChange('datasource')}
+                    options={[{ value: '', label: 'Use chart defaults' }, ...DATASOURCE_OPTIONS]}
+                    className="mt-1 w-full"
+                  />
+                </div>
+                <div className="md:col-span-1">
+                  <DropdownSelect
+                    label="Exchange"
+                    value={form.exchange || ''}
+                    onChange={handleChange('exchange')}
+                    options={exchangeOptions}
+                    className="mt-1 w-full"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Symbol</label>
+                <input
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  value={form.symbols}
+                  onChange={handleChange('symbols')}
+                  placeholder="e.g. BTCUSD"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">Provide one symbol to start; you can add more later.</p>
+              </div>
+            </div>
+          )}
+
+          {currentStep === 1 && (
+            <div className="space-y-4">
+              {templateOptions.length > 0 && (
+                <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Reuse ATM template</p>
+                      <p className="text-xs text-slate-500">
+                        Start from an existing configuration or switch to a fresh layout below.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          className="h-4 w-4 accent-[color:var(--accent-text-strong)]"
+                          checked={atmMode === 'existing'}
+                          onChange={() => setAtmMode('existing')}
+                        />
+                        Use existing
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          className="h-4 w-4 accent-[color:var(--accent-text-strong)]"
+                          checked={atmMode === 'new'}
+                          onChange={() => setAtmMode('new')}
+                        />
+                        Create new
+                      </label>
+                    </div>
+                  </div>
+
+                  {atmMode === 'existing' && (
+                    <div className="mt-3 space-y-3">
+                      <DropdownSelect
+                        label="Existing templates"
+                        value={selectedATMTemplateId}
+                        onChange={handleATMTemplateSelect}
+                        options={templateOptions.map((option) => ({ value: option.value, label: option.label }))}
+                        className="mt-1 w-full"
+                      />
+                      {selectedTemplate && <ATMTemplateSummary template={selectedTemplate.template} />}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM builder</p>
+                    <p className="text-xs text-slate-500">Contracts, stops, targets, breakeven, and trailing.</p>
+                  </div>
+                  <ActionButton type="button" variant="subtle" onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}>
+                    Reset
+                  </ActionButton>
+                </div>
+                <ATMTemplateSummary template={form.atm_template} />
+                {atmMode !== 'existing' && (
+                  <ATMConfigForm value={form.atm_template} onChange={handleATMTemplateChange} />
+                )}
+                {atmMode === 'existing' && !selectedTemplate && (
+                  <p className="text-xs text-amber-200/80">
+                    Select an existing template above or switch to "Create new" to edit the fields directly.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <footer className="flex items-center justify-between border-t border-white/5 pt-4">
+            <div className="text-xs text-slate-500">
+              Step {currentStep + 1} of {steps.length}
+            </div>
+            <div className="flex items-center gap-2">
+              <ActionButton type="button" variant="ghost" onClick={onCancel}>
+                Cancel
+              </ActionButton>
+              {currentStep === 1 && (
+                <ActionButton type="button" variant="subtle" onClick={handleStepBack}>
+                  Back
+                </ActionButton>
+              )}
+              {currentStep === 0 && (
+                <ActionButton type="button" onClick={handleStepAdvance}>
+                  Next
+                </ActionButton>
+              )}
+              {currentStep === 1 && (
+                <ActionButton type="submit" disabled={submitting}>
+                  {submitting ? 'Saving…' : 'Save strategy'}
+                </ActionButton>
+              )}
+            </div>
+          </footer>
         </form>
       </div>
     </div>
@@ -1750,6 +1903,36 @@ const StrategyTab = ({ chartId }) => {
     [strategies, selectedId],
   )
 
+  const atmTemplateKey = useCallback((template) => {
+    try {
+      return JSON.stringify(template || {})
+    } catch (err) {
+      console.error('Failed to stringify ATM template', err)
+      return ''
+    }
+  }, [])
+
+  const availableATMTemplates = useMemo(() => {
+    const seen = new Set()
+    const uniqueTemplates = []
+
+    const pushTemplate = (id, label, template) => {
+      const key = atmTemplateKey(template)
+      if (!key || seen.has(key)) return
+      seen.add(key)
+      uniqueTemplates.push({ id, label, template })
+    }
+
+    pushTemplate('default-atm', 'Default ATM template', DEFAULT_ATM_TEMPLATE)
+    strategies.forEach((strategy, index) => {
+      if (!strategy?.atm_template) return
+      const label = strategy.name ? `${strategy.name} ATM` : `Strategy ATM ${index + 1}`
+      pushTemplate(`strategy-${strategy.id || index}`, label, strategy.atm_template)
+    })
+
+    return uniqueTemplates
+  }, [atmTemplateKey, strategies])
+
   const openInstrumentModal = useCallback(
     (defaults = {}) => {
       const fallbackSymbol = defaults.symbol || selectedStrategy?.symbols?.[0] || ''
@@ -2191,6 +2374,7 @@ const StrategyTab = ({ chartId }) => {
         onSubmit={handleStrategySubmit}
         onCancel={closeStrategyModal}
         submitting={savingStrategy}
+        availableATMTemplates={availableATMTemplates}
       />
 
       <RuleFormModal
