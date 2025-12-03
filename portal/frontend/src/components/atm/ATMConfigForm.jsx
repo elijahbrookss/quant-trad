@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
 export const DEFAULT_ATM_TEMPLATE = {
   contracts: 3,
@@ -37,6 +37,21 @@ const UNIT_OPTIONS = [
   { value: 'r', label: 'R multiple' },
   { value: 'price', label: 'Price' },
 ]
+
+function formatNumber(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return value
+  if (Math.abs(numeric) >= 1) return numeric.toLocaleString(undefined, { maximumFractionDigits: 4 })
+  return numeric.toPrecision(4)
+}
+
+function autoLabel(value, overrideFlag, fallback, suffix = '') {
+  if (overrideFlag) return formatNumber(value)
+  const resolved = value ?? fallback
+  if (resolved === null || resolved === undefined) return 'Auto'
+  return `Auto (${formatNumber(resolved)}${suffix})`
+}
 
 function normalizeTargets(template) {
   const entries = Array.isArray(template?.take_profit_orders) ? template.take_profit_orders : []
@@ -140,181 +155,187 @@ export default function ATMConfigForm({ value, onChange }) {
   const breakeven = template.breakeven || {}
   const trailing = template.trailing || {}
 
+  const breakevenEnabled = breakeven.enabled !== false
+  const trailingEnabled = Boolean(trailing.enabled)
+  const [breakevenOpen, setBreakevenOpen] = useState(true)
+  const [trailingOpen, setTrailingOpen] = useState(true)
+
+  const breakevenActivation = useMemo(() => {
+    if (breakeven.target_index !== null && breakeven.target_index !== undefined) return 'target'
+    if (breakeven.r_multiple !== null && breakeven.r_multiple !== undefined) return 'r'
+    if (breakeven.ticks) return 'ticks'
+    return 'manual'
+  }, [breakeven])
+
+  const trailingActivation = useMemo(() => {
+    if (trailing.target_index !== null && trailing.target_index !== undefined) return 'target'
+    if (trailing.r_multiple !== null && trailing.r_multiple !== undefined) return 'r'
+    if (trailing.ticks) return 'ticks'
+    return 'manual'
+  }, [trailing])
+
+  const trailingMode = useMemo(() => {
+    if (trailing.atr_multiplier !== null && trailing.atr_multiplier !== undefined) return 'atr'
+    return 'ticks'
+  }, [trailing])
+
+  const handleBreakevenActivation = (mode, value) => {
+    const next = { ...breakeven }
+    if (mode === 'target') {
+      next.target_index = value ?? 0
+      next.r_multiple = null
+      next.ticks = null
+    } else if (mode === 'ticks') {
+      next.target_index = null
+      next.r_multiple = null
+      next.ticks = value ?? null
+    } else if (mode === 'r') {
+      next.target_index = null
+      next.ticks = null
+      next.r_multiple = value ?? 1
+    } else {
+      next.target_index = null
+      next.r_multiple = null
+      next.ticks = null
+    }
+    update({ breakeven: next })
+  }
+
+  const handleTrailingActivation = (mode, value) => {
+    const next = { ...trailing }
+    if (mode === 'target') {
+      next.target_index = value ?? 0
+      next.r_multiple = null
+      next.ticks = trailingMode === 'ticks' ? trailing.ticks ?? null : null
+    } else if (mode === 'ticks') {
+      next.target_index = null
+      next.r_multiple = null
+      next.ticks = value ?? null
+    } else if (mode === 'r') {
+      next.target_index = null
+      next.ticks = trailingMode === 'ticks' ? trailing.ticks ?? null : null
+      next.r_multiple = value ?? 1
+    } else {
+      next.target_index = null
+      next.r_multiple = null
+      if (trailingMode !== 'ticks') next.ticks = null
+    }
+    update({ trailing: next })
+  }
+
+  const handleTrailingMode = (mode) => {
+    const next = { ...trailing }
+    if (mode === 'atr') {
+      next.atr_multiplier = trailing.atr_multiplier ?? 1.0
+      next.atr_period = trailing.atr_period ?? 14
+    } else {
+      next.atr_multiplier = null
+    }
+    update({ trailing: next })
+  }
+
   const targetOptions = targets.map((target, index) => ({
     label: target.label || `Target ${index + 1}`,
     value: index,
   }))
 
+  const resolvedTickSize = template.tick_size ?? DEFAULT_ATM_TEMPLATE.tick_size
+  const resolvedContractSize = template.contract_size ?? 1
+  const resolvedTickValue =
+    template.tick_value ?? (resolvedTickSize && resolvedContractSize ? resolvedTickSize * resolvedContractSize : null)
+
+
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm">
-      <div className="grid gap-4 md:grid-cols-3">
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Contracts</label>
-          <input
-            className={inputClasses}
-            type="number"
-            min={1}
-            value={template.contracts ?? DEFAULT_ATM_TEMPLATE.contracts}
-            onChange={(event) => update({ contracts: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.contracts) })}
-          />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop</label>
-          <div className="grid grid-cols-[1.2fr,0.8fr] gap-2">
-            {stopMode === 'ticks' && (
-              <input
-                className={inputClasses}
-                type="number"
-                min={1}
-                value={template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks}
-                onChange={(event) =>
-                  update({ stop_ticks: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.stop_ticks), stop_r_multiple: null, stop_price: null })
-                }
-              />
-            )}
-            {stopMode === 'r' && (
-              <input
-                className={inputClasses}
-                type="number"
-                step="0.1"
-                value={template.stop_r_multiple ?? 1}
-                onChange={(event) =>
-                  update({ stop_ticks: null, stop_r_multiple: Number(event.target.value) || 1, stop_price: null })
-                }
-              />
-            )}
-            {stopMode === 'price' && (
-              <input
-                className={inputClasses}
-                type="number"
-                step="any"
-                value={template.stop_price ?? ''}
-                onChange={(event) =>
-                  update({ stop_ticks: null, stop_r_multiple: null, stop_price: event.target.value === '' ? null : Number(event.target.value) })
-                }
-              />
-            )}
-            <select
-              className={`${inputClasses} bg-black/50 text-xs`}
-              value={stopMode}
-              onChange={(event) => {
-                const mode = event.target.value
-                if (mode === stopMode) return
-                if (mode === 'ticks') {
-                  update({ stop_ticks: template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks, stop_r_multiple: null, stop_price: null })
-                  return
-                }
-                if (mode === 'r') {
-                  update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? 1, stop_price: null })
-                  return
-                }
-                update({ stop_ticks: null, stop_r_multiple: null, stop_price: template.stop_price ?? null })
-              }}
-            >
-              {UNIT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="flex items-end justify-end">
-          <button type="button" className={fieldButtonClasses} onClick={addTarget}>
-            Add target
-          </button>
-        </div>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-3">
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick size</label>
-          <input
-            className={inputClasses}
-            type="number"
-            step="any"
-            placeholder="Auto"
-            value={template._meta?.tick_size_override ? template.tick_size ?? '' : ''}
-            onChange={(event) => applyOverrideField('tick_size', event.target.value)}
-          />
-        </div>
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Tick value</label>
-          <input
-            className={inputClasses}
-            type="number"
-            step="any"
-            placeholder="Auto"
-            value={template._meta?.tick_value_override ? template.tick_value ?? '' : ''}
-            onChange={(event) => applyOverrideField('tick_value', event.target.value)}
-          />
-        </div>
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Contract size</label>
-          <input
-            className={inputClasses}
-            type="number"
-            step="any"
-            placeholder="Auto"
-            value={template._meta?.contract_size_override ? template.contract_size ?? '' : ''}
-            onChange={(event) => applyOverrideField('contract_size', event.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {targets.map((target, index) => (
-          <div key={target.id || index} className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="grid gap-4 lg:grid-cols-[1.05fr,0.95fr]">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="flex items-center justify-between">
-              <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Target {index + 1}</p>
-              {targets.length > 1 && (
-                <button type="button" className="text-xs text-rose-300 hover:text-rose-200" onClick={() => removeTarget(index)}>
-                  Remove
-                </button>
-              )}
-            </div>
-            <div className="mt-3 grid gap-3 md:grid-cols-3">
               <div>
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Label</label>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Position setup</p>
+                <p className="text-[11px] text-slate-500">Contracts and market sizing inputs.</p>
+              </div>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contracts</label>
                 <input
                   className={inputClasses}
-                  value={target.label || ''}
-                  onChange={(event) => handleTargetChange(index, 'label', event.target.value)}
+                  type="number"
+                  min={1}
+                  value={template.contracts ?? DEFAULT_ATM_TEMPLATE.contracts}
+                  onChange={(event) =>
+                    update({
+                      contracts: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.contracts),
+                    })
+                  }
                 />
+                <p className="mt-1 text-[11px] text-slate-500">How many contracts to open per position.</p>
               </div>
-              <div className="space-y-1">
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Target</label>
-                <div className="grid grid-cols-[1.2fr,0.8fr] gap-2">
-                  {(target.r_multiple === null || target.r_multiple === undefined) && target.price == null && (
+              <div>
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Initial stop</label>
+                <div className="grid grid-cols-[1.3fr,0.7fr] gap-2">
+                  {stopMode === 'ticks' && (
                     <input
                       className={inputClasses}
                       type="number"
-                      value={target.ticks ?? 0}
-                      onChange={(event) => handleTargetChange(index, 'ticks', event.target.value)}
+                      min={1}
+                      value={template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks}
+                      onChange={(event) =>
+                        update({
+                          stop_ticks: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.stop_ticks),
+                          stop_r_multiple: null,
+                          stop_price: null,
+                        })
+                      }
                     />
                   )}
-                  {target.r_multiple !== null && target.r_multiple !== undefined && (
+                  {stopMode === 'r' && (
                     <input
                       className={inputClasses}
                       type="number"
                       step="0.1"
-                      value={target.r_multiple ?? 0}
-                      onChange={(event) => handleTargetChange(index, 'r_multiple', event.target.value)}
+                      value={template.stop_r_multiple ?? 1}
+                      onChange={(event) =>
+                        update({ stop_ticks: null, stop_r_multiple: Number(event.target.value) || 1, stop_price: null })
+                      }
                     />
                   )}
-                  {target.price !== null && target.price !== undefined && (
+                  {stopMode === 'price' && (
                     <input
                       className={inputClasses}
                       type="number"
                       step="any"
-                      value={target.price ?? ''}
-                      onChange={(event) => handleTargetChange(index, 'price', event.target.value)}
+                      value={template.stop_price ?? ''}
+                      onChange={(event) =>
+                        update({
+                          stop_ticks: null,
+                          stop_r_multiple: null,
+                          stop_price: event.target.value === '' ? null : Number(event.target.value),
+                        })
+                      }
                     />
                   )}
                   <select
                     className={`${inputClasses} bg-black/50 text-xs`}
-                    value={target.r_multiple !== null && target.r_multiple !== undefined ? 'r' : target.price !== null && target.price !== undefined ? 'price' : 'ticks'}
-                    onChange={(event) => handleTargetModeChange(index, event.target.value)}
+                    value={stopMode}
+                    onChange={(event) => {
+                      const mode = event.target.value
+                      if (mode === stopMode) return
+                      if (mode === 'ticks') {
+                        update({
+                          stop_ticks: template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks,
+                          stop_r_multiple: null,
+                          stop_price: null,
+                        })
+                        return
+                      }
+                      if (mode === 'r') {
+                        update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? 1, stop_price: null })
+                        return
+                      }
+                      update({ stop_ticks: null, stop_r_multiple: null, stop_price: template.stop_price ?? null })
+                    }}
                   >
                     {UNIT_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
@@ -323,144 +344,390 @@ export default function ATMConfigForm({ value, onChange }) {
                     ))}
                   </select>
                 </div>
+                <p className="mt-1 text-[11px] text-slate-500">Define where the first protective stop starts.</p>
               </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
               <div>
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contracts</label>
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Tick size</label>
                 <input
                   className={inputClasses}
                   type="number"
-                  min={1}
-                  value={target.contracts ?? 1}
-                  onChange={(event) => handleTargetChange(index, 'contracts', event.target.value)}
+                  step="any"
+                  placeholder="Auto"
+                  value={template._meta?.tick_size_override ? template.tick_size ?? '' : ''}
+                  onChange={(event) => applyOverrideField('tick_size', event.target.value)}
                 />
+                <p className="mt-1 text-[11px] text-slate-500">{autoLabel(template.tick_size, template._meta?.tick_size_override, resolvedTickSize)}</p>
+              </div>
+              <div>
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Tick value</label>
+                <input
+                  className={inputClasses}
+                  type="number"
+                  step="any"
+                  placeholder="Auto"
+                  value={template._meta?.tick_value_override ? template.tick_value ?? '' : ''}
+                  onChange={(event) => applyOverrideField('tick_value', event.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-500">{autoLabel(template.tick_value, template._meta?.tick_value_override, resolvedTickValue)}</p>
+              </div>
+              <div>
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contract size</label>
+                <input
+                  className={inputClasses}
+                  type="number"
+                  step="any"
+                  placeholder="Auto"
+                  value={template._meta?.contract_size_override ? template.contract_size ?? '' : ''}
+                  onChange={(event) => applyOverrideField('contract_size', event.target.value)}
+                />
+                <p className="mt-1 text-[11px] text-slate-500">{autoLabel(template.contract_size, template._meta?.contract_size_override, resolvedContractSize, ' contracts')}</p>
               </div>
             </div>
           </div>
-        ))}
-      </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Breakeven</p>
-            <label className="flex items-center gap-2 text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={breakeven.enabled !== false}
-                onChange={(event) => update({ breakeven: { ...breakeven, enabled: event.target.checked } })}
-              />
-              Enable
-            </label>
-          </div>
-          <div className="mt-3 space-y-2 opacity-100">
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Move stop after</label>
-            <select
-              className={inputClasses}
-              value={breakeven.target_index ?? ''}
-              onChange={(event) => {
-                const next = { ...breakeven, target_index: event.target.value === '' ? null : Number(event.target.value) }
-                update({ breakeven: next })
-              }}
-              disabled={breakeven.enabled === false}
-            >
-              <option value="">Manual</option>
-              {targetOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Take-profit targets</p>
+                <p className="text-[11px] text-slate-500">Add targets in ticks, price, or R.</p>
+              </div>
+              <button type="button" className={fieldButtonClasses} onClick={addTarget}>
+                Add target
+              </button>
+            </div>
+            <div className="mt-3 space-y-3">
+              {targets.map((target, index) => (
+                <div key={target.id || index} className="rounded-xl border border-white/10 bg-black/40 p-3">
+                  <div className="grid gap-3 md:grid-cols-[1.1fr,1.2fr,0.7fr,0.4fr] md:items-end">
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Label</label>
+                      <input
+                        className={inputClasses}
+                        value={target.label || ''}
+                        onChange={(event) => handleTargetChange(index, 'label', event.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Target</label>
+                      <div className="mt-1 grid grid-cols-[1.1fr,0.9fr] gap-2">
+                        {(target.r_multiple === null || target.r_multiple === undefined) && target.price == null && (
+                          <input
+                            className={inputClasses}
+                            type="number"
+                            value={target.ticks ?? 0}
+                            onChange={(event) => handleTargetChange(index, 'ticks', event.target.value)}
+                          />
+                        )}
+                        {target.r_multiple !== null && target.r_multiple !== undefined && (
+                          <input
+                            className={inputClasses}
+                            type="number"
+                            step="0.1"
+                            value={target.r_multiple ?? 0}
+                            onChange={(event) => handleTargetChange(index, 'r_multiple', event.target.value)}
+                          />
+                        )}
+                        {target.price !== null && target.price !== undefined && (
+                          <input
+                            className={inputClasses}
+                            type="number"
+                            step="any"
+                            value={target.price ?? ''}
+                            onChange={(event) => handleTargetChange(index, 'price', event.target.value)}
+                          />
+                        )}
+                        <select
+                          className={`${inputClasses} bg-black/50 text-xs`}
+                          value={
+                            target.r_multiple !== null && target.r_multiple !== undefined
+                              ? 'r'
+                              : target.price !== null && target.price !== undefined
+                                ? 'price'
+                                : 'ticks'
+                          }
+                          onChange={(event) => handleTargetModeChange(index, event.target.value)}
+                        >
+                          {UNIT_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Contracts</label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        min={1}
+                        value={target.contracts ?? 1}
+                        onChange={(event) => handleTargetChange(index, 'contracts', event.target.value)}
+                      />
+                    </div>
+                    <div className="flex items-center justify-end">
+                      {targets.length > 1 && (
+                        <button
+                          type="button"
+                          className="text-xs text-rose-300 transition hover:text-rose-100"
+                          onClick={() => removeTarget(index)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
               ))}
-            </select>
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Fallback ticks</label>
-            <input
-              className={inputClasses}
-              type="number"
-              value={breakeven.ticks ?? ''}
-              onChange={(event) => {
-                const numeric = event.target.value === '' ? null : Number(event.target.value)
-                update({ breakeven: { ...breakeven, ticks: numeric } })
-              }}
-              disabled={breakeven.enabled === false}
-            />
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Or when R multiple reached</label>
-            <input
-              className={inputClasses}
-              type="number"
-              step="0.1"
-              value={breakeven.r_multiple ?? ''}
-              onChange={(event) => {
-                const numeric = event.target.value === '' ? null : Number(event.target.value)
-                update({ breakeven: { ...breakeven, r_multiple: numeric } })
-              }}
-              disabled={breakeven.enabled === false}
-            />
+            </div>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
-            <label className="flex items-center gap-2 text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={Boolean(trailing.enabled)}
-                onChange={(event) => update({ trailing: { ...trailing, enabled: event.target.checked } })}
-              />
-              Enable
-            </label>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Breakeven</p>
+                <p className="text-[11px] text-slate-500">Move stop to entry after predefined progress.</p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={breakevenEnabled}
+                  onChange={(event) => update({ breakeven: { ...breakeven, enabled: event.target.checked } })}
+                />
+                Enable
+              </label>
+            </div>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Move stop after</p>
+                <button
+                  type="button"
+                  className="text-[11px] text-slate-400 hover:text-slate-200"
+                  onClick={() => setBreakevenOpen((open) => !open)}
+                >
+                  {breakevenOpen ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              {breakevenOpen && (
+                <>
+                  <select
+                    className={inputClasses}
+                    value={breakevenActivation}
+                    onChange={(event) => handleBreakevenActivation(event.target.value)}
+                    disabled={!breakevenEnabled}
+                  >
+                    <option value="manual">Manual</option>
+                    <option value="target">After target</option>
+                    <option value="ticks">After ticks</option>
+                    <option value="r">After R multiple</option>
+                  </select>
+
+                  {breakevenActivation === 'target' && (
+                    <select
+                      className={inputClasses}
+                      value={breakeven.target_index ?? 0}
+                      onChange={(event) => handleBreakevenActivation('target', Number(event.target.value))}
+                      disabled={!breakevenEnabled}
+                    >
+                      {targetOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {breakevenActivation === 'ticks' && (
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Fallback ticks to trigger breakeven if no target or R trigger fires.">
+                        Fallback ticks
+                      </label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        value={breakeven.ticks ?? ''}
+                        onChange={(event) => handleBreakevenActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
+                        disabled={!breakevenEnabled}
+                      />
+                    </div>
+                  )}
+                  {breakevenActivation === 'r' && (
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">R multiple</label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        step="0.1"
+                        value={breakeven.r_multiple ?? ''}
+                        onChange={(event) => handleBreakevenActivation('r', event.target.value === '' ? null : Number(event.target.value))}
+                        disabled={!breakevenEnabled}
+                      />
+                    </div>
+                  )}
+                  <p className="text-[11px] text-slate-500" title="Breakeven moves the stop to entry once your trigger is reached.">
+                    Breakeven moves the stop to entry using the first trigger that fires.
+                  </p>
+                </>
+              )}
+            </div>
           </div>
-          <div className="mt-3 space-y-2">
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activate after</label>
-            <select
-              className={inputClasses}
-              value={trailing.target_index ?? ''}
-              onChange={(event) => {
-                const nextIndex = event.target.value === '' ? null : Number(event.target.value)
-                update({ trailing: { ...trailing, target_index: nextIndex } })
-              }}
-              disabled={!trailing.enabled}
-            >
-              <option value="">Manual</option>
-              {targetOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Or after R multiple</label>
-            <input
-              className={inputClasses}
-              type="number"
-              step="0.1"
-              value={trailing.r_multiple ?? ''}
-              onChange={(event) => update({ trailing: { ...trailing, r_multiple: event.target.value === '' ? null : Number(event.target.value) } })}
-              disabled={!trailing.enabled}
-            />
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Fallback ticks</label>
-            <input
-              className={inputClasses}
-              type="number"
-              value={trailing.ticks ?? ''}
-              onChange={(event) => update({ trailing: { ...trailing, ticks: event.target.value === '' ? null : Number(event.target.value) } })}
-              disabled={!trailing.enabled}
-            />
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
-            <input
-              className={inputClasses}
-              type="number"
-              step="0.1"
-              value={trailing.atr_multiplier ?? 1}
-              onChange={(event) => update({ trailing: { ...trailing, atr_multiplier: Number(event.target.value) || 1 } })}
-              disabled={!trailing.enabled}
-            />
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-            <input
-              className={inputClasses}
-              type="number"
-              min={1}
-              value={trailing.atr_period ?? 14}
-              onChange={(event) => update({ trailing: { ...trailing, atr_period: Math.max(1, Number(event.target.value) || 14) } })}
-              disabled={!trailing.enabled}
-            />
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
+                <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={trailingEnabled}
+                  onChange={(event) => update({ trailing: { ...trailing, enabled: event.target.checked } })}
+                />
+                Enable
+              </label>
+            </div>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation</p>
+                <button
+                  type="button"
+                  className="text-[11px] text-slate-400 hover:text-slate-200"
+                  onClick={() => setTrailingOpen((open) => !open)}
+                >
+                  {trailingOpen ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              {trailingOpen && (
+                <>
+                  <select
+                    className={inputClasses}
+                    value={trailingActivation}
+                    onChange={(event) => handleTrailingActivation(event.target.value)}
+                    disabled={!trailingEnabled}
+                  >
+                    <option value="manual">Manual</option>
+                    <option value="target">After target</option>
+                    <option value="ticks">After ticks</option>
+                    <option value="r">After R multiple</option>
+                  </select>
+                  {trailingActivation === 'target' && (
+                    <select
+                      className={inputClasses}
+                      value={trailing.target_index ?? 0}
+                      onChange={(event) => handleTrailingActivation('target', Number(event.target.value))}
+                      disabled={!trailingEnabled}
+                    >
+                      {targetOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {trailingActivation === 'ticks' && (
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Start trailing once price has moved this many ticks in your favor.">
+                        Activate after ticks
+                      </label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        value={trailing.ticks ?? ''}
+                        onChange={(event) => handleTrailingActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
+                        disabled={!trailingEnabled}
+                      />
+                    </div>
+                  )}
+                  {trailingActivation === 'r' && (
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activate after R multiple</label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        step="0.1"
+                        value={trailing.r_multiple ?? ''}
+                        onChange={(event) => handleTrailingActivation('r', event.target.value === '' ? null : Number(event.target.value))}
+                        disabled={!trailingEnabled}
+                      />
+                    </div>
+                  )}
+
+                  <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trailing mode</label>
+                  <select
+                    className={inputClasses}
+                    value={trailingMode}
+                    onChange={(event) => handleTrailingMode(event.target.value)}
+                    disabled={!trailingEnabled}
+                  >
+                    <option value="atr">ATR-based</option>
+                    <option value="ticks">Fixed ticks</option>
+                  </select>
+
+                  {trailingMode === 'atr' && (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div>
+                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                        <input
+                          className={inputClasses}
+                          type="number"
+                          min={1}
+                          value={trailing.atr_period ?? 14}
+                          onChange={(event) =>
+                            update({
+                              trailing: {
+                                ...trailing,
+                                atr_period: Math.max(1, Number(event.target.value) || 14),
+                                atr_multiplier: trailing.atr_multiplier ?? 1,
+                              },
+                            })
+                          }
+                          disabled={!trailingEnabled}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                        <input
+                          className={inputClasses}
+                          type="number"
+                          step="0.1"
+                          value={trailing.atr_multiplier ?? 1}
+                          onChange={(event) =>
+                            update({
+                              trailing: { ...trailing, atr_multiplier: Number(event.target.value) || 1 },
+                            })
+                          }
+                          disabled={!trailingEnabled}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {trailingMode === 'ticks' && (
+                    <div>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Distance in ticks the stop will trail from the best price. Also used if ATR is unavailable.">
+                        Trail distance (ticks)
+                      </label>
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        value={trailing.ticks ?? ''}
+                        onChange={(event) => update({ trailing: { ...trailing, ticks: event.target.value === '' ? null : Number(event.target.value) } })}
+                        disabled={!trailingEnabled}
+                      />
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-slate-500" title="Trailing only tightens the stop; it never loosens after activation.">
+                    Trailing tightens toward price after activation; it never loosens.
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
