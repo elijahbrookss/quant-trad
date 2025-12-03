@@ -340,6 +340,7 @@ class BotTradeRecord(Base):
     net_pnl = Column(Float, nullable=True)
     quote_currency = Column(String(16), nullable=True)
     atm_template = Column(JSON, nullable=True)
+    metrics = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -363,6 +364,7 @@ class BotTradeRecord(Base):
             "net_pnl": self.net_pnl,
             "quote_currency": self.quote_currency,
             "atm_template": dict(self.atm_template or {}),
+            "metrics": dict(self.metrics or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

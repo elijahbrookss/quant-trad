@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "contracts": 3,
     "tick_size": 0.01,
+    "atr_r_multiple": 1.0,
     "stop_ticks": 35,
     "take_profit_orders": [
         {"id": "tp-1", "label": "TP +20", "ticks": 20, "contracts": 1},
@@ -75,11 +76,15 @@ def _normalise_take_profits(
         ) or 0
         label = (entry.get("label") or entry.get("name") or f"Target {idx + 1}").strip()
         order_id = entry.get("id") or f"tp-{idx + 1}"
+        r_multiple = _coerce_float(entry.get("r_multiple"))
+        price = _coerce_float(entry.get("price"))
         cleaned.append(
             {
                 "id": order_id,
                 "label": label or f"Target {idx + 1}",
                 "ticks": ticks,
+                "r_multiple": r_multiple,
+                "price": price,
                 "contracts": contract_counts[idx] if idx < len(contract_counts) else 1,
             }
         )
@@ -117,6 +122,8 @@ def _normalise_breakeven(
             config["target_index"] = max(_coerce_int(source.get("target_index"), 0) or 0, 0)
         if source.get("ticks") is not None:
             config["ticks"] = max(_coerce_int(source.get("ticks"), 0) or 0, 0)
+        if source.get("r_multiple") is not None:
+            config["r_multiple"] = float(source.get("r_multiple") or 0.0)
     elif source is not None:
         config["ticks"] = max(_coerce_int(source, 0) or 0, 0)
 
@@ -146,6 +153,8 @@ def _normalise_trailing(
             config["atr_multiplier"] = float(source.get("atr_multiplier") or 1.0)
         if source.get("atr_period") is not None:
             config["atr_period"] = max(_coerce_int(source.get("atr_period"), 14) or 14, 1)
+        if source.get("r_multiple") is not None:
+            config["r_multiple"] = float(source.get("r_multiple") or 0.0)
     elif isinstance(source, bool):
         config["enabled"] = source
 
@@ -184,6 +193,9 @@ def normalise_template(
     payload_meta = payload.get("_meta") if isinstance(payload.get("_meta"), Mapping) else {}
     meta: Dict[str, Any] = dict(result.get("_meta") or {})
 
+    if payload.get("atr_r_multiple") is not None:
+        result["atr_r_multiple"] = float(payload.get("atr_r_multiple") or result.get("atr_r_multiple") or 1.0)
+
     if payload.get("contracts") is not None:
         result["contracts"] = max(_coerce_int(payload.get("contracts"), result["contracts"]) or 1, 1)
 
@@ -203,6 +215,10 @@ def normalise_template(
     )
     if stop_ticks is not None:
         result["stop_ticks"] = max(stop_ticks, 1)
+
+    stop_r_multiple = _coerce_float(payload.get("stop_r") or payload.get("stop_r_multiple"))
+    if stop_r_multiple is not None:
+        result["stop_r_multiple"] = float(stop_r_multiple)
 
     result["breakeven"] = _normalise_breakeven(payload, result.get("breakeven", {}))
     result["trailing"] = _normalise_trailing(payload, result.get("trailing", {}))

@@ -685,13 +685,15 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
             if net is not None:
                 record.net_pnl = net
             quote = snapshot.get("quote_currency")
-            if quote:
-                record.quote_currency = str(quote).upper()
-            if snapshot.get("atm_template") is not None:
-                record.atm_template = dict(snapshot.get("atm_template") or {})
-            record.updated_at = now
-            if record.created_at is None:
-                record.created_at = now
+        if quote:
+            record.quote_currency = str(quote).upper()
+        if snapshot.get("atm_template") is not None:
+            record.atm_template = dict(snapshot.get("atm_template") or {})
+        if snapshot.get("metrics") is not None:
+            record.metrics = dict(snapshot.get("metrics") or {})
+        record.updated_at = now
+        if record.created_at is None:
+            record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("bot_trade_persist_failed | trade=%s | error=%s", trade_id, exc)
 
