@@ -1,16 +1,20 @@
 import { useMemo, useState } from 'react'
 
 export const DEFAULT_ATM_TEMPLATE = {
-  contracts: 3,
-  stop_ticks: 35,
+  contracts: 1,
+  stop_ticks: null,
   stop_r_multiple: null,
-  take_profit_orders: [
-    { id: 'tp-1', label: 'TP +20', ticks: 20, contracts: 1 },
-    { id: 'tp-2', label: 'TP +40', ticks: 40, contracts: 1 },
-    { id: 'tp-3', label: 'TP +60', ticks: 60, contracts: 1 },
-  ],
-  breakeven: { enabled: true, target_index: 0, ticks: 20, r_multiple: null },
-  trailing: { enabled: true, target_index: 1, atr_multiplier: 1.0, atr_period: 14 },
+  stop_price: null,
+  take_profit_orders: [],
+  breakeven: { enabled: false },
+  trailing: { enabled: false },
+  tick_size: null,
+  tick_value: null,
+  contract_size: null,
+  rMode: 'atr',
+  rAtrPeriod: 14,
+  rAtrMultiplier: 1,
+  rRiskTicks: null,
 }
 
 export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
@@ -20,6 +24,13 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   } catch {
     cloned = JSON.parse(JSON.stringify(DEFAULT_ATM_TEMPLATE))
   }
+  if (cloned.rMode !== 'atr' && cloned.rMode !== 'ticks') {
+    cloned.rMode = 'atr'
+  }
+  if (cloned.rAtrPeriod === undefined || cloned.rAtrPeriod === null) cloned.rAtrPeriod = DEFAULT_ATM_TEMPLATE.rAtrPeriod
+  if (cloned.rAtrMultiplier === undefined || cloned.rAtrMultiplier === null)
+    cloned.rAtrMultiplier = DEFAULT_ATM_TEMPLATE.rAtrMultiplier
+  if (cloned.rRiskTicks === undefined) cloned.rRiskTicks = DEFAULT_ATM_TEMPLATE.rRiskTicks
   if (!cloned._meta || typeof cloned._meta !== 'object') {
     cloned._meta = {}
   }
@@ -55,8 +66,7 @@ function autoLabel(value, overrideFlag, fallback, suffix = '') {
 
 function normalizeTargets(template) {
   const entries = Array.isArray(template?.take_profit_orders) ? template.take_profit_orders : []
-  if (entries.length) return entries
-  return cloneATMTemplate(DEFAULT_ATM_TEMPLATE).take_profit_orders
+  return entries
 }
 
 export default function ATMConfigForm({ value, onChange }) {
@@ -147,7 +157,6 @@ export default function ATMConfigForm({ value, onChange }) {
   }
 
   const removeTarget = (index) => {
-    if (targets.length <= 1) return
     const nextTargets = targets.filter((_, idx) => idx !== index)
     update({ take_profit_orders: nextTargets })
   }
@@ -239,11 +248,43 @@ export default function ATMConfigForm({ value, onChange }) {
     value: index,
   }))
 
-  const resolvedTickSize = template.tick_size ?? DEFAULT_ATM_TEMPLATE.tick_size
-  const resolvedContractSize = template.contract_size ?? 1
+  const resolvedTickSize = template.tick_size ?? template._meta?.tick_size ?? null
+  const resolvedContractSize = template.contract_size ?? template._meta?.contract_size ?? 1
   const resolvedTickValue =
-    template.tick_value ?? (resolvedTickSize && resolvedContractSize ? resolvedTickSize * resolvedContractSize : null)
+    template.tick_value ??
+    template._meta?.tick_value ??
+    (resolvedTickSize && resolvedContractSize ? resolvedTickSize * resolvedContractSize : null)
 
+  const latestAtrValue =
+    template._meta?.latest_atr ?? template._meta?.atr_preview ?? template._meta?.atr ?? template._meta?.atr_at_entry ?? null
+
+  const oneR = useMemo(() => {
+    if (template.rMode === 'ticks') {
+      const ticks = template.rRiskTicks ?? DEFAULT_ATM_TEMPLATE.rRiskTicks
+      const price = ticks && resolvedTickSize ? ticks * resolvedTickSize : null
+      return { mode: 'ticks', price, ticks }
+    }
+    const atr = Number(latestAtrValue)
+    if (!Number.isFinite(atr)) {
+      return { mode: 'atr', price: null, ticks: null }
+    }
+    const priceMove = Number(template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier) * atr
+    const ticks = resolvedTickSize ? priceMove / resolvedTickSize : null
+    return { mode: 'atr', price: priceMove, ticks }
+  }, [latestAtrValue, resolvedTickSize, template.rAtrMultiplier, template.rMode, template.rRiskTicks])
+
+  const describeRApprox = (multiple = 1) => {
+    if (!multiple || !oneR) return ''
+    const numericMultiple = Number(multiple)
+    if (!Number.isFinite(numericMultiple)) return ''
+    const price = Number.isFinite(oneR.price) ? numericMultiple * Number(oneR.price) : null
+    const ticks = Number.isFinite(oneR.ticks) ? numericMultiple * Number(oneR.ticks) : null
+    const parts = []
+    if (price !== null) parts.push(`${formatNumber(price)} pts`)
+    if (ticks !== null) parts.push(`${formatNumber(ticks)} ticks`)
+    if (!parts.length) return ''
+    return `≈ ${parts.join(' / ')}`
+  }
 
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm">
@@ -263,7 +304,7 @@ export default function ATMConfigForm({ value, onChange }) {
                   className={inputClasses}
                   type="number"
                   min={1}
-                  value={template.contracts ?? DEFAULT_ATM_TEMPLATE.contracts}
+                  value={template.contracts ?? ''}
                   onChange={(event) =>
                     update({
                       contracts: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.contracts),
@@ -272,83 +313,6 @@ export default function ATMConfigForm({ value, onChange }) {
                 />
                 <p className="mt-1 text-[11px] text-slate-500">How many contracts to open per position.</p>
               </div>
-              <div>
-                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Initial stop</label>
-                <div className="grid grid-cols-[1.3fr,0.7fr] gap-2">
-                  {stopMode === 'ticks' && (
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      min={1}
-                      value={template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks}
-                      onChange={(event) =>
-                        update({
-                          stop_ticks: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.stop_ticks),
-                          stop_r_multiple: null,
-                          stop_price: null,
-                        })
-                      }
-                    />
-                  )}
-                  {stopMode === 'r' && (
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      step="0.1"
-                      value={template.stop_r_multiple ?? 1}
-                      onChange={(event) =>
-                        update({ stop_ticks: null, stop_r_multiple: Number(event.target.value) || 1, stop_price: null })
-                      }
-                    />
-                  )}
-                  {stopMode === 'price' && (
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      step="any"
-                      value={template.stop_price ?? ''}
-                      onChange={(event) =>
-                        update({
-                          stop_ticks: null,
-                          stop_r_multiple: null,
-                          stop_price: event.target.value === '' ? null : Number(event.target.value),
-                        })
-                      }
-                    />
-                  )}
-                  <select
-                    className={`${inputClasses} bg-black/50 text-xs`}
-                    value={stopMode}
-                    onChange={(event) => {
-                      const mode = event.target.value
-                      if (mode === stopMode) return
-                      if (mode === 'ticks') {
-                        update({
-                          stop_ticks: template.stop_ticks ?? DEFAULT_ATM_TEMPLATE.stop_ticks,
-                          stop_r_multiple: null,
-                          stop_price: null,
-                        })
-                        return
-                      }
-                      if (mode === 'r') {
-                        update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? 1, stop_price: null })
-                        return
-                      }
-                      update({ stop_ticks: null, stop_r_multiple: null, stop_price: template.stop_price ?? null })
-                    }}
-                  >
-                    {UNIT_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <p className="mt-1 text-[11px] text-slate-500">Define where the first protective stop starts.</p>
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
               <div>
                 <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Tick size</label>
                 <input
@@ -361,6 +325,9 @@ export default function ATMConfigForm({ value, onChange }) {
                 />
                 <p className="mt-1 text-[11px] text-slate-500">{autoLabel(template.tick_size, template._meta?.tick_size_override, resolvedTickSize)}</p>
               </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
               <div>
                 <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Tick value</label>
                 <input
@@ -391,6 +358,175 @@ export default function ATMConfigForm({ value, onChange }) {
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="flex items-center justify-between">
               <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk unit (R) settings</p>
+                <p className="text-[11px] text-slate-500">1R is your unit of risk; R inputs use this definition.</p>
+              </div>
+            </div>
+            <div className="mt-3 space-y-3">
+              <div className="grid gap-3 md:grid-cols-2 md:items-end">
+                <div>
+                  <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Mode</label>
+                  <select
+                    className={inputClasses}
+                    value={template.rMode || 'atr'}
+                    onChange={(event) => update({ rMode: event.target.value })}
+                  >
+                    <option value="atr">ATR-based</option>
+                    <option value="ticks">Tick-based</option>
+                  </select>
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  {template.rMode === 'ticks'
+                    ? 'Use fixed ticks to define 1R for stops and targets.'
+                    : 'Use ATR at entry with the multiplier below to size 1R.'}
+                </div>
+              </div>
+
+              {template.rMode !== 'ticks' && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      min={1}
+                      value={template.rAtrPeriod ?? DEFAULT_ATM_TEMPLATE.rAtrPeriod}
+                      onChange={(event) =>
+                        update({ rAtrPeriod: Math.max(1, Number(event.target.value) || DEFAULT_ATM_TEMPLATE.rAtrPeriod) })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      step="0.1"
+                      value={template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier}
+                      onChange={(event) => update({ rAtrMultiplier: Number(event.target.value) || DEFAULT_ATM_TEMPLATE.rAtrMultiplier })}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {template.rMode === 'ticks' && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk ticks</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      min={1}
+                      value={template.rRiskTicks ?? ''}
+                      onChange={(event) =>
+                        update({ rRiskTicks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1) })
+                      }
+                    />
+                  </div>
+                  <div className="text-[11px] text-slate-500">Define how many ticks equal 1R.</div>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-white/10 bg-black/40 p-3 text-[12px] text-slate-300">
+                {template.rMode === 'ticks' && template.rRiskTicks
+                  ? `1R = ${formatNumber(template.rRiskTicks)} ticks${describeRApprox(1) ? ` (${describeRApprox(1)})` : ''}`
+                  : template.rMode === 'atr'
+                    ? Number.isFinite(Number(latestAtrValue))
+                      ? `1R ≈ ${formatNumber((template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier) * Number(latestAtrValue))} (based on latest ATR)`
+                      : '1R will resolve from ATR when data is available.'
+                    : '1R definition pending inputs.'}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Initial stop</p>
+                <p className="text-[11px] text-slate-500">Where the first protective stop begins.</p>
+              </div>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-[1.3fr,0.7fr]">
+              <div>
+                {stopMode === 'ticks' && (
+                  <input
+                    className={inputClasses}
+                    type="number"
+                    min={1}
+                    value={template.stop_ticks ?? ''}
+                    onChange={(event) =>
+                      update({
+                        stop_ticks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1),
+                        stop_r_multiple: null,
+                        stop_price: null,
+                      })
+                    }
+                  />
+                )}
+                {stopMode === 'r' && (
+                  <div>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      step="0.1"
+                      value={template.stop_r_multiple ?? ''}
+                      onChange={(event) =>
+                        update({ stop_ticks: null, stop_r_multiple: event.target.value === '' ? null : Number(event.target.value), stop_price: null })
+                      }
+                    />
+                    {describeRApprox(template.stop_r_multiple) && (
+                      <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(template.stop_r_multiple)}</p>
+                    )}
+                  </div>
+                )}
+                {stopMode === 'price' && (
+                  <input
+                    className={inputClasses}
+                    type="number"
+                    step="any"
+                    value={template.stop_price ?? ''}
+                    onChange={(event) =>
+                      update({
+                        stop_ticks: null,
+                        stop_r_multiple: null,
+                        stop_price: event.target.value === '' ? null : Number(event.target.value),
+                      })
+                    }
+                  />
+                )}
+              </div>
+              <div>
+                <select
+                  className={`${inputClasses} bg-black/50 text-xs`}
+                  value={stopMode}
+                  onChange={(event) => {
+                    const mode = event.target.value
+                    if (mode === stopMode) return
+                    if (mode === 'ticks') {
+                      update({ stop_ticks: template.stop_ticks ?? null, stop_r_multiple: null, stop_price: null })
+                      return
+                    }
+                    if (mode === 'r') {
+                      update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? null, stop_price: null })
+                      return
+                    }
+                    update({ stop_ticks: null, stop_r_multiple: null, stop_price: template.stop_price ?? null })
+                  }}
+                >
+                  {UNIT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-slate-500">Choose ticks, R multiple, or explicit price.</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Take-profit targets</p>
                 <p className="text-[11px] text-slate-500">Add targets in ticks, price, or R.</p>
               </div>
@@ -399,6 +535,7 @@ export default function ATMConfigForm({ value, onChange }) {
               </button>
             </div>
             <div className="mt-3 space-y-3">
+              {targets.length === 0 && <p className="text-sm text-slate-400">No targets yet. Add one to get started.</p>}
               {targets.map((target, index) => (
                 <div key={target.id || index} className="rounded-xl border border-white/10 bg-black/40 p-3">
                   <div className="grid gap-3 md:grid-cols-[1.1fr,1.2fr,0.7fr,0.4fr] md:items-end">
@@ -412,50 +549,55 @@ export default function ATMConfigForm({ value, onChange }) {
                     </div>
                     <div>
                       <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Target</label>
-                      <div className="mt-1 grid grid-cols-[1.1fr,0.9fr] gap-2">
-                        {(target.r_multiple === null || target.r_multiple === undefined) && target.price == null && (
-                          <input
-                            className={inputClasses}
-                            type="number"
-                            value={target.ticks ?? 0}
-                            onChange={(event) => handleTargetChange(index, 'ticks', event.target.value)}
-                          />
+                      <div className="mt-1 space-y-1">
+                        <div className="grid grid-cols-[1.1fr,0.9fr] gap-2">
+                          {(target.r_multiple === null || target.r_multiple === undefined) && target.price == null && (
+                            <input
+                              className={inputClasses}
+                              type="number"
+                              value={target.ticks ?? ''}
+                              onChange={(event) => handleTargetChange(index, 'ticks', event.target.value)}
+                            />
+                          )}
+                          {target.r_multiple !== null && target.r_multiple !== undefined && (
+                            <input
+                              className={inputClasses}
+                              type="number"
+                              step="0.1"
+                              value={target.r_multiple ?? ''}
+                              onChange={(event) => handleTargetChange(index, 'r_multiple', event.target.value)}
+                            />
+                          )}
+                          {target.price !== null && target.price !== undefined && (
+                            <input
+                              className={inputClasses}
+                              type="number"
+                              step="any"
+                              value={target.price ?? ''}
+                              onChange={(event) => handleTargetChange(index, 'price', event.target.value)}
+                            />
+                          )}
+                          <select
+                            className={`${inputClasses} bg-black/50 text-xs`}
+                            value={
+                              target.r_multiple !== null && target.r_multiple !== undefined
+                                ? 'r'
+                                : target.price !== null && target.price !== undefined
+                                  ? 'price'
+                                  : 'ticks'
+                            }
+                            onChange={(event) => handleTargetModeChange(index, event.target.value)}
+                          >
+                            {UNIT_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {target.r_multiple !== null && target.r_multiple !== undefined && describeRApprox(target.r_multiple) && (
+                          <p className="text-[11px] text-slate-500">{describeRApprox(target.r_multiple)}</p>
                         )}
-                        {target.r_multiple !== null && target.r_multiple !== undefined && (
-                          <input
-                            className={inputClasses}
-                            type="number"
-                            step="0.1"
-                            value={target.r_multiple ?? 0}
-                            onChange={(event) => handleTargetChange(index, 'r_multiple', event.target.value)}
-                          />
-                        )}
-                        {target.price !== null && target.price !== undefined && (
-                          <input
-                            className={inputClasses}
-                            type="number"
-                            step="any"
-                            value={target.price ?? ''}
-                            onChange={(event) => handleTargetChange(index, 'price', event.target.value)}
-                          />
-                        )}
-                        <select
-                          className={`${inputClasses} bg-black/50 text-xs`}
-                          value={
-                            target.r_multiple !== null && target.r_multiple !== undefined
-                              ? 'r'
-                              : target.price !== null && target.price !== undefined
-                                ? 'price'
-                                : 'ticks'
-                          }
-                          onChange={(event) => handleTargetModeChange(index, event.target.value)}
-                        >
-                          {UNIT_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
                       </div>
                     </div>
                     <div>
@@ -469,15 +611,13 @@ export default function ATMConfigForm({ value, onChange }) {
                       />
                     </div>
                     <div className="flex items-center justify-end">
-                      {targets.length > 1 && (
-                        <button
-                          type="button"
-                          className="text-xs text-rose-300 transition hover:text-rose-100"
-                          onClick={() => removeTarget(index)}
-                        >
-                          Remove
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        className="text-xs text-rose-300 transition hover:text-rose-100"
+                        onClick={() => removeTarget(index)}
+                      >
+                        Remove
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -566,6 +706,9 @@ export default function ATMConfigForm({ value, onChange }) {
                         onChange={(event) => handleBreakevenActivation('r', event.target.value === '' ? null : Number(event.target.value))}
                         disabled={!breakevenEnabled}
                       />
+                      {describeRApprox(breakeven.r_multiple) && (
+                        <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(breakeven.r_multiple)}</p>
+                      )}
                     </div>
                   )}
                   <p className="text-[11px] text-slate-500" title="Breakeven moves the stop to entry once your trigger is reached.">
@@ -654,6 +797,9 @@ export default function ATMConfigForm({ value, onChange }) {
                         onChange={(event) => handleTrailingActivation('r', event.target.value === '' ? null : Number(event.target.value))}
                         disabled={!trailingEnabled}
                       />
+                      {describeRApprox(trailing.r_multiple) && (
+                        <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(trailing.r_multiple)}</p>
+                      )}
                     </div>
                   )}
 

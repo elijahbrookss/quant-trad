@@ -56,6 +56,22 @@ export default function ATMTemplateSummary({ template }) {
   const trailing = config.trailing || {}
   const meta = config._meta || {}
 
+  const resolvedTickSize = config.tick_size ?? meta.tick_size ?? null
+  const latestAtrValue = meta.latest_atr ?? meta.atr_preview ?? meta.atr ?? null
+  const rMode = config.rMode || 'atr'
+  const riskTicks = config.rRiskTicks
+  const rAtrMultiplier = config.rAtrMultiplier ?? 1
+
+  const oneRPrice =
+    rMode === 'ticks'
+      ? riskTicks && resolvedTickSize
+        ? riskTicks * resolvedTickSize
+        : null
+      : latestAtrValue
+        ? rAtrMultiplier * Number(latestAtrValue)
+        : null
+  const oneRTicks = resolvedTickSize && oneRPrice ? oneRPrice / resolvedTickSize : riskTicks ?? null
+
   const describeField = (value, flag) => {
     if (flag) {
       return formatNumber(value)
@@ -69,6 +85,17 @@ export default function ATMTemplateSummary({ template }) {
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Contracts</p>
           <p className="text-lg font-semibold text-white">{formatNumber(config.contracts)}</p>
+        </div>
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Risk unit</p>
+          <p className="text-sm text-white">
+            {rMode === 'ticks'
+              ? `${formatNumber(riskTicks)} ticks${oneRPrice ? ` (${formatNumber(oneRPrice)} pts)` : ''}`
+              : oneRPrice
+                ? `${formatNumber(oneRPrice)} per R`
+                : `${formatNumber(rAtrMultiplier)} x ATR`}
+          </p>
+          <p className="text-[11px] text-slate-500">1R definition for R-based stops and targets.</p>
         </div>
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Initial stop</p>
