@@ -9,7 +9,13 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from core.logger import logger
-from engines.strategy_manager import StrategyConfig, StrategySession, StrategySessionManager, TimeframeSpec
+from engines.strategy_manager import (
+    StrategyConfig,
+    StrategyInstrument,
+    StrategySession,
+    StrategySessionManager,
+    TimeframeSpec,
+)
 from indicators.base import BaseIndicator
 from indicators.market_profile import MarketProfileIndicator
 from signals.engine.market_profile_generator import MarketProfileSignalGenerator
@@ -111,7 +117,9 @@ def build_manager(symbol: str) -> Tuple[StrategySessionManager, StrategySession]
 
     config = StrategyConfig(
         strategy_id="market_profile",
-        symbols=[symbol],
+        provider_id=None,
+        venue_id=None,
+        instruments=[StrategyInstrument(symbol=symbol)],
         primary_timeframe="lower",
         timeframes={
             "lower": TimeframeSpec(start=LOWER_START, end=END_DATE, interval="15m"),

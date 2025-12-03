@@ -38,11 +38,28 @@ class TimeframeSpec:
 
 
 @dataclass(frozen=True)
+class StrategyInstrument:
+    """Descriptor for a symbol attached to a strategy."""
+
+    symbol: str
+    enabled: bool = True
+    risk_multiplier: Optional[float] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def is_active(self) -> bool:
+        """Return ``True`` when the slot should participate in runtime."""
+
+        return bool(self.symbol) and self.enabled
+
+
+@dataclass(frozen=True)
 class StrategyConfig:
     """High-level configuration for a single trading strategy."""
 
     strategy_id: str
-    symbols: Sequence[str]
+    provider_id: Optional[str]
+    venue_id: Optional[str]
+    instruments: Sequence[StrategyInstrument]
     primary_timeframe: str
     timeframes: Mapping[str, TimeframeSpec]
     indicator_factories: Sequence[IndicatorFactory]
@@ -50,6 +67,12 @@ class StrategyConfig:
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     engine_kwargs: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def symbols(self) -> List[str]:
+        """Return ordered symbol identifiers for backward compatibility."""
+
+        return [slot.symbol for slot in self.instruments if slot.is_active()]
 
 
 def _normalise_for_hash(value: Any) -> Any:
@@ -76,9 +99,10 @@ def _hash_payload(value: Any) -> str:
 class StrategySession:
     """Runtime state for a single strategy + symbol pair."""
 
-    def __init__(self, config: StrategyConfig, symbol: str) -> None:
+    def __init__(self, config: StrategyConfig, instrument: StrategyInstrument) -> None:
         self.config = config
-        self.symbol = symbol
+        self.instrument = instrument
+        self.symbol = instrument.symbol
         self.timeframe_data: Dict[str, pd.DataFrame] = {}
         self.contexts: Dict[str, DataContext] = {}
         self.providers: Dict[str, BaseDataProvider] = {}
@@ -397,14 +421,16 @@ class StrategySessionManager:
     def __init__(self, configs: Sequence[StrategyConfig]) -> None:
         self.sessions: List[StrategySession] = []
         for config in configs:
-            for symbol in config.symbols:
+            for instrument in config.instruments:
+                if not instrument.is_active():
+                    continue
                 try:
-                    session = StrategySession(config, symbol)
+                    session = StrategySession(config, instrument)
                 except Exception:
                     logger.exception(
                         "Failed to initialise session | strategy=%s symbol=%s",
                         config.strategy_id,
-                        symbol,
+                        instrument.symbol,
                     )
                     continue
                 self.sessions.append(session)
@@ -468,6 +494,7 @@ class StrategySessionManager:
 
 
 __all__ = [
+    "StrategyInstrument",
     "StrategyConfig",
     "StrategySession",
     "StrategySessionManager",

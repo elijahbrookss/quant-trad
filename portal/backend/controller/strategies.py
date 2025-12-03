@@ -68,6 +68,14 @@ class StrategyRuleOut(BaseModel):
     updated_at: str
 
 
+class InstrumentSlotIn(BaseModel):
+    """Lightweight instrument slot definition for strategies."""
+
+    symbol: str
+    enabled: bool = Field(default=True)
+    risk_multiplier: Optional[float] = Field(default=None)
+
+
 class StrategyOut(BaseModel):
     """Response model representing a strategy record."""
 
@@ -75,6 +83,7 @@ class StrategyOut(BaseModel):
     name: str
     description: Optional[str] = None
     symbols: List[str]
+    instrument_slots: List[Dict[str, Any]] = Field(default_factory=list)
     timeframe: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -95,7 +104,8 @@ class StrategyCreateRequest(BaseModel):
     """Payload for creating a new strategy."""
 
     name: str
-    symbols: List[str] = Field(default_factory=list)
+    symbols: List[Any] = Field(default_factory=list)
+    instrument_slots: List[InstrumentSlotIn] = Field(default_factory=list)
     timeframe: str
     description: Optional[str] = None
     datasource: Optional[str] = None
@@ -110,7 +120,8 @@ class StrategyUpdateRequest(BaseModel):
     """Payload for updating a strategy."""
 
     name: Optional[str] = None
-    symbols: Optional[List[str]] = None
+    symbols: Optional[List[Any]] = None
+    instrument_slots: Optional[List[InstrumentSlotIn]] = None
     timeframe: Optional[str] = None
     description: Optional[str] = None
     datasource: Optional[str] = None
@@ -210,9 +221,15 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
 
     try:
         payload = _apply_market_aliases(body.dict())
+        symbols_payload = (
+            payload.get("instrument_slots")
+            or body.instrument_slots
+            or payload.get("symbols")
+            or body.symbols
+        )
         record = strategy_service.create_strategy(
             payload.get("name") or body.name,
-            symbols=payload.get("symbols") or body.symbols,
+            symbols=symbols_payload,
             timeframe=payload.get("timeframe") or body.timeframe,
             description=payload.get("description"),
             datasource=payload.get("datasource"),

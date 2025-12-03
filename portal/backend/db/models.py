@@ -77,11 +77,21 @@ class StrategyRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Serialise a strategy row for downstream consumers."""
 
+        def _symbol_names(raw: Any) -> list[str]:
+            names: list[str] = []
+            for entry in raw or []:
+                if isinstance(entry, dict) and entry.get("symbol"):
+                    names.append(str(entry.get("symbol")))
+                elif entry:
+                    names.append(str(entry))
+            return names
+
         return {
             "id": self.id,
             "name": self.name,
             "description": self.description,
             "symbols": list(self.symbols or []),
+            "symbol_names": _symbol_names(self.symbols),
             "timeframe": self.timeframe,
             "datasource": self.datasource,
             "exchange": self.exchange,

@@ -703,7 +703,7 @@ class StrategyDefinition:
 
     id: str
     name: str
-    symbols: List[str]
+    instruments: List[InstrumentSlot]
     timeframe: str
     description: Optional[str] = None
     datasource: Optional[str] = None
@@ -715,6 +715,12 @@ class StrategyDefinition:
     atm_template: Dict[str, Any] = field(default_factory=_default_atm_template)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
+
+    @property
+    def symbols(self) -> List[str]:
+        """Return ordered list of attached symbol identifiers."""
+
+        return [slot.symbol for slot in self.instruments]
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the strategy for API responses."""
@@ -747,7 +753,8 @@ class StrategyDefinition:
                     return True
             return False
 
-        for symbol in self.symbols:
+        for slot in self.instruments:
+            symbol = slot.symbol
             record: Optional[Dict[str, Any]] = None
             try:
                 record = instrument_service.resolve_instrument(
@@ -758,9 +765,9 @@ class StrategyDefinition:
             except Exception:
                 record = None
             if record:
-                instruments.append(record)
+                instruments.append({**slot.to_dict(), **record})
             else:
-                instruments.append({"symbol": symbol})
+                instruments.append(slot.to_dict())
                 if not _message_exists(symbol):
                     instrument_messages.append(
                         {
@@ -774,6 +781,7 @@ class StrategyDefinition:
             "name": self.name,
             "description": self.description,
             "symbols": list(self.symbols),
+            "instrument_slots": [slot.to_dict() for slot in self.instruments],
             "timeframe": self.timeframe,
             "datasource": self.datasource,
             "exchange": self.exchange,
@@ -795,7 +803,7 @@ class StrategyDefinition:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": list(self.symbols),
+            "symbols": [slot.to_dict() for slot in self.instruments],
             "timeframe": self.timeframe,
             "datasource": self.datasource,
             "exchange": self.exchange,
@@ -812,13 +820,21 @@ class StrategyDefinition:
             description = fields["description"]
             self.description = str(description).strip() if description else None
         if "symbols" in fields and fields["symbols"] is not None:
-            symbols = [
-                str(symbol).strip()
-                for symbol in fields["symbols"]
-                if str(symbol).strip()
-            ]
-            if symbols:
-                self.symbols = symbols[:1]
+            slots: List[InstrumentSlot] = []
+            for raw_symbol in fields["symbols"]:
+                slot = InstrumentSlot.from_any(raw_symbol)
+                if slot.symbol:
+                    slots.append(slot)
+            if slots:
+                self.instruments = slots
+        if "instrument_slots" in fields and fields["instrument_slots"] is not None:
+            slots: List[InstrumentSlot] = []
+            for raw_slot in fields["instrument_slots"]:
+                slot = InstrumentSlot.from_any(raw_slot)
+                if slot.symbol:
+                    slots.append(slot)
+            if slots:
+                self.instruments = slots
         if "timeframe" in fields and fields["timeframe"] is not None:
             self.timeframe = str(fields["timeframe"]).strip()
         if "datasource" in fields:
@@ -873,11 +889,13 @@ class StrategyRegistry:
             strategy_id = str(entry.get("id") or "").strip()
             if not strategy_id:
                 continue
+            raw_symbols = entry.get("symbols") or []
+            slots = [InstrumentSlot.from_any(symbol) for symbol in raw_symbols]
             base = StrategyDefinition(
                 id=strategy_id,
                 name=str(entry.get("name") or strategy_id).strip(),
                 description=entry.get("description"),
-                symbols=list(entry.get("symbols") or []),
+                instruments=[slot for slot in slots if slot.symbol] or [InstrumentSlot(symbol="Unknown")],
                 timeframe=str(entry.get("timeframe") or "15m"),
                 datasource=entry.get("datasource"),
                 exchange=entry.get("exchange"),
@@ -935,15 +953,15 @@ class StrategyRegistry:
         datasource = (record.datasource or "").strip().upper()
         if datasource != "CCXT":
             return
-        for symbol in record.symbols:
+        for slot in record.instruments:
             _, error = instrument_service.auto_sync_instrument(
                 record.datasource,
                 record.exchange,
-                symbol,
+                slot.symbol,
             )
             if error:
                 record.instrument_messages.append({
-                    "symbol": symbol,
+                    "symbol": slot.symbol,
                     "message": error,
                 })
 
@@ -976,11 +994,12 @@ class StrategyRegistry:
 
         strategy_id = str(uuid.uuid4())
         clean_name = str(name).strip()
-        clean_symbols = [
-            str(symbol).strip()
+        clean_slots = [
+            InstrumentSlot.from_any(symbol)
             for symbol in symbols
-            if str(symbol).strip()
+            if str(symbol or "").strip()
         ]
+        clean_slots = [slot for slot in clean_slots if slot.symbol]
         indicators = [
             str(identifier).strip()
             for identifier in (indicator_ids or [])
@@ -991,7 +1010,7 @@ class StrategyRegistry:
             id=strategy_id,
             name=clean_name,
             description=str(description).strip() if description else None,
-            symbols=clean_symbols[:1] or ["Unknown"],
+            instruments=clean_slots or [InstrumentSlot(symbol="Unknown")],
             timeframe=str(timeframe).strip(),
             datasource=str(datasource).strip() if datasource else None,
             exchange=str(exchange).strip() if exchange else None,
@@ -1470,7 +1489,7 @@ def get_strategy(strategy_id: str) -> Dict[str, Any]:
 def create_strategy(
     name: str,
     *,
-    symbols: Iterable[str],
+    symbols: Iterable[Any],
     timeframe: str,
     description: Optional[str] = None,
     datasource: Optional[str] = None,
@@ -1611,4 +1630,41 @@ def delete_symbol_preset_service(preset_id: str) -> None:
     """Delete a stored preset."""
 
     delete_symbol_preset(preset_id)
+
+@dataclass
+class InstrumentSlot:
+    """Represents a symbol attached to a strategy along with runtime hints."""
+
+    symbol: str
+    enabled: bool = True
+    risk_multiplier: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a serialisable representation of the slot."""
+
+        payload: Dict[str, Any] = {
+            "symbol": self.symbol,
+            "enabled": bool(self.enabled),
+        }
+        if self.risk_multiplier is not None:
+            payload["risk_multiplier"] = float(self.risk_multiplier)
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
+    @staticmethod
+    def from_any(value: Any) -> "InstrumentSlot":
+        """Normalise raw payloads into :class:`InstrumentSlot` instances."""
+
+        if isinstance(value, InstrumentSlot):
+            return value
+        if isinstance(value, Mapping):
+            return InstrumentSlot(
+                symbol=str(value.get("symbol") or "").strip(),
+                enabled=bool(value.get("enabled", True)),
+                risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
+                metadata=dict(value.get("metadata") or {}),
+            )
+        return InstrumentSlot(symbol=str(value or "").strip())
 
