@@ -489,9 +489,8 @@ class LadderRiskEngine:
             self.tick_size = float(fallback_tick)
         else:
             self.tick_size = 0.01
-        self.orders = self._orders_from_template()
-        self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
+        self.base_risk_per_trade = _coerce_float(self.template.get("base_risk_per_trade"))
         self.stop_r_multiple = _coerce_float(self.template.get("stop_r_multiple"))
         self.r_multiple = float(self.template.get("atr_r_multiple") or 1.0)
         self.breakeven_config: Dict[str, Any] = dict(self.template.get("breakeven") or {})
@@ -514,6 +513,13 @@ class LadderRiskEngine:
         else:
             tick_value = self.tick_size * self.contract_size
         self.tick_value = float(tick_value or self.tick_size)
+
+        contracts_from_risk = self._contracts_from_base_risk()
+        if contracts_from_risk is not None:
+            self.template["contracts"] = contracts_from_risk
+
+        self.orders = self._orders_from_template()
+        self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         quote_value = self.template.get("quote_currency") or self.instrument.get("quote_currency") or "USD"
         self.quote_currency = str(quote_value).upper()
         config_maker = _coerce_float(self.template.get("maker_fee_rate"))
@@ -590,6 +596,20 @@ class LadderRiskEngine:
         for idx in range(total):
             slots[idx % count] += 1
         return slots
+
+    def _contracts_from_base_risk(self) -> Optional[int]:
+        if self.base_risk_per_trade in (None, ""):
+            return None
+        try:
+            base_risk = max(float(self.base_risk_per_trade), 0.0)
+        except (TypeError, ValueError):
+            return None
+        stop_ticks = abs(float(self.stop_ticks or 0))
+        tick_value = abs(float(self.tick_value or 0))
+        if base_risk == 0 or stop_ticks == 0 or tick_value == 0:
+            return None
+        contracts = int(base_risk / (stop_ticks * tick_value))
+        return max(contracts, 1) if contracts > 0 else 1
 
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         config = self.breakeven_config

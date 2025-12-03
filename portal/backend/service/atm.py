@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "contracts": 3,
     "tick_size": 0.01,
+    "base_risk_per_trade": None,
     "atr_r_multiple": 1.0,
     "stop_ticks": 35,
     "stop_price": None,
@@ -201,6 +202,11 @@ def normalise_template(
 
     if payload.get("contracts") is not None:
         result["contracts"] = max(_coerce_int(payload.get("contracts"), result["contracts"]) or 1, 1)
+
+    if payload.get("base_risk_per_trade") is not None:
+        result["base_risk_per_trade"] = _coerce_float(
+            payload.get("base_risk_per_trade"), result.get("base_risk_per_trade")
+        )
 
     entries = _extract_take_profits(payload)
     if entries:

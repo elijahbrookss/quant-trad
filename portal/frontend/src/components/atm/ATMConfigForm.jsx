@@ -15,6 +15,7 @@ export const DEFAULT_ATM_TEMPLATE = {
   rAtrPeriod: 14,
   rAtrMultiplier: 1,
   rRiskTicks: null,
+  base_risk_per_trade: null,
 }
 
 export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
@@ -31,6 +32,7 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   if (cloned.rAtrMultiplier === undefined || cloned.rAtrMultiplier === null)
     cloned.rAtrMultiplier = DEFAULT_ATM_TEMPLATE.rAtrMultiplier
   if (cloned.rRiskTicks === undefined) cloned.rRiskTicks = DEFAULT_ATM_TEMPLATE.rRiskTicks
+  if (cloned.base_risk_per_trade === undefined) cloned.base_risk_per_trade = DEFAULT_ATM_TEMPLATE.base_risk_per_trade
   if (!cloned._meta || typeof cloned._meta !== 'object') {
     cloned._meta = {}
   }

@@ -72,6 +72,7 @@ const RISK_DEFAULTS = Object.freeze({
   riskUnitMode: 'atr',
   atrPeriod: 14,
   atrMultiplier: 1,
+  baseRiskPerTrade: '',
   globalRiskMultiplier: 1,
   riskTicks: null,
 })
@@ -429,6 +430,7 @@ function StrategyFormModal({
         riskUnitMode: initialValues.atm_template?.rMode || prev.riskUnitMode,
         atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
         atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
+        baseRiskPerTrade: initialValues.atm_template?.base_risk_per_trade ?? prev.baseRiskPerTrade,
         riskTicks: initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
       }))
     } else {
@@ -544,6 +546,7 @@ function StrategyFormModal({
           rAtrPeriod: next.atrPeriod ?? current.atm_template?.rAtrPeriod,
           rAtrMultiplier: next.atrMultiplier ?? current.atm_template?.rAtrMultiplier,
           rRiskTicks: next.riskTicks ?? current.atm_template?.rRiskTicks,
+          base_risk_per_trade: next.baseRiskPerTrade ?? current.atm_template?.base_risk_per_trade,
         }),
       }))
       return next
@@ -634,6 +637,8 @@ function StrategyFormModal({
     const name = form.name.trim() || fallbackName
     const rawGlobalRisk = riskSettings.globalRiskMultiplier
     const globalRisk = rawGlobalRisk === '' ? null : Number(rawGlobalRisk)
+    const baseRiskInput = riskSettings.baseRiskPerTrade
+    const baseRiskValue = baseRiskInput === '' ? null : Number(baseRiskInput)
     const cleanedSlots = (form.instrument_slots || [])
       .map((slot, index) => {
         const symbol = normalizeSymbol(slot.symbol)
@@ -673,6 +678,7 @@ function StrategyFormModal({
         rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
         rAtrMultiplier: riskSettings.atrMultiplier ?? form.atm_template?.rAtrMultiplier,
         rRiskTicks: riskSettings.riskTicks ?? form.atm_template?.rRiskTicks,
+        base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.base_risk_per_trade,
       }),
     }
     await onSubmit(payload)
@@ -914,15 +920,15 @@ function StrategyFormModal({
 
           {currentStep === 1 && (
             <div className="space-y-4">
-              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
+              <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Global risk settings</p>
-                    <p className="text-xs text-slate-500">Applies to all symbols unless an override is provided.</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop Distance (1R Definition)</p>
+                    <p className="text-xs text-slate-500">Defines how wide your stop is.</p>
                   </div>
                   <div className="text-[11px] text-slate-400">Risk drives sizing; keep position sizing off in the next step.</div>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-3 md:grid-cols-3">
                   <div>
                     <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk unit mode</label>
                     <select
@@ -935,8 +941,76 @@ function StrategyFormModal({
                       <option value="explicit">Explicit (manual)</option>
                     </select>
                   </div>
+                  {riskSettings.riskUnitMode === 'ticks' ? (
+                    <div className="md:col-span-2">
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk ticks</label>
+                      <input
+                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                        type="number"
+                        min={1}
+                        value={riskSettings.riskTicks ?? ''}
+                        onChange={(event) => updateRiskSettings({ riskTicks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1) })}
+                      />
+                      <p className="mt-1 text-[11px] text-slate-500">Ticks that define 1R when using tick mode.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          type="number"
+                          min={1}
+                          value={riskSettings.atrPeriod ?? 14}
+                          onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
+                        />
+                        <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length.</p>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                          <span className="text-[11px] text-slate-400" title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop.">(i)</span>
+                        </div>
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          value={riskSettings.atrMultiplier ?? 1}
+                          onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between gap-3">
                   <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Position Sizing</p>
+                    <p className="text-xs text-slate-500">Controls how much money you risk per trade.</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Base Risk Per Trade ($)</label>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={riskSettings.baseRiskPerTrade ?? ''}
+                      onChange={(event) => updateRiskSettings({ baseRiskPerTrade: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">Dollar amount risked per trade before multipliers.</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
+                      <span className="text-[11px] text-slate-400" title="Scales position size. Example: $100 base risk × 2 → $200 risk.">(i)</span>
+                    </div>
                     <input
                       className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                       type="number"
@@ -948,108 +1022,68 @@ function StrategyFormModal({
                     <p className="mt-1 text-[11px] text-slate-500">Default multiplier for every symbol.</p>
                   </div>
                 </div>
-                {riskSettings.riskUnitMode === 'ticks' ? (
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk ticks</label>
-                      <input
-                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                        type="number"
-                        min={1}
-                        value={riskSettings.riskTicks ?? ''}
-                        onChange={(event) => updateRiskSettings({ riskTicks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1) })}
-                      />
-                      <p className="mt-1 text-[11px] text-slate-500">Ticks that define 1R when using tick mode.</p>
-                    </div>
-                    <div className="rounded-lg bg-black/40 p-3 text-[11px] text-slate-300">
-                      Enter tick count used to size stops and targets.</div>
-                  </div>
-                ) : (
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-                      <input
-                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                        type="number"
-                        min={1}
-                        value={riskSettings.atrPeriod ?? 14}
-                        onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
-                      <input
-                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                        type="number"
-                        step="0.1"
-                        value={riskSettings.atrMultiplier ?? 1}
-                        onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
 
-              <div className="space-y-3 rounded-2xl border border-white/10 bg-black/30 p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Per-symbol risk overrides</p>
-                    <p className="text-xs text-slate-500">Leave blank to inherit the global multiplier.</p>
+                <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Per-symbol risk overrides</p>
+                      <p className="text-xs text-slate-500">Leave blank to inherit the global multiplier.</p>
+                    </div>
                   </div>
-                </div>
 
-                <div className="space-y-3">
-                  {(form.instrument_slots || []).map((slot) => {
-                    const status = slotStatus[slot.uid] || {}
-                    return (
-                      <div key={slot.uid} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                          <div>
-                            <p className="text-sm font-semibold text-white">{slot.symbol}</p>
-                            <p className="text-[11px] text-slate-400">Metadata available in details.</p>
+                  <div className="space-y-3">
+                    {(form.instrument_slots || []).map((slot) => {
+                      const status = slotStatus[slot.uid] || {}
+                      return (
+                        <div key={slot.uid} className="space-y-2 rounded-xl border border-white/10 bg-black/30 p-3">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div>
+                              <p className="text-sm font-semibold text-white">{slot.symbol}</p>
+                              <p className="text-[11px] text-slate-400">Metadata available in details.</p>
+                            </div>
+                            <div className="flex items-center gap-2 md:min-w-[240px]">
+                              <input
+                                className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                                type="number"
+                                step="0.1"
+                                placeholder={String(riskSettings.globalRiskMultiplier || '')}
+                                value={slot.risk_multiplier ?? ''}
+                                onChange={(event) => handleSlotChange(slot.uid, { risk_multiplier: event.target.value })}
+                              />
+                              <span className="text-[11px] text-slate-500">Inherit if empty</span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 md:min-w-[240px]">
-                            <input
-                              className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                              type="number"
-                              step="0.1"
-                              placeholder={String(riskSettings.globalRiskMultiplier || '')}
-                              value={slot.risk_multiplier ?? ''}
-                              onChange={(event) => handleSlotChange(slot.uid, { risk_multiplier: event.target.value })}
-                            />
-                            <span className="text-[11px] text-slate-500">Inherit if empty</span>
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <ActionButton type="button" variant="ghost" className="text-xs" onClick={() => toggleSlotDetails(slot.uid)}>
+                              {expandedSlots.includes(slot.uid) ? 'Hide details' : 'Show details'}
+                            </ActionButton>
+                            <ActionButton
+                              type="button"
+                              variant="subtle"
+                              className="text-xs"
+                              onClick={() => handleRefreshMetadata(slot)}
+                              disabled={status.loading}
+                            >
+                              {status.loading ? 'Loading…' : 'Refresh metadata'}
+                            </ActionButton>
                           </div>
+                          {expandedSlots.includes(slot.uid) ? (
+                            <div className="border-t border-white/5 pt-2">
+                              <InstrumentDetailsPanel
+                                symbol={normalizeSymbol(slot.symbol) || slot.symbol}
+                                metadata={slot.metadata}
+                                providerId={form.provider_id}
+                                venueId={form.venue_id}
+                                timeframe={form.timeframe}
+                                status={status}
+                                onRefresh={() => handleRefreshMetadata(slot)}
+                              />
+                            </div>
+                          ) : null}
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
-                          <ActionButton type="button" variant="ghost" className="text-xs" onClick={() => toggleSlotDetails(slot.uid)}>
-                            {expandedSlots.includes(slot.uid) ? 'Hide details' : 'Show details'}
-                          </ActionButton>
-                          <ActionButton
-                            type="button"
-                            variant="subtle"
-                            className="text-xs"
-                            onClick={() => handleRefreshMetadata(slot)}
-                            disabled={status.loading}
-                          >
-                            {status.loading ? 'Loading…' : 'Refresh metadata'}
-                          </ActionButton>
-                        </div>
-                        {expandedSlots.includes(slot.uid) ? (
-                          <div className="border-t border-white/5 pt-2">
-                            <InstrumentDetailsPanel
-                              symbol={normalizeSymbol(slot.symbol) || slot.symbol}
-                              metadata={slot.metadata}
-                              providerId={form.provider_id}
-                              venueId={form.venue_id}
-                              timeframe={form.timeframe}
-                              status={status}
-                              onRefresh={() => handleRefreshMetadata(slot)}
-                            />
-                          </div>
-                        ) : null}
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
