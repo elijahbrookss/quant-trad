@@ -171,7 +171,9 @@ def _attach_instrument_meta(bot: Dict[str, object]) -> None:
         datasource = strategy.get("datasource") or bot.get("datasource")
         exchange = strategy.get("exchange") or bot.get("exchange")
         instruments: List[Dict[str, Any]] = []
-        for symbol in strategy.get("symbols") or []:
+        for slot in strategy.get("symbols") or []:
+            symbol = slot.get("symbol") if isinstance(slot, Mapping) else slot
+            risk_multiplier = slot.get("risk_multiplier") if isinstance(slot, Mapping) else None
             record = instrument_service.resolve_instrument(datasource, exchange, symbol)
             if not record:
                 continue
@@ -182,9 +184,11 @@ def _attach_instrument_meta(bot: Dict[str, object]) -> None:
                 instrument_service.instrument_key(None, None, symbol),
             }
             for key in keys:
-                instrument_map[key] = record
+                instrument_map[key] = {**record, "risk_multiplier": risk_multiplier}
             enriched = dict(record)
             enriched.setdefault("symbol", symbol)
+            if risk_multiplier is not None:
+                enriched["risk_multiplier"] = risk_multiplier
             instruments.append(enriched)
         if instruments:
             strategy["instruments"] = instruments

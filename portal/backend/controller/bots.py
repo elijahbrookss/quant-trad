@@ -31,6 +31,10 @@ class RiskSettings(BaseModel):
     stop_ticks: Optional[int] = Field(default=30, ge=1)
     breakeven_trigger_ticks: Optional[int] = Field(default=20, ge=1)
     tick_size: Optional[float] = Field(default=0.01, gt=0)
+    base_risk_per_trade: Optional[float] = Field(default=None, ge=0)
+    risk_unit_mode: Optional[str] = Field(default="atr")
+    ticks_stop: Optional[int] = Field(default=None, ge=1)
+    global_risk_multiplier: Optional[float] = Field(default=1.0, ge=0)
 
 
 class BotBase(BaseModel):
