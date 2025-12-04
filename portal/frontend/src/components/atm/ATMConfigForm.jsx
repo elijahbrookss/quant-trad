@@ -11,6 +11,9 @@ export const DEFAULT_ATM_TEMPLATE = {
   tick_size: null,
   tick_value: null,
   contract_size: null,
+  risk_unit_mode: 'atr',
+  ticks_stop: null,
+  global_risk_multiplier: 1,
   rMode: 'atr',
   rAtrPeriod: 14,
   rAtrMultiplier: 1,
@@ -28,10 +31,18 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   if (cloned.rMode !== 'atr' && cloned.rMode !== 'ticks' && cloned.rMode !== 'explicit') {
     cloned.rMode = 'atr'
   }
+  if (cloned.risk_unit_mode !== 'atr' && cloned.risk_unit_mode !== 'ticks') {
+    cloned.risk_unit_mode = cloned.rMode
+  }
+  if (cloned.rMode !== cloned.risk_unit_mode) {
+    cloned.rMode = cloned.risk_unit_mode
+  }
   if (cloned.rAtrPeriod === undefined || cloned.rAtrPeriod === null) cloned.rAtrPeriod = DEFAULT_ATM_TEMPLATE.rAtrPeriod
   if (cloned.rAtrMultiplier === undefined || cloned.rAtrMultiplier === null)
     cloned.rAtrMultiplier = DEFAULT_ATM_TEMPLATE.rAtrMultiplier
   if (cloned.rRiskTicks === undefined) cloned.rRiskTicks = DEFAULT_ATM_TEMPLATE.rRiskTicks
+  if (cloned.ticks_stop === undefined) cloned.ticks_stop = DEFAULT_ATM_TEMPLATE.ticks_stop
+  if (cloned.global_risk_multiplier === undefined) cloned.global_risk_multiplier = DEFAULT_ATM_TEMPLATE.global_risk_multiplier
   if (cloned.base_risk_per_trade === undefined) cloned.base_risk_per_trade = DEFAULT_ATM_TEMPLATE.base_risk_per_trade
   if (!cloned._meta || typeof cloned._meta !== 'object') {
     cloned._meta = {}

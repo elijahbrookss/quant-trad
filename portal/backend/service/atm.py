@@ -8,6 +8,9 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "contracts": 3,
     "tick_size": 0.01,
+    "risk_unit_mode": "atr",
+    "ticks_stop": None,
+    "global_risk_multiplier": 1.0,
     "base_risk_per_trade": None,
     "atr_r_multiple": 1.0,
     "stop_ticks": 35,
@@ -199,6 +202,25 @@ def normalise_template(
 
     if payload.get("atr_r_multiple") is not None:
         result["atr_r_multiple"] = float(payload.get("atr_r_multiple") or result.get("atr_r_multiple") or 1.0)
+
+    risk_mode = str(payload.get("risk_unit_mode") or payload.get("rMode") or result.get("risk_unit_mode") or "atr").lower()
+    if risk_mode not in {"atr", "ticks"}:
+        risk_mode = "atr"
+    result["risk_unit_mode"] = risk_mode
+
+    ticks_stop = _coerce_int(
+        payload.get("ticks_stop")
+        or payload.get("rRiskTicks")
+        or payload.get("risk_ticks"),
+        result.get("ticks_stop"),
+    )
+    if ticks_stop is not None:
+        result["ticks_stop"] = max(ticks_stop, 1)
+
+    if payload.get("global_risk_multiplier") is not None:
+        result["global_risk_multiplier"] = _coerce_float(
+            payload.get("global_risk_multiplier"), result.get("global_risk_multiplier")
+        )
 
     if payload.get("contracts") is not None:
         result["contracts"] = max(_coerce_int(payload.get("contracts"), result["contracts"]) or 1, 1)

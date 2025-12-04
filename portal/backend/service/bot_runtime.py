@@ -514,9 +514,16 @@ class LadderRiskEngine:
             tick_value = self.tick_size * self.contract_size
         self.tick_value = float(tick_value or self.tick_size)
 
-        contracts_from_risk = self._contracts_from_base_risk()
-        if contracts_from_risk is not None:
-            self.template["contracts"] = contracts_from_risk
+        risk_mode = str(self.template.get("risk_unit_mode") or "atr").lower()
+        self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
+        self.ticks_stop = int(
+            self.template.get("ticks_stop")
+            or self.template.get("stop_ticks")
+            or DEFAULT_RISK.get("stop_ticks")
+            or 1
+        )
+        self.global_risk_multiplier = _coerce_float(self.template.get("global_risk_multiplier"), 1.0) or 1.0
+        self.instrument_risk_multiplier = _coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
 
         self.orders = self._orders_from_template()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
@@ -597,19 +604,73 @@ class LadderRiskEngine:
             slots[idx % count] += 1
         return slots
 
-    def _contracts_from_base_risk(self) -> Optional[int]:
+    def _point_value(self) -> float:
+        if self.tick_value not in (None, 0):
+            return float(self.tick_value)
+        if self.contract_size not in (None, 0):
+            return float(self.contract_size)
+        return 1.0
+
+    def _apply_quantity_constraints(self, qty: float) -> float:
+        min_qty = _coerce_float(
+            self.instrument.get("min_qty")
+            or self.instrument.get("min_order_size")
+            or self.instrument.get("min_quantity")
+        )
+        qty_step = _coerce_float(
+            self.instrument.get("qty_step")
+            or self.instrument.get("order_step")
+            or self.instrument.get("step_size")
+        )
+        supports_fractional = bool(self.instrument.get("supports_fractional") or self.instrument.get("fractional_orders"))
+
+        normalized = max(qty, 0.0)
+        if qty_step not in (None, 0):
+            normalized = round(normalized / qty_step) * qty_step
+        elif not supports_fractional:
+            normalized = float(int(round(normalized)))
+
+        if min_qty not in (None, 0) and normalized < float(min_qty):
+            normalized = float(min_qty)
+
+        if not supports_fractional:
+            normalized = float(max(int(round(normalized)), 1))
+        return normalized
+
+    def _contracts_from_effective_risk(self, stop_distance_price: float) -> Optional[float]:
         if self.base_risk_per_trade in (None, ""):
             return None
         try:
             base_risk = max(float(self.base_risk_per_trade), 0.0)
         except (TypeError, ValueError):
             return None
-        stop_ticks = abs(float(self.stop_ticks or 0))
-        tick_value = abs(float(self.tick_value or 0))
-        if base_risk == 0 or stop_ticks == 0 or tick_value == 0:
+        effective_multiplier = max(self.global_risk_multiplier or 1.0, 0.0) * max(
+            self.instrument_risk_multiplier or 1.0, 0.0
+        )
+        effective_risk = base_risk * (effective_multiplier or 1.0)
+        if effective_risk <= 0:
             return None
-        contracts = int(base_risk / (stop_ticks * tick_value))
-        return max(contracts, 1) if contracts > 0 else 1
+
+        risk_per_unit = abs(stop_distance_price) * abs(self._point_value())
+        if risk_per_unit == 0:
+            return None
+
+        qty = effective_risk / risk_per_unit
+        return self._apply_quantity_constraints(qty)
+
+    def _orders_with_total(self, total_contracts: Optional[float]) -> List[Dict[str, Any]]:
+        base_orders = self._orders_from_template()
+        if total_contracts in (None, 0) or not base_orders:
+            return base_orders
+
+        total = max(int(round(total_contracts)), len(base_orders))
+        distribution = self._distribute_contracts(len(base_orders), total)
+        scaled: List[Dict[str, Any]] = []
+        for idx, order in enumerate(base_orders):
+            payload = dict(order)
+            payload["contracts"] = distribution[idx] if idx < len(distribution) else max(int(round(total / len(base_orders))), 1)
+            scaled.append(payload)
+        return scaled
 
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         config = self.breakeven_config
@@ -663,18 +724,42 @@ class LadderRiskEngine:
         r_value = risk_math.r_value_from_atr(atr_at_entry, self.r_multiple)
         r_ticks = risk_math.ticks_for_r(r_value, self.tick_size)
         stop_price = None
-        explicit_stop = _coerce_float(self.template.get("stop_price"))
-        if explicit_stop not in (None, 0):
-            stop_price = float(explicit_stop)
-        if self.stop_r_multiple is not None and r_value is not None and stop_price is None:
-            stop_price = risk_math.price_from_r(candle.close, direction, r_value, self.stop_r_multiple)
-        if stop_price is None:
-            stop_distance = self.stop_ticks * self.tick_size
+        one_r_distance = None
+        stop_distance_price = None
+
+        if self.risk_unit_mode == "ticks":
+            stop_distance_price = abs(self.ticks_stop * self.tick_size)
             stop_price = (
-                candle.close - stop_distance if direction == "long" else candle.close + stop_distance
+                candle.close - stop_distance_price
+                if direction == "long"
+                else candle.close + stop_distance_price
             )
+            one_r_distance = stop_distance_price
+            r_value = one_r_distance
+            r_ticks = risk_math.ticks_for_r(one_r_distance, self.tick_size)
+        else:
+            explicit_stop = _coerce_float(self.template.get("stop_price"))
+            if explicit_stop not in (None, 0):
+                stop_price = float(explicit_stop)
+            if self.stop_r_multiple is not None and r_value is not None and stop_price is None:
+                stop_price = risk_math.price_from_r(candle.close, direction, r_value, self.stop_r_multiple)
+            if stop_price is None:
+                stop_distance = self.stop_ticks * self.tick_size
+                stop_price = (
+                    candle.close - stop_distance if direction == "long" else candle.close + stop_distance
+                )
+            stop_distance_price = abs(candle.close - stop_price)
+            one_r_distance = stop_distance_price if stop_distance_price is not None else r_value
+            if r_value is None:
+                r_value = one_r_distance
+            if r_ticks is None:
+                r_ticks = risk_math.ticks_for_r(r_value, self.tick_size)
+
+        total_contracts = self._contracts_from_effective_risk(one_r_distance or 0.0)
+        orders_for_position = self._orders_with_total(total_contracts)
+
         legs: List[Leg] = []
-        for idx, order in enumerate(self.orders):
+        for idx, order in enumerate(orders_for_position):
             ticks = order.get("ticks")
             r_multiple = order.get("r_multiple")
             price = order.get("price")

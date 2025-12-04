@@ -427,11 +427,15 @@ function StrategyFormModal({
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
         ...prev,
-        riskUnitMode: initialValues.atm_template?.rMode || prev.riskUnitMode,
+        riskUnitMode:
+          initialValues.atm_template?.risk_unit_mode || initialValues.atm_template?.rMode || prev.riskUnitMode,
         atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
         atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
         baseRiskPerTrade: initialValues.atm_template?.base_risk_per_trade ?? prev.baseRiskPerTrade,
-        riskTicks: initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
+        riskTicks:
+          initialValues.atm_template?.ticks_stop ?? initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
+        globalRiskMultiplier:
+          initialValues.atm_template?.global_risk_multiplier ?? prev.globalRiskMultiplier,
       }))
     } else {
       setForm({
@@ -653,8 +657,6 @@ function StrategyFormModal({
         }
         if (Number.isFinite(overrideValue)) {
           payload.risk_multiplier = overrideValue
-        } else if (Number.isFinite(globalRisk)) {
-          payload.risk_multiplier = globalRisk
         }
         if (slot.metadata && Object.keys(slot.metadata).length) {
           payload.metadata = slot.metadata
@@ -675,10 +677,15 @@ function StrategyFormModal({
       atm_template: cloneATMTemplate({
         ...form.atm_template,
         rMode: riskSettings.riskUnitMode || form.atm_template?.rMode,
+        risk_unit_mode: riskSettings.riskUnitMode || form.atm_template?.risk_unit_mode,
         rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
         rAtrMultiplier: riskSettings.atrMultiplier ?? form.atm_template?.rAtrMultiplier,
         rRiskTicks: riskSettings.riskTicks ?? form.atm_template?.rRiskTicks,
+        ticks_stop: riskSettings.riskTicks ?? form.atm_template?.ticks_stop,
         base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.base_risk_per_trade,
+        global_risk_multiplier: Number.isFinite(globalRisk)
+          ? globalRisk
+          : form.atm_template?.global_risk_multiplier,
       }),
     }
     await onSubmit(payload)
@@ -938,7 +945,6 @@ function StrategyFormModal({
                     >
                       <option value="atr">ATR-based</option>
                       <option value="ticks">Ticks</option>
-                      <option value="explicit">Explicit (manual)</option>
                     </select>
                   </div>
                   {riskSettings.riskUnitMode === 'ticks' ? (
@@ -969,7 +975,12 @@ function StrategyFormModal({
                       <div>
                         <div className="flex items-center justify-between">
                           <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
-                          <span className="text-[11px] text-slate-400" title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop.">(i)</span>
+                          <span
+                            className="text-[11px] text-slate-400"
+                            title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
+                          >
+                            (i)
+                          </span>
                         </div>
                         <input
                           className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
