@@ -53,3 +53,33 @@ class YahooFinanceProvider(BaseDataProvider):
         """Return spot metadata expressed per share/coin."""
 
         return self._normalize_metadata(tick_size=0.01, contract_size=1.0)
+
+    def validate_symbol(self, venue: str, symbol: str) -> None:
+        """Confirm Yahoo Finance recognizes the symbol by probing for data."""
+
+        if not symbol:
+            raise ValueError("symbol is required for Yahoo Finance validation")
+
+        ticker = yf.Ticker(symbol)
+
+        try:
+            info = ticker.fast_info
+        except Exception as exc:
+            logger.warning(
+                "yfinance_fast_info_failed | symbol=%s | error=%s",
+                symbol,
+                exc,
+            )
+            info = None
+
+        price = getattr(info, "last_price", None) if info else None
+        if price is not None:
+            return
+
+        try:
+            probe = ticker.history(period="1d", interval="1d")
+        except Exception as exc:
+            raise ValueError(f"Yahoo Finance lookup failed for '{symbol}': {exc}") from exc
+
+        if probe is None or probe.empty:
+            raise ValueError(f"Symbol '{symbol}' not found on Yahoo Finance")

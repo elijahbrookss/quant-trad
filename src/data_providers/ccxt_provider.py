@@ -83,6 +83,16 @@ class CCXTProvider(BaseDataProvider):
             tick_value=tick_value,
         )
 
+    def validate_symbol(self, venue: str, symbol: str) -> None:
+        """Ensure CCXT has metadata for the requested symbol."""
+
+        if not symbol:
+            raise ValueError("symbol is required for CCXT validation")
+
+        market = self._load_market(symbol)
+        if not market:
+            raise ValueError(f"Symbol '{symbol}' not found on {self._exchange_id}")
+
     def _sandbox_flag(self) -> bool:
         flag = os.getenv("CCXT_SANDBOX_MODE", "false").strip().lower()
         return flag in {"1", "true", "yes", "on"}

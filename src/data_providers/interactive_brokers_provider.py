@@ -122,23 +122,10 @@ class InteractiveBrokersProvider(BaseDataProvider):
         """Return tick size, contract multiplier, and derived tick value."""
 
         contract = self._build_contract(symbol)
+        details = self._fetch_contract_details(contract)
         instrument_type = self.get_instrument_type(venue, symbol)
         min_tick: Optional[float] = None
         multiplier: Optional[float] = None
-
-        with self._lock:
-            self._ensure_connection()
-            try:
-                details = self._ib.reqContractDetails(contract)
-            except Exception as exc:  # pragma: no cover - network interaction
-                logger.warning(
-                    "ibkr_metadata_fetch_failed | symbol=%s | secType=%s | exchange=%s | error=%s",
-                    symbol,
-                    contract.secType,
-                    contract.exchange,
-                    exc,
-                )
-                details = []
 
         if details:
             first = details[0]
@@ -160,6 +147,33 @@ class InteractiveBrokersProvider(BaseDataProvider):
             min_tick = 0.01
 
         return self._normalize_metadata(tick_size=min_tick, contract_size=multiplier)
+
+    def validate_symbol(self, venue: str, symbol: str) -> None:
+        """Raise if IBKR cannot resolve contract details for the symbol."""
+
+        if not symbol:
+            raise ValueError("symbol is required for Interactive Brokers validation")
+
+        contract = self._build_contract(symbol)
+        details = self._fetch_contract_details(contract)
+
+        if not details:
+            raise ValueError(f"Interactive Brokers could not resolve contract details for '{symbol}'")
+
+    def _fetch_contract_details(self, contract: Contract) -> list:
+        with self._lock:
+            self._ensure_connection()
+            try:
+                return self._ib.reqContractDetails(contract)
+            except Exception as exc:  # pragma: no cover - network interaction
+                logger.warning(
+                    "ibkr_metadata_fetch_failed | symbol=%s | secType=%s | exchange=%s | error=%s",
+                    contract.symbol,
+                    contract.secType,
+                    contract.exchange,
+                    exc,
+                )
+                return []
 
     # ------------------------------------------------------------------
     # Public helpers
