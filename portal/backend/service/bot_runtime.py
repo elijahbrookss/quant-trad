@@ -651,7 +651,11 @@ class LadderRiskEngine:
         if effective_risk <= 0:
             return None
 
-        risk_per_unit = abs(stop_distance_price) * abs(self._point_value())
+        if self.tick_value not in (None, 0) and self.tick_size not in (None, 0):
+            ticks = abs(stop_distance_price) / abs(self.tick_size)
+            risk_per_unit = ticks * abs(self.tick_value)
+        else:
+            risk_per_unit = abs(stop_distance_price) * abs(self._point_value())
         if risk_per_unit == 0:
             return None
 

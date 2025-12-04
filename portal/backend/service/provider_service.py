@@ -128,40 +128,20 @@ def tick_metadata(provider_id: Optional[str], venue_id: Optional[str], symbol: O
         return {"errors": {"symbol": "Symbol is required."}}
 
     instrument = instrument_service.resolve_instrument(datasource, exchange, normalized_symbol)
-    if not instrument and datasource == "CCXT":
-        instrument, _ = instrument_service.auto_sync_instrument(datasource, exchange, normalized_symbol)
-
-    fetched_metadata: Dict[str, Any] = {}
-
+    error: Optional[str] = None
     if not instrument:
-        venue_or_exchange = normalized.get("venue_id") or exchange or ""
-        try:
-            provider = get_provider(normalized.get("provider_id"), venue=normalized.get("venue_id"), exchange=exchange)
-            provider_metadata = provider.get_instrument_metadata(venue_or_exchange, normalized_symbol)
-            fetched_metadata = provider_metadata.as_dict() if provider_metadata else {}
-            instrument_type = provider.get_instrument_type(venue_or_exchange, normalized_symbol)
-            instrument = instrument_service.create_instrument(
-                symbol=normalized_symbol,
-                datasource=datasource,
-                exchange=exchange,
-                instrument_type=getattr(instrument_type, "value", instrument_type),
-                tick_size=fetched_metadata.get("tick_size"),
-                tick_value=fetched_metadata.get("tick_value"),
-                contract_size=fetched_metadata.get("contract_size"),
-            )
-        except Exception as exc:  # pragma: no cover - runtime integration
-            logger.warning(
-                "tick_metadata_provider_lookup_failed | provider=%s venue=%s symbol=%s error=%s",
-                normalized.get("provider_id"),
-                normalized.get("venue_id"),
-                normalized_symbol,
-                exc,
-            )
+        instrument, error = instrument_service.validate_instrument(
+            datasource,
+            exchange,
+            normalized_symbol,
+            provider_id=normalized.get("provider_id"),
+            venue_id=normalized.get("venue_id"),
+        )
 
+    if error:
+        return {"errors": {"symbol": error}}
     if not instrument:
-        if not fetched_metadata:
-            return {"errors": {"symbol": "Tick metadata not found for this symbol."}}
-        instrument = fetched_metadata
+        return {"errors": {"symbol": "Tick metadata not found for this symbol."}}
 
     metadata = {
         "tick_size": instrument.get("tick_size"),

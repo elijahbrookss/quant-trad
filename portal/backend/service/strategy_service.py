@@ -947,23 +947,22 @@ class StrategyRegistry:
             self._records[strategy_id] = base
 
     def _sync_instruments(self, record: StrategyDefinition) -> None:
-        """Auto-load instrument metadata for CCXT strategies."""
+        """Ensure instrument metadata exists for each slot regardless of provider."""
 
         record.instrument_messages = []
-        datasource = (record.datasource or "").strip().upper()
-        if datasource != "CCXT":
-            return
         for slot in record.instruments:
-            _, error = instrument_service.auto_sync_instrument(
+            _, error = instrument_service.validate_instrument(
                 record.datasource,
                 record.exchange,
                 slot.symbol,
             )
             if error:
-                record.instrument_messages.append({
-                    "symbol": slot.symbol,
-                    "message": error,
-                })
+                record.instrument_messages.append(
+                    {
+                        "symbol": slot.symbol,
+                        "message": error,
+                    }
+                )
 
     def list(self) -> List[Dict[str, Any]]:
         """Return serialised strategies for API responses."""
