@@ -77,6 +77,24 @@ const RISK_DEFAULTS = Object.freeze({
   riskTicks: null,
 })
 
+const CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+})
+
+const formatCurrency = (value) => {
+  const numericValue = Number(value)
+  return CURRENCY_FORMATTER.format(Number.isFinite(numericValue) ? numericValue : 0)
+}
+
+const parseNumericOr = (value, fallback) => {
+  if (value === '' || value === null || value === undefined) return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 const newSlot = (symbol = '') => ({
   uid: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2),
   symbol,
@@ -959,11 +977,11 @@ function StrategyFormModal({
                       />
                       <p className="mt-1 text-[11px] text-slate-500">Ticks that define 1R when using tick mode.</p>
                     </div>
-                  ) : (
-                    <>
-                      <div>
-                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-                        <input
+                    ) : (
+                      <>
+                        <div>
+                          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                          <input
                           className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                           type="number"
                           min={1}
@@ -973,23 +991,24 @@ function StrategyFormModal({
                         <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length.</p>
                       </div>
                       <div>
-                        <div className="flex items-center justify-between">
-                          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
+                        <div className="relative mt-1">
+                          <input
+                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                            type="number"
+                            step="0.1"
+                            min={0}
+                            value={riskSettings.atrMultiplier ?? 1}
+                            onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
+                          />
                           <span
-                            className="text-[11px] text-slate-400"
+                            className="pointer-events-auto absolute inset-y-0 right-3 flex items-center text-[12px] text-slate-300"
                             title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
                           >
-                            (i)
+                            ⓘ
                           </span>
                         </div>
-                        <input
-                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                          type="number"
-                          step="0.1"
-                          min={0}
-                          value={riskSettings.atrMultiplier ?? 1}
-                          onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
-                        />
+                        <p className="mt-1 text-[11px] text-slate-500">Scales ATR to set your stop distance (1R).</p>
                       </div>
                     </>
                   )}
@@ -1018,18 +1037,23 @@ function StrategyFormModal({
                     <p className="mt-1 text-[11px] text-slate-500">Dollar amount risked per trade before multipliers.</p>
                   </div>
                   <div>
-                    <div className="flex items-center justify-between">
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
-                      <span className="text-[11px] text-slate-400" title="Scales position size. Example: $100 base risk × 2 → $200 risk.">(i)</span>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
+                    <div className="relative mt-1">
+                      <input
+                        className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        value={riskSettings.globalRiskMultiplier ?? ''}
+                        onChange={(event) => updateRiskSettings({ globalRiskMultiplier: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
+                      />
+                      <span
+                        className="pointer-events-auto absolute inset-y-0 right-3 flex items-center text-[12px] text-slate-300"
+                        title="Scales position size. Example: $100 base risk × 2 → $200 risk."
+                      >
+                        ⓘ
+                      </span>
                     </div>
-                    <input
-                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                      type="number"
-                      step="0.1"
-                      min={0}
-                      value={riskSettings.globalRiskMultiplier ?? ''}
-                      onChange={(event) => updateRiskSettings({ globalRiskMultiplier: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
-                    />
                     <p className="mt-1 text-[11px] text-slate-500">Default multiplier for every symbol.</p>
                   </div>
                 </div>
@@ -1045,12 +1069,24 @@ function StrategyFormModal({
                   <div className="space-y-3">
                     {(form.instrument_slots || []).map((slot) => {
                       const status = slotStatus[slot.uid] || {}
+                      const baseRiskValue = parseNumericOr(riskSettings.baseRiskPerTrade, 0)
+                      const globalMultiplier = parseNumericOr(riskSettings.globalRiskMultiplier, 1)
+                      const hasOverride =
+                        slot.risk_multiplier !== '' &&
+                        slot.risk_multiplier !== null &&
+                        slot.risk_multiplier !== undefined
+                      const overrideMultiplier = hasOverride ? parseNumericOr(slot.risk_multiplier, globalMultiplier) : null
+                      const effectiveMultiplier = overrideMultiplier === null ? globalMultiplier : overrideMultiplier
+                      const estimatedRisk = baseRiskValue * effectiveMultiplier
                       return (
                         <div key={slot.uid} className="space-y-2 rounded-xl border border-white/10 bg-black/30 p-3">
                           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div>
+                            <div className="space-y-1">
                               <p className="text-sm font-semibold text-white">{slot.symbol}</p>
-                              <p className="text-[11px] text-slate-400">Metadata available in details.</p>
+                              <p className="text-[11px] text-slate-400">
+                                Estimated risk per trade: {formatCurrency(estimatedRisk)}
+                              </p>
+                              <p className="text-[11px] text-slate-500">Metadata available in details.</p>
                             </div>
                             <div className="flex items-center gap-2 md:min-w-[240px]">
                               <input
