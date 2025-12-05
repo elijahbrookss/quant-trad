@@ -71,12 +71,10 @@ const MIN_RISK_MULTIPLIER = 0.01
 const MIN_BASE_RISK = 1
 
 const RISK_DEFAULTS = Object.freeze({
-  riskUnitMode: 'atr',
   atrPeriod: 14,
   atrMultiplier: 1,
   baseRiskPerTrade: '',
   globalRiskMultiplier: 1,
-  riskTicks: null,
 })
 
 const CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
@@ -449,16 +447,12 @@ function StrategyFormModal({
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
         ...prev,
-        riskUnitMode:
-          initialValues.atm_template?.risk_unit_mode || initialValues.atm_template?.rMode || prev.riskUnitMode,
         atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
         atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
         baseRiskPerTrade:
           initialValues.atm_template?.base_risk_per_trade !== undefined
             ? Math.max(MIN_BASE_RISK, initialValues.atm_template?.base_risk_per_trade || MIN_BASE_RISK)
             : prev.baseRiskPerTrade,
-        riskTicks:
-          initialValues.atm_template?.ticks_stop ?? initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
         globalRiskMultiplier:
           initialValues.atm_template?.global_risk_multiplier ?? prev.globalRiskMultiplier,
       }))
@@ -578,11 +572,11 @@ function StrategyFormModal({
         ...current,
         atm_template: cloneATMTemplate({
           ...current.atm_template,
-          rMode: next.riskUnitMode || current.atm_template?.rMode,
           rAtrPeriod: next.atrPeriod ?? current.atm_template?.rAtrPeriod,
           rAtrMultiplier: next.atrMultiplier ?? current.atm_template?.rAtrMultiplier,
-          rRiskTicks: next.riskTicks ?? current.atm_template?.rRiskTicks,
           base_risk_per_trade: next.baseRiskPerTrade ?? current.atm_template?.base_risk_per_trade,
+          rMode: 'atr',
+          risk_unit_mode: 'atr',
         }),
       }))
       return next
@@ -708,12 +702,12 @@ function StrategyFormModal({
       instrument_slots: cleanedSlots,
       atm_template: cloneATMTemplate({
         ...form.atm_template,
-        rMode: riskSettings.riskUnitMode || form.atm_template?.rMode,
-        risk_unit_mode: riskSettings.riskUnitMode || form.atm_template?.risk_unit_mode,
+        rMode: 'atr',
+        risk_unit_mode: 'atr',
         rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
         rAtrMultiplier: riskSettings.atrMultiplier ?? form.atm_template?.rAtrMultiplier,
-        rRiskTicks: riskSettings.riskTicks ?? form.atm_template?.rRiskTicks,
-        ticks_stop: riskSettings.riskTicks ?? form.atm_template?.ticks_stop,
+        rRiskTicks: null,
+        ticks_stop: null,
         base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.base_risk_per_trade,
         global_risk_multiplier: Number.isFinite(globalRisk)
           ? globalRisk
@@ -807,7 +801,7 @@ function StrategyFormModal({
 
   const steps = [
     { id: 0, title: 'Basic setup', description: 'Name, timeframe, provider/venue, and symbols.' },
-    { id: 1, title: 'Risk & ATR', description: 'Define risk unit and per-symbol overrides.' },
+    { id: 1, title: 'Risk & ATR', description: 'Define ATR-based R and per-symbol overrides.' },
     { id: 2, title: 'ATM template', description: 'Stops, targets, breakeven, and trailing.' },
   ]
 
@@ -984,65 +978,38 @@ function StrategyFormModal({
                   </div>
                   <div className="text-[11px] text-slate-400">Risk drives sizing; keep position sizing off in the next step.</div>
                 </div>
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-2">
                   <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk unit mode</label>
-                    <select
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
+                    <input
                       className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                      value={riskSettings.riskUnitMode}
-                      onChange={(event) => updateRiskSettings({ riskUnitMode: event.target.value })}
-                    >
-                      <option value="atr">ATR-based</option>
-                      <option value="ticks">Ticks</option>
-                    </select>
+                      type="number"
+                      min={1}
+                      value={riskSettings.atrPeriod ?? 14}
+                      onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length used to define 1R.</p>
                   </div>
-                  {riskSettings.riskUnitMode === 'ticks' ? (
-                    <div className="md:col-span-2">
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Risk ticks</label>
-                      <input
-                        className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                        type="number"
-                        min={1}
-                        value={riskSettings.riskTicks ?? ''}
-                        onChange={(event) => updateRiskSettings({ riskTicks: event.target.value === '' ? null : Math.max(1, Number(event.target.value) || 1) })}
-                      />
-                      <p className="mt-1 text-[11px] text-slate-500">Ticks that define 1R when using tick mode.</p>
+                  <div>
+                    <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                      <span>ATR multiplier</span>
+                      <span
+                        className="text-[11px] text-slate-500"
+                        title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
+                      >
+                        ⓘ
+                      </span>
                     </div>
-                    ) : (
-                      <>
-                        <div>
-                          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-                          <input
-                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                          type="number"
-                          min={1}
-                          value={riskSettings.atrPeriod ?? 14}
-                          onChange={(event) => updateRiskSettings({ atrPeriod: Math.max(1, Number(event.target.value) || 14) })}
-                        />
-                        <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length.</p>
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                          <span>ATR multiplier</span>
-                          <span
-                            className="text-[11px] text-slate-500"
-                            title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
-                          >
-                            ⓘ
-                          </span>
-                        </div>
-                        <input
-                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                          type="number"
-                          step="0.1"
-                          min={0}
-                          value={riskSettings.atrMultiplier ?? 1}
-                          onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
-                        />
-                        <p className="mt-1 text-[11px] text-slate-500">Scales ATR to set your stop distance (1R).</p>
-                      </div>
-                    </>
-                  )}
+                    <input
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                      type="number"
+                      step="0.1"
+                      min={0}
+                      value={riskSettings.atrMultiplier ?? 1}
+                      onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
+                    />
+                    <p className="mt-1 text-[11px] text-slate-500">Scales ATR to set your stop distance (1R).</p>
+                  </div>
                 </div>
               </div>
 
