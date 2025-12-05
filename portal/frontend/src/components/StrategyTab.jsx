@@ -1006,23 +1006,23 @@ function StrategyFormModal({
                         <p className="mt-1 text-[11px] text-slate-500">Rolling ATR length.</p>
                       </div>
                       <div>
-                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
-                        <div className="relative mt-1">
-                          <input
-                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                            type="number"
-                            step="0.1"
-                            min={0}
-                            value={riskSettings.atrMultiplier ?? 1}
-                            onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
-                          />
+                        <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                          <span>ATR multiplier</span>
                           <span
-                            className="pointer-events-auto absolute inset-y-0 right-3 flex items-center text-[12px] text-slate-300"
+                            className="text-[11px] text-slate-500"
                             title="Scales ATR to set stop distance. Example: ATR 10 × 1.5 → 15pt stop."
                           >
                             ⓘ
                           </span>
                         </div>
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          value={riskSettings.atrMultiplier ?? 1}
+                          onChange={(event) => updateRiskSettings({ atrMultiplier: Number(event.target.value) || 1 })}
+                        />
                         <p className="mt-1 text-[11px] text-slate-500">Scales ATR to set your stop distance (1R).</p>
                       </div>
                     </>
@@ -1052,28 +1052,28 @@ function StrategyFormModal({
                     <p className="mt-1 text-[11px] text-slate-500">Dollar amount risked per trade before multipliers.</p>
                   </div>
                   <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</label>
-                    <div className="relative mt-1">
-                      <input
-                        className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                        type="number"
-                        step="0.1"
-                        min={MIN_RISK_MULTIPLIER}
-                        value={riskSettings.globalRiskMultiplier ?? ''}
-                        onChange={(event) => {
-                          const rawValue = event.target.value
-                          const nextValue = rawValue === '' ? '' : Math.max(MIN_RISK_MULTIPLIER, Number(rawValue) || 0)
-                          setRiskErrors((prev) => ({ ...prev, globalRiskMultiplier: undefined }))
-                          updateRiskSettings({ globalRiskMultiplier: nextValue })
-                        }}
-                      />
+                    <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
+                      <span>Global risk multiplier</span>
                       <span
-                        className="pointer-events-auto absolute inset-y-0 right-3 flex items-center text-[12px] text-slate-300"
+                        className="text-[11px] text-slate-500"
                         title="Scales position size. Example: $100 base risk × 2 → $200 risk."
                       >
                         ⓘ
                       </span>
                     </div>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                      type="number"
+                      step="0.1"
+                      min={MIN_RISK_MULTIPLIER}
+                      value={riskSettings.globalRiskMultiplier ?? ''}
+                      onChange={(event) => {
+                        const rawValue = event.target.value
+                        const nextValue = rawValue === '' ? '' : Math.max(MIN_RISK_MULTIPLIER, Number(rawValue) || 0)
+                        setRiskErrors((prev) => ({ ...prev, globalRiskMultiplier: undefined }))
+                        updateRiskSettings({ globalRiskMultiplier: nextValue })
+                      }}
+                    />
                     <p className="mt-1 text-[11px] text-slate-500">Default multiplier for every symbol.</p>
                     {riskErrors.globalRiskMultiplier ? (
                       <p className="mt-1 text-[11px] text-rose-400">{riskErrors.globalRiskMultiplier}</p>
@@ -1083,10 +1083,7 @@ function StrategyFormModal({
 
                 <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-3">
                   <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Per-symbol risk overrides</p>
-                      <p className="text-xs text-slate-500">Leave blank to inherit the global multiplier.</p>
-                    </div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Per-symbol risk overrides</p>
                   </div>
 
                   <div className="space-y-3">
@@ -1109,7 +1106,6 @@ function StrategyFormModal({
                               <p className="text-[11px] text-slate-400">
                                 Estimated risk per trade: {formatCurrency(estimatedRisk)}
                               </p>
-                              <p className="text-[11px] text-slate-500">Metadata available in details.</p>
                             </div>
                             <div className="flex items-center gap-2 md:min-w-[240px]">
                               <input
