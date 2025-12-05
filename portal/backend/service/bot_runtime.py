@@ -556,6 +556,7 @@ class LadderRiskEngine:
     def _orders_from_template(self) -> List[Dict[str, Any]]:
         orders: List[Dict[str, Any]] = []
         entries = self.template.get("take_profit_orders") or []
+        base_contracts = int(self.template.get("contracts") or len(entries) or 0)
         for idx, entry in enumerate(entries):
             ticks = _coerce_float(entry.get("ticks"))
             r_multiple = _coerce_float(entry.get("r_multiple"))
@@ -563,7 +564,16 @@ class LadderRiskEngine:
             if ticks is None and r_multiple is None and price is None:
                 continue
             label = entry.get("label") or f"Target {idx + 1}"
+            size_percent = _coerce_float(
+                entry.get("size_percent") or entry.get("size_pct") or entry.get("size")
+            )
+            if size_percent is not None and 0 <= size_percent <= 1:
+                size_percent *= 100
             contracts = int(entry.get("contracts") or 0)
+            if contracts <= 0 and size_percent is not None and base_contracts > 0:
+                contracts = int(round((size_percent / 100) * base_contracts))
+            if contracts <= 0:
+                continue
             orders.append(
                 {
                     "label": label,
@@ -571,6 +581,7 @@ class LadderRiskEngine:
                     "r_multiple": r_multiple,
                     "price": price,
                     "contracts": max(contracts, 1),
+                    "size_percent": size_percent,
                 }
             )
         if orders:

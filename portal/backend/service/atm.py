@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -61,16 +62,43 @@ def _normalise_take_profits(
     cleaned: list[Dict[str, Any]] = []
     fallback = max(int(fallback_contracts or len(entries)), len(entries) or 1)
 
-    specified = [max(_coerce_int(entry.get("contracts"), 0) or 0, 0) for entry in entries]
-    use_distribution = sum(specified) == 0
+    percents: list[Optional[float]] = []
+    for entry in entries:
+        raw_percent = entry.get("size_percent") or entry.get("size_pct") or entry.get("size")
+        value = _coerce_float(raw_percent)
+        if value is not None and 0 <= value <= 1:
+            value *= 100
+        percents.append(value if value is None or value >= 0 else None)
+
+    has_percent = any(value is not None for value in percents)
+
+    specified_contracts = [max(_coerce_int(entry.get("contracts"), 0) or 0, 0) for entry in entries]
     contract_counts: list[int] = []
-    if use_distribution:
-        base = max(fallback // len(entries), 1)
-        remainder = max(fallback - base * len(entries), 0)
-        for idx in range(len(entries)):
-            contract_counts.append(base + (1 if idx < remainder else 0))
+    if has_percent:
+        weights = [max(value or 0, 0.0) for value in percents]
+        weight_total = sum(weights)
+        if weight_total > 0:
+            scaled = [(weight / weight_total) * fallback for weight in weights]
+            floors = [int(math.floor(value)) for value in scaled]
+            remainder = max(fallback - sum(floors), 0)
+            order = sorted(range(len(scaled)), key=lambda idx: scaled[idx] - floors[idx], reverse=True)
+            for idx in range(remainder):
+                floors[order[idx % len(order)]] += 1
+            contract_counts = floors
+        else:
+            base = max(fallback // len(entries), 1)
+            remainder = max(fallback - base * len(entries), 0)
+            for idx in range(len(entries)):
+                contract_counts.append(base + (1 if idx < remainder else 0))
     else:
-        contract_counts = [count if count > 0 else 1 for count in specified]
+        use_distribution = sum(specified_contracts) == 0
+        if use_distribution:
+            base = max(fallback // len(entries), 1)
+            remainder = max(fallback - base * len(entries), 0)
+            for idx in range(len(entries)):
+                contract_counts.append(base + (1 if idx < remainder else 0))
+        else:
+            contract_counts = [count if count > 0 else 1 for count in specified_contracts]
 
     for idx, entry in enumerate(entries):
         ticks = _coerce_int(
@@ -83,6 +111,9 @@ def _normalise_take_profits(
         order_id = entry.get("id") or f"tp-{idx + 1}"
         r_multiple = _coerce_float(entry.get("r_multiple"))
         price = _coerce_float(entry.get("price"))
+        contracts = contract_counts[idx] if idx < len(contract_counts) else 1
+        size_percent = percents[idx] if idx < len(percents) else None
+        computed_percent = (contracts / fallback * 100) if fallback else None
         cleaned.append(
             {
                 "id": order_id,
@@ -90,7 +121,8 @@ def _normalise_take_profits(
                 "ticks": ticks,
                 "r_multiple": r_multiple,
                 "price": price,
-                "contracts": contract_counts[idx] if idx < len(contract_counts) else 1,
+                "contracts": contracts,
+                "size_percent": size_percent if size_percent is not None else computed_percent,
             }
         )
 

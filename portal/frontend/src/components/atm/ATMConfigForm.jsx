@@ -67,22 +67,65 @@ function autoLabel(value, overrideFlag, fallback, suffix = '') {
   return `Auto (${formatNumber(resolved)}${suffix})`
 }
 
+function parseSizePercent(target, totalContracts) {
+  const candidates = [target.size_percent, target.size_pct, target.size]
+  for (const candidate of candidates) {
+    const numeric = Number(candidate)
+    if (Number.isFinite(numeric)) {
+      if (numeric >= 0 && numeric <= 1) {
+        return numeric * 100
+      }
+      return Math.max(0, numeric)
+    }
+  }
+
+  const contracts = Number(target.contracts)
+  if (Number.isFinite(contracts) && totalContracts > 0) {
+    return Math.max(0, (contracts / totalContracts) * 100)
+  }
+
+  return null
+}
+
 function normalizeTargets(template) {
   const entries = Array.isArray(template?.take_profit_orders) ? template.take_profit_orders : []
-  return entries.map((target, index) => {
+  const contractTotal = entries.reduce((sum, entry) => {
+    const numeric = Number(entry?.contracts)
+    return Number.isFinite(numeric) ? sum + Math.max(0, numeric) : sum
+  }, 0)
+
+  const normalised = entries.map((target, index) => {
     const next = { ...target }
     if (next.r_multiple === undefined || next.r_multiple === null) {
       next.r_multiple = index + 1
     }
+    if (!next.label) {
+      next.label = `TP ${index + 1}`
+    }
     next.ticks = null
     next.price = null
+    next.size_percent = parseSizePercent(next, contractTotal)
     return next
   })
+
+  if (normalised.length === 1) {
+    normalised[0] = { ...normalised[0], size_percent: 100 }
+  }
+
+  return normalised
 }
 
 export default function ATMConfigForm({ value, onChange, hidePositionSizing = false, hideRiskSettings = false, collapsible = false }) {
   const template = useMemo(() => cloneATMTemplate(value), [value])
   const targets = useMemo(() => normalizeTargets(template), [template])
+  const targetSizeTotal = useMemo(
+    () =>
+      targets.reduce((sum, target) => {
+        const numeric = Number(target.size_percent)
+        return Number.isFinite(numeric) ? sum + numeric : sum
+      }, 0),
+    [targets],
+  )
 
   const stopMode = 'r'
 
@@ -116,9 +159,9 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     const nextTargets = targets.map((target, idx) => {
       if (idx !== index) return target
       let valueToApply = rawValue
-      if (field === 'contracts') {
-        const numeric = Number(rawValue)
-        valueToApply = Number.isFinite(numeric) ? numeric : target[field]
+      if (field === 'size_percent') {
+        const numeric = rawValue === '' ? null : Number(rawValue)
+        valueToApply = Number.isFinite(numeric) ? numeric : null
       }
       if (field === 'r_multiple') {
         const numeric = rawValue === '' ? null : Number(rawValue)
@@ -129,25 +172,59 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
       }
       return { ...target, [field]: valueToApply }
     })
-    update({ take_profit_orders: nextTargets })
+    applyTargets(nextTargets)
+  }
+
+  const applyTargets = (nextTargets) => {
+    const normalised = normalizeTargets({ ...template, take_profit_orders: nextTargets })
+    if (normalised.length === 1) {
+      normalised[0] = { ...normalised[0], size_percent: 100 }
+    }
+    update({ take_profit_orders: normalised })
   }
 
   const addTarget = () => {
+    if (targets.length === 0) {
+      applyTargets([
+        {
+          id: 'tp-1',
+          label: 'TP 1',
+          r_multiple: 1,
+          size_percent: 100,
+        },
+      ])
+      return
+    }
+
+    if (targets.length === 1) {
+      applyTargets([
+        { ...targets[0], size_percent: 50 },
+        {
+          id: `tp-2`,
+          label: 'TP 2',
+          r_multiple: 2,
+          size_percent: 50,
+        },
+      ])
+      return
+    }
+
+    const remaining = Math.max(0, 100 - targetSizeTotal)
     const nextTargets = [
       ...targets,
       {
         id: `tp-${targets.length + 1}`,
-        label: `TP +${(targets.length + 1) * 20}`,
-        r_multiple: (targets.length + 1) * 1,
-        contracts: 1,
+        label: `TP ${targets.length + 1}`,
+        r_multiple: targets.length + 1,
+        size_percent: remaining || null,
       },
     ]
-    update({ take_profit_orders: nextTargets })
+    applyTargets(nextTargets)
   }
 
   const removeTarget = (index) => {
     const nextTargets = targets.filter((_, idx) => idx !== index)
-    update({ take_profit_orders: nextTargets })
+    applyTargets(nextTargets)
   }
 
   const breakeven = template.breakeven || {}
@@ -338,9 +415,6 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                     })
                   }
                 />
-                {describeRApprox(template.stop_r_multiple) && (
-                  <p className="text-[11px] text-slate-500">{describeRApprox(template.stop_r_multiple)}</p>
-                )}
               </div>
             )}
           </div>
@@ -364,6 +438,12 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
             </div>
             {(targetsOpen || !collapsible) && (
               <div className="mt-3 space-y-3">
+                {targets.length > 0 && Math.abs(targetSizeTotal - 100) > 0.001 && (
+                  <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-rose-200">
+                    <p className="font-semibold">Allocation across targets must sum to 100%.</p>
+                    <p className="mt-1 text-rose-100/80">Total: {formatNumber(targetSizeTotal)}% (must be 100%).</p>
+                  </div>
+                )}
                 {targets.length === 0 && <p className="text-sm text-slate-400">No targets yet. Add one to get started.</p>}
                 {targets.map((target, index) => (
                   <div key={target.id || index} className="rounded-xl border border-white/10 bg-black/40 p-3">
@@ -385,20 +465,20 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                           value={target.r_multiple ?? ''}
                           onChange={(event) => handleTargetChange(index, 'r_multiple', event.target.value)}
                         />
-                        {describeRApprox(target.r_multiple) && (
-                          <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(target.r_multiple)}</p>
-                        )}
                       </div>
                       <div>
-                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Size</label>
+                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Size (%)</label>
                         <input
                           className={inputClasses}
                           type="number"
                           min={0}
-                          value={target.contracts ?? ''}
-                          onChange={(event) => handleTargetChange(index, 'contracts', event.target.value)}
+                          max={100}
+                          step="0.1"
+                          value={target.size_percent ?? ''}
+                          readOnly={targets.length === 1}
+                          onChange={(event) => handleTargetChange(index, 'size_percent', event.target.value)}
                         />
-                        <p className="mt-1 text-[11px] text-slate-500">Contracts at this target.</p>
+                        <p className="mt-1 text-[11px] text-slate-500">Percent of position closed at this target.</p>
                       </div>
                     </div>
                     <div className="mt-2 flex justify-end">
