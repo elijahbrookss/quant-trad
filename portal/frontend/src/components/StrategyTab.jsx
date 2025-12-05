@@ -67,6 +67,7 @@ const INSTRUMENT_FORM_DEFAULT = {
 }
 
 const EMPTY_LIST = Object.freeze([])
+const MIN_RISK_MULTIPLIER = 0.01
 
 const RISK_DEFAULTS = Object.freeze({
   riskUnitMode: 'atr',
@@ -145,6 +146,7 @@ function StrategyFormModal({
   const [symbolsInput, setSymbolsInput] = useState('')
   const [symbolValidation, setSymbolValidation] = useState({})
   const [riskSettings, setRiskSettings] = useState(RISK_DEFAULTS)
+  const [riskErrors, setRiskErrors] = useState({})
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
   const providerOptions = useMemo(
@@ -415,6 +417,7 @@ function StrategyFormModal({
       setSymbolsInput('')
       setSymbolValidation({})
       setRiskSettings(RISK_DEFAULTS)
+      setRiskErrors({})
       return
     }
 
@@ -473,6 +476,7 @@ function StrategyFormModal({
     setSlotStatus({})
     setExpandedSlots([])
     setSymbolValidation({})
+    setRiskErrors({})
   }, [open, initialValues, templateOptions, templateKey, inflateSlots])
 
   const handleChange = (field) => (input) => {
@@ -762,6 +766,17 @@ function StrategyFormModal({
     }
 
     if (currentStep === 1) {
+      const errors = {}
+      const parsedGlobalRisk = parseNumericOr(riskSettings.globalRiskMultiplier, null)
+      if (parsedGlobalRisk === null || !Number.isFinite(parsedGlobalRisk)) {
+        errors.globalRiskMultiplier = 'Set a global risk multiplier before continuing.'
+      } else if (parsedGlobalRisk < MIN_RISK_MULTIPLIER) {
+        errors.globalRiskMultiplier = `Global risk multiplier must be at least ${MIN_RISK_MULTIPLIER}.`
+      }
+
+      setRiskErrors(errors)
+      if (Object.keys(errors).length) return
+
       setCurrentStep(2)
       return
     }
@@ -1043,9 +1058,14 @@ function StrategyFormModal({
                         className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                         type="number"
                         step="0.1"
-                        min={0}
+                        min={MIN_RISK_MULTIPLIER}
                         value={riskSettings.globalRiskMultiplier ?? ''}
-                        onChange={(event) => updateRiskSettings({ globalRiskMultiplier: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
+                        onChange={(event) => {
+                          const rawValue = event.target.value
+                          const nextValue = rawValue === '' ? '' : Math.max(MIN_RISK_MULTIPLIER, Number(rawValue) || 0)
+                          setRiskErrors((prev) => ({ ...prev, globalRiskMultiplier: undefined }))
+                          updateRiskSettings({ globalRiskMultiplier: nextValue })
+                        }}
                       />
                       <span
                         className="pointer-events-auto absolute inset-y-0 right-3 flex items-center text-[12px] text-slate-300"
@@ -1055,6 +1075,9 @@ function StrategyFormModal({
                       </span>
                     </div>
                     <p className="mt-1 text-[11px] text-slate-500">Default multiplier for every symbol.</p>
+                    {riskErrors.globalRiskMultiplier ? (
+                      <p className="mt-1 text-[11px] text-rose-400">{riskErrors.globalRiskMultiplier}</p>
+                    ) : null}
                   </div>
                 </div>
 
@@ -1097,7 +1120,6 @@ function StrategyFormModal({
                                 value={slot.risk_multiplier ?? ''}
                                 onChange={(event) => handleSlotChange(slot.uid, { risk_multiplier: event.target.value })}
                               />
-                              <span className="text-[11px] text-slate-500">Inherit if empty</span>
                             </div>
                           </div>
                           <div className="flex flex-wrap items-center gap-2 text-xs">
