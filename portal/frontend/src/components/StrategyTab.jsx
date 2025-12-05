@@ -802,7 +802,7 @@ function StrategyFormModal({
   const steps = [
     { id: 0, title: 'Basic setup', description: 'Name, timeframe, provider/venue, and symbols.' },
     { id: 1, title: 'Risk & ATR', description: 'Define ATR-based R and per-symbol overrides.' },
-    { id: 2, title: 'ATM template', description: 'Stops, targets, breakeven, and trailing.' },
+    { id: 2, title: 'ATM template', description: 'Stops, targets, stop adjustments, and trailing.' },
   ]
 
   return (
@@ -1200,7 +1200,7 @@ function StrategyFormModal({
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
-                    <p className="text-xs text-slate-500">Stops, targets, breakeven, and trailing in a compact layout.</p>
+                    <p className="text-xs text-slate-500">Stops, targets, stop adjustments, and trailing in a compact layout.</p>
                   </div>
                   <ActionButton type="button" variant="subtle" onClick={() => handleATMTemplateChange(DEFAULT_ATM_TEMPLATE)}>
                     Reset

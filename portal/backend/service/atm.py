@@ -21,6 +21,7 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
         {"id": "tp-2", "label": "TP +40", "ticks": 40, "contracts": 1},
         {"id": "tp-3", "label": "TP +60", "ticks": 60, "contracts": 1},
     ],
+    "stop_adjustments": [],
     "breakeven": {"enabled": True, "target_index": 0, "ticks": 20},
     "trailing": {
         "enabled": True,
@@ -146,6 +147,46 @@ def _extract_take_profits(payload: Mapping[str, Any]) -> Sequence[Mapping[str, A
                 ]
             return value  # type: ignore[return-value]
     return []
+
+
+def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str, Any]]:
+    source = payload.get("stop_adjustments")
+    if not isinstance(source, Sequence) or isinstance(source, (str, bytes)):
+        return []
+
+    rules: list[Dict[str, Any]] = []
+    for entry in source:
+        if not isinstance(entry, Mapping):
+            continue
+
+        trigger_type = str(entry.get("trigger_type") or "").lower()
+        action_type = str(entry.get("action_type") or "").lower()
+        if trigger_type not in {"r_multiple", "target_hit"}:
+            continue
+        if action_type not in {"move_to_breakeven", "move_to_r"}:
+            continue
+
+        trigger_value = entry.get("trigger_value")
+        if trigger_type == "r_multiple":
+            trigger_value = _coerce_float(trigger_value, 0.0)
+        if trigger_type == "target_hit" and trigger_value is None:
+            continue
+
+        action_value = None
+        if action_type == "move_to_r":
+            action_value = _coerce_float(entry.get("action_value"), 0.0)
+
+        rules.append(
+            {
+                "id": entry.get("id"),
+                "trigger_type": trigger_type,
+                "trigger_value": trigger_value,
+                "action_type": action_type,
+                "action_value": action_value if action_type == "move_to_r" else None,
+            }
+        )
+
+    return rules
 
 
 def _normalise_breakeven(
@@ -287,7 +328,30 @@ def normalise_template(
     if stop_price is not None:
         result["stop_price"] = float(stop_price)
 
-    result["breakeven"] = _normalise_breakeven(payload, result.get("breakeven", {}))
+    breakeven_config = _normalise_breakeven(payload, result.get("breakeven", {}))
+    stop_adjustments = list(_normalise_stop_adjustments(payload))
+    if stop_adjustments:
+        result["stop_adjustments"] = stop_adjustments
+    elif breakeven_config.get("enabled"):
+        trigger_type = "target_hit" if breakeven_config.get("target_index") is not None else "r_multiple"
+        trigger_value = (
+            breakeven_config.get("target_index")
+            if trigger_type == "target_hit"
+            else breakeven_config.get("r_multiple")
+        )
+        result["stop_adjustments"] = [
+            {
+                "id": "sa-1",
+                "trigger_type": trigger_type,
+                "trigger_value": trigger_value if trigger_value is not None else 0.0,
+                "action_type": "move_to_breakeven",
+                "action_value": None,
+            }
+        ]
+    elif not isinstance(result.get("stop_adjustments"), list):
+        result["stop_adjustments"] = []
+
+    result["breakeven"] = breakeven_config
     result["trailing"] = _normalise_trailing(payload, result.get("trailing", {}))
 
     def _should_override(field: str, provided: Any) -> bool:

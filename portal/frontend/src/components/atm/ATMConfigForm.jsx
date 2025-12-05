@@ -6,7 +6,7 @@ export const DEFAULT_ATM_TEMPLATE = {
   stop_r_multiple: 1,
   stop_price: null,
   take_profit_orders: [],
-  breakeven: { enabled: false },
+  stop_adjustments: [],
   trailing: { enabled: false },
   tick_size: null,
   tick_value: null,
@@ -35,6 +35,18 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
     cloned.rAtrMultiplier = DEFAULT_ATM_TEMPLATE.rAtrMultiplier
   cloned.rRiskTicks = null
   cloned.ticks_stop = null
+  if (!Array.isArray(cloned.stop_adjustments)) cloned.stop_adjustments = []
+  if (cloned.stop_adjustments.length === 0 && cloned.breakeven?.enabled) {
+    const triggerValue = cloned.breakeven?.target_index ?? cloned.breakeven?.r_multiple ?? 1
+    const triggerType = cloned.breakeven?.target_index !== undefined && cloned.breakeven?.target_index !== null ? 'target_hit' : 'r_multiple'
+    cloned.stop_adjustments.push({
+      id: 'sa-1',
+      trigger_type: triggerType,
+      trigger_value: triggerValue,
+      action_type: 'move_to_breakeven',
+      action_value: null,
+    })
+  }
   if (cloned.stop_r_multiple === undefined || cloned.stop_r_multiple === null) {
     cloned.stop_r_multiple = DEFAULT_ATM_TEMPLATE.stop_r_multiple
   }
@@ -96,6 +108,9 @@ function normalizeTargets(template) {
 
   const normalised = entries.map((target, index) => {
     const next = { ...target }
+    if (!next.id) {
+      next.id = `tp-${index + 1}`
+    }
     if (next.r_multiple === undefined || next.r_multiple === null) {
       next.r_multiple = index + 1
     }
@@ -104,7 +119,8 @@ function normalizeTargets(template) {
     }
     next.ticks = null
     next.price = null
-    next.size_percent = parseSizePercent(next, contractTotal)
+    const parsedSize = parseSizePercent(next, contractTotal)
+    next.size_percent = parsedSize === null || parsedSize === undefined ? parsedSize : Math.round(parsedSize)
     return next
   })
 
@@ -155,13 +171,20 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     update(next)
   }
 
+  const distributeEvenPercents = (count) => {
+    if (!count) return []
+    const base = Math.floor(100 / count)
+    const remainder = Math.max(0, 100 - base * count)
+    return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0))
+  }
+
   const handleTargetChange = (index, field, rawValue) => {
     const nextTargets = targets.map((target, idx) => {
       if (idx !== index) return target
       let valueToApply = rawValue
       if (field === 'size_percent') {
         const numeric = rawValue === '' ? null : Number(rawValue)
-        valueToApply = Number.isFinite(numeric) ? numeric : null
+        valueToApply = Number.isFinite(numeric) ? Math.round(numeric) : null
       }
       if (field === 'r_multiple') {
         const numeric = rawValue === '' ? null : Number(rawValue)
@@ -187,8 +210,8 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     if (normalised.length === 1) {
       normalised = [{ ...normalised[0], size_percent: 100 }]
     } else if (autoSizeAllowed && normalised.length > 1) {
-      const evenSplit = 100 / normalised.length
-      normalised = normalised.map((target) => ({ ...target, size_percent: evenSplit }))
+      const evenPercents = distributeEvenPercents(normalised.length)
+      normalised = normalised.map((target, idx) => ({ ...target, size_percent: evenPercents[idx] }))
     }
 
     update({ take_profit_orders: normalised, _meta: meta })
@@ -222,7 +245,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
 
     const meta = template._meta || {}
     const manualSizing = meta.targetSizeManual === true
-    const remaining = Math.max(0, 100 - targetSizeTotal)
+    const remaining = Math.max(0, Math.round(100 - targetSizeTotal))
     const nextTargets = [
       ...targets,
       {
@@ -240,24 +263,59 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     applyTargets(nextTargets, { manualSizing: template._meta?.targetSizeManual === true })
   }
 
-  const breakeven = template.breakeven || {}
+  const stopAdjustments = useMemo(
+    () =>
+      (Array.isArray(template.stop_adjustments) ? template.stop_adjustments : []).map((rule, index) => {
+        const triggerType = rule?.trigger_type === 'target_hit' ? 'target_hit' : 'r_multiple'
+        const actionType = rule?.action_type === 'move_to_r' ? 'move_to_r' : 'move_to_breakeven'
+        const defaultTriggerValue = triggerType === 'target_hit' ? rule?.trigger_value ?? null : Number(rule?.trigger_value ?? 1)
+        const parsedTrigger = triggerType === 'target_hit' ? defaultTriggerValue : Number.isFinite(defaultTriggerValue) ? defaultTriggerValue : 1
+        const parsedActionValue = actionType === 'move_to_r' ? Number(rule?.action_value ?? 0) : null
+
+        return {
+          id: rule?.id || `sa-${index + 1}`,
+          trigger_type: triggerType,
+          trigger_value: triggerType === 'target_hit' ? defaultTriggerValue : parsedTrigger,
+          action_type: actionType,
+          action_value: actionType === 'move_to_r' ? parsedActionValue : null,
+        }
+      }),
+    [template.stop_adjustments],
+  )
+
   const trailing = template.trailing || {}
 
-  const breakevenEnabled = breakeven.enabled === true
   const trailingEnabled = trailing.enabled === true
   const [stopOpen, setStopOpen] = useState(true)
   const [targetsOpen, setTargetsOpen] = useState(true)
   const [positionOpen, setPositionOpen] = useState(true)
   const [riskUnitOpen, setRiskUnitOpen] = useState(true)
 
-  const breakevenActivation = 'r'
   const trailingActivation = 'r'
 
-  const handleBreakevenActivation = (mode, value) => {
-    const next = { ...breakeven, enabled: true, target_index: null }
-    next.r_multiple = value ?? 1
-    next.ticks = null
-    update({ breakeven: next })
+  const updateStopAdjustments = (next) => {
+    update({ stop_adjustments: next })
+  }
+
+  const addStopAdjustment = () => {
+    const nextRule = {
+      id: `sa-${stopAdjustments.length + 1}`,
+      trigger_type: targets.length ? 'target_hit' : 'r_multiple',
+      trigger_value: targets.length ? targets[0]?.id ?? null : 1,
+      action_type: 'move_to_breakeven',
+      action_value: null,
+    }
+    updateStopAdjustments([...stopAdjustments, nextRule])
+  }
+
+  const handleStopAdjustmentChange = (index, patch) => {
+    const next = stopAdjustments.map((rule, idx) => (idx === index ? { ...rule, ...patch } : rule))
+    updateStopAdjustments(next)
+  }
+
+  const removeStopAdjustment = (index) => {
+    const next = stopAdjustments.filter((_, idx) => idx !== index)
+    updateStopAdjustments(next)
   }
 
   const handleTrailingActivation = (mode, value) => {
@@ -486,7 +544,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                           type="number"
                           min={0}
                           max={100}
-                          step="0.1"
+                          step="1"
                           value={target.size_percent ?? ''}
                           readOnly={targets.length === 1}
                           onChange={(event) => handleTargetChange(index, 'size_percent', event.target.value)}
@@ -510,73 +568,144 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Breakeven</p>
-                <p className="text-[11px] text-slate-500">Move stop to entry after predefined progress.</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop adjustment</p>
+                <p className="text-[11px] text-slate-500">Modify the protective stop after predefined progress.</p>
               </div>
-              {breakevenEnabled && (
-                <button
-                  type="button"
-                  className="text-[11px] text-slate-400 hover:text-slate-200"
-                  onClick={() => update({ breakeven: { enabled: false } })}
-                >
-                  Remove
+              {stopAdjustments.length > 0 && (
+                <button type="button" className={fieldButtonClasses} onClick={addStopAdjustment}>
+                  Add rule
                 </button>
               )}
             </div>
-            {!breakevenEnabled && (
+            {stopAdjustments.length === 0 && (
               <div className="mt-3 flex items-start justify-between rounded-xl border border-white/10 bg-black/40 p-3">
                 <div>
-                  <p className="text-sm font-medium text-slate-100">Add breakeven</p>
-                  <p className="text-[11px] text-slate-500">Move stop to entry after predefined progress.</p>
+                  <p className="text-sm font-medium text-slate-100">Add stop adjustment</p>
+                  <p className="text-[11px] text-slate-500">Modify the protective stop after predefined progress.</p>
                 </div>
-                <button
-                  type="button"
-                  className={fieldButtonClasses}
-                  onClick={() =>
-                    update({
-                      breakeven: {
-                        ...breakeven,
-                        enabled: true,
-                        target_index: null,
-                        r_multiple: breakeven.r_multiple ?? 1,
-                        ticks: null,
-                      },
-                    })
-                  }
-                >
-                  Add breakeven
+                <button type="button" className={fieldButtonClasses} onClick={addStopAdjustment}>
+                  Add stop adjustment
                 </button>
               </div>
             )}
-            {breakevenEnabled && (
+            {stopAdjustments.length > 0 && (
               <div className="mt-3 space-y-3">
-                <div className="grid gap-3 md:grid-cols-[1.2fr,0.8fr] md:items-end">
-                  <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Move stop after R multiple</label>
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      step="0.1"
-                      value={breakeven.r_multiple ?? ''}
-                      onChange={(event) => handleBreakevenActivation('r', event.target.value === '' ? null : Number(event.target.value))}
-                    />
-                    {describeRApprox(breakeven.r_multiple) && (
-                      <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(breakeven.r_multiple)}</p>
-                    )}
-                  </div>
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      className="text-[11px] text-slate-400 hover:text-slate-200"
-                      onClick={() => update({ breakeven: { enabled: false } })}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-500" title="Breakeven moves the stop to entry once your trigger is reached.">
-                  Breakeven moves the stop to entry using the first trigger that fires.
-                </p>
+                {stopAdjustments.map((rule, index) => {
+                  const triggerIsTarget = rule.trigger_type === 'target_hit'
+                  const actionIsMoveToR = rule.action_type === 'move_to_r'
+                  const targetOptions = targets.map((target) => ({ label: target.label || target.id, value: target.id || target.label }))
+
+                  return (
+                    <div key={rule.id || index} className="space-y-3 rounded-xl border border-white/10 bg-black/40 p-3">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trigger</p>
+                          <div>
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trigger type</label>
+                            <select
+                              className={inputClasses}
+                              value={rule.trigger_type}
+                              onChange={(event) => {
+                                const nextType = event.target.value === 'target_hit' && targets.length === 0 ? 'r_multiple' : event.target.value
+                                const nextValue =
+                                  nextType === 'target_hit'
+                                    ? targets[0]?.id ?? null
+                                    : rule.trigger_type === 'target_hit'
+                                      ? 1
+                                      : rule.trigger_value ?? 1
+                                handleStopAdjustmentChange(index, { trigger_type: nextType, trigger_value: nextValue })
+                              }}
+                            >
+                              <option value="r_multiple">R multiple</option>
+                              <option value="target_hit" disabled={targets.length === 0}>
+                                Target hit
+                              </option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trigger value</label>
+                            {triggerIsTarget ? (
+                              <select
+                                className={inputClasses}
+                                value={(rule.trigger_value ?? '') as string}
+                                disabled={targets.length === 0}
+                                onChange={(event) => handleStopAdjustmentChange(index, { trigger_value: event.target.value })}
+                              >
+                                {targets.length === 0 && <option>No targets available</option>}
+                                {targetOptions.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                className={inputClasses}
+                                type="number"
+                                step="0.1"
+                                value={rule.trigger_value ?? ''}
+                                onChange={(event) => {
+                                  const numeric = event.target.value === '' ? null : Number(event.target.value)
+                                  handleStopAdjustmentChange(index, {
+                                    trigger_value: Number.isFinite(numeric) ? numeric : rule.trigger_value,
+                                  })
+                                }}
+                              />
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Action</p>
+                          <div>
+                            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Action type</label>
+                            <select
+                              className={inputClasses}
+                              value={rule.action_type}
+                              onChange={(event) => {
+                                const nextType = event.target.value
+                                handleStopAdjustmentChange(index, {
+                                  action_type: nextType,
+                                  action_value: nextType === 'move_to_r' ? rule.action_value ?? 0 : null,
+                                })
+                              }}
+                            >
+                              <option value="move_to_breakeven">Move to breakeven (0R)</option>
+                              <option value="move_to_r">Move to X R</option>
+                            </select>
+                          </div>
+                          {actionIsMoveToR && (
+                            <div>
+                              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Action value (R)</label>
+                              <input
+                                className={inputClasses}
+                                type="number"
+                                step="0.1"
+                                value={rule.action_value ?? ''}
+                                onChange={(event) => {
+                                  const numeric = event.target.value === '' ? null : Number(event.target.value)
+                                  handleStopAdjustmentChange(index, {
+                                    action_value: Number.isFinite(numeric) ? numeric : rule.action_value,
+                                  })
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          className="text-[11px] text-slate-400 hover:text-slate-200"
+                          onClick={() => removeStopAdjustment(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>

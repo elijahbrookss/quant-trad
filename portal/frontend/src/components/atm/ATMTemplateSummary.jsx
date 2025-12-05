@@ -14,6 +14,19 @@ function formatNumber(value) {
   return numeric.toPrecision(4)
 }
 
+function describeStopAdjustment(rule, targetLookup) {
+  if (!rule) return ''
+  const trigger =
+    rule.trigger_type === 'target_hit'
+      ? `After ${targetLookup[rule.trigger_value] || 'target'}`
+      : `After ${formatNumber(rule.trigger_value)} R`
+  const action =
+    rule.action_type === 'move_to_r'
+      ? `Move stop to ${formatNumber(rule.action_value ?? 0)} R`
+      : 'Move stop to breakeven (0R)'
+  return `${trigger} → ${action}`
+}
+
 function renderTargets(targets) {
   if (!targets.length) {
     return (
@@ -52,9 +65,16 @@ function renderTargets(targets) {
 export default function ATMTemplateSummary({ template }) {
   const config = cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE)
   const targets = Array.isArray(config.take_profit_orders) ? config.take_profit_orders : []
-  const breakeven = config.breakeven || {}
+  const stopAdjustments = Array.isArray(config.stop_adjustments) ? config.stop_adjustments : []
   const trailing = config.trailing || {}
   const meta = config._meta || {}
+
+  const targetLabels = targets.reduce((acc, target, index) => {
+    const label = target.label || `TP ${index + 1}`
+    const key = target?.id || label
+    acc[key] = label
+    return acc
+  }, {})
 
   const resolvedTickSize = config.tick_size ?? meta.tick_size ?? null
   const latestAtrValue = meta.latest_atr ?? meta.atr_preview ?? meta.atr ?? null
@@ -108,18 +128,19 @@ export default function ATMTemplateSummary({ template }) {
           </p>
         </div>
         <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Breakeven</p>
-          <p className="text-sm text-white">
-            {breakeven?.enabled === false
-              ? 'Disabled'
-              : breakeven?.target_index !== undefined && breakeven?.target_index !== null
-                ? `After target ${Number(breakeven.target_index) + 1}`
-                : breakeven?.r_multiple !== null && breakeven?.r_multiple !== undefined
-                  ? `${formatNumber(breakeven.r_multiple)} R`
-                  : breakeven?.ticks
-                    ? `${formatNumber(breakeven.ticks)} ticks`
-                    : 'Manual'}
-          </p>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Stop adjustments</p>
+          {stopAdjustments.length ? (
+            <ul className="mt-1 space-y-1 text-sm text-white">
+              {stopAdjustments.map((rule, index) => (
+                <li key={rule.id || index}>
+                  <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Rule {index + 1}</p>
+                  <p>{describeStopAdjustment(rule, targetLabels)}</p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-400">None</p>
+          )}
         </div>
       </div>
 
