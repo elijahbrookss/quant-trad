@@ -148,6 +148,44 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+@dataclass
+class InstrumentSlot:
+    """Represents a symbol attached to a strategy along with runtime hints."""
+
+    symbol: str
+    enabled: bool = True
+    risk_multiplier: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a serialisable representation of the slot."""
+
+        payload: Dict[str, Any] = {
+            "symbol": self.symbol,
+            "enabled": bool(self.enabled),
+        }
+        if self.risk_multiplier is not None:
+            payload["risk_multiplier"] = float(self.risk_multiplier)
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
+
+    @staticmethod
+    def from_any(value: Any) -> "InstrumentSlot":
+        """Normalise raw payloads into :class:`InstrumentSlot` instances."""
+
+        if isinstance(value, InstrumentSlot):
+            return value
+        if isinstance(value, Mapping):
+            return InstrumentSlot(
+                symbol=str(value.get("symbol") or "").strip(),
+                enabled=bool(value.get("enabled", True)),
+                risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
+                metadata=dict(value.get("metadata") or {}),
+            )
+        return InstrumentSlot(symbol=str(value or "").strip())
+
+
 def _promote_signal_metadata(signal: MutableMapping[str, Any]) -> None:
     """Lift useful metadata fields to the top level for easier inspection."""
 
@@ -689,6 +727,7 @@ class StrategyRule:
             "direction": direction,
             "reason": reason,
         }
+
 
 
 def _default_atm_template() -> Dict[str, Any]:
@@ -1629,41 +1668,4 @@ def delete_symbol_preset_service(preset_id: str) -> None:
     """Delete a stored preset."""
 
     delete_symbol_preset(preset_id)
-
-@dataclass
-class InstrumentSlot:
-    """Represents a symbol attached to a strategy along with runtime hints."""
-
-    symbol: str
-    enabled: bool = True
-    risk_multiplier: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a serialisable representation of the slot."""
-
-        payload: Dict[str, Any] = {
-            "symbol": self.symbol,
-            "enabled": bool(self.enabled),
-        }
-        if self.risk_multiplier is not None:
-            payload["risk_multiplier"] = float(self.risk_multiplier)
-        if self.metadata:
-            payload["metadata"] = dict(self.metadata)
-        return payload
-
-    @staticmethod
-    def from_any(value: Any) -> "InstrumentSlot":
-        """Normalise raw payloads into :class:`InstrumentSlot` instances."""
-
-        if isinstance(value, InstrumentSlot):
-            return value
-        if isinstance(value, Mapping):
-            return InstrumentSlot(
-                symbol=str(value.get("symbol") or "").strip(),
-                enabled=bool(value.get("enabled", True)),
-                risk_multiplier=float(value["risk_multiplier"]) if value.get("risk_multiplier") is not None else None,
-                metadata=dict(value.get("metadata") or {}),
-            )
-        return InstrumentSlot(symbol=str(value or "").strip())
 
