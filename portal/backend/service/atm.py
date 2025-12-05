@@ -169,12 +169,16 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         trigger_value = entry.get("trigger_value")
         if trigger_type == "r_multiple":
             trigger_value = _coerce_float(trigger_value, 0.0)
+            if trigger_value is None or trigger_value <= 0:
+                continue
         if trigger_type == "target_hit" and trigger_value is None:
             continue
 
         action_value = None
         if action_type == "move_to_r":
             action_value = _coerce_float(entry.get("action_value"), 0.0)
+            if action_value is None or action_value <= 0:
+                continue
 
         rules.append(
             {

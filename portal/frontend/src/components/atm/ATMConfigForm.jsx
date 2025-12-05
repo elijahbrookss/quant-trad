@@ -286,6 +286,25 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   const trailing = template.trailing || {}
 
   const trailingEnabled = trailing.enabled === true
+  const maxTargetRMultiple = useMemo(
+    () =>
+      targets.reduce((maxR, target) => {
+        const numeric = Number(target.r_multiple)
+        if (!Number.isFinite(numeric)) return maxR
+        return Math.max(maxR, numeric)
+      }, 0),
+    [targets],
+  )
+  const trailingActivationWarning = useMemo(() => {
+    const activation = Number(trailing?.r_multiple)
+    return (
+      trailingEnabled &&
+      Number.isFinite(activation) &&
+      activation > 0 &&
+      maxTargetRMultiple > 0 &&
+      activation > maxTargetRMultiple
+    )
+  }, [trailing?.r_multiple, trailingEnabled, maxTargetRMultiple])
   const [stopOpen, setStopOpen] = useState(true)
   const [targetsOpen, setTargetsOpen] = useState(true)
   const [positionOpen, setPositionOpen] = useState(true)
@@ -309,7 +328,29 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   }
 
   const handleStopAdjustmentChange = (index, patch) => {
-    const next = stopAdjustments.map((rule, idx) => (idx === index ? { ...rule, ...patch } : rule))
+    const next = stopAdjustments.map((rule, idx) => {
+      if (idx !== index) return rule
+      const updated = { ...rule, ...patch }
+
+      if (updated.trigger_type === 'r_multiple') {
+        const numeric = Number(updated.trigger_value)
+        updated.trigger_value = Number.isFinite(numeric) && numeric > 0 ? numeric : ''
+      }
+
+      if (updated.trigger_type === 'target_hit' && !targets.length) {
+        updated.trigger_type = 'r_multiple'
+        updated.trigger_value = 1
+      }
+
+      if (updated.action_type === 'move_to_r') {
+        const numeric = Number(updated.action_value)
+        updated.action_value = Number.isFinite(numeric) && numeric > 0 ? numeric : ''
+      } else {
+        updated.action_value = null
+      }
+
+      return updated
+    })
     updateStopAdjustments(next)
   }
 
@@ -570,6 +611,9 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop adjustment</p>
                 <p className="text-[11px] text-slate-500">Modify the protective stop after predefined progress.</p>
+                <p className="text-[11px] text-slate-500">
+                  Stop adjustments apply until a trailing stop activates. After that, trailing controls all future stop movement.
+                </p>
               </div>
               {stopAdjustments.length > 0 && (
                 <button type="button" className={fieldButtonClasses} onClick={addStopAdjustment}>
@@ -643,13 +687,13 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                                 className={inputClasses}
                                 type="number"
                                 step="0.1"
+                                min={0.01}
                                 value={rule.trigger_value ?? ''}
-                                onChange={(event) => {
-                                  const numeric = event.target.value === '' ? null : Number(event.target.value)
+                                onChange={(event) =>
                                   handleStopAdjustmentChange(index, {
-                                    trigger_value: Number.isFinite(numeric) ? numeric : rule.trigger_value,
+                                    trigger_value: event.target.value === '' ? '' : Number(event.target.value),
                                   })
-                                }}
+                                }
                               />
                             )}
                           </div>
@@ -674,23 +718,23 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                               <option value="move_to_r">Move to X R</option>
                             </select>
                           </div>
-                          {actionIsMoveToR && (
-                            <div>
-                              <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Action value (R)</label>
-                              <input
-                                className={inputClasses}
-                                type="number"
-                                step="0.1"
-                                value={rule.action_value ?? ''}
-                                onChange={(event) => {
-                                  const numeric = event.target.value === '' ? null : Number(event.target.value)
-                                  handleStopAdjustmentChange(index, {
-                                    action_value: Number.isFinite(numeric) ? numeric : rule.action_value,
-                                  })
-                                }}
-                              />
-                            </div>
-                          )}
+                            {actionIsMoveToR && (
+                              <div>
+                                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Action value (R)</label>
+                                <input
+                                  className={inputClasses}
+                                  type="number"
+                                  step="0.1"
+                                  min={0.01}
+                                  value={rule.action_value ?? ''}
+                                  onChange={(event) =>
+                                    handleStopAdjustmentChange(index, {
+                                      action_value: event.target.value === '' ? '' : Number(event.target.value),
+                                    })
+                                  }
+                                />
+                              </div>
+                            )}
                         </div>
                       </div>
 
@@ -715,6 +759,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
                 <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
+                <p className="text-[11px] text-slate-500">Trailing takes over once active and ignores remaining stop adjustments.</p>
               </div>
               {trailingEnabled && (
                 <button
@@ -768,6 +813,11 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                     />
                     {describeRApprox(trailing.r_multiple) && (
                       <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(trailing.r_multiple)}</p>
+                    )}
+                    {trailingActivationWarning && (
+                      <p className="mt-1 text-[11px] text-amber-400">
+                        Trailing stop may never activate if all size is closed by the last target.
+                      </p>
                     )}
                   </div>
                   <div className="flex justify-end">

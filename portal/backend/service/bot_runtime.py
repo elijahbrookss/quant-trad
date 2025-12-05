@@ -171,6 +171,7 @@ class Leg:
     exit_time: Optional[str] = None
     contracts: int = 1
     pnl: float = 0.0
+    leg_id: Optional[str] = None
 
     def serialize(self) -> Dict[str, Optional[float]]:
         return {
@@ -182,6 +183,7 @@ class Leg:
             "exit_time": self.exit_time,
             "contracts": self.contracts,
             "pnl": round(self.pnl, 4),
+            "id": self.leg_id,
         }
 
 
@@ -221,6 +223,7 @@ class LadderPosition:
     trailing_active: bool = False
     trailing_atr_multiple: float = 0.0
     pre_entry_context: Optional[Dict[str, Optional[float]]] = None
+    stop_adjustments: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -260,6 +263,7 @@ class LadderPosition:
                         {
                             "type": "target",
                             "leg": leg.name,
+                            "leg_id": leg.leg_id,
                             "trade_id": self.trade_id,
                             "price": round(leg.target_price, 4),
                             "time": leg.exit_time,
@@ -305,11 +309,52 @@ class LadderPosition:
         return events
 
     def _maybe_move_breakeven(self) -> None:
-        if self.moved_to_breakeven:
+        if self.moved_to_breakeven or self.trailing_active:
             return
         if self.breakeven_trigger_ticks and self.mfe_ticks >= self.breakeven_trigger_ticks:
             self.stop_price = risk_math.clamp_stop(self.stop_price, self.entry_price, self.direction)
             self.moved_to_breakeven = True
+
+    def _maybe_apply_stop_adjustments(self) -> None:
+        """Apply one-time stop adjustments while trailing is inactive.
+
+        Stop adjustments are evaluated on every bar until trailing activates; once
+        trailing is active this method is skipped to honor the priority rule.
+        """
+
+        if self.trailing_active or not self.stop_adjustments:
+            return
+
+        triggered_targets = {leg.leg_id for leg in self.legs if leg.status == "target" and leg.leg_id}
+
+        for rule in self.stop_adjustments:
+            if rule.get("fired"):
+                continue
+
+            if rule.get("trigger_type") == "r_multiple":
+                trigger_ticks = rule.get("trigger_ticks")
+                if trigger_ticks in (None, 0) or self.mfe_ticks < float(trigger_ticks):
+                    continue
+            else:
+                target_id = rule.get("trigger_target_id")
+                if not target_id or target_id not in triggered_targets:
+                    continue
+
+            candidate = None
+            if rule.get("action_type") == "move_to_breakeven":
+                candidate = self.entry_price
+            elif rule.get("action_type") == "move_to_r":
+                action_r = rule.get("action_r")
+                if action_r not in (None, 0) and self.r_value not in (None, 0):
+                    candidate = risk_math.price_from_r(self.entry_price, self.direction, float(self.r_value), float(action_r))
+
+            if candidate is None:
+                continue
+
+            self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
+            rule["fired"] = True
+            if candidate == self.entry_price:
+                self.moved_to_breakeven = True
 
     def _maybe_trail_stop(self) -> None:
         if self.trailing_distance_ticks in (None, 0):
@@ -351,6 +396,7 @@ class LadderPosition:
                             "time": leg.exit_time,
                             "currency": self.quote_currency,
                             "leg": leg.name,
+                            "leg_id": leg.leg_id,
                             "contracts": leg.contracts,
                             "pnl": round(pnl, 4),
                             "ticks": tick_distance,
@@ -369,6 +415,7 @@ class LadderPosition:
         self._update_excursions(candle)
         leg_events = self._apply_leg_fills(candle)
         events.extend(leg_events)
+        self._maybe_apply_stop_adjustments()
         self._maybe_move_breakeven()
         self._maybe_trail_stop()
         stop_events = self._apply_stop(candle)
@@ -495,6 +542,7 @@ class LadderRiskEngine:
         self.r_multiple = float(self.template.get("atr_r_multiple") or 1.0)
         self.breakeven_config: Dict[str, Any] = dict(self.template.get("breakeven") or {})
         self.trailing_config: Dict[str, Any] = dict(self.template.get("trailing") or {})
+        self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
         config_contract = _coerce_float(self.template.get("contract_size"))
         instrument_contract = _coerce_float(self.instrument.get("contract_size"))
         self.contract_size = (
@@ -687,6 +735,60 @@ class LadderRiskEngine:
             scaled.append(payload)
         return scaled
 
+    def _build_stop_adjustments(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> List[Dict[str, Any]]:
+        """Normalise stop adjustment rules for runtime evaluation."""
+
+        runtime_rules: List[Dict[str, Any]] = []
+        if r_ticks in (None, 0):
+            return runtime_rules
+
+        for idx, entry in enumerate(self.stop_adjustments_config):
+            trigger_type = str(entry.get("trigger_type") or "").lower()
+            action_type = str(entry.get("action_type") or "").lower()
+            if trigger_type not in {"r_multiple", "target_hit"}:
+                continue
+            if action_type not in {"move_to_breakeven", "move_to_r"}:
+                continue
+
+            trigger_ticks: Optional[float] = None
+            trigger_target_id: Optional[str] = None
+
+            if trigger_type == "r_multiple":
+                trigger_value = _coerce_float(entry.get("trigger_value"))
+                if trigger_value in (None, 0) or trigger_value <= 0:
+                    continue
+                trigger_ticks = float(trigger_value) * float(r_ticks)
+            else:
+                desired = entry.get("trigger_value") or entry.get("trigger_target_id") or entry.get("target_id")
+                if desired is None:
+                    continue
+                for leg in legs:
+                    if str(leg.leg_id or leg.name) == str(desired):
+                        trigger_target_id = leg.leg_id or leg.name
+                        break
+                if trigger_target_id is None:
+                    continue
+
+            action_r: Optional[float] = None
+            if action_type == "move_to_r":
+                action_r = _coerce_float(entry.get("action_value"))
+                if action_r in (None, 0) or action_r <= 0:
+                    continue
+
+            runtime_rules.append(
+                {
+                    "id": entry.get("id") or f"sa-{idx + 1}",
+                    "trigger_type": trigger_type,
+                    "trigger_ticks": trigger_ticks,
+                    "trigger_target_id": trigger_target_id,
+                    "action_type": action_type,
+                    "action_r": action_r,
+                    "fired": False,
+                }
+            )
+
+        return runtime_rules
+
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         config = self.breakeven_config
         if config.get("enabled") is False:
@@ -803,9 +905,11 @@ class LadderRiskEngine:
                     ticks=target_ticks or 0,
                     target_price=target_price,
                     contracts=order.get("contracts", 1),
+                    leg_id=order.get("id") or order.get("label") or f"tp-{idx + 1}",
                 )
             )
-        breakeven_ticks = self._breakeven_threshold(legs, r_ticks)
+        runtime_stop_adjustments = self._build_stop_adjustments(legs, r_ticks)
+        breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, r_ticks)
         trailing_activation_ticks = self._trailing_activation_ticks(legs, r_ticks)
         trailing_distance_ticks = self._trailing_distance_ticks(atr_at_entry)
         position = LadderPosition(
@@ -829,6 +933,7 @@ class LadderRiskEngine:
             trailing_distance_ticks=trailing_distance_ticks,
             trailing_atr_multiple=float(self.trailing_config.get("atr_multiplier") or 0.0),
             pre_entry_context=getattr(candle, "lookback_15", None),
+            stop_adjustments=runtime_stop_adjustments,
         )
         position.register_entry_fee()
         return position
