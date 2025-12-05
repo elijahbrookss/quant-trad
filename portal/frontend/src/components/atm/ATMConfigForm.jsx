@@ -573,7 +573,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                         return base ? distance / base : distance
                       })() ?? ''}
                       onChange={(event) => {
-                        const base = template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier || 1
+                        const base = template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier ?? 1
                         const desiredR = event.target.value === '' ? null : Number(event.target.value)
                         update({
                           trailing: {
