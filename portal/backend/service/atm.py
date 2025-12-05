@@ -26,9 +26,12 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "trailing": {
         "enabled": True,
         "target_index": 1,
+        "activation_type": "r_multiple",
         "ticks": None,
         "atr_multiplier": 1.0,
         "atr_period": 14,
+        "r_multiple": 1.0,
+        "target_id": None,
     },
 }
 
@@ -229,8 +232,18 @@ def _normalise_trailing(
     if isinstance(source, Mapping):
         if "enabled" in source:
             config["enabled"] = bool(source.get("enabled"))
+        activation_type = str(
+            source.get("activation_type")
+            or ("target_hit" if source.get("target_index") is not None else "r_multiple")
+            or "r_multiple"
+        ).lower()
+        if activation_type not in {"r_multiple", "target_hit"}:
+            activation_type = "r_multiple"
+        config["activation_type"] = activation_type
         if source.get("target_index") is not None:
             config["target_index"] = max(_coerce_int(source.get("target_index"), 0) or 0, 0)
+        if source.get("target_id") is not None:
+            config["target_id"] = source.get("target_id")
         if source.get("ticks") is not None:
             config["ticks"] = max(_coerce_int(source.get("ticks"), 0) or 0, 0)
         if source.get("atr_multiplier") is not None:
@@ -245,6 +258,7 @@ def _normalise_trailing(
     legacy_target = _coerce_int(payload.get("trail_after_target_index"))
     if legacy_target is not None:
         config["target_index"] = max(legacy_target, 0)
+        config["activation_type"] = "target_hit"
     legacy_ticks = _coerce_int(payload.get("trail_after_ticks"))
     if legacy_ticks is not None:
         config["ticks"] = max(legacy_ticks, 0)

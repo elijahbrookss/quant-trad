@@ -7,7 +7,7 @@ export const DEFAULT_ATM_TEMPLATE = {
   stop_price: null,
   take_profit_orders: [],
   stop_adjustments: [],
-  trailing: { enabled: false },
+  trailing: { enabled: false, activation_type: 'r_multiple', r_multiple: 1, target_id: null },
   tick_size: null,
   tick_value: null,
   contract_size: null,
@@ -49,6 +49,15 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   }
   if (cloned.stop_r_multiple === undefined || cloned.stop_r_multiple === null) {
     cloned.stop_r_multiple = DEFAULT_ATM_TEMPLATE.stop_r_multiple
+  }
+  if (!cloned.trailing || typeof cloned.trailing !== 'object') {
+    cloned.trailing = { ...DEFAULT_ATM_TEMPLATE.trailing }
+  } else {
+    if (cloned.trailing.activation_type !== 'target_hit') cloned.trailing.activation_type = 'r_multiple'
+    if (cloned.trailing.r_multiple === undefined || cloned.trailing.r_multiple === null) {
+      cloned.trailing.r_multiple = DEFAULT_ATM_TEMPLATE.trailing.r_multiple
+    }
+    if (cloned.trailing.target_id === undefined) cloned.trailing.target_id = null
   }
   if (cloned.global_risk_multiplier === undefined) cloned.global_risk_multiplier = DEFAULT_ATM_TEMPLATE.global_risk_multiplier
   if (cloned.base_risk_per_trade === undefined) cloned.base_risk_per_trade = DEFAULT_ATM_TEMPLATE.base_risk_per_trade
@@ -286,6 +295,16 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   const trailing = template.trailing || {}
 
   const trailingEnabled = trailing.enabled === true
+  const trailingActivationType = trailing.activation_type === 'target_hit' ? 'target_hit' : 'r_multiple'
+  const trailingTargetOptions = useMemo(
+    () => targets.map((target) => ({ label: target.label || target.id, value: target.id || target.label })),
+    [targets],
+  )
+  const trailingActivationTarget = useMemo(() => {
+    const desired = trailing.target_id ?? trailing.target_index ?? trailing.targetId
+    return trailingTargetOptions.find((option) => String(option.value) === String(desired)) || null
+  }, [trailing.target_id, trailing.target_index, trailing.targetId, trailingTargetOptions])
+
   const maxTargetRMultiple = useMemo(
     () =>
       targets.reduce((maxR, target) => {
@@ -296,21 +315,23 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     [targets],
   )
   const trailingActivationWarning = useMemo(() => {
-    const activation = Number(trailing?.r_multiple)
-    return (
-      trailingEnabled &&
-      Number.isFinite(activation) &&
-      activation > 0 &&
-      maxTargetRMultiple > 0 &&
-      activation > maxTargetRMultiple
-    )
-  }, [trailing?.r_multiple, trailingEnabled, maxTargetRMultiple])
+    const activation = (() => {
+      if (!trailingEnabled) return null
+      if (trailingActivationType === 'target_hit') {
+        const match = targets.find((target) => String(target.id || target.label) === String(trailingActivationTarget?.value))
+        const value = Number(match?.r_multiple)
+        return Number.isFinite(value) ? value : null
+      }
+      const value = Number(trailing?.r_multiple)
+      return Number.isFinite(value) ? value : null
+    })()
+
+    return activation !== null && activation > 0 && maxTargetRMultiple > 0 && activation > maxTargetRMultiple
+  }, [trailing?.r_multiple, trailingActivationType, trailingActivationTarget?.value, trailingEnabled, maxTargetRMultiple, targets])
   const [stopOpen, setStopOpen] = useState(true)
   const [targetsOpen, setTargetsOpen] = useState(true)
   const [positionOpen, setPositionOpen] = useState(true)
   const [riskUnitOpen, setRiskUnitOpen] = useState(true)
-
-  const trailingActivation = 'r'
 
   const updateStopAdjustments = (next) => {
     update({ stop_adjustments: next })
@@ -359,37 +380,50 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     updateStopAdjustments(next)
   }
 
-  const handleTrailingActivation = (mode, value) => {
-    const next = { ...trailing, enabled: true, target_index: null }
-    next.r_multiple = value ?? 1
-    next.ticks = null
-    update({ trailing: next })
+  const updateTrailing = (patch = {}) => {
+    update({ trailing: { ...DEFAULT_ATM_TEMPLATE.trailing, ...trailing, ...patch } })
+  }
+
+  const handleTrailingActivationTypeChange = (nextType) => {
+    const type = nextType === 'target_hit' && targets.length ? 'target_hit' : 'r_multiple'
+    if (type === 'target_hit') {
+      const selected = trailingActivationTarget || trailingTargetOptions[0] || null
+      const nextIndex = selected
+        ? targets.findIndex((target) => String(target.id || target.label) === String(selected.value))
+        : null
+      updateTrailing({
+        activation_type: 'target_hit',
+        target_id: selected?.value ?? null,
+        target_index: nextIndex >= 0 ? nextIndex : null,
+        r_multiple: null,
+        enabled: true,
+      })
+      return
+    }
+
+    updateTrailing({ activation_type: 'r_multiple', target_id: null, target_index: null, r_multiple: trailing.r_multiple ?? 1, enabled: true })
+  }
+
+  const handleTrailingActivationValueChange = (value) => {
+    const numeric = value === '' ? null : Number(value)
+    updateTrailing({ activation_type: 'r_multiple', target_id: null, target_index: null, r_multiple: numeric, enabled: true })
+  }
+
+  const handleTrailingTargetChange = (targetValue) => {
+    const index = targets.findIndex((target) => String(target.id || target.label) === String(targetValue))
+    updateTrailing({
+      activation_type: 'target_hit',
+      target_id: targetValue,
+      target_index: index >= 0 ? index : null,
+      r_multiple: null,
+      enabled: true,
+    })
   }
 
   const resolvedContractSize = template.contract_size ?? template._meta?.contract_size ?? 1
 
   const latestAtrValue =
     template._meta?.latest_atr ?? template._meta?.atr_preview ?? template._meta?.atr ?? template._meta?.atr_at_entry ?? null
-
-  const oneR = useMemo(() => {
-    const atr = Number(latestAtrValue)
-    if (!Number.isFinite(atr)) {
-      return { price: null }
-    }
-    const priceMove = Number(template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier) * atr
-    return { price: priceMove }
-  }, [latestAtrValue, template.rAtrMultiplier])
-
-  const describeRApprox = (multiple = 1) => {
-    if (!multiple || !oneR) return ''
-    const numericMultiple = Number(multiple)
-    if (!Number.isFinite(numericMultiple)) return ''
-    const price = Number.isFinite(oneR.price) ? numericMultiple * Number(oneR.price) : null
-    const parts = []
-    if (price !== null) parts.push(`${formatNumber(price)} price move`)
-    if (!parts.length) return ''
-    return `≈ ${parts.join(' / ')}`
-  }
 
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm">
@@ -765,7 +799,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                 <button
                   type="button"
                   className="text-[11px] text-slate-400 hover:text-slate-200"
-                  onClick={() => update({ trailing: { enabled: false } })}
+                  onClick={() => updateTrailing({ enabled: false })}
                 >
                   Remove
                 </button>
@@ -781,17 +815,15 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                   type="button"
                   className={fieldButtonClasses}
                   onClick={() =>
-                    update({
-                      trailing: {
-                        ...trailing,
-                        enabled: true,
-                        target_index: null,
-                        r_multiple: trailing.r_multiple ?? 1,
-                        ticks: null,
-                        atr_multiplier:
-                          trailing.atr_multiplier ?? (template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier),
-                        atr_period: template.rAtrPeriod ?? DEFAULT_ATM_TEMPLATE.rAtrPeriod,
-                      },
+                    updateTrailing({
+                      enabled: true,
+                      activation_type: 'r_multiple',
+                      target_id: null,
+                      target_index: null,
+                      r_multiple: trailing.r_multiple ?? 1,
+                      atr_multiplier:
+                        trailing.atr_multiplier ?? (template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier),
+                      atr_period: template.rAtrPeriod ?? DEFAULT_ATM_TEMPLATE.rAtrPeriod,
                     })
                   }
                 >
@@ -801,18 +833,46 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
             )}
             {trailingEnabled && (
               <div className="mt-3 space-y-3">
-                <div className="grid gap-3 md:grid-cols-[1.2fr,0.8fr] md:items-end">
+                <div className="grid gap-3 md:grid-cols-[1.1fr,1.1fr,0.6fr] md:items-end">
                   <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activate after R multiple</label>
-                    <input
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation type</label>
+                    <select
                       className={inputClasses}
-                      type="number"
-                      step="0.1"
-                      value={trailing.r_multiple ?? ''}
-                      onChange={(event) => handleTrailingActivation('r', event.target.value === '' ? null : Number(event.target.value))}
-                    />
-                    {describeRApprox(trailing.r_multiple) && (
-                      <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(trailing.r_multiple)}</p>
+                      value={trailingActivationType}
+                      onChange={(event) => handleTrailingActivationTypeChange(event.target.value)}
+                    >
+                      <option value="r_multiple">R multiple</option>
+                      <option value="target_hit" disabled={targets.length === 0}>
+                        Target hit
+                      </option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation value</label>
+                    {trailingActivationType === 'target_hit' ? (
+                      <select
+                        className={inputClasses}
+                        value={trailingActivationTarget?.value ?? ''}
+                        disabled={targets.length === 0}
+                        onChange={(event) => handleTrailingTargetChange(event.target.value)}
+                      >
+                        <option value="" disabled>
+                          {targets.length ? 'Select target' : 'Add a target first'}
+                        </option>
+                        {trailingTargetOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        className={inputClasses}
+                        type="number"
+                        step="0.1"
+                        value={trailing.r_multiple ?? ''}
+                        onChange={(event) => handleTrailingActivationValueChange(event.target.value)}
+                      />
                     )}
                     {trailingActivationWarning && (
                       <p className="mt-1 text-[11px] text-amber-400">
@@ -824,7 +884,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                     <button
                       type="button"
                       className="text-[11px] text-slate-400 hover:text-slate-200"
-                      onClick={() => update({ trailing: { enabled: false } })}
+                      onClick={() => updateTrailing({ enabled: false })}
                     >
                       Remove
                     </button>

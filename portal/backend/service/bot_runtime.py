@@ -812,14 +812,29 @@ class LadderRiskEngine:
         config = self.trailing_config or {}
         if not config.get("enabled"):
             return None
-        if config.get("target_index") is not None and legs:
-            index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
-            target_ticks = legs[index].ticks
-            if target_ticks is not None:
-                return float(target_ticks)
+        activation_type = str(
+            config.get("activation_type")
+            or ("target_hit" if config.get("target_index") is not None else "r_multiple")
+            or "r_multiple"
+        ).lower()
+
+        if activation_type == "target_hit":
+            desired = config.get("target_id") or config.get("targetId")
+            if desired is not None:
+                for leg in legs:
+                    if str(leg.leg_id or leg.name) == str(desired):
+                        return float(leg.ticks)
+            if config.get("target_index") is not None and legs:
+                index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
+                target_ticks = legs[index].ticks
+                if target_ticks is not None:
+                    return float(target_ticks)
+            return None
+
         ticks = _coerce_float(config.get("ticks"))
         if ticks and ticks > 0:
             return float(ticks)
+
         r_multiple = _coerce_float(config.get("r_multiple"))
         if r_multiple is not None and r_ticks:
             return float(r_multiple) * float(r_ticks)
