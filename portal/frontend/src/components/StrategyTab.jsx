@@ -68,6 +68,7 @@ const INSTRUMENT_FORM_DEFAULT = {
 
 const EMPTY_LIST = Object.freeze([])
 const MIN_RISK_MULTIPLIER = 0.01
+const MIN_BASE_RISK = 1
 
 const RISK_DEFAULTS = Object.freeze({
   riskUnitMode: 'atr',
@@ -452,7 +453,10 @@ function StrategyFormModal({
           initialValues.atm_template?.risk_unit_mode || initialValues.atm_template?.rMode || prev.riskUnitMode,
         atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
         atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
-        baseRiskPerTrade: initialValues.atm_template?.base_risk_per_trade ?? prev.baseRiskPerTrade,
+        baseRiskPerTrade:
+          initialValues.atm_template?.base_risk_per_trade !== undefined
+            ? Math.max(MIN_BASE_RISK, initialValues.atm_template?.base_risk_per_trade || MIN_BASE_RISK)
+            : prev.baseRiskPerTrade,
         riskTicks:
           initialValues.atm_template?.ticks_stop ?? initialValues.atm_template?.rRiskTicks ?? prev.riskTicks,
         globalRiskMultiplier:
@@ -562,8 +566,14 @@ function StrategyFormModal({
   )
 
   const updateRiskSettings = useCallback((patch) => {
+    const normalizedPatch = { ...patch }
+    if ('baseRiskPerTrade' in patch) {
+      const rawBaseRisk = patch.baseRiskPerTrade
+      normalizedPatch.baseRiskPerTrade =
+        rawBaseRisk === '' ? '' : Math.max(MIN_BASE_RISK, Number(rawBaseRisk) || MIN_BASE_RISK)
+    }
     setRiskSettings((prev) => {
-      const next = { ...prev, ...patch }
+      const next = { ...prev, ...normalizedPatch }
       setForm((current) => ({
         ...current,
         atm_template: cloneATMTemplate({
@@ -768,6 +778,12 @@ function StrategyFormModal({
     if (currentStep === 1) {
       const errors = {}
       const parsedGlobalRisk = parseNumericOr(riskSettings.globalRiskMultiplier, null)
+      const parsedBaseRisk = parseNumericOr(riskSettings.baseRiskPerTrade, null)
+      if (parsedBaseRisk === null || !Number.isFinite(parsedBaseRisk)) {
+        errors.baseRiskPerTrade = 'Set a base risk per trade before continuing.'
+      } else if (parsedBaseRisk < MIN_BASE_RISK) {
+        errors.baseRiskPerTrade = `Base risk per trade must be at least $${MIN_BASE_RISK}.`
+      }
       if (parsedGlobalRisk === null || !Number.isFinite(parsedGlobalRisk)) {
         errors.globalRiskMultiplier = 'Set a global risk multiplier before continuing.'
       } else if (parsedGlobalRisk < MIN_RISK_MULTIPLIER) {
@@ -1038,20 +1054,28 @@ function StrategyFormModal({
                   </div>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="flex flex-col justify-start">
                     <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Base Risk Per Trade ($)</label>
                     <input
                       className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                       type="number"
-                      min={0}
+                      min={MIN_BASE_RISK}
                       step="0.01"
                       value={riskSettings.baseRiskPerTrade ?? ''}
-                      onChange={(event) => updateRiskSettings({ baseRiskPerTrade: event.target.value === '' ? '' : Number(event.target.value) || 0 })}
+                      onChange={(event) => {
+                        const rawValue = event.target.value
+                        const nextValue = rawValue === '' ? '' : Math.max(MIN_BASE_RISK, Number(rawValue) || 0)
+                        setRiskErrors((prev) => ({ ...prev, baseRiskPerTrade: undefined }))
+                        updateRiskSettings({ baseRiskPerTrade: nextValue })
+                      }}
                     />
                     <p className="mt-1 text-[11px] text-slate-500">Dollar amount risked per trade before multipliers.</p>
+                    {riskErrors.baseRiskPerTrade ? (
+                      <p className="mt-1 text-[11px] text-rose-400">{riskErrors.baseRiskPerTrade}</p>
+                    ) : null}
                   </div>
-                  <div>
+                  <div className="flex flex-col justify-start">
                     <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] text-slate-500">
                       <span>Global risk multiplier</span>
                       <span
