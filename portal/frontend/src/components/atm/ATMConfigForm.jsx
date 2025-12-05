@@ -59,7 +59,6 @@ const inputClasses =
 const UNIT_OPTIONS = [
   { value: 'ticks', label: 'Ticks' },
   { value: 'r', label: 'R multiple' },
-  { value: 'price', label: 'Price' },
 ]
 
 function formatNumber(value) {
@@ -88,9 +87,8 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
 
   const stopMode = useMemo(() => {
     if (template.stop_r_multiple !== null && template.stop_r_multiple !== undefined) return 'r'
-    if (template.stop_price !== null && template.stop_price !== undefined) return 'price'
     return 'ticks'
-  }, [template.stop_price, template.stop_r_multiple])
+  }, [template.stop_r_multiple])
 
   const update = (patch = {}) => {
     const next = { ...template, ...patch }
@@ -177,27 +175,23 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   const breakeven = template.breakeven || {}
   const trailing = template.trailing || {}
 
-  const breakevenEnabled = breakeven.enabled !== false
-  const trailingEnabled = Boolean(trailing.enabled)
-  const [breakevenOpen, setBreakevenOpen] = useState(true)
-  const [trailingOpen, setTrailingOpen] = useState(true)
+  const breakevenEnabled = breakeven.enabled === true
+  const trailingEnabled = trailing.enabled === true
   const [stopOpen, setStopOpen] = useState(true)
   const [targetsOpen, setTargetsOpen] = useState(true)
   const [positionOpen, setPositionOpen] = useState(true)
   const [riskUnitOpen, setRiskUnitOpen] = useState(true)
 
   const breakevenActivation = useMemo(() => {
-    if (breakeven.target_index !== null && breakeven.target_index !== undefined) return 'target'
     if (breakeven.r_multiple !== null && breakeven.r_multiple !== undefined) return 'r'
-    if (breakeven.ticks) return 'ticks'
-    return 'manual'
+    if (breakeven.ticks !== null && breakeven.ticks !== undefined) return 'ticks'
+    return 'r'
   }, [breakeven])
 
   const trailingActivation = useMemo(() => {
-    if (trailing.target_index !== null && trailing.target_index !== undefined) return 'target'
     if (trailing.r_multiple !== null && trailing.r_multiple !== undefined) return 'r'
-    if (trailing.ticks) return 'ticks'
-    return 'manual'
+    if (trailing.ticks !== null && trailing.ticks !== undefined) return 'ticks'
+    return 'r'
   }, [trailing])
 
   const trailingMode = useMemo(() => {
@@ -206,45 +200,25 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   }, [trailing])
 
   const handleBreakevenActivation = (mode, value) => {
-    const next = { ...breakeven }
-    if (mode === 'target') {
-      next.target_index = value ?? 0
-      next.r_multiple = null
-      next.ticks = null
-    } else if (mode === 'ticks') {
-      next.target_index = null
-      next.r_multiple = null
+    const next = { ...breakeven, enabled: true, target_index: null }
+    if (mode === 'ticks') {
       next.ticks = value ?? null
-    } else if (mode === 'r') {
-      next.target_index = null
-      next.ticks = null
-      next.r_multiple = value ?? 1
-    } else {
-      next.target_index = null
       next.r_multiple = null
+    } else {
+      next.r_multiple = value ?? 1
       next.ticks = null
     }
     update({ breakeven: next })
   }
 
   const handleTrailingActivation = (mode, value) => {
-    const next = { ...trailing }
-    if (mode === 'target') {
-      next.target_index = value ?? 0
-      next.r_multiple = null
-      next.ticks = trailingMode === 'ticks' ? trailing.ticks ?? null : null
-    } else if (mode === 'ticks') {
-      next.target_index = null
-      next.r_multiple = null
+    const next = { ...trailing, enabled: true, target_index: null }
+    if (mode === 'ticks') {
       next.ticks = value ?? null
-    } else if (mode === 'r') {
-      next.target_index = null
-      next.ticks = trailingMode === 'ticks' ? trailing.ticks ?? null : null
-      next.r_multiple = value ?? 1
-    } else {
-      next.target_index = null
       next.r_multiple = null
-      if (trailingMode !== 'ticks') next.ticks = null
+    } else {
+      next.r_multiple = value ?? 1
+      next.ticks = trailingMode === 'ticks' ? trailing.ticks ?? null : null
     }
     update({ trailing: next })
   }
@@ -259,11 +233,6 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
     }
     update({ trailing: next })
   }
-
-  const targetOptions = targets.map((target, index) => ({
-    label: target.label || `Target ${index + 1}`,
-    value: index,
-  }))
 
   const resolvedTickSize = template.tick_size ?? template._meta?.tick_size ?? null
   const resolvedContractSize = template.contract_size ?? template._meta?.contract_size ?? 1
@@ -527,21 +496,6 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                       )}
                     </div>
                   )}
-                  {stopMode === 'price' && (
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      step="any"
-                      value={template.stop_price ?? ''}
-                      onChange={(event) =>
-                        update({
-                          stop_ticks: null,
-                          stop_r_multiple: null,
-                          stop_price: event.target.value === '' ? null : Number(event.target.value),
-                        })
-                      }
-                    />
-                  )}
                 </div>
                 <div>
                   <select
@@ -554,11 +508,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                         update({ stop_ticks: template.stop_ticks ?? null, stop_r_multiple: null, stop_price: null })
                         return
                       }
-                      if (mode === 'r') {
-                        update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? null, stop_price: null })
-                        return
-                      }
-                      update({ stop_ticks: null, stop_r_multiple: null, stop_price: template.stop_price ?? null })
+                      update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? null, stop_price: null })
                     }}
                   >
                     {UNIT_OPTIONS.map((option) => (
@@ -567,7 +517,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                       </option>
                     ))}
                   </select>
-                  <p className="mt-1 text-[11px] text-slate-500">Choose ticks, R multiple, or explicit price.</p>
+                  <p className="mt-1 text-[11px] text-slate-500">Choose ticks or R multiple.</p>
                 </div>
               </div>
             )}
@@ -696,90 +646,99 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Breakeven</p>
                 <p className="text-[11px] text-slate-500">Move stop to entry after predefined progress.</p>
               </div>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={breakevenEnabled}
-                  onChange={(event) => update({ breakeven: { ...breakeven, enabled: event.target.checked } })}
-                />
-                Enable
-              </label>
-            </div>
-            <div className="mt-3 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Move stop after</p>
+              {breakevenEnabled && (
                 <button
                   type="button"
                   className="text-[11px] text-slate-400 hover:text-slate-200"
-                  onClick={() => setBreakevenOpen((open) => !open)}
+                  onClick={() => update({ breakeven: { enabled: false } })}
                 >
-                  {breakevenOpen ? 'Hide' : 'Show'}
+                  Remove
                 </button>
-              </div>
-              {breakevenOpen && (
-                <>
-                  <select
-                    className={inputClasses}
-                    value={breakevenActivation}
-                    onChange={(event) => handleBreakevenActivation(event.target.value)}
-                    disabled={!breakevenEnabled}
-                  >
-                    <option value="manual">Manual</option>
-                    <option value="target">After target</option>
-                    <option value="ticks">After ticks</option>
-                    <option value="r">After R multiple</option>
-                  </select>
-
-                  {breakevenActivation === 'target' && (
-                    <select
-                      className={inputClasses}
-                      value={breakeven.target_index ?? 0}
-                      onChange={(event) => handleBreakevenActivation('target', Number(event.target.value))}
-                      disabled={!breakevenEnabled}
-                    >
-                      {targetOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  {breakevenActivation === 'ticks' && (
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Fallback ticks to trigger breakeven if no target or R trigger fires.">
-                        Fallback ticks
-                      </label>
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        value={breakeven.ticks ?? ''}
-                        onChange={(event) => handleBreakevenActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
-                        disabled={!breakevenEnabled}
-                      />
-                    </div>
-                  )}
-                  {breakevenActivation === 'r' && (
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">R multiple</label>
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        step="0.1"
-                        value={breakeven.r_multiple ?? ''}
-                        onChange={(event) => handleBreakevenActivation('r', event.target.value === '' ? null : Number(event.target.value))}
-                        disabled={!breakevenEnabled}
-                      />
-                      {describeRApprox(breakeven.r_multiple) && (
-                        <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(breakeven.r_multiple)}</p>
-                      )}
-                    </div>
-                  )}
-                  <p className="text-[11px] text-slate-500" title="Breakeven moves the stop to entry once your trigger is reached.">
-                    Breakeven moves the stop to entry using the first trigger that fires.
-                  </p>
-                </>
               )}
             </div>
+            {!breakevenEnabled && (
+              <div className="mt-3 flex items-start justify-between rounded-xl border border-white/10 bg-black/40 p-3">
+                <div>
+                  <p className="text-sm font-medium text-slate-100">Add breakeven</p>
+                  <p className="text-[11px] text-slate-500">Move stop to entry after predefined progress.</p>
+                </div>
+                <button
+                  type="button"
+                  className={fieldButtonClasses}
+                  onClick={() =>
+                    update({
+                      breakeven: {
+                        ...breakeven,
+                        enabled: true,
+                        target_index: null,
+                        r_multiple: breakeven.r_multiple ?? 1,
+                        ticks: breakeven.ticks ?? null,
+                      },
+                    })
+                  }
+                >
+                  Add breakeven
+                </button>
+              </div>
+            )}
+            {breakevenEnabled && (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-[1.2fr,0.8fr] md:items-end">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Move stop after</label>
+                    <select
+                      className={inputClasses}
+                      value={breakevenActivation}
+                      onChange={(event) => handleBreakevenActivation(event.target.value)}
+                    >
+                      <option value="r">After R multiple</option>
+                      <option value="ticks">After ticks</option>
+                    </select>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="text-[11px] text-slate-400 hover:text-slate-200"
+                      onClick={() => update({ breakeven: { enabled: false } })}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+
+                {breakevenActivation === 'ticks' && (
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Fallback ticks to trigger breakeven.">
+                      Activate after ticks
+                    </label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      value={breakeven.ticks ?? ''}
+                      onChange={(event) => handleBreakevenActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
+                    />
+                  </div>
+                )}
+                {breakevenActivation === 'r' && (
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">R multiple</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      step="0.1"
+                      value={breakeven.r_multiple ?? ''}
+                      onChange={(event) => handleBreakevenActivation('r', event.target.value === '' ? null : Number(event.target.value))}
+                    />
+                    {describeRApprox(breakeven.r_multiple) && (
+                      <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(breakeven.r_multiple)}</p>
+                    )}
+                  </div>
+                )}
+                <p className="text-[11px] text-slate-500" title="Breakeven moves the stop to entry once your trigger is reached.">
+                  Breakeven moves the stop to entry using the first trigger that fires.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -788,155 +747,161 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
                 <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
               </div>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={trailingEnabled}
-                  onChange={(event) => update({ trailing: { ...trailing, enabled: event.target.checked } })}
-                />
-                Enable
-              </label>
-            </div>
-            <div className="mt-3 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation</p>
+              {trailingEnabled && (
                 <button
                   type="button"
                   className="text-[11px] text-slate-400 hover:text-slate-200"
-                  onClick={() => setTrailingOpen((open) => !open)}
+                  onClick={() => update({ trailing: { enabled: false } })}
                 >
-                  {trailingOpen ? 'Hide' : 'Show'}
+                  Remove
+                </button>
+              )}
+            </div>
+            {!trailingEnabled && (
+              <div className="mt-3 flex items-start justify-between rounded-xl border border-white/10 bg-black/40 p-3">
+                <div>
+                  <p className="text-sm font-medium text-slate-100">Add trailing stop</p>
+                  <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
+                </div>
+                <button
+                  type="button"
+                  className={fieldButtonClasses}
+                  onClick={() =>
+                    update({
+                      trailing: {
+                        ...trailing,
+                        enabled: true,
+                        target_index: null,
+                        r_multiple: trailing.r_multiple ?? 1,
+                        ticks: trailing.ticks ?? null,
+                      },
+                    })
+                  }
+                >
+                  Add trailing stop
                 </button>
               </div>
-              {trailingOpen && (
-                <>
-                  <select
-                    className={inputClasses}
-                    value={trailingActivation}
-                    onChange={(event) => handleTrailingActivation(event.target.value)}
-                    disabled={!trailingEnabled}
-                  >
-                    <option value="manual">Manual</option>
-                    <option value="target">After target</option>
-                    <option value="ticks">After ticks</option>
-                    <option value="r">After R multiple</option>
-                  </select>
-                  {trailingActivation === 'target' && (
+            )}
+            {trailingEnabled && (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-[1.2fr,0.8fr] md:items-end">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation</label>
                     <select
                       className={inputClasses}
-                      value={trailing.target_index ?? 0}
-                      onChange={(event) => handleTrailingActivation('target', Number(event.target.value))}
-                      disabled={!trailingEnabled}
+                      value={trailingActivation}
+                      onChange={(event) => handleTrailingActivation(event.target.value)}
                     >
-                      {targetOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
+                      <option value="r">After R multiple</option>
+                      <option value="ticks">After ticks</option>
                     </select>
-                  )}
-                  {trailingActivation === 'ticks' && (
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="text-[11px] text-slate-400 hover:text-slate-200"
+                      onClick={() => update({ trailing: { enabled: false } })}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+
+                {trailingActivation === 'ticks' && (
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Start trailing once price has moved this many ticks in your favor.">
+                      Activate after ticks
+                    </label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      value={trailing.ticks ?? ''}
+                      onChange={(event) => handleTrailingActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
+                    />
+                  </div>
+                )}
+                {trailingActivation === 'r' && (
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activate after R multiple</label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      step="0.1"
+                      value={trailing.r_multiple ?? ''}
+                      onChange={(event) => handleTrailingActivation('r', event.target.value === '' ? null : Number(event.target.value))}
+                    />
+                    {describeRApprox(trailing.r_multiple) && (
+                      <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(trailing.r_multiple)}</p>
+                    )}
+                  </div>
+                )}
+
+                <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trailing mode</label>
+                <select
+                  className={inputClasses}
+                  value={trailingMode}
+                  onChange={(event) => handleTrailingMode(event.target.value)}
+                >
+                  <option value="atr">ATR-based</option>
+                  <option value="ticks">Fixed ticks</option>
+                </select>
+
+                {trailingMode === 'atr' && (
+                  <div className="grid gap-3 md:grid-cols-2">
                     <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Start trailing once price has moved this many ticks in your favor.">
-                        Activate after ticks
-                      </label>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
                       <input
                         className={inputClasses}
                         type="number"
-                        value={trailing.ticks ?? ''}
-                        onChange={(event) => handleTrailingActivation('ticks', event.target.value === '' ? null : Number(event.target.value))}
-                        disabled={!trailingEnabled}
+                        min={1}
+                        value={trailing.atr_period ?? 14}
+                        onChange={(event) =>
+                          update({
+                            trailing: {
+                              ...trailing,
+                              atr_period: Math.max(1, Number(event.target.value) || 14),
+                              atr_multiplier: trailing.atr_multiplier ?? 1,
+                            },
+                          })
+                        }
                       />
                     </div>
-                  )}
-                  {trailingActivation === 'r' && (
                     <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activate after R multiple</label>
+                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
                       <input
                         className={inputClasses}
                         type="number"
                         step="0.1"
-                        value={trailing.r_multiple ?? ''}
-                        onChange={(event) => handleTrailingActivation('r', event.target.value === '' ? null : Number(event.target.value))}
-                        disabled={!trailingEnabled}
-                      />
-                      {describeRApprox(trailing.r_multiple) && (
-                        <p className="mt-1 text-[11px] text-slate-500">{describeRApprox(trailing.r_multiple)}</p>
-                      )}
-                    </div>
-                  )}
-
-                  <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trailing mode</label>
-                  <select
-                    className={inputClasses}
-                    value={trailingMode}
-                    onChange={(event) => handleTrailingMode(event.target.value)}
-                    disabled={!trailingEnabled}
-                  >
-                    <option value="atr">ATR-based</option>
-                    <option value="ticks">Fixed ticks</option>
-                  </select>
-
-                  {trailingMode === 'atr' && (
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div>
-                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</label>
-                        <input
-                          className={inputClasses}
-                          type="number"
-                          min={1}
-                          value={trailing.atr_period ?? 14}
-                          onChange={(event) =>
-                            update({
-                              trailing: {
-                                ...trailing,
-                                atr_period: Math.max(1, Number(event.target.value) || 14),
-                                atr_multiplier: trailing.atr_multiplier ?? 1,
-                              },
-                            })
-                          }
-                          disabled={!trailingEnabled}
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier</label>
-                        <input
-                          className={inputClasses}
-                          type="number"
-                          step="0.1"
-                          value={trailing.atr_multiplier ?? 1}
-                          onChange={(event) =>
-                            update({
-                              trailing: { ...trailing, atr_multiplier: Number(event.target.value) || 1 },
-                            })
-                          }
-                          disabled={!trailingEnabled}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {trailingMode === 'ticks' && (
-                    <div>
-                      <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Distance in ticks the stop will trail from the best price. Also used if ATR is unavailable.">
-                        Trail distance (ticks)
-                      </label>
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        value={trailing.ticks ?? ''}
-                        onChange={(event) => update({ trailing: { ...trailing, ticks: event.target.value === '' ? null : Number(event.target.value) } })}
-                        disabled={!trailingEnabled}
+                        value={trailing.atr_multiplier ?? 1}
+                        onChange={(event) =>
+                          update({
+                            trailing: { ...trailing, atr_multiplier: Number(event.target.value) || 1 },
+                          })
+                        }
                       />
                     </div>
-                  )}
+                  </div>
+                )}
 
-                  <p className="text-[11px] text-slate-500" title="Trailing only tightens the stop; it never loosens after activation.">
-                    Trailing tightens toward price after activation; it never loosens.
-                  </p>
-                </>
-              )}
-            </div>
+                {trailingMode === 'ticks' && (
+                  <div>
+                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500" title="Distance in ticks the stop will trail from the best price. Also used if ATR is unavailable.">
+                      Trail distance (ticks)
+                    </label>
+                    <input
+                      className={inputClasses}
+                      type="number"
+                      value={trailing.ticks ?? ''}
+                      onChange={(event) => update({ trailing: { ...trailing, ticks: event.target.value === '' ? null : Number(event.target.value) } })}
+                    />
+                  </div>
+                )}
+
+                <p className="text-[11px] text-slate-500" title="Trailing only tightens the stop; it never loosens after activation.">
+                  Trailing tightens toward price after activation; it never loosens.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>

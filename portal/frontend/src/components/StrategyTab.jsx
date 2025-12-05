@@ -1224,7 +1224,6 @@ function StrategyFormModal({
                         options={templateOptions.map((option) => ({ value: option.value, label: option.label }))}
                         className="mt-1 w-full"
                       />
-                      {selectedTemplate && <ATMTemplateSummary template={selectedTemplate.template} />}
                     </div>
                   )}
                 </div>
@@ -1240,7 +1239,6 @@ function StrategyFormModal({
                     Reset
                   </ActionButton>
                 </div>
-                <ATMTemplateSummary template={form.atm_template} />
                 {atmMode !== 'existing' && (
                   <ATMConfigForm
                     value={form.atm_template}
