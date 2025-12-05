@@ -627,7 +627,7 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                             {triggerIsTarget ? (
                               <select
                                 className={inputClasses}
-                                value={(rule.trigger_value ?? '') as string}
+                                value={rule.trigger_value ?? ''}
                                 disabled={targets.length === 0}
                                 onChange={(event) => handleStopAdjustmentChange(index, { trigger_value: event.target.value })}
                               >
