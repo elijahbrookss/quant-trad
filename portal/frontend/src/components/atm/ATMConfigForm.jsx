@@ -172,15 +172,26 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
       }
       return { ...target, [field]: valueToApply }
     })
-    applyTargets(nextTargets)
+    applyTargets(nextTargets, { manualSizing: field === 'size_percent' })
   }
 
-  const applyTargets = (nextTargets) => {
-    const normalised = normalizeTargets({ ...template, take_profit_orders: nextTargets })
-    if (normalised.length === 1) {
-      normalised[0] = { ...normalised[0], size_percent: 100 }
+  const applyTargets = (nextTargets, { manualSizing = false } = {}) => {
+    const meta = { ...(template._meta || {}) }
+    if (manualSizing) {
+      meta.targetSizeManual = true
     }
-    update({ take_profit_orders: normalised })
+
+    let normalised = normalizeTargets({ ...template, take_profit_orders: nextTargets })
+    const autoSizeAllowed = meta.targetSizeManual !== true
+
+    if (normalised.length === 1) {
+      normalised = [{ ...normalised[0], size_percent: 100 }]
+    } else if (autoSizeAllowed && normalised.length > 1) {
+      const evenSplit = 100 / normalised.length
+      normalised = normalised.map((target) => ({ ...target, size_percent: evenSplit }))
+    }
+
+    update({ take_profit_orders: normalised, _meta: meta })
   }
 
   const addTarget = () => {
@@ -209,6 +220,8 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
       return
     }
 
+    const meta = template._meta || {}
+    const manualSizing = meta.targetSizeManual === true
     const remaining = Math.max(0, 100 - targetSizeTotal)
     const nextTargets = [
       ...targets,
@@ -216,15 +229,15 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
         id: `tp-${targets.length + 1}`,
         label: `TP ${targets.length + 1}`,
         r_multiple: targets.length + 1,
-        size_percent: remaining || null,
+        size_percent: manualSizing ? remaining || null : null,
       },
     ]
-    applyTargets(nextTargets)
+    applyTargets(nextTargets, { manualSizing })
   }
 
   const removeTarget = (index) => {
     const nextTargets = targets.filter((_, idx) => idx !== index)
-    applyTargets(nextTargets)
+    applyTargets(nextTargets, { manualSizing: template._meta?.targetSizeManual === true })
   }
 
   const breakeven = template.breakeven || {}
