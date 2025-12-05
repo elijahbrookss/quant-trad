@@ -508,7 +508,11 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                         update({ stop_ticks: template.stop_ticks ?? null, stop_r_multiple: null, stop_price: null })
                         return
                       }
-                      update({ stop_ticks: null, stop_r_multiple: template.stop_r_multiple ?? null, stop_price: null })
+                      update({
+                        stop_ticks: null,
+                        stop_r_multiple: template.stop_r_multiple ?? 1,
+                        stop_price: null,
+                      })
                     }}
                   >
                     {UNIT_OPTIONS.map((option) => (
