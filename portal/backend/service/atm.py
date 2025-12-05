@@ -292,18 +292,21 @@ def normalise_template(
 
     payload_meta = payload.get("_meta") if isinstance(payload.get("_meta"), Mapping) else {}
     meta: Dict[str, Any] = dict(result.get("_meta") or {})
+    template_provided = template is not None
 
     if payload.get("name") is not None:
         candidate_name = str(payload.get("name") or "").strip()
         result["name"] = candidate_name or result.get("name") or DEFAULT_ATM_TEMPLATE["name"]
 
+    resolved_name = str(result.get("name") or "").strip()
+    if template_provided and not resolved_name:
+        raise ValueError("ATM template name is required.")
+    result["name"] = resolved_name or DEFAULT_ATM_TEMPLATE["name"]
+
     if payload.get("atr_r_multiple") is not None:
         result["atr_r_multiple"] = float(payload.get("atr_r_multiple") or result.get("atr_r_multiple") or 1.0)
 
-    risk_mode = str(payload.get("risk_unit_mode") or payload.get("rMode") or result.get("risk_unit_mode") or "atr").lower()
-    if risk_mode not in {"atr", "ticks"}:
-        risk_mode = "atr"
-    result["risk_unit_mode"] = risk_mode
+    result["risk_unit_mode"] = "atr"
 
     ticks_stop = _coerce_int(
         payload.get("ticks_stop")
