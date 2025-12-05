@@ -56,6 +56,15 @@ class CCXTProvider(BaseDataProvider):
 
         return InstrumentType.SPOT
 
+    def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Raise if the market is missing and return the resolved type."""
+
+        market = self._load_market(symbol)
+        if not market:
+            raise ValueError(f"Symbol '{symbol}' not found on {self._exchange_id}")
+
+        return self.get_instrument_type(venue, symbol)
+
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return tick/contract details derived from CCXT market metadata."""
 

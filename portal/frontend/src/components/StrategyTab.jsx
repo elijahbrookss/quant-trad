@@ -2472,6 +2472,10 @@ const StrategyDetails = ({
                 {hasMetadata ? (
                   <dl className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-2">
                     <div>
+                      <dt className="uppercase tracking-[0.3em] text-slate-500">Instrument type</dt>
+                      <dd className="text-base text-white">{record.instrument_type || '—'}</dd>
+                    </div>
+                    <div>
                       <dt className="uppercase tracking-[0.3em] text-slate-500">Tick size</dt>
                       <dd className="text-base text-white">{formatInstrumentNumber(record.tick_size)}</dd>
                     </div>

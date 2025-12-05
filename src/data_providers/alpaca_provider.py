@@ -78,18 +78,43 @@ class AlpacaProvider(BaseDataProvider):
         return DataSource.ALPACA.value
 
     def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
-        """Alpaca's equities API only delivers spot instruments."""
+        """Return the Alpaca asset class mapped into our instrument enum."""
 
-        return InstrumentType.SPOT
+        asset = self._get_asset(symbol)
+        asset_class = getattr(asset, "asset_class", None) or getattr(asset, "assetClass", None) or getattr(asset, "class", None)
+        normalized = str(asset_class or "").strip().lower()
+
+        if normalized in {"us_equity", "equity", "stock", "us_equities"}:
+            return InstrumentType.SPOT
+        if normalized in {"crypto", "cryptocurrency"}:
+            return InstrumentType.SPOT
+        if normalized in {"future", "futures", "fut"}:
+            return InstrumentType.FUTURE
+        if normalized in {"option", "options", "opt"}:
+            return InstrumentType.FUTURE
+
+        raise ValueError(f"Unsupported Alpaca asset class '{asset_class}' for symbol '{symbol}'")
+
+    def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Validate existence and return the instrument type using Alpaca assets."""
+
+        return self.get_instrument_type(venue, symbol)
 
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return tick and contract details for Alpaca equities."""
 
         # US equities trade in $0.01 increments; one share is one trading unit.
+        # Validation happens inside ``_get_asset`` to ensure the symbol exists.
+        self._get_asset(symbol)
         return self._normalize_metadata(tick_size=0.01, contract_size=1.0)
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Confirm the symbol exists via Alpaca's asset lookup."""
+
+        self._get_asset(symbol)
+
+    def _get_asset(self, symbol: str):
+        """Return the Alpaca asset object or raise if unavailable."""
 
         if not symbol:
             raise ValueError("Symbol is required for Alpaca validation")
@@ -116,6 +141,8 @@ class AlpacaProvider(BaseDataProvider):
 
         if not asset or getattr(asset, "symbol", None) is None:
             raise ValueError(f"Alpaca symbol '{symbol}' not found")
+
+        return asset
 
     @staticmethod
     def _paper_trading_enabled() -> bool:

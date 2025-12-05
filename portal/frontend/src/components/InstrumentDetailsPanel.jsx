@@ -1,4 +1,5 @@
 const fieldLabels = [
+  { key: 'instrument_type', label: 'Instrument type' },
   { key: 'tick_size', label: 'Tick size' },
   { key: 'contract_size', label: 'Contract size' },
   { key: 'tick_value', label: 'Tick value' },

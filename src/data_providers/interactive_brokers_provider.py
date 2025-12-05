@@ -110,20 +110,25 @@ class InteractiveBrokersProvider(BaseDataProvider):
     def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
         """Map IBKR security types into a spot vs futures/perps binary."""
 
-        contract = self._build_contract(symbol)
-        sec_type = (contract.secType or "").upper()
+        _, details = self._resolve_contract_details(symbol)
+        sec_type = ((details[0].contract.secType if details else None) or "").upper()
 
         if sec_type in {"FUT", "OPT"}:
             return InstrumentType.FUTURE
 
         return InstrumentType.SPOT
 
+    def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Resolve contract details and return the derived instrument type."""
+
+        return self.get_instrument_type(venue, symbol)
+
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return tick size, contract multiplier, and derived tick value."""
 
-        contract = self._build_contract(symbol)
-        details = self._fetch_contract_details(contract)
-        instrument_type = self.get_instrument_type(venue, symbol)
+        contract, details = self._resolve_contract_details(symbol)
+        sec_type = ((details[0].contract.secType if details else None) or "").upper()
+        instrument_type = InstrumentType.FUTURE if sec_type in {"FUT", "OPT"} else InstrumentType.SPOT
         min_tick: Optional[float] = None
         multiplier: Optional[float] = None
 
@@ -151,6 +156,9 @@ class InteractiveBrokersProvider(BaseDataProvider):
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Raise if IBKR cannot resolve contract details for the symbol."""
 
+        self._resolve_contract_details(symbol)
+
+    def _resolve_contract_details(self, symbol: str) -> Tuple[Contract, list]:
         if not symbol:
             raise ValueError("symbol is required for Interactive Brokers validation")
 
@@ -159,6 +167,8 @@ class InteractiveBrokersProvider(BaseDataProvider):
 
         if not details:
             raise ValueError(f"Interactive Brokers could not resolve contract details for '{symbol}'")
+
+        return contract, details
 
     def _fetch_contract_details(self, contract: Contract) -> list:
         with self._lock:
