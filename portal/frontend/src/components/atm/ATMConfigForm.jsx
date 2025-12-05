@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
 
 export const DEFAULT_ATM_TEMPLATE = {
+  name: 'New ATM template',
   contracts: 1,
   stop_ticks: null,
-  stop_r_multiple: 1,
+  stop_r_multiple: -1,
   stop_price: null,
   take_profit_orders: [],
   stop_adjustments: [],
@@ -24,10 +25,11 @@ export const DEFAULT_ATM_TEMPLATE = {
 export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   let cloned
   try {
-    cloned = JSON.parse(JSON.stringify(template || DEFAULT_ATM_TEMPLATE))
+  cloned = JSON.parse(JSON.stringify(template || DEFAULT_ATM_TEMPLATE))
   } catch {
     cloned = JSON.parse(JSON.stringify(DEFAULT_ATM_TEMPLATE))
   }
+  if (cloned.name === undefined || cloned.name === null || cloned.name === '') cloned.name = DEFAULT_ATM_TEMPLATE.name
   cloned.rMode = 'atr'
   cloned.risk_unit_mode = 'atr'
   if (cloned.rAtrPeriod === undefined || cloned.rAtrPeriod === null) cloned.rAtrPeriod = DEFAULT_ATM_TEMPLATE.rAtrPeriod
@@ -49,6 +51,12 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
   }
   if (cloned.stop_r_multiple === undefined || cloned.stop_r_multiple === null) {
     cloned.stop_r_multiple = DEFAULT_ATM_TEMPLATE.stop_r_multiple
+  }
+  if (cloned.stop_r_multiple !== null && cloned.stop_r_multiple !== undefined) {
+    const numericStop = Number(cloned.stop_r_multiple)
+    if (Number.isFinite(numericStop) && numericStop > 0) {
+      cloned.stop_r_multiple = -Math.abs(numericStop)
+    }
   }
   if (!cloned.trailing || typeof cloned.trailing !== 'object') {
     cloned.trailing = { ...DEFAULT_ATM_TEMPLATE.trailing }
@@ -140,7 +148,14 @@ function normalizeTargets(template) {
   return normalised
 }
 
-export default function ATMConfigForm({ value, onChange, hidePositionSizing = false, hideRiskSettings = false, collapsible = false }) {
+export default function ATMConfigForm({
+  value,
+  onChange,
+  hidePositionSizing = false,
+  hideRiskSettings = false,
+  collapsible = false,
+  errors = {},
+}) {
   const template = useMemo(() => cloneATMTemplate(value), [value])
   const targets = useMemo(() => normalizeTargets(template), [template])
   const targetSizeTotal = useMemo(
@@ -153,6 +168,8 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   )
 
   const stopMode = 'r'
+
+  const validationErrors = errors || {}
 
   const update = (patch = {}) => {
     const next = { ...template, ...patch }
@@ -425,8 +442,25 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
   const latestAtrValue =
     template._meta?.latest_atr ?? template._meta?.atr_preview ?? template._meta?.atr ?? template._meta?.atr_at_entry ?? null
 
+  const stopDistance = template.stop_r_multiple
+  const stopDistanceInvalid =
+    stopDistance !== null && stopDistance !== undefined && Number.isFinite(Number(stopDistance)) && Number(stopDistance) >= 0
+  const stopDistanceError =
+    validationErrors.stop_r_multiple || (stopDistanceInvalid ? 'Stop distance must be negative (below entry).' : null)
+
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm">
+      <div>
+        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Template name</label>
+        <input
+          className={inputClasses}
+          value={template.name || ''}
+          onChange={(event) => update({ name: event.target.value })}
+          placeholder="Name this ATM template"
+        />
+        <p className="mt-1 text-[11px] text-slate-500">Required for saving and reusing this template.</p>
+        {validationErrors.name ? <p className="mt-1 text-[11px] text-rose-400">{validationErrors.name}</p> : null}
+      </div>
       <div className="grid gap-4 lg:grid-cols-[1.05fr,0.95fr]">
         <div className="space-y-4">
           {!hidePositionSizing && (
@@ -551,7 +585,6 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                   className={inputClasses}
                   type="number"
                   step="0.1"
-                  min={0}
                   value={template.stop_r_multiple ?? ''}
                   onChange={(event) =>
                     update({
@@ -561,6 +594,8 @@ export default function ATMConfigForm({ value, onChange, hidePositionSizing = fa
                     })
                   }
                 />
+                <p className="text-[11px] text-slate-500">Distance in R (must be negative).</p>
+                {stopDistanceError ? <p className="text-[11px] text-rose-400">{stopDistanceError}</p> : null}
               </div>
             )}
           </div>

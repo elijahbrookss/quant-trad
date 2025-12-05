@@ -89,6 +89,13 @@ const formatCurrency = (value) => {
   return CURRENCY_FORMATTER.format(Number.isFinite(numericValue) ? numericValue : 0)
 }
 
+const formatNumber = (value, precision = 2) => {
+  if (value === null || value === undefined) return '—'
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return value
+  return Number(numericValue).toFixed(precision).replace(/\.0+$/, '').replace(/\.([1-9]*)0+$/, '.$1')
+}
+
 const parseNumericOr = (value, fallback) => {
   if (value === '' || value === null || value === undefined) return fallback
   const parsed = Number(value)
@@ -146,6 +153,8 @@ function StrategyFormModal({
   const [symbolValidation, setSymbolValidation] = useState({})
   const [riskSettings, setRiskSettings] = useState(RISK_DEFAULTS)
   const [riskErrors, setRiskErrors] = useState({})
+  const [atmErrors, setAtmErrors] = useState({})
+  const [showSaveAnimation, setShowSaveAnimation] = useState(false)
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
   const providerOptions = useMemo(
@@ -379,12 +388,19 @@ function StrategyFormModal({
 
   const templateOptions = useMemo(
     () =>
-      (availableATMTemplates || []).map((item, index) => ({
-        value: item.id || `atm-${index + 1}`,
-        label: item.label || `ATM template ${index + 1}`,
-        template: cloneATMTemplate(item.template || DEFAULT_ATM_TEMPLATE),
-        key: templateKey(item.template),
-      })),
+      (availableATMTemplates || []).map((item, index) => {
+        const template = cloneATMTemplate(item.template || DEFAULT_ATM_TEMPLATE)
+        const label = template.name?.trim() || item.label || `ATM template ${index + 1}`
+        if (!template.name) {
+          template.name = label
+        }
+        return {
+          value: item.id || `atm-${index + 1}`,
+          label,
+          template,
+          key: templateKey(template),
+        }
+      }),
     [availableATMTemplates, templateKey],
   )
 
@@ -417,6 +433,8 @@ function StrategyFormModal({
       setSymbolValidation({})
       setRiskSettings(RISK_DEFAULTS)
       setRiskErrors({})
+      setAtmErrors({})
+      setShowSaveAnimation(false)
       return
     }
 
@@ -521,6 +539,7 @@ function StrategyFormModal({
       ...prev,
       atm_template: cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE),
     }))
+    setAtmErrors({})
     setAtmMode('new')
   }, [])
 
@@ -661,14 +680,50 @@ function StrategyFormModal({
     }
   }
 
+  const validateATMTemplate = useCallback(() => {
+    const errors = {}
+    const template = cloneATMTemplate(form.atm_template || DEFAULT_ATM_TEMPLATE)
+    const templateName = (template.name || '').trim()
+    if (!templateName) {
+      errors.name = 'Template name is required.'
+    }
+
+    const stopValue = template.stop_r_multiple
+    const stopNumeric = Number(stopValue)
+    if (stopValue === null || stopValue === undefined || Number.isNaN(stopNumeric)) {
+      errors.stop_r_multiple = 'Enter a negative stop distance in R.'
+    } else if (stopNumeric >= 0) {
+      errors.stop_r_multiple = 'Stop distance must be negative.'
+    }
+
+    const targets = Array.isArray(template.take_profit_orders) ? template.take_profit_orders : []
+    if (targets.length) {
+      const total = targets.reduce((sum, target) => {
+        const numeric = Number(target.size_percent)
+        return Number.isFinite(numeric) ? sum + numeric : sum
+      }, 0)
+      if (Math.abs(total - 100) > 0.001) {
+        errors.take_profit_orders = `Allocation must total 100%. Current: ${Math.round(total)}%.`
+      }
+    }
+
+    setAtmErrors(errors)
+    return errors
+  }, [form.atm_template])
+
   const handleSubmit = async (event) => {
     event.preventDefault()
+    if (currentStep !== 2) return
     const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
     const name = form.name.trim() || fallbackName
     const rawGlobalRisk = riskSettings.globalRiskMultiplier
     const globalRisk = rawGlobalRisk === '' ? null : Number(rawGlobalRisk)
     const baseRiskInput = riskSettings.baseRiskPerTrade
     const baseRiskValue = baseRiskInput === '' ? null : Number(baseRiskInput)
+    const atmValidation = validateATMTemplate()
+    if (Object.keys(atmValidation).length) return
+
+    const templateName = (form.atm_template?.name || '').trim()
     const cleanedSlots = (form.instrument_slots || [])
       .map((slot, index) => {
         const symbol = normalizeSymbol(slot.symbol)
@@ -702,6 +757,7 @@ function StrategyFormModal({
       instrument_slots: cleanedSlots,
       atm_template: cloneATMTemplate({
         ...form.atm_template,
+        name: templateName,
         rMode: 'atr',
         risk_unit_mode: 'atr',
         rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
@@ -714,7 +770,14 @@ function StrategyFormModal({
           : form.atm_template?.global_risk_multiplier,
       }),
     }
-    await onSubmit(payload)
+    try {
+      const saved = await onSubmit(payload, { closeOnSuccess: false })
+      setCurrentStep(3)
+      setShowSaveAnimation(true)
+      setTimeout(() => setShowSaveAnimation(false), 1200)
+    } catch (err) {
+      // Error messaging handled upstream via onSubmit
+    }
   }
 
   const venueOptions = useMemo(() => getVenueOptions(form.provider_id), [form.provider_id, getVenueOptions])
@@ -803,11 +866,26 @@ function StrategyFormModal({
     { id: 0, title: 'Basic setup', description: 'Name, timeframe, provider/venue, and symbols.' },
     { id: 1, title: 'Risk & ATR', description: 'Define ATR-based R and per-symbol overrides.' },
     { id: 2, title: 'ATM template', description: 'Stops, targets, stop adjustments, and trailing.' },
+    { id: 3, title: 'Review', description: 'Confirm the saved strategy and jump back to edit.' },
   ]
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
+      <div className="relative w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
+        {showSaveAnimation && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-3 text-emerald-100">
+              <div className="relative">
+                <div className="absolute inset-0 animate-ping rounded-full bg-emerald-500/40" />
+                <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500 text-2xl font-bold text-white shadow-lg shadow-emerald-500/40">
+                  ✓
+                </div>
+              </div>
+              <p className="text-lg font-semibold">Strategy saved!</p>
+              <p className="text-sm text-emerald-200/80">Review the details below or jump back to edit.</p>
+            </div>
+          </div>
+        )}
         <header className="border-b border-white/5 px-6 py-5">
           <div className="flex items-center justify-between">
             <div>
@@ -1210,16 +1288,128 @@ function StrategyFormModal({
                   <ATMConfigForm
                     value={form.atm_template}
                     onChange={handleATMTemplateChange}
+                    errors={atmErrors}
                     hidePositionSizing
                     hideRiskSettings
                     collapsible
                   />
+                )}
+                {atmMode === 'existing' && selectedTemplate && (
+                  <div className="mt-3">
+                    <ATMTemplateSummary template={selectedTemplate.template} compact />
+                  </div>
                 )}
                 {atmMode === 'existing' && !selectedTemplate && (
                   <p className="text-xs text-amber-200/80">
                     Select an existing template above or switch to "Create new" to edit the fields directly.
                   </p>
                 )}
+              </div>
+            </div>
+          )}
+          {currentStep === 3 && (
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Basic setup</p>
+                    <p className="text-xs text-slate-500">Core strategy metadata and symbols.</p>
+                  </div>
+                  <ActionButton type="button" variant="subtle" onClick={() => setCurrentStep(0)}>
+                    ✎ Edit
+                  </ActionButton>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Name</p>
+                    <p className="text-base text-white">{form.name || 'Untitled strategy'}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Timeframe</p>
+                    <p className="text-base text-white">{form.timeframe}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Provider / Venue</p>
+                    <p className="text-base text-white">
+                      {form.provider_id || '—'} / {form.venue_id || '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Symbols</p>
+                    <p className="text-base text-white">
+                      {(form.instrument_slots || []).map((slot) => slot.symbol).join(', ') || '—'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Risk & ATR</p>
+                    <p className="text-xs text-slate-500">Sizing inputs carried into your ATM template.</p>
+                  </div>
+                  <ActionButton type="button" variant="subtle" onClick={() => setCurrentStep(1)}>
+                    ✎ Edit
+                  </ActionButton>
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-4">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Base risk per trade</p>
+                    <p className="text-base text-white">{formatCurrency(riskSettings.baseRiskPerTrade || 0)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR period</p>
+                    <p className="text-base text-white">{riskSettings.atrPeriod}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">ATR multiplier (1R)</p>
+                    <p className="text-base text-white">{riskSettings.atrMultiplier}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Global risk multiplier</p>
+                    <p className="text-base text-white">{riskSettings.globalRiskMultiplier}</p>
+                  </div>
+                </div>
+                <div className="mt-4 space-y-2">
+                  <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Per-symbol risk</p>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {(form.instrument_slots || []).map((slot) => {
+                      const base = parseNumericOr(riskSettings.baseRiskPerTrade, 0)
+                      const globalMultiplier = parseNumericOr(riskSettings.globalRiskMultiplier, 1)
+                      const override = slot.risk_multiplier === '' || slot.risk_multiplier === null
+                        ? null
+                        : parseNumericOr(slot.risk_multiplier, globalMultiplier)
+                      const effective = override === null ? globalMultiplier : override
+                      return (
+                        <div key={slot.uid} className="rounded-xl border border-white/5 bg-black/40 px-3 py-2 text-sm">
+                          <div className="flex items-center justify-between text-white">
+                            <span className="font-semibold">{slot.symbol}</span>
+                            <span className="text-xs text-slate-300">× {formatNumber(effective)} R</span>
+                          </div>
+                          <p className="text-xs text-slate-400">
+                            Estimated risk: {formatCurrency(base * effective)}
+                          </p>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">ATM template</p>
+                    <p className="text-xs text-slate-500">Saved stops, targets, adjustments, and trailing.</p>
+                  </div>
+                  <ActionButton type="button" variant="subtle" onClick={() => setCurrentStep(2)}>
+                    ✎ Edit
+                  </ActionButton>
+                </div>
+                <div className="mt-3">
+                  <ATMTemplateSummary template={form.atm_template} compact />
+                </div>
               </div>
             </div>
           )}
@@ -1236,14 +1426,19 @@ function StrategyFormModal({
                   Back
                 </ActionButton>
               )}
-              {currentStep < steps.length - 1 && (
+              {currentStep < 2 && (
                 <ActionButton type="button" onClick={handleStepAdvance} disabled={prefetchingMeta || providersLoading}>
                   {prefetchingMeta || providersLoading ? 'Loading…' : 'Next'}
                 </ActionButton>
               )}
-              {currentStep === steps.length - 1 && (
+              {currentStep === 2 && (
                 <ActionButton type="submit" disabled={submitting}>
                   {submitting ? 'Saving…' : 'Save strategy'}
+                </ActionButton>
+              )}
+              {currentStep === 3 && (
+                <ActionButton type="button" onClick={onCancel}>
+                  Close
                 </ActionButton>
               )}
             </div>
@@ -2729,10 +2924,12 @@ const StrategyTab = ({ chartId }) => {
     const uniqueTemplates = []
 
     const pushTemplate = (id, label, template) => {
-      const key = atmTemplateKey(template)
+      const normalized = cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE)
+      const resolvedLabel = normalized.name?.trim() || label
+      const key = atmTemplateKey(normalized)
       if (!key || seen.has(key)) return
       seen.add(key)
-      uniqueTemplates.push({ id, label, template })
+      uniqueTemplates.push({ id, label: resolvedLabel, template: normalized })
     }
 
     pushTemplate('default-atm', 'Default ATM template', DEFAULT_ATM_TEMPLATE)
@@ -2947,22 +3144,28 @@ const StrategyTab = ({ chartId }) => {
   const openRuleModal = (rule = null) => setRuleModal({ open: true, rule })
   const closeRuleModal = () => setRuleModal({ open: false, rule: null })
 
-  const handleStrategySubmit = async (payload) => {
+  const handleStrategySubmit = async (payload, options = {}) => {
+    const { closeOnSuccess = true } = options || {}
     setSavingStrategy(true)
     setErrorMessage(null)
     try {
+      let saved
       if (strategyModal.strategy) {
-        await updateStrategy(strategyModal.strategy.id, payload)
+        saved = await updateStrategy(strategyModal.strategy.id, payload)
         info('strategy_updated', { strategyId: strategyModal.strategy.id })
       } else {
-        await createStrategy(payload)
+        saved = await createStrategy(payload)
         info('strategy_created', { name: payload.name })
       }
       await refreshStrategies()
-      closeStrategyModal()
+      if (closeOnSuccess) {
+        closeStrategyModal()
+      }
+      return saved
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to save strategy')
       error('strategy_save_failed', err)
+      throw err
     } finally {
       setSavingStrategy(false)
     }

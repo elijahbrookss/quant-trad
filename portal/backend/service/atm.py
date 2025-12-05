@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
+    "name": "New ATM template",
     "contracts": 3,
     "tick_size": 0.01,
     "risk_unit_mode": "atr",
@@ -16,6 +17,7 @@ DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "atr_r_multiple": 1.0,
     "stop_ticks": 35,
     "stop_price": None,
+    "stop_r_multiple": -1.0,
     "take_profit_orders": [
         {"id": "tp-1", "label": "TP +20", "ticks": 20, "contracts": 1},
         {"id": "tp-2", "label": "TP +40", "ticks": 40, "contracts": 1},
@@ -291,6 +293,10 @@ def normalise_template(
     payload_meta = payload.get("_meta") if isinstance(payload.get("_meta"), Mapping) else {}
     meta: Dict[str, Any] = dict(result.get("_meta") or {})
 
+    if payload.get("name") is not None:
+        candidate_name = str(payload.get("name") or "").strip()
+        result["name"] = candidate_name or result.get("name") or DEFAULT_ATM_TEMPLATE["name"]
+
     if payload.get("atr_r_multiple") is not None:
         result["atr_r_multiple"] = float(payload.get("atr_r_multiple") or result.get("atr_r_multiple") or 1.0)
 
@@ -340,7 +346,11 @@ def normalise_template(
 
     stop_r_multiple = _coerce_float(payload.get("stop_r") or payload.get("stop_r_multiple"))
     if stop_r_multiple is not None:
-        result["stop_r_multiple"] = float(stop_r_multiple)
+        value = float(stop_r_multiple)
+        if value == 0:
+            result["stop_r_multiple"] = result.get("stop_r_multiple") or -1.0
+        else:
+            result["stop_r_multiple"] = -abs(value)
 
     stop_price = _coerce_float(payload.get("stop_price"))
     if stop_price is not None:

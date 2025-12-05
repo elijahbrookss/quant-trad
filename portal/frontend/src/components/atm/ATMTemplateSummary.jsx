@@ -62,12 +62,13 @@ function renderTargets(targets) {
   )
 }
 
-export default function ATMTemplateSummary({ template }) {
+export default function ATMTemplateSummary({ template, compact = false }) {
   const config = cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE)
   const targets = Array.isArray(config.take_profit_orders) ? config.take_profit_orders : []
   const stopAdjustments = Array.isArray(config.stop_adjustments) ? config.stop_adjustments : []
   const trailing = config.trailing || {}
   const meta = config._meta || {}
+  const templateName = config.name?.trim() || 'Untitled template'
 
   const targetLabels = targets.reduce((acc, target, index) => {
     const label = target.label || `TP ${index + 1}`
@@ -75,6 +76,68 @@ export default function ATMTemplateSummary({ template }) {
     acc[key] = label
     return acc
   }, {})
+
+  if (compact) {
+    return (
+      <div className="space-y-3 rounded-xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template</p>
+            <p className="text-lg font-semibold text-white">{templateName}</p>
+          </div>
+          <p className="text-sm text-slate-200">{formatNumber(config.stop_r_multiple)} R stop</p>
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Take-profit targets</p>
+          {targets.length ? (
+            <ul className="space-y-1">
+              {targets.map((target, index) => (
+                <li key={target.id || index} className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2">
+                  <span className="font-semibold text-white">{target.label || `TP ${index + 1}`}</span>
+                  <span className="text-xs text-slate-300">
+                    {formatNumber(target.r_multiple)} R • {formatNumber(target.size_percent ?? target.size_pct, 0)}%
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-400">No take-profit targets defined yet.</p>
+          )}
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Stop adjustments</p>
+          {stopAdjustments.length ? (
+            <ul className="space-y-1 text-xs text-slate-200">
+              {stopAdjustments.map((rule, index) => (
+                <li key={rule.id || index} className="rounded-lg bg-white/5 px-3 py-2">
+                  {describeStopAdjustment(rule, targetLabels)}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-400">None</p>
+          )}
+        </div>
+
+        <div className="space-y-1">
+          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trailing stop</p>
+          <p className="text-sm text-slate-300">
+            {trailing?.enabled
+              ? trailing.activation_type === 'target_hit'
+                ? `Activates after ${targetLabels[trailing.target_id] || 'target'}; trails ${formatNumber(
+                    trailing.atr_multiplier ?? 1,
+                  )}R`
+                : `Activates after ${formatNumber(trailing.r_multiple ?? 1)} R; trails ${formatNumber(
+                    trailing.atr_multiplier ?? 1,
+                  )}R`
+              : 'Trailing stop disabled.'}
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   const resolvedTickSize = config.tick_size ?? meta.tick_size ?? null
   const latestAtrValue = meta.latest_atr ?? meta.atr_preview ?? meta.atr ?? null
