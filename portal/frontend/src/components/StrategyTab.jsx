@@ -435,7 +435,8 @@ function StrategyFormModal({
       setRiskSettings(RISK_DEFAULTS)
       setRiskErrors({})
       setAtmErrors({})
-      setShowSaveAnimation(false)
+      setSaveAnimationVisible(false)
+      setSaveAnimationStage('idle')
       return
     }
 
