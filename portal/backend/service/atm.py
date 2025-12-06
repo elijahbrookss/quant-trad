@@ -277,8 +277,12 @@ def normalise_template(
     template: Optional[Mapping[str, Any]],
     *,
     base: Optional[Mapping[str, Any]] = None,
+    require_template: bool = False,
 ) -> Dict[str, Any]:
     """Return a fully-populated ATM template merged with defaults."""
+
+    if require_template and not template:
+        raise ValueError("ATM template must be provided.")
 
     result = deepcopy(base or DEFAULT_ATM_TEMPLATE)
     if not template:

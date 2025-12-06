@@ -7,6 +7,7 @@ import {
   deleteStrategy,
   deleteStrategyRule,
   detachStrategyIndicator,
+  fetchATMTemplates,
   fetchStrategies,
   generateStrategySignals,
   updateStrategy,
@@ -467,14 +468,14 @@ function StrategyFormModal({
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
         ...prev,
-        atrPeriod: initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
-        atrMultiplier: initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
+        atrPeriod: initialValues.atr_period ?? initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
+        atrMultiplier: initialValues.atr_multiplier ?? initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
         baseRiskPerTrade:
-          initialValues.atm_template?.base_risk_per_trade !== undefined
-            ? Math.max(MIN_BASE_RISK, initialValues.atm_template?.base_risk_per_trade || MIN_BASE_RISK)
+          initialValues.base_risk_per_trade !== undefined
+            ? Math.max(MIN_BASE_RISK, initialValues.base_risk_per_trade || MIN_BASE_RISK)
             : prev.baseRiskPerTrade,
         globalRiskMultiplier:
-          initialValues.atm_template?.global_risk_multiplier ?? prev.globalRiskMultiplier,
+          initialValues.global_risk_multiplier ?? initialValues.atm_template?.global_risk_multiplier ?? prev.globalRiskMultiplier,
       }))
     } else {
       setForm({
@@ -747,6 +748,12 @@ function StrategyFormModal({
         return payload
       })
       .filter(Boolean)
+    const riskOverrides = cleanedSlots.reduce((acc, slot) => {
+      if (slot.risk_multiplier !== undefined && slot.risk_multiplier !== null) {
+        acc[slot.symbol] = slot.risk_multiplier
+      }
+      return acc
+    }, {})
     const payload = {
       name,
       description: form.description.trim() || null,
@@ -757,6 +764,12 @@ function StrategyFormModal({
       exchange: null,
       symbols: cleanedSlots.map((slot) => slot.symbol),
       instrument_slots: cleanedSlots,
+      atm_template_id: atmMode === 'existing' ? selectedATMTemplateId || null : null,
+      base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
+      global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : null,
+      atr_period: riskSettings.atrPeriod,
+      atr_multiplier: riskSettings.atrMultiplier,
+      risk_overrides: riskOverrides,
       atm_template: cloneATMTemplate({
         ...form.atm_template,
         name: templateName,
@@ -2909,6 +2922,7 @@ const StrategyTab = ({ chartId }) => {
   const [strategies, setStrategies] = useState([])
   const [selectedId, setSelectedId] = useState(null)
   const [indicators, setIndicators] = useState([])
+  const [atmTemplates, setAtmTemplates] = useState([])
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState(null)
   const [strategyModal, setStrategyModal] = useState({ open: false, strategy: null })
@@ -2959,7 +2973,10 @@ const StrategyTab = ({ chartId }) => {
       uniqueTemplates.push({ id, label: resolvedLabel, template: normalized })
     }
 
-    pushTemplate('default-atm', 'Default ATM template', DEFAULT_ATM_TEMPLATE)
+    atmTemplates.forEach((template) => {
+      if (!template?.template) return
+      pushTemplate(template.id, template.name, template.template)
+    })
     strategies.forEach((strategy, index) => {
       if (!strategy?.atm_template) return
       const label = strategy.name ? `${strategy.name} ATM` : `Strategy ATM ${index + 1}`
@@ -2967,7 +2984,7 @@ const StrategyTab = ({ chartId }) => {
     })
 
     return uniqueTemplates
-  }, [atmTemplateKey, strategies])
+  }, [atmTemplateKey, atmTemplates, strategies])
 
   const openInstrumentModal = useCallback(
     (defaults = {}) => {
@@ -3147,6 +3164,15 @@ const StrategyTab = ({ chartId }) => {
     }
   }, [selectedId, error])
 
+  const refreshATMTemplates = useCallback(async () => {
+    try {
+      const payload = await fetchATMTemplates()
+      setAtmTemplates(Array.isArray(payload) ? payload : [])
+    } catch (err) {
+      warn('atm_templates_fetch_failed', err)
+    }
+  }, [warn])
+
   const loadIndicators = useCallback(async () => {
     try {
       const payload = await fetchIndicators()
@@ -3158,7 +3184,8 @@ const StrategyTab = ({ chartId }) => {
 
   useEffect(() => {
     refreshStrategies()
-  }, [refreshStrategies])
+    refreshATMTemplates()
+  }, [refreshStrategies, refreshATMTemplates])
 
   useEffect(() => {
     loadIndicators()
@@ -3185,6 +3212,7 @@ const StrategyTab = ({ chartId }) => {
         info('strategy_created', { name: payload.name })
       }
       await refreshStrategies()
+      await refreshATMTemplates()
       if (closeOnSuccess) {
         closeStrategyModal()
       }
