@@ -123,6 +123,30 @@ class Database:
                 strategy_statements.append(
                     "ALTER TABLE portal_strategies ADD COLUMN atm_template JSON NOT NULL DEFAULT '{}'"
                 )
+            if "atm_template_id" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN atm_template_id VARCHAR(64) NULL"
+                )
+            if "base_risk_per_trade" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN base_risk_per_trade FLOAT NULL"
+                )
+            if "global_risk_multiplier" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN global_risk_multiplier FLOAT NULL"
+                )
+            if "atr_period" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN atr_period INTEGER NULL"
+                )
+            if "atr_multiplier" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN atr_multiplier FLOAT NULL"
+                )
+            if "risk_overrides" not in strategy_columns:
+                strategy_statements.append(
+                    "ALTER TABLE portal_strategies ADD COLUMN risk_overrides JSON NULL"
+                )
             _run_statements("portal_strategies", strategy_statements)
 
     @property
