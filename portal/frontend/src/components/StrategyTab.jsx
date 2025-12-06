@@ -154,7 +154,8 @@ function StrategyFormModal({
   const [riskSettings, setRiskSettings] = useState(RISK_DEFAULTS)
   const [riskErrors, setRiskErrors] = useState({})
   const [atmErrors, setAtmErrors] = useState({})
-  const [showSaveAnimation, setShowSaveAnimation] = useState(false)
+  const [saveAnimationStage, setSaveAnimationStage] = useState('idle')
+  const [saveAnimationVisible, setSaveAnimationVisible] = useState(false)
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
 
   const providerOptions = useMemo(
@@ -770,12 +771,26 @@ function StrategyFormModal({
           : form.atm_template?.global_risk_multiplier,
       }),
     }
+    const savingStartedAt = Date.now()
+    const MIN_SAVING_DURATION_MS = 800
+    const SAVED_HOLD_DURATION_MS = 700
     try {
-      const saved = await onSubmit(payload, { closeOnSuccess: false })
-      setCurrentStep(3)
-      setShowSaveAnimation(true)
-      setTimeout(() => setShowSaveAnimation(false), 1200)
+      setSaveAnimationVisible(true)
+      setSaveAnimationStage('saving')
+      await onSubmit(payload, { closeOnSuccess: false })
+      const elapsed = Date.now() - savingStartedAt
+      const remainingSavingDelay = Math.max(0, MIN_SAVING_DURATION_MS - elapsed)
+      setTimeout(() => {
+        setSaveAnimationStage('saved')
+        setTimeout(() => {
+          setSaveAnimationVisible(false)
+          setSaveAnimationStage('idle')
+          setCurrentStep(3)
+        }, SAVED_HOLD_DURATION_MS)
+      }, remainingSavingDelay)
     } catch (err) {
+      setSaveAnimationVisible(false)
+      setSaveAnimationStage('idle')
       // Error messaging handled upstream via onSubmit
     }
   }
@@ -863,7 +878,7 @@ function StrategyFormModal({
   if (!open) return null
 
   const steps = [
-    { id: 0, title: 'Basic setup', description: 'Name, timeframe, provider/venue, and symbols.' },
+    { id: 0, title: 'Basic setup', description: '' },
     { id: 1, title: 'Risk & ATR', description: 'Define ATR-based R and per-symbol overrides.' },
     { id: 2, title: 'ATM template', description: 'Stops, targets, stop adjustments, and trailing.' },
     { id: 3, title: 'Review', description: 'Confirm the saved strategy and jump back to edit.' },
@@ -872,18 +887,27 @@ function StrategyFormModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
       <div className="relative w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
-        {showSaveAnimation && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-            <div className="flex flex-col items-center gap-3 text-emerald-100">
-              <div className="relative">
-                <div className="absolute inset-0 animate-ping rounded-full bg-emerald-500/40" />
-                <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500 text-2xl font-bold text-white shadow-lg shadow-emerald-500/40">
-                  ✓
-                </div>
+        {saveAnimationVisible && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#11131c]/90 backdrop-blur-sm">
+            {saveAnimationStage === 'saving' && (
+              <div className="flex flex-col items-center gap-3 text-slate-200">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full border-2 border-emerald-400/40 border-t-transparent animate-spin" />
+                <p className="text-lg font-semibold text-white animate-pulse">Saving strategy…</p>
+                <p className="text-xs text-slate-400">Hold tight while we store your template.</p>
               </div>
-              <p className="text-lg font-semibold">Strategy saved!</p>
-              <p className="text-sm text-emerald-200/80">Review the details below or jump back to edit.</p>
-            </div>
+            )}
+            {saveAnimationStage === 'saved' && (
+              <div className="flex flex-col items-center gap-3 text-emerald-100">
+                <div className="relative">
+                  <div className="absolute inset-0 animate-ping rounded-full bg-emerald-500/40" />
+                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500 text-2xl font-bold text-white shadow-lg shadow-emerald-500/40 transition-transform duration-300 ease-out">
+                    ✓
+                  </div>
+                </div>
+                <p className="text-lg font-semibold">Saved!</p>
+                <p className="text-sm text-emerald-200/80">Preparing your review…</p>
+              </div>
+            )}
           </div>
         )}
         <header className="border-b border-white/5 px-6 py-5">
@@ -893,7 +917,9 @@ function StrategyFormModal({
                 {initialValues ? 'Edit strategy' : 'Create strategy'}
               </p>
               <h3 className="text-lg font-semibold text-white">{steps[currentStep].title}</h3>
-              <p className="text-sm text-slate-400">{steps[currentStep].description}</p>
+              {steps[currentStep].description && (
+                <p className="text-sm text-slate-400">{steps[currentStep].description}</p>
+              )}
             </div>
             <div className="flex items-center gap-3 text-xs uppercase tracking-[0.2em] text-slate-400">
               {steps.map((step) => (
