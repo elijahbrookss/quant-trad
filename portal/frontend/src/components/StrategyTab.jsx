@@ -127,6 +127,35 @@ const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   return <button className={classes} {...props} />
 }
 
+const AccordionSection = ({
+  title,
+  description,
+  open,
+  onToggle,
+  action,
+  children,
+}) => {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0d1320]">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-white/5"
+      >
+        <div>
+          <p className="text-sm font-semibold text-white">{title}</p>
+          {description && <p className="text-xs text-slate-500">{description}</p>}
+        </div>
+        <div className="flex items-center gap-2">
+          {action}
+          <span className="text-lg text-slate-400">{open ? '−' : '+'}</span>
+        </div>
+      </button>
+      {open && <div className="border-t border-white/10 p-4">{children}</div>}
+    </div>
+  )
+}
+
 function StrategyFormModal({
   open,
   initialValues,
@@ -2672,6 +2701,28 @@ const StrategyDetails = ({
 
   const instrumentMessages = strategyInstrumentMessages
 
+  const ruleCount = Array.isArray(strategy?.rules) ? strategy.rules.length : 0
+  const indicatorCount = Array.isArray(attachedIndicators) ? attachedIndicators.length : 0
+  const atmTemplate = strategy?.atm_template || {}
+  const atmTargets = Array.isArray(atmTemplate.take_profit_orders) ? atmTemplate.take_profit_orders : []
+  const atmStopLabel =
+    atmTemplate.stop_r_multiple !== null && atmTemplate.stop_r_multiple !== undefined
+      ? `${formatNumber(atmTemplate.stop_r_multiple)}R stop`
+      : 'No stop'
+  const atmBadge = `ATM: ${atmTargets.length || 0} target${atmTargets.length === 1 ? '' : 's'}, ${atmStopLabel}`
+
+  const [instrumentOpen, setInstrumentOpen] = useState(instrumentMessages.length > 0)
+  const [atmOpen, setAtmOpen] = useState(true)
+  const [logicOpen, setLogicOpen] = useState(true)
+  const [previewOpen, setPreviewOpen] = useState(false)
+
+  useEffect(() => {
+    setInstrumentOpen(instrumentMessages.length > 0)
+    setAtmOpen(true)
+    setLogicOpen(true)
+    setPreviewOpen(false)
+  }, [strategy?.id, instrumentMessages.length])
+
   const formatInstrumentNumber = useCallback((value) => {
     if (value === null || value === undefined || value === '') {
       return '—'
@@ -2712,23 +2763,35 @@ const StrategyDetails = ({
   }
 
   return (
-    <div className="space-y-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-lg font-semibold text-white">{strategy.name}</h3>
-          <p className="text-sm text-slate-400">
-            {strategy.timeframe} • {strategy.symbols.join(', ')}
-          </p>
+    <div className="space-y-6">
+      <div className="rounded-2xl border border-white/10 bg-[#101526] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Strategy overview</p>
+            <p className="text-lg font-semibold text-white">{strategy.name}</p>
+            <p className="text-sm text-slate-400">
+              {strategy.timeframe} • {(strategy.symbols || []).join(', ')}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <ActionButton variant="ghost" onClick={onEdit}>
+              Edit
+            </ActionButton>
+            <ActionButton variant="danger" onClick={onDelete}>
+              Delete
+            </ActionButton>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <ActionButton variant="ghost" onClick={onEdit}>
-            Edit
-          </ActionButton>
-          <ActionButton variant="danger" onClick={onDelete}>
-            Delete
-          </ActionButton>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-100">{atmBadge}</span>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-100">
+            {ruleCount} rule{ruleCount === 1 ? '' : 's'}
+          </span>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-slate-100">
+            {indicatorCount} indicator{indicatorCount === 1 ? '' : 's'}
+          </span>
         </div>
-      </header>
+      </div>
 
       {Array.isArray(strategy.missing_indicators) && strategy.missing_indicators.length > 0 && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
@@ -2746,23 +2809,29 @@ const StrategyDetails = ({
         </div>
       )}
 
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold text-white">Instrument metadata</h4>
-        </div>
+      <AccordionSection
+        title="Instrument metadata"
+        description="Validate tick sizes, fees, and instrument types."
+        open={instrumentOpen}
+        onToggle={() => setInstrumentOpen((prev) => !prev)}
+      >
         {instrumentMessages.length > 0 && (
-          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
-            <p className="font-semibold text-amber-200">Metadata notes</p>
-            <ul className="mt-1 space-y-1">
-              {instrumentMessages.map((entry, idx) => (
-                <li key={`${entry.symbol || 'instrument'}-${idx}`}>
-                  <span className="font-semibold">{entry.symbol || 'Symbol'}:</span>{' '}
-                  {entry.message || 'No metadata stored'}
-                </li>
-              ))}
-            </ul>
+          <div className="mb-3 flex gap-3 rounded-xl border border-amber-400/40 bg-amber-500/5 p-3 text-xs text-amber-100">
+            <div className="text-lg leading-5">⚠️</div>
+            <div>
+              <p className="font-semibold text-amber-200">Metadata issues</p>
+              <ul className="mt-1 list-disc space-y-1 pl-4">
+                {instrumentMessages.map((entry, idx) => (
+                  <li key={`${entry.symbol || 'instrument'}-${idx}`}>
+                    <span className="font-semibold">{entry.symbol || 'Symbol'}:</span>{' '}
+                    {entry.message || 'No metadata stored'}
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         )}
+
         <div className="space-y-3">
           {(strategy.symbols || []).map((symbol) => {
             const key = (symbol || '').toUpperCase()
@@ -2770,7 +2839,7 @@ const StrategyDetails = ({
             const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)
             return (
               <div key={key || symbol} className="rounded-2xl border border-white/10 bg-[#111726] p-4 text-sm text-slate-200">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbol</p>
                     <p className="text-lg font-semibold text-white">{symbol || '—'}</p>
@@ -2792,8 +2861,7 @@ const StrategyDetails = ({
                     <div>
                       <dt className="uppercase tracking-[0.3em] text-slate-500">Tick value</dt>
                       <dd className="text-base text-white">
-                        {formatInstrumentNumber(record.tick_value)}{' '}
-                        {record.quote_currency || ''}
+                        {formatInstrumentNumber(record.tick_value)} {record.quote_currency || ''}
                       </dd>
                     </div>
                     <div>
@@ -2803,13 +2871,8 @@ const StrategyDetails = ({
                     <div>
                       <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
                       <dd className="text-base text-white">
-                        {record.maker_fee_rate != null
-                          ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%`
-                          : '—'}{' '}
-                        /{' '}
-                        {record.taker_fee_rate != null
-                          ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%`
-                          : '—'}
+                        {record.maker_fee_rate != null ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%` : '—'} /{' '}
+                        {record.taker_fee_rate != null ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%` : '—'}
                       </dd>
                     </div>
                     <div>
@@ -2824,44 +2887,66 @@ const StrategyDetails = ({
             )
           })}
         </div>
-      </section>
+      </AccordionSection>
 
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold text-white">ATM template</h4>
-          <p className="text-xs text-slate-400">Distribution of targets, contracts, and trailing rules.</p>
-        </div>
+      <AccordionSection
+        title="ATM template"
+        description="Stops, targets, adjustments, and trailing rules."
+        open={atmOpen}
+        onToggle={() => setAtmOpen((prev) => !prev)}
+        action={
+          <ActionButton variant="ghost" onClick={onEdit}>
+            Edit
+          </ActionButton>
+        }
+      >
         <ATMTemplateSummary template={strategy.atm_template} />
-      </section>
+      </AccordionSection>
 
-      <section className="space-y-4">
-        <h4 className="text-sm font-semibold text-white">Indicators</h4>
-        <AttachedIndicators
-          strategy={strategy}
-          attached={attachedIndicators}
-          availableIndicators={availableIndicators}
-          onAttach={onAttachIndicator}
-          onDetach={onDetachIndicator}
-        />
-      </section>
+      <AccordionSection
+        title="Logic & signals"
+        description="Manage indicators and execution rules."
+        open={logicOpen}
+        onToggle={() => setLogicOpen((prev) => !prev)}
+        action={
+          <ActionButton variant="ghost" onClick={onEdit}>
+            Edit
+          </ActionButton>
+        }
+      >
+        <div className="space-y-6">
+          <div className="space-y-3">
+            <h4 className="text-sm font-semibold text-white">Indicators</h4>
+            <AttachedIndicators
+              strategy={strategy}
+              attached={attachedIndicators}
+              availableIndicators={availableIndicators}
+              onAttach={onAttachIndicator}
+              onDetach={onDetachIndicator}
+            />
+          </div>
 
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold text-white">Rules</h4>
-          <ActionButton onClick={onAddRule}>New rule</ActionButton>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-semibold text-white">Rules</h4>
+              <ActionButton onClick={onAddRule}>New rule</ActionButton>
+            </div>
+            <RuleList
+              rules={Array.isArray(strategy.rules) ? strategy.rules : []}
+              onEdit={onEditRule}
+              onDelete={onDeleteRule}
+              indicatorLookup={indicatorLookup}
+            />
+          </div>
         </div>
-        <RuleList
-          rules={Array.isArray(strategy.rules) ? strategy.rules : []}
-          onEdit={onEditRule}
-          onDelete={onDeleteRule}
-          indicatorLookup={indicatorLookup}
-        />
-      </section>
+      </AccordionSection>
 
-      <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-semibold text-white">Signal check</h4>
-        </div>
+      <AccordionSection
+        title="Quick signal preview"
+        description="Preview raw BUY/SELL signals from your rules. No PnL or positions."
+        open={previewOpen}
+        onToggle={() => setPreviewOpen((prev) => !prev)}
+      >
         <form onSubmit={handleSubmit} className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
           <DateRangePickerComponent
             dateRange={signalWindow.dateRange}
@@ -2940,7 +3025,7 @@ const StrategyDetails = ({
         </form>
 
         {signalResult && <SignalSummary result={signalResult} />}
-      </section>
+      </AccordionSection>
     </div>
   )
 }
