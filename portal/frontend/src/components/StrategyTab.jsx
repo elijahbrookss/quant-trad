@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   attachStrategyIndicator,
@@ -157,7 +157,9 @@ function StrategyFormModal({
   const [atmErrors, setAtmErrors] = useState({})
   const [saveAnimationStage, setSaveAnimationStage] = useState('idle')
   const [saveAnimationVisible, setSaveAnimationVisible] = useState(false)
+  const [initializedKey, setInitializedKey] = useState(null)
   const modalLogger = useMemo(() => createLogger('StrategyFormModal'), [])
+  const templateOptionsRef = useRef([])
 
   const providerOptions = useMemo(
     () => (providers || []).map((provider) => ({ value: provider.id, label: provider.label })),
@@ -412,6 +414,10 @@ function StrategyFormModal({
   )
 
   useEffect(() => {
+    templateOptionsRef.current = templateOptions
+  }, [templateOptions])
+
+  useEffect(() => {
     setSymbolValidation({})
   }, [symbolsInput])
 
@@ -438,9 +444,16 @@ function StrategyFormModal({
       setAtmErrors({})
       setSaveAnimationVisible(false)
       setSaveAnimationStage('idle')
+      setInitializedKey(null)
       return
     }
 
+    const initKey = initialValues?.id ? `strategy-${initialValues.id}` : 'new'
+    if (initializedKey === initKey) {
+      return
+    }
+
+    const currentTemplateOptions = templateOptionsRef.current || []
     if (initialValues) {
       const initialSlots = (() => {
         if (Array.isArray(initialValues.instrument_slots)) return inflateSlots(initialValues.instrument_slots)
@@ -449,9 +462,11 @@ function StrategyFormModal({
         return inflateSlots([])
       })()
       const fallbackTemplate = cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE)
-      const match = templateOptions.find(
+      const matchById = currentTemplateOptions.find((option) => option.value === initialValues.atm_template_id)
+      const matchByKey = currentTemplateOptions.find(
         (option) => option.key && option.key === templateKey(initialValues.atm_template),
       )
+      const match = matchById || matchByKey
 
       setForm({
         name: initialValues.name || '',
@@ -463,7 +478,7 @@ function StrategyFormModal({
         atm_template: match ? cloneATMTemplate(match.template) : fallbackTemplate,
       })
       setAtmMode(match ? 'existing' : 'new')
-      setSelectedATMTemplateId(match?.value || '')
+      setSelectedATMTemplateId(match?.value || initialValues.atm_template_id || '')
       setCurrentStep(0)
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
@@ -489,6 +504,7 @@ function StrategyFormModal({
       setSymbolsInput('')
       setRiskSettings(RISK_DEFAULTS)
     }
+    setInitializedKey(initKey)
     setTouched({})
     setShowValidation(false)
     setAtmPrefillWarning(null)
@@ -496,7 +512,23 @@ function StrategyFormModal({
     setExpandedSlots([])
     setSymbolValidation({})
     setRiskErrors({})
-  }, [open, initialValues, templateOptions, templateKey, inflateSlots])
+  }, [open, initialValues, templateKey, inflateSlots, initializedKey])
+
+  useEffect(() => {
+    if (!open || atmMode !== 'existing') return
+    if (selectedATMTemplateId) return
+    if (!initialValues?.atm_template_id && !initialValues?.atm_template) return
+
+    const matchById = templateOptions.find((option) => option.value === initialValues.atm_template_id)
+    const matchByKey = templateOptions.find(
+      (option) => option.key && option.key === templateKey(initialValues.atm_template),
+    )
+    const match = matchById || matchByKey
+    if (!match) return
+
+    setSelectedATMTemplateId(match.value)
+    setForm((prev) => ({ ...prev, atm_template: cloneATMTemplate(match.template) }))
+  }, [atmMode, initialValues, open, selectedATMTemplateId, templateKey, templateOptions])
 
   const handleChange = (field) => (input) => {
     let value = input
