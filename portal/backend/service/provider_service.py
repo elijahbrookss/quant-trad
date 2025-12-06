@@ -129,7 +129,10 @@ def tick_metadata(provider_id: Optional[str], venue_id: Optional[str], symbol: O
 
     instrument = instrument_service.resolve_instrument(datasource, exchange, normalized_symbol)
     error: Optional[str] = None
-    if not instrument:
+    # Always re-validate Alpaca instruments so asset-class checks (e.g., futures vs. equities)
+    # surface immediately during the symbol step.
+    force_validate = (datasource or "").upper() == "ALPACA"
+    if not instrument or force_validate:
         instrument, error = instrument_service.validate_instrument(
             datasource,
             exchange,

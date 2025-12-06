@@ -7,6 +7,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import AssetClass
 from alpaca.common.exceptions import APIError
 from core.logger import logger
 from .base_provider import DataSource, BaseDataProvider, InstrumentMetadata, InstrumentType
@@ -82,13 +83,18 @@ class AlpacaProvider(BaseDataProvider):
 
         asset = self._get_asset(symbol)
         asset_class = getattr(asset, "asset_class", None) or getattr(asset, "assetClass", None) or getattr(asset, "class", None)
-        normalized = str(asset_class or "").strip().lower()
+
+        # Normalize AssetClass enums and string representations like "AssetClass.US_EQUITY".
+        if isinstance(asset_class, AssetClass):
+            normalized = str(asset_class.value).strip().lower()
+        else:
+            normalized = str(asset_class or "").replace("AssetClass.", "").replace("assetclass.", "").strip().lower()
 
         if normalized in {"us_equity", "equity", "stock", "us_equities"}:
             return InstrumentType.SPOT
         if normalized in {"crypto", "cryptocurrency"}:
             return InstrumentType.SPOT
-        if normalized in {"future", "futures", "fut"}:
+        if normalized in {"future", "futures", "fut", "us_futures"}:
             return InstrumentType.FUTURE
         if normalized in {"option", "options", "opt"}:
             return InstrumentType.FUTURE
