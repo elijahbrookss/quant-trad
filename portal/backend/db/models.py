@@ -71,12 +71,9 @@ class StrategyRecord(Base):
     datasource = Column(String(64), nullable=True)
     exchange = Column(String(64), nullable=True)
     indicator_ids = Column(JSON, nullable=False, default=list)
-    atm_template = Column(JSON, nullable=False, default=dict)
     atm_template_id = Column(String(64), nullable=True)
     base_risk_per_trade = Column(Float, nullable=True)
     global_risk_multiplier = Column(Float, nullable=True)
-    atr_period = Column(Integer, nullable=True)
-    atr_multiplier = Column(Float, nullable=True)
     risk_overrides = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -103,12 +100,9 @@ class StrategyRecord(Base):
             "datasource": self.datasource,
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids or []),
-            "atm_template": dict(self.atm_template or {}),
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
             "global_risk_multiplier": self.global_risk_multiplier,
-            "atr_period": self.atr_period,
-            "atr_multiplier": self.atr_multiplier,
             "risk_overrides": self.risk_overrides or {},
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
@@ -418,7 +412,6 @@ class BotTradeRecord(Base):
     fees_paid = Column(Float, nullable=True)
     net_pnl = Column(Float, nullable=True)
     quote_currency = Column(String(16), nullable=True)
-    atm_template = Column(JSON, nullable=True)
     metrics = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -442,7 +435,6 @@ class BotTradeRecord(Base):
             "fees_paid": self.fees_paid,
             "net_pnl": self.net_pnl,
             "quote_currency": self.quote_currency,
-            "atm_template": dict(self.atm_template or {}),
             "metrics": dict(self.metrics or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",

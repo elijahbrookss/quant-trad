@@ -537,9 +537,21 @@ class LadderRiskEngine:
         else:
             self.tick_size = 0.01
         self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
-        self.base_risk_per_trade = _coerce_float(self.template.get("base_risk_per_trade"))
+
+        # Read from nested initial_stop object (schema v2) or flat fields (schema v1)
+        initial_stop_config = self.template.get("initial_stop") if isinstance(self.template.get("initial_stop"), dict) else {}
+        self.r_multiple = float(
+            initial_stop_config.get("atr_multiplier") or self.template.get("atr_r_multiple") or 1.0
+        )
+
+        # Read from nested risk object (schema v2) or flat fields (schema v1)
+        risk_config = self.template.get("risk") if isinstance(self.template.get("risk"), dict) else {}
+        self.base_risk_per_trade = _coerce_float(
+            risk_config.get("base_risk_per_trade") or self.template.get("base_risk_per_trade")
+        )
         self.stop_r_multiple = _coerce_float(self.template.get("stop_r_multiple"))
-        self.r_multiple = float(self.template.get("atr_r_multiple") or 1.0)
+
+        # Legacy configs (keep for backward compat)
         self.breakeven_config: Dict[str, Any] = dict(self.template.get("breakeven") or {})
         self.trailing_config: Dict[str, Any] = dict(self.template.get("trailing") or {})
         self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
@@ -562,7 +574,8 @@ class LadderRiskEngine:
             tick_value = self.tick_size * self.contract_size
         self.tick_value = float(tick_value or self.tick_size)
 
-        risk_mode = str(self.template.get("risk_unit_mode") or "atr").lower()
+        # Read risk mode from nested initial_stop config or flat field
+        risk_mode = str(initial_stop_config.get("mode") or self.template.get("risk_unit_mode") or "atr").lower()
         self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
         self.ticks_stop = int(
             self.template.get("ticks_stop")
@@ -570,7 +583,9 @@ class LadderRiskEngine:
             or DEFAULT_RISK.get("stop_ticks")
             or 1
         )
-        self.global_risk_multiplier = _coerce_float(self.template.get("global_risk_multiplier"), 1.0) or 1.0
+        self.global_risk_multiplier = _coerce_float(
+            risk_config.get("global_risk_multiplier") or self.template.get("global_risk_multiplier"), 1.0
+        ) or 1.0
         self.instrument_risk_multiplier = _coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
 
         self.orders = self._orders_from_template()
@@ -612,11 +627,18 @@ class LadderRiskEngine:
             if ticks is None and r_multiple is None and price is None:
                 continue
             label = entry.get("label") or f"Target {idx + 1}"
+            # Support size_fraction (v2) and size_percent (v1)
+            size_fraction = _coerce_float(entry.get("size_fraction"))
             size_percent = _coerce_float(
                 entry.get("size_percent") or entry.get("size_pct") or entry.get("size")
             )
-            if size_percent is not None and 0 <= size_percent <= 1:
+
+            # Normalize to percentage
+            if size_fraction is not None and 0 <= size_fraction <= 1:
+                size_percent = size_fraction * 100
+            elif size_percent is not None and 0 <= size_percent <= 1:
                 size_percent *= 100
+
             contracts = int(entry.get("contracts") or 0)
             if contracts <= 0 and size_percent is not None and base_contracts > 0:
                 contracts = int(round((size_percent / 100) * base_contracts))
@@ -2228,7 +2250,6 @@ class BotRuntime:
                 "stop_price": trade.stop_price,
                 "contracts": contracts,
                 "status": "open",
-                "atm_template": series.atm_template,
                 "quote_currency": trade.quote_currency,
                 "metrics": trade._metrics_snapshot(),
             }

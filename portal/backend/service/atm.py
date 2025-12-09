@@ -7,34 +7,30 @@ from copy import deepcopy
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
+    "schema_version": 2,
     "name": "New ATM template",
-    "contracts": 3,
-    "tick_size": 0.01,
-    "risk_unit_mode": "atr",
-    "ticks_stop": None,
-    "global_risk_multiplier": 1.0,
-    "base_risk_per_trade": None,
-    "atr_r_multiple": 1.0,
-    "stop_ticks": 35,
-    "stop_price": None,
-    "stop_r_multiple": -1.0,
-    "take_profit_orders": [
-        {"id": "tp-1", "label": "TP +20", "ticks": 20, "contracts": 1},
-        {"id": "tp-2", "label": "TP +40", "ticks": 40, "contracts": 1},
-        {"id": "tp-3", "label": "TP +60", "ticks": 60, "contracts": 1},
-    ],
-    "stop_adjustments": [],
-    "breakeven": {"enabled": True, "target_index": 0, "ticks": 20},
-    "trailing": {
-        "enabled": True,
-        "target_index": 1,
-        "activation_type": "r_multiple",
-        "ticks": None,
-        "atr_multiplier": 1.0,
+    "initial_stop": {
+        "mode": "atr",
         "atr_period": 14,
-        "r_multiple": 1.0,
-        "target_id": None,
+        "atr_multiplier": 1.0,
     },
+    "risk": {
+        "global_risk_multiplier": 1.0,
+        "base_risk_per_trade": None,
+    },
+    "take_profit_orders": [
+        {"id": "tp-1", "r_multiple": 1.0, "size_fraction": 0.34},
+        {"id": "tp-2", "r_multiple": 2.0, "size_fraction": 0.33},
+        {"id": "tp-3", "r_multiple": 3.0, "size_fraction": 0.33},
+    ],
+    "stop_adjustments": [
+        {
+            "id": "sa-1",
+            "trigger": {"type": "r_multiple_reached", "value": 1.0},
+            "action": {"type": "move_to_breakeven"},
+        }
+    ],
+    "_meta": {"instrument_overrides": False},
 }
 
 
@@ -70,8 +66,15 @@ def _normalise_take_profits(
 
     percents: list[Optional[float]] = []
     for entry in entries:
-        raw_percent = entry.get("size_percent") or entry.get("size_pct") or entry.get("size")
+        # Support both size_fraction (v2) and size_percent (v1)
+        raw_percent = (
+            entry.get("size_fraction")
+            or entry.get("size_percent")
+            or entry.get("size_pct")
+            or entry.get("size")
+        )
         value = _coerce_float(raw_percent)
+        # size_fraction is 0-1, size_percent is 0-100
         if value is not None and 0 <= value <= 1:
             value *= 100
         percents.append(value if value is None or value >= 0 else None)
@@ -164,36 +167,81 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         if not isinstance(entry, Mapping):
             continue
 
-        trigger_type = str(entry.get("trigger_type") or "").lower()
-        action_type = str(entry.get("action_type") or "").lower()
-        if trigger_type not in {"r_multiple", "target_hit"}:
-            continue
-        if action_type not in {"move_to_breakeven", "move_to_r"}:
-            continue
+        # Check for new nested format
+        trigger = entry.get("trigger")
+        action = entry.get("action")
 
-        trigger_value = entry.get("trigger_value")
-        if trigger_type == "r_multiple":
-            trigger_value = _coerce_float(trigger_value, 0.0)
-            if trigger_value is None or trigger_value <= 0:
-                continue
-        if trigger_type == "target_hit" and trigger_value is None:
-            continue
+        if isinstance(trigger, Mapping) and isinstance(action, Mapping):
+            # New schema v2 format
+            trigger_type = str(trigger.get("type") or "").replace("_reached", "").lower()
+            trigger_value = trigger.get("value")
+            action_type = str(action.get("type") or "").lower()
 
-        action_value = None
-        if action_type == "move_to_r":
-            action_value = _coerce_float(entry.get("action_value"), 0.0)
-            if action_value is None or action_value <= 0:
+            if trigger_type not in {"r_multiple", "target_hit"}:
                 continue
 
-        rules.append(
-            {
+            # Validate trigger value
+            if trigger_type == "r_multiple":
+                trigger_value = _coerce_float(trigger_value, 0.0)
+                if trigger_value is None or trigger_value <= 0:
+                    continue
+            if trigger_type == "target_hit" and trigger_value is None:
+                continue
+
+            # Parse action
+            action_value = None
+            atr_period = None
+            atr_multiplier = None
+
+            if action_type == "move_to_r":
+                action_value = _coerce_float(action.get("value"), 0.0)
+                if action_value is None or action_value <= 0:
+                    continue
+            elif action_type == "trail_atr":
+                atr_period = _coerce_int(action.get("atr_period"), 14)
+                atr_multiplier = _coerce_float(action.get("atr_multiplier"), 1.0)
+            elif action_type != "move_to_breakeven":
+                continue
+
+            rules.append({
+                "id": entry.get("id"),
+                "trigger_type": trigger_type,
+                "trigger_value": trigger_value,
+                "action_type": action_type,
+                "action_value": action_value,
+                "atr_period": atr_period,
+                "atr_multiplier": atr_multiplier,
+            })
+        else:
+            # Legacy flat format (still support for backward compat)
+            trigger_type = str(entry.get("trigger_type") or "").lower()
+            action_type = str(entry.get("action_type") or "").lower()
+            if trigger_type not in {"r_multiple", "target_hit"}:
+                continue
+            if action_type not in {"move_to_breakeven", "move_to_r"}:
+                continue
+
+            trigger_value = entry.get("trigger_value")
+            if trigger_type == "r_multiple":
+                trigger_value = _coerce_float(trigger_value, 0.0)
+                if trigger_value is None or trigger_value <= 0:
+                    continue
+            if trigger_type == "target_hit" and trigger_value is None:
+                continue
+
+            action_value = None
+            if action_type == "move_to_r":
+                action_value = _coerce_float(entry.get("action_value"), 0.0)
+                if action_value is None or action_value <= 0:
+                    continue
+
+            rules.append({
                 "id": entry.get("id"),
                 "trigger_type": trigger_type,
                 "trigger_value": trigger_value,
                 "action_type": action_type,
                 "action_value": action_value if action_type == "move_to_r" else None,
-            }
-        )
+            })
 
     return rules
 
@@ -307,32 +355,56 @@ def normalise_template(
         raise ValueError("ATM template name is required.")
     result["name"] = resolved_name or DEFAULT_ATM_TEMPLATE["name"]
 
-    if payload.get("atr_r_multiple") is not None:
-        result["atr_r_multiple"] = float(payload.get("atr_r_multiple") or result.get("atr_r_multiple") or 1.0)
+    # Handle schema_version
+    schema_version = payload.get("schema_version", 1)
+    result["schema_version"] = schema_version
 
-    result["risk_unit_mode"] = "atr"
+    # Handle nested initial_stop object (schema v2)
+    initial_stop_config = payload.get("initial_stop")
+    if isinstance(initial_stop_config, Mapping):
+        # Schema v2: nested initial_stop object
+        if "initial_stop" not in result or not isinstance(result["initial_stop"], dict):
+            result["initial_stop"] = {}
 
-    ticks_stop = _coerce_int(
-        payload.get("ticks_stop")
-        or payload.get("rRiskTicks")
-        or payload.get("risk_ticks"),
-        result.get("ticks_stop"),
-    )
-    if ticks_stop is not None:
-        result["ticks_stop"] = max(ticks_stop, 1)
+        if initial_stop_config.get("mode") is not None:
+            result["initial_stop"]["mode"] = str(initial_stop_config.get("mode") or "atr")
+        if initial_stop_config.get("atr_period") is not None:
+            result["initial_stop"]["atr_period"] = max(_coerce_int(initial_stop_config.get("atr_period"), 14) or 14, 1)
+        if initial_stop_config.get("atr_multiplier") is not None:
+            result["initial_stop"]["atr_multiplier"] = float(initial_stop_config.get("atr_multiplier") or 1.0)
+    else:
+        # Schema v1: derive from flat fields (backward compatibility)
+        if "initial_stop" not in result or not isinstance(result["initial_stop"], dict):
+            result["initial_stop"] = {}
 
-    if payload.get("global_risk_multiplier") is not None:
-        result["global_risk_multiplier"] = _coerce_float(
-            payload.get("global_risk_multiplier"), result.get("global_risk_multiplier")
-        )
+        if payload.get("risk_unit_mode") is not None:
+            result["initial_stop"]["mode"] = str(payload.get("risk_unit_mode") or "atr")
+        if payload.get("atr_r_multiple") is not None:
+            result["initial_stop"]["atr_multiplier"] = float(payload.get("atr_r_multiple") or 1.0)
+        # atr_period might be top-level in v1
+        if payload.get("atr_period") is not None:
+            result["initial_stop"]["atr_period"] = max(_coerce_int(payload.get("atr_period"), 14) or 14, 1)
 
-    if payload.get("contracts") is not None:
-        result["contracts"] = max(_coerce_int(payload.get("contracts"), result["contracts"]) or 1, 1)
+    # Handle nested risk object (schema v2) or flat fields (schema v1)
+    risk_config = payload.get("risk")
+    if isinstance(risk_config, Mapping):
+        # Schema v2: nested risk object
+        if "risk" not in result or not isinstance(result["risk"], dict):
+            result["risk"] = {}
 
-    if payload.get("base_risk_per_trade") is not None:
-        result["base_risk_per_trade"] = _coerce_float(
-            payload.get("base_risk_per_trade"), result.get("base_risk_per_trade")
-        )
+        if risk_config.get("global_risk_multiplier") is not None:
+            result["risk"]["global_risk_multiplier"] = _coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
+        if risk_config.get("base_risk_per_trade") is not None:
+            result["risk"]["base_risk_per_trade"] = _coerce_float(risk_config.get("base_risk_per_trade"))
+    else:
+        # Schema v1: flat fields (backward compatibility)
+        if "risk" not in result or not isinstance(result["risk"], dict):
+            result["risk"] = {}
+
+        if payload.get("global_risk_multiplier") is not None:
+            result["risk"]["global_risk_multiplier"] = _coerce_float(payload.get("global_risk_multiplier"), 1.0) or 1.0
+        if payload.get("base_risk_per_trade") is not None:
+            result["risk"]["base_risk_per_trade"] = _coerce_float(payload.get("base_risk_per_trade"))
 
     entries = _extract_take_profits(payload)
     if entries:
@@ -363,31 +435,12 @@ def normalise_template(
     if stop_price is not None:
         result["stop_price"] = float(stop_price)
 
-    breakeven_config = _normalise_breakeven(payload, result.get("breakeven", {}))
+    # Handle stop adjustments
     stop_adjustments = list(_normalise_stop_adjustments(payload))
     if stop_adjustments:
         result["stop_adjustments"] = stop_adjustments
-    elif breakeven_config.get("enabled"):
-        trigger_type = "target_hit" if breakeven_config.get("target_index") is not None else "r_multiple"
-        trigger_value = (
-            breakeven_config.get("target_index")
-            if trigger_type == "target_hit"
-            else breakeven_config.get("r_multiple")
-        )
-        result["stop_adjustments"] = [
-            {
-                "id": "sa-1",
-                "trigger_type": trigger_type,
-                "trigger_value": trigger_value if trigger_value is not None else 0.0,
-                "action_type": "move_to_breakeven",
-                "action_value": None,
-            }
-        ]
     elif not isinstance(result.get("stop_adjustments"), list):
         result["stop_adjustments"] = []
-
-    result["breakeven"] = breakeven_config
-    result["trailing"] = _normalise_trailing(payload, result.get("trailing", {}))
 
     def _should_override(field: str, provided: Any) -> bool:
         flag = payload_meta.get(f"{field}_override")

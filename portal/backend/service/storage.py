@@ -446,7 +446,8 @@ def load_strategies() -> List[Dict[str, Any]]:
                 record["atm_template"] = normalise_template(templates[template_id].template)
                 record.setdefault("atm_template_name", templates[template_id].name)
             else:
-                record["atm_template"] = normalise_template(record.get("atm_template"))
+                # No template found - use default
+                record["atm_template"] = None
             links = session.execute(
                 select(StrategyIndicatorLink).where(
                     StrategyIndicatorLink.strategy_id == strategy.id
@@ -487,7 +488,6 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.datasource = payload.get("datasource")
             record.exchange = payload.get("exchange")
             record.indicator_ids = list(payload.get("indicator_ids") or [])
-            record.atm_template = dict(payload.get("atm_template") or {})
             record.atm_template_id = payload.get("atm_template_id")
             record.base_risk_per_trade = payload.get("base_risk_per_trade")
             record.global_risk_multiplier = payload.get("global_risk_multiplier")
@@ -770,15 +770,13 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
             if net is not None:
                 record.net_pnl = net
             quote = snapshot.get("quote_currency")
-        if quote:
-            record.quote_currency = str(quote).upper()
-        if snapshot.get("atm_template") is not None:
-            record.atm_template = dict(snapshot.get("atm_template") or {})
-        if snapshot.get("metrics") is not None:
-            record.metrics = dict(snapshot.get("metrics") or {})
-        record.updated_at = now
-        if record.created_at is None:
-            record.created_at = now
+            if quote:
+                record.quote_currency = str(quote).upper()
+            if snapshot.get("metrics") is not None:
+                record.metrics = dict(snapshot.get("metrics") or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("bot_trade_persist_failed | trade=%s | error=%s", trade_id, exc)
 

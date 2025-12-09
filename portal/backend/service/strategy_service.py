@@ -153,14 +153,12 @@ def _infer_signal_direction(signal: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _risk_fields_from_template(template: Optional[Mapping[str, Any]]) -> Dict[str, Optional[float]]:
-    """Extract risk and ATR settings from a template payload."""
+    """Extract risk settings from a template payload."""
 
     if not isinstance(template, Mapping):
         return {
             "base_risk_per_trade": None,
             "global_risk_multiplier": None,
-            "atr_period": None,
-            "atr_multiplier": None,
         }
 
     def _safe_float(value: Any) -> Optional[float]:
@@ -171,22 +169,16 @@ def _risk_fields_from_template(template: Optional[Mapping[str, Any]]) -> Dict[st
         except (TypeError, ValueError):
             return None
 
-    def _safe_int(value: Any) -> Optional[int]:
-        try:
-            if value in (None, ""):
-                return None
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    atr_period = template.get("atr_period") or template.get("rAtrPeriod")
-    atr_multiplier = template.get("atr_multiplier") or template.get("rAtrMultiplier")
+    # Read from nested risk object or flat fields
+    risk_config = template.get("risk") if isinstance(template.get("risk"), dict) else {}
 
     return {
-        "base_risk_per_trade": _safe_float(template.get("base_risk_per_trade")),
-        "global_risk_multiplier": _safe_float(template.get("global_risk_multiplier")),
-        "atr_period": _safe_int(atr_period),
-        "atr_multiplier": _safe_float(atr_multiplier),
+        "base_risk_per_trade": _safe_float(
+            risk_config.get("base_risk_per_trade") or template.get("base_risk_per_trade")
+        ),
+        "global_risk_multiplier": _safe_float(
+            risk_config.get("global_risk_multiplier") or template.get("global_risk_multiplier")
+        ),
     }
 
 
@@ -785,12 +777,9 @@ class StrategyDefinition:
     indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
-    atm_template: Optional[Dict[str, Any]] = None
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
     global_risk_multiplier: Optional[float] = None
-    atr_period: Optional[int] = None
-    atr_multiplier: Optional[float] = None
     risk_overrides: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
@@ -855,6 +844,13 @@ class StrategyDefinition:
                         }
                     )
 
+        # Fetch ATM template from storage if template_id is set
+        atm_template = None
+        if self.atm_template_id:
+            stored_template = get_atm_template(self.atm_template_id)
+            if stored_template:
+                atm_template = normalise_template(stored_template.get("template"))
+
         return {
             "id": self.id,
             "name": self.name,
@@ -870,12 +866,10 @@ class StrategyDefinition:
             "instruments": instruments,
             "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
-            "atm_template": dict(self.atm_template or {}),
+            "atm_template": atm_template or {},
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
             "global_risk_multiplier": self.global_risk_multiplier,
-            "atr_period": self.atr_period,
-            "atr_multiplier": self.atr_multiplier,
             "risk_overrides": dict(self.risk_overrides or {}),
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
@@ -893,12 +887,9 @@ class StrategyDefinition:
             "datasource": self.datasource,
             "exchange": self.exchange,
             "indicator_ids": list(self.indicator_ids),
-            "atm_template": dict(self.atm_template or {}),
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
             "global_risk_multiplier": self.global_risk_multiplier,
-            "atr_period": self.atr_period,
-            "atr_multiplier": self.atr_multiplier,
             "risk_overrides": dict(self.risk_overrides or {}),
         }
 
@@ -947,8 +938,6 @@ class StrategyDefinition:
                 for obsolete in removed:
                     self.indicator_snapshots.pop(obsolete, None)
                 self.indicator_ids = new_ids
-        if "atm_template" in fields and fields["atm_template"] is not None:
-            self.atm_template = normalise_template(fields["atm_template"], require_template=True)
         if "atm_template_id" in fields:
             self.atm_template_id = fields.get("atm_template_id") or None
         if "base_risk_per_trade" in fields:
@@ -957,12 +946,6 @@ class StrategyDefinition:
         if "global_risk_multiplier" in fields:
             value = fields.get("global_risk_multiplier")
             self.global_risk_multiplier = float(value) if value is not None else None
-        if "atr_period" in fields:
-            value = fields.get("atr_period")
-            self.atr_period = int(value) if value is not None else None
-        if "atr_multiplier" in fields:
-            value = fields.get("atr_multiplier")
-            self.atr_multiplier = float(value) if value is not None else None
         if "risk_overrides" in fields and fields["risk_overrides"] is not None:
             self.risk_overrides = dict(fields.get("risk_overrides") or {})
         self.updated_at = _utcnow()
@@ -1011,11 +994,8 @@ class StrategyRegistry:
             base.created_at = _parse_timestamp(entry.get("created_at"))
             base.updated_at = _parse_timestamp(entry.get("updated_at"))
             base.atm_template_id = entry.get("atm_template_id")
-            base.atm_template = normalise_template(entry.get("atm_template")) if entry.get("atm_template") else None
             base.base_risk_per_trade = entry.get("base_risk_per_trade")
             base.global_risk_multiplier = entry.get("global_risk_multiplier")
-            base.atr_period = entry.get("atr_period")
-            base.atr_multiplier = entry.get("atr_multiplier")
             base.risk_overrides = entry.get("risk_overrides") or {}
 
             for link in entry.get("indicator_links", []):
@@ -1104,8 +1084,6 @@ class StrategyRegistry:
         atm_template_id: Optional[str] = None,
         base_risk_per_trade: Optional[float] = None,
         global_risk_multiplier: Optional[float] = None,
-        atr_period: Optional[int] = None,
-        atr_multiplier: Optional[float] = None,
         risk_overrides: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a new strategy record and return its payload."""
@@ -1136,6 +1114,13 @@ class StrategyRegistry:
         normalised_template = normalise_template(template_payload, require_template=True)
         risk_fields = _risk_fields_from_template(normalised_template)
 
+        # Save or get the ATM template ID
+        if atm_template_id:
+            final_template_id = atm_template_id
+        else:
+            saved_template = upsert_atm_template({"name": normalised_template.get("name") or clean_name, "template": normalised_template})
+            final_template_id = saved_template.get("id")
+
         record = StrategyDefinition(
             id=strategy_id,
             name=clean_name,
@@ -1145,21 +1130,14 @@ class StrategyRegistry:
             datasource=str(datasource).strip() if datasource else None,
             exchange=str(exchange).strip() if exchange else None,
             indicator_ids=list(dict.fromkeys(indicators)),
-            atm_template=normalised_template,
+            atm_template_id=final_template_id,
             base_risk_per_trade=base_risk_per_trade if base_risk_per_trade is not None else risk_fields.get("base_risk_per_trade"),
             global_risk_multiplier=global_risk_multiplier if global_risk_multiplier is not None else risk_fields.get("global_risk_multiplier"),
-            atr_period=atr_period if atr_period is not None else risk_fields.get("atr_period"),
-            atr_multiplier=atr_multiplier if atr_multiplier is not None else risk_fields.get("atr_multiplier"),
             risk_overrides={
                 **({slot.symbol: slot.risk_multiplier for slot in clean_slots if slot.risk_multiplier is not None}),
                 **(dict(risk_overrides or {})),
             },
         )
-        if atm_template_id:
-            record.atm_template_id = atm_template_id
-        else:
-            saved_template = upsert_atm_template({"name": normalised_template.get("name") or clean_name, "template": normalised_template})
-            record.atm_template_id = saved_template.get("id")
         for inst_id in record.indicator_ids:
             try:
                 meta = deepcopy(get_instance_meta(inst_id))
@@ -1187,11 +1165,8 @@ class StrategyRegistry:
         if fields.get("atm_template") is not None:
             normalised_template = normalise_template(fields.get("atm_template"), require_template=True)
             risk_fields = _risk_fields_from_template(normalised_template)
-            record.atm_template = normalised_template
             record.base_risk_per_trade = risk_fields.get("base_risk_per_trade")
             record.global_risk_multiplier = risk_fields.get("global_risk_multiplier")
-            record.atr_period = risk_fields.get("atr_period")
-            record.atr_multiplier = risk_fields.get("atr_multiplier")
             candidate_template_id = fields.get("atm_template_id") or record.atm_template_id
             saved_template = upsert_atm_template(
                 {
@@ -1669,8 +1644,6 @@ def create_strategy(
     atm_template_id: Optional[str] = None,
     base_risk_per_trade: Optional[float] = None,
     global_risk_multiplier: Optional[float] = None,
-    atr_period: Optional[int] = None,
-    atr_multiplier: Optional[float] = None,
     risk_overrides: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new strategy using the global registry."""
@@ -1687,8 +1660,6 @@ def create_strategy(
         atm_template_id=atm_template_id,
         base_risk_per_trade=base_risk_per_trade,
         global_risk_multiplier=global_risk_multiplier,
-        atr_period=atr_period,
-        atr_multiplier=atr_multiplier,
         risk_overrides=risk_overrides,
     )
 
