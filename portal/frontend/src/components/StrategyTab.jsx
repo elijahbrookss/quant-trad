@@ -512,14 +512,14 @@ function StrategyFormModal({
       setSymbolsInput(initialSlots.map((slot) => slot.symbol).filter(Boolean).join(', '))
       setRiskSettings((prev) => ({
         ...prev,
-        atrPeriod: initialValues.atr_period ?? initialValues.atm_template?.rAtrPeriod ?? prev.atrPeriod,
-        atrMultiplier: initialValues.atr_multiplier ?? initialValues.atm_template?.rAtrMultiplier ?? prev.atrMultiplier,
+        atrPeriod: initialValues.atm_template?.initial_stop?.atr_period ?? prev.atrPeriod,
+        atrMultiplier: initialValues.atm_template?.initial_stop?.atr_multiplier ?? prev.atrMultiplier,
         baseRiskPerTrade:
           initialValues.base_risk_per_trade !== undefined
             ? Math.max(MIN_BASE_RISK, initialValues.base_risk_per_trade || MIN_BASE_RISK)
             : prev.baseRiskPerTrade,
         globalRiskMultiplier:
-          initialValues.global_risk_multiplier ?? initialValues.atm_template?.global_risk_multiplier ?? prev.globalRiskMultiplier,
+          initialValues.global_risk_multiplier ?? initialValues.atm_template?.risk?.global_risk_multiplier ?? prev.globalRiskMultiplier,
       }))
     } else {
       setForm({
@@ -655,11 +655,16 @@ function StrategyFormModal({
         ...current,
         atm_template: cloneATMTemplate({
           ...current.atm_template,
-          rAtrPeriod: next.atrPeriod ?? current.atm_template?.rAtrPeriod,
-          rAtrMultiplier: next.atrMultiplier ?? current.atm_template?.rAtrMultiplier,
-          base_risk_per_trade: next.baseRiskPerTrade ?? current.atm_template?.base_risk_per_trade,
-          rMode: 'atr',
-          risk_unit_mode: 'atr',
+          initial_stop: {
+            ...(current.atm_template?.initial_stop || {}),
+            mode: 'atr',
+            atr_period: next.atrPeriod ?? current.atm_template?.initial_stop?.atr_period ?? 14,
+            atr_multiplier: next.atrMultiplier ?? current.atm_template?.initial_stop?.atr_multiplier ?? 1.0,
+          },
+          risk: {
+            ...(current.atm_template?.risk || {}),
+            base_risk_per_trade: next.baseRiskPerTrade ?? current.atm_template?.risk?.base_risk_per_trade,
+          },
         }),
       }))
       return next
@@ -828,22 +833,21 @@ function StrategyFormModal({
       atm_template_id: atmMode === 'existing' ? selectedATMTemplateId || null : null,
       base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
       global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : null,
-      atr_period: riskSettings.atrPeriod,
-      atr_multiplier: riskSettings.atrMultiplier,
       risk_overrides: riskOverrides,
       atm_template: cloneATMTemplate({
         ...form.atm_template,
         name: templateName,
-        rMode: 'atr',
-        risk_unit_mode: 'atr',
-        rAtrPeriod: riskSettings.atrPeriod ?? form.atm_template?.rAtrPeriod,
-        rAtrMultiplier: riskSettings.atrMultiplier ?? form.atm_template?.rAtrMultiplier,
-        rRiskTicks: null,
-        ticks_stop: null,
-        base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.base_risk_per_trade,
-        global_risk_multiplier: Number.isFinite(globalRisk)
-          ? globalRisk
-          : form.atm_template?.global_risk_multiplier,
+        initial_stop: {
+          ...(form.atm_template?.initial_stop || {}),
+          mode: 'atr',
+          atr_period: riskSettings.atrPeriod ?? form.atm_template?.initial_stop?.atr_period ?? 14,
+          atr_multiplier: riskSettings.atrMultiplier ?? form.atm_template?.initial_stop?.atr_multiplier ?? 1.0,
+        },
+        risk: {
+          ...(form.atm_template?.risk || {}),
+          base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.risk?.base_risk_per_trade,
+          global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : form.atm_template?.risk?.global_risk_multiplier,
+        },
       }),
     }
     const savingStartedAt = Date.now()

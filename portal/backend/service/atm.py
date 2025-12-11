@@ -66,15 +66,10 @@ def _normalise_take_profits(
 
     percents: list[Optional[float]] = []
     for entry in entries:
-        # Support both size_fraction (v2) and size_percent (v1)
-        raw_percent = (
-            entry.get("size_fraction")
-            or entry.get("size_percent")
-            or entry.get("size_pct")
-            or entry.get("size")
-        )
-        value = _coerce_float(raw_percent)
-        # size_fraction is 0-1, size_percent is 0-100
+        # v2 schema: size_fraction (0-1 range)
+        raw_fraction = entry.get("size_fraction")
+        value = _coerce_float(raw_fraction)
+        # Convert to percentage for internal processing
         if value is not None and 0 <= value <= 1:
             value *= 100
         percents.append(value if value is None or value >= 0 else None)
@@ -167,81 +162,52 @@ def _normalise_stop_adjustments(payload: Mapping[str, Any]) -> Sequence[Dict[str
         if not isinstance(entry, Mapping):
             continue
 
-        # Check for new nested format
+        # Schema v2: nested trigger/action format
         trigger = entry.get("trigger")
         action = entry.get("action")
 
-        if isinstance(trigger, Mapping) and isinstance(action, Mapping):
-            # New schema v2 format
-            trigger_type = str(trigger.get("type") or "").replace("_reached", "").lower()
-            trigger_value = trigger.get("value")
-            action_type = str(action.get("type") or "").lower()
+        if not isinstance(trigger, Mapping) or not isinstance(action, Mapping):
+            continue
 
-            if trigger_type not in {"r_multiple", "target_hit"}:
+        trigger_type = str(trigger.get("type") or "").replace("_reached", "").lower()
+        trigger_value = trigger.get("value")
+        action_type = str(action.get("type") or "").lower()
+
+        if trigger_type not in {"r_multiple", "target_hit"}:
+            continue
+
+        # Validate trigger value
+        if trigger_type == "r_multiple":
+            trigger_value = _coerce_float(trigger_value, 0.0)
+            if trigger_value is None or trigger_value <= 0:
                 continue
+        if trigger_type == "target_hit" and trigger_value is None:
+            continue
 
-            # Validate trigger value
-            if trigger_type == "r_multiple":
-                trigger_value = _coerce_float(trigger_value, 0.0)
-                if trigger_value is None or trigger_value <= 0:
-                    continue
-            if trigger_type == "target_hit" and trigger_value is None:
+        # Parse action
+        action_value = None
+        atr_period = None
+        atr_multiplier = None
+
+        if action_type == "move_to_r":
+            action_value = _coerce_float(action.get("value"), 0.0)
+            if action_value is None or action_value <= 0:
                 continue
+        elif action_type == "trail_atr":
+            atr_period = _coerce_int(action.get("atr_period"), 14)
+            atr_multiplier = _coerce_float(action.get("atr_multiplier"), 1.0)
+        elif action_type != "move_to_breakeven":
+            continue
 
-            # Parse action
-            action_value = None
-            atr_period = None
-            atr_multiplier = None
-
-            if action_type == "move_to_r":
-                action_value = _coerce_float(action.get("value"), 0.0)
-                if action_value is None or action_value <= 0:
-                    continue
-            elif action_type == "trail_atr":
-                atr_period = _coerce_int(action.get("atr_period"), 14)
-                atr_multiplier = _coerce_float(action.get("atr_multiplier"), 1.0)
-            elif action_type != "move_to_breakeven":
-                continue
-
-            rules.append({
-                "id": entry.get("id"),
-                "trigger_type": trigger_type,
-                "trigger_value": trigger_value,
-                "action_type": action_type,
-                "action_value": action_value,
-                "atr_period": atr_period,
-                "atr_multiplier": atr_multiplier,
-            })
-        else:
-            # Legacy flat format (still support for backward compat)
-            trigger_type = str(entry.get("trigger_type") or "").lower()
-            action_type = str(entry.get("action_type") or "").lower()
-            if trigger_type not in {"r_multiple", "target_hit"}:
-                continue
-            if action_type not in {"move_to_breakeven", "move_to_r"}:
-                continue
-
-            trigger_value = entry.get("trigger_value")
-            if trigger_type == "r_multiple":
-                trigger_value = _coerce_float(trigger_value, 0.0)
-                if trigger_value is None or trigger_value <= 0:
-                    continue
-            if trigger_type == "target_hit" and trigger_value is None:
-                continue
-
-            action_value = None
-            if action_type == "move_to_r":
-                action_value = _coerce_float(entry.get("action_value"), 0.0)
-                if action_value is None or action_value <= 0:
-                    continue
-
-            rules.append({
-                "id": entry.get("id"),
-                "trigger_type": trigger_type,
-                "trigger_value": trigger_value,
-                "action_type": action_type,
-                "action_value": action_value if action_type == "move_to_r" else None,
-            })
+        rules.append({
+            "id": entry.get("id"),
+            "trigger_type": trigger_type,
+            "trigger_value": trigger_value,
+            "action_type": action_type,
+            "action_value": action_value,
+            "atr_period": atr_period,
+            "atr_multiplier": atr_multiplier,
+        })
 
     return rules
 
@@ -361,8 +327,8 @@ def normalise_template(
 
     # Handle nested initial_stop object (schema v2)
     initial_stop_config = payload.get("initial_stop")
+    # Schema v2: nested initial_stop object
     if isinstance(initial_stop_config, Mapping):
-        # Schema v2: nested initial_stop object
         if "initial_stop" not in result or not isinstance(result["initial_stop"], dict):
             result["initial_stop"] = {}
 
@@ -372,23 +338,9 @@ def normalise_template(
             result["initial_stop"]["atr_period"] = max(_coerce_int(initial_stop_config.get("atr_period"), 14) or 14, 1)
         if initial_stop_config.get("atr_multiplier") is not None:
             result["initial_stop"]["atr_multiplier"] = float(initial_stop_config.get("atr_multiplier") or 1.0)
-    else:
-        # Schema v1: derive from flat fields (backward compatibility)
-        if "initial_stop" not in result or not isinstance(result["initial_stop"], dict):
-            result["initial_stop"] = {}
-
-        if payload.get("risk_unit_mode") is not None:
-            result["initial_stop"]["mode"] = str(payload.get("risk_unit_mode") or "atr")
-        if payload.get("atr_r_multiple") is not None:
-            result["initial_stop"]["atr_multiplier"] = float(payload.get("atr_r_multiple") or 1.0)
-        # atr_period might be top-level in v1
-        if payload.get("atr_period") is not None:
-            result["initial_stop"]["atr_period"] = max(_coerce_int(payload.get("atr_period"), 14) or 14, 1)
-
-    # Handle nested risk object (schema v2) or flat fields (schema v1)
+    # Schema v2: nested risk object
     risk_config = payload.get("risk")
     if isinstance(risk_config, Mapping):
-        # Schema v2: nested risk object
         if "risk" not in result or not isinstance(result["risk"], dict):
             result["risk"] = {}
 
@@ -396,15 +348,6 @@ def normalise_template(
             result["risk"]["global_risk_multiplier"] = _coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
         if risk_config.get("base_risk_per_trade") is not None:
             result["risk"]["base_risk_per_trade"] = _coerce_float(risk_config.get("base_risk_per_trade"))
-    else:
-        # Schema v1: flat fields (backward compatibility)
-        if "risk" not in result or not isinstance(result["risk"], dict):
-            result["risk"] = {}
-
-        if payload.get("global_risk_multiplier") is not None:
-            result["risk"]["global_risk_multiplier"] = _coerce_float(payload.get("global_risk_multiplier"), 1.0) or 1.0
-        if payload.get("base_risk_per_trade") is not None:
-            result["risk"]["base_risk_per_trade"] = _coerce_float(payload.get("base_risk_per_trade"))
 
     entries = _extract_take_profits(payload)
     if entries:

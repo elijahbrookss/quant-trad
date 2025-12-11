@@ -25,90 +25,6 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
     cloned = JSON.parse(JSON.stringify(DEFAULT_ATM_TEMPLATE))
   }
 
-  // Detect schema version (v1 if missing schema_version)
-  const isV1 = !cloned.schema_version || cloned.schema_version === 1
-
-  if (isV1) {
-    // Migrate v1 to v2
-    const v2Template = {
-      schema_version: 2,
-      name: cloned.name || DEFAULT_ATM_TEMPLATE.name,
-      initial_stop: {
-        mode: cloned.risk_unit_mode || cloned.rMode || 'atr',
-        atr_period: cloned.rAtrPeriod ?? cloned.atr_period ?? 14,
-        atr_multiplier: cloned.rAtrMultiplier ?? cloned.atr_r_multiple ?? 1.0,
-      },
-      risk: {
-        global_risk_multiplier: cloned.global_risk_multiplier ?? 1.0,
-        base_risk_per_trade: cloned.base_risk_per_trade ?? null,
-      },
-      take_profit_orders: [],
-      stop_adjustments: [],
-      _meta: cloned._meta || {},
-    }
-
-    // Convert take_profit_orders: size_percent (0-100) to size_fraction (0-1)
-    if (Array.isArray(cloned.take_profit_orders)) {
-      v2Template.take_profit_orders = cloned.take_profit_orders.map((tp, index) => {
-        const sizePercent = tp.size_percent ?? tp.size_pct ?? tp.size ?? 100
-        return {
-          id: tp.id || `tp-${index + 1}`,
-          r_multiple: tp.r_multiple ?? index + 1,
-          size_fraction: sizePercent / 100, // Convert 0-100 to 0-1
-          label: tp.label,
-        }
-      })
-    }
-
-    // Convert stop_adjustments: flat to nested trigger/action
-    if (Array.isArray(cloned.stop_adjustments)) {
-      v2Template.stop_adjustments = cloned.stop_adjustments.map((sa, index) => ({
-        id: sa.id || `sa-${index + 1}`,
-        trigger: {
-          type: sa.trigger_type === 'target_hit' ? 'target_hit' : 'r_multiple_reached',
-          value: sa.trigger_value ?? 1.0,
-        },
-        action: {
-          type: sa.action_type === 'move_to_r' ? 'move_to_r' : 'move_to_breakeven',
-          value: sa.action_type === 'move_to_r' ? sa.action_value : undefined,
-        },
-      }))
-    }
-
-    // Handle legacy breakeven object
-    if (cloned.breakeven?.enabled && v2Template.stop_adjustments.length === 0) {
-      const triggerValue = cloned.breakeven?.target_index ?? cloned.breakeven?.r_multiple ?? 1
-      const triggerType = cloned.breakeven?.target_index !== undefined && cloned.breakeven?.target_index !== null
-        ? 'target_hit'
-        : 'r_multiple_reached'
-      v2Template.stop_adjustments.push({
-        id: 'sa-1',
-        trigger: { type: triggerType, value: triggerValue },
-        action: { type: 'move_to_breakeven' },
-      })
-    }
-
-    // Handle legacy trailing object - convert to stop_adjustment with trail_atr action
-    if (cloned.trailing?.enabled) {
-      const trailingActivationType = cloned.trailing.activation_type === 'target_hit' ? 'target_hit' : 'r_multiple_reached'
-      const trailingTriggerValue = cloned.trailing.activation_type === 'target_hit'
-        ? cloned.trailing.target_id ?? cloned.trailing.target_index
-        : cloned.trailing.r_multiple ?? 1
-
-      v2Template.stop_adjustments.push({
-        id: 'trailing-1',
-        trigger: { type: trailingActivationType, value: trailingTriggerValue },
-        action: {
-          type: 'trail_atr',
-          atr_period: cloned.trailing.atr_period ?? cloned.rAtrPeriod ?? 14,
-          atr_multiplier: cloned.trailing.atr_multiplier ?? cloned.rAtrMultiplier ?? 1.0,
-        },
-      })
-    }
-
-    cloned = v2Template
-  }
-
   // Normalize v2 template
   if (cloned.name === undefined || cloned.name === null || cloned.name === '') {
     cloned.name = DEFAULT_ATM_TEMPLATE.name
@@ -141,6 +57,10 @@ export function cloneATMTemplate(template = DEFAULT_ATM_TEMPLATE) {
     cloned._meta = {}
   }
 
+  if (!cloned.schema_version) {
+    cloned.schema_version = 2
+  }
+
   return cloned
 }
 
@@ -166,24 +86,12 @@ function autoLabel(value, overrideFlag, fallback, suffix = '') {
 }
 
 function parseSizePercent(target, totalContracts) {
-  // Check for size_fraction first (v2 schema: 0-1 range)
+  // v2 schema: size_fraction (0-1 range)
   const sizeFraction = target.size_fraction
   if (sizeFraction !== undefined && sizeFraction !== null) {
     const numeric = Number(sizeFraction)
     if (Number.isFinite(numeric)) {
       return numeric * 100 // Convert 0-1 to 0-100 for UI
-    }
-  }
-
-  // Fallback to v1 schema fields (0-100 range or 0-1 range)
-  const candidates = [target.size_percent, target.size_pct, target.size]
-  for (const candidate of candidates) {
-    const numeric = Number(candidate)
-    if (Number.isFinite(numeric)) {
-      if (numeric >= 0 && numeric <= 1) {
-        return numeric * 100
-      }
-      return Math.max(0, numeric)
     }
   }
 
@@ -374,52 +282,37 @@ export default function ATMConfigForm({
   const stopAdjustments = useMemo(
     () =>
       (Array.isArray(template.stop_adjustments) ? template.stop_adjustments : []).map((rule, index) => {
-        // Handle v2 nested format
-        if (rule?.trigger && rule?.action) {
-          const triggerType = rule.trigger.type === 'target_hit' ? 'target_hit' : 'r_multiple'
-          const triggerValue = rule.trigger.value ?? 1
+        // v2 schema: nested trigger/action format
+        if (!rule?.trigger || !rule?.action) return null
 
-          // Check action type - could be move_to_breakeven, move_to_r, or trail_atr
-          let actionType = 'move_to_breakeven'
-          let actionValue = null
-          let atrPeriod = null
-          let atrMultiplier = null
+        const triggerType = rule.trigger.type === 'target_hit' ? 'target_hit' : 'r_multiple'
+        const triggerValue = rule.trigger.value ?? 1
 
-          if (rule.action.type === 'move_to_r') {
-            actionType = 'move_to_r'
-            actionValue = rule.action.value ?? 0
-          } else if (rule.action.type === 'trail_atr') {
-            actionType = 'trail_atr'
-            atrPeriod = rule.action.atr_period ?? 14
-            atrMultiplier = rule.action.atr_multiplier ?? 1.0
-          }
+        // Check action type - could be move_to_breakeven, move_to_r, or trail_atr
+        let actionType = 'move_to_breakeven'
+        let actionValue = null
+        let atrPeriod = null
+        let atrMultiplier = null
 
-          return {
-            id: rule.id || `sa-${index + 1}`,
-            trigger_type: triggerType,
-            trigger_value: triggerValue,
-            action_type: actionType,
-            action_value: actionValue,
-            atr_period: atrPeriod,
-            atr_multiplier: atrMultiplier,
-          }
+        if (rule.action.type === 'move_to_r') {
+          actionType = 'move_to_r'
+          actionValue = rule.action.value ?? 0
+        } else if (rule.action.type === 'trail_atr') {
+          actionType = 'trail_atr'
+          atrPeriod = rule.action.atr_period ?? 14
+          atrMultiplier = rule.action.atr_multiplier ?? 1.0
         }
-
-        // Handle v1 flat format (backward compatibility)
-        const triggerType = rule?.trigger_type === 'target_hit' ? 'target_hit' : 'r_multiple'
-        const actionType = rule?.action_type === 'move_to_r' ? 'move_to_r' : 'move_to_breakeven'
-        const defaultTriggerValue = triggerType === 'target_hit' ? rule?.trigger_value ?? null : Number(rule?.trigger_value ?? 1)
-        const parsedTrigger = triggerType === 'target_hit' ? defaultTriggerValue : Number.isFinite(defaultTriggerValue) ? defaultTriggerValue : 1
-        const parsedActionValue = actionType === 'move_to_r' ? Number(rule?.action_value ?? 0) : null
 
         return {
-          id: rule?.id || `sa-${index + 1}`,
+          id: rule.id || `sa-${index + 1}`,
           trigger_type: triggerType,
-          trigger_value: triggerType === 'target_hit' ? defaultTriggerValue : parsedTrigger,
+          trigger_value: triggerValue,
           action_type: actionType,
-          action_value: actionType === 'move_to_r' ? parsedActionValue : null,
+          action_value: actionValue,
+          atr_period: atrPeriod,
+          atr_multiplier: atrMultiplier,
         }
-      }),
+      }).filter(Boolean),
     [template.stop_adjustments],
   )
 

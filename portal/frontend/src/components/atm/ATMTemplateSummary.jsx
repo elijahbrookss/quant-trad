@@ -15,15 +15,29 @@ function formatNumber(value) {
 }
 
 function describeStopAdjustment(rule, targetLookup) {
-  if (!rule) return ''
+  if (!rule?.trigger || !rule?.action) return ''
+
+  // v2 schema: nested trigger/action format
+  const triggerType = rule.trigger.type === 'target_hit' ? 'target_hit' : 'r_multiple'
+  const triggerValue = rule.trigger.value
+  const actionType = rule.action.type
+  const actionValue = rule.action.value
+
   const trigger =
-    rule.trigger_type === 'target_hit'
-      ? `After ${targetLookup[rule.trigger_value] || 'target'}`
-      : `After ${formatNumber(rule.trigger_value)} R`
-  const action =
-    rule.action_type === 'move_to_r'
-      ? `Move stop to ${formatNumber(rule.action_value ?? 0)} R`
-      : 'Move stop to breakeven (0R)'
+    triggerType === 'target_hit'
+      ? `After ${targetLookup[triggerValue] || 'target'}`
+      : `After ${formatNumber(triggerValue)} R`
+
+  let action
+  if (actionType === 'move_to_r') {
+    action = `Move stop to ${formatNumber(actionValue ?? 0)} R`
+  } else if (actionType === 'trail_atr') {
+    const atrMultiplier = rule.action.atr_multiplier ?? 1.0
+    action = `Trail stop (ATR × ${formatNumber(atrMultiplier)})`
+  } else {
+    action = 'Move stop to breakeven (0R)'
+  }
+
   return `${trigger} → ${action}`
 }
 
@@ -52,8 +66,9 @@ export default function ATMTemplateSummary({ template, compact = false }) {
   const targetsStory = targets.length
     ? targets
         .map((target, index) => {
-          const size = target.size_percent ?? target.size_pct ?? target.size
-          return `${target.label || `TP ${index + 1}`} ${formatNumber(target.r_multiple)}R (${formatNumber(size, 0)}%)`
+          // v2 schema: size_fraction (0-1 range)
+          const sizePercent = (target.size_fraction ?? 0) * 100
+          return `${target.label || `TP ${index + 1}`} ${formatNumber(target.r_multiple)}R (${formatNumber(sizePercent)}%)`
         })
         .join(', ')
     : 'No take-profit targets defined.'

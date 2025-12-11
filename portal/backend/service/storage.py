@@ -491,8 +491,6 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.atm_template_id = payload.get("atm_template_id")
             record.base_risk_per_trade = payload.get("base_risk_per_trade")
             record.global_risk_multiplier = payload.get("global_risk_multiplier")
-            record.atr_period = payload.get("atr_period")
-            record.atr_multiplier = payload.get("atr_multiplier")
             record.risk_overrides = payload.get("risk_overrides") or {}
             record.updated_at = now
             if record.created_at is None:
