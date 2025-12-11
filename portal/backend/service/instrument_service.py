@@ -314,8 +314,9 @@ def validate_instrument(
 
     venue_arg = exchange_id or venue_id or ""
     try:
+        provider.validate_symbol(venue_arg, normalized_symbol)
+        instrument_type = provider.validate_instrument_type(venue_arg, normalized_symbol)
         metadata = provider.get_instrument_metadata(venue_arg, normalized_symbol)
-        instrument_type = provider.get_instrument_type(venue_arg, normalized_symbol)
     except Exception as exc:  # pragma: no cover - provider integration
         logger.warning(
             "instrument_validation_failed | provider=%s venue=%s symbol=%s error=%s",

@@ -14,163 +14,111 @@ function formatNumber(value) {
   return numeric.toPrecision(4)
 }
 
-function renderTargets(targets) {
-  if (!targets.length) {
-    return (
-      <p className="text-sm text-slate-400">No take-profit targets defined yet.</p>
-    )
+function describeStopAdjustment(rule, targetLookup) {
+  if (!rule?.trigger || !rule?.action) return ''
+
+  // v2 schema: nested trigger/action format
+  const triggerType = rule.trigger.type === 'target_hit' ? 'target_hit' : 'r_multiple'
+  const triggerValue = rule.trigger.value
+  const actionType = rule.action.type
+  const actionValue = rule.action.value
+
+  const trigger =
+    triggerType === 'target_hit'
+      ? `After ${targetLookup[triggerValue] || 'target'}`
+      : `After ${formatNumber(triggerValue)} R`
+
+  let action
+  if (actionType === 'move_to_r') {
+    action = `Move stop to ${formatNumber(actionValue ?? 0)} R`
+  } else if (actionType === 'trail_atr') {
+    const atrMultiplier = rule.action.atr_multiplier ?? 1.0
+    action = `Trail stop (ATR × ${formatNumber(atrMultiplier)})`
+  } else {
+    action = 'Move stop to breakeven (0R)'
   }
-  return (
-    <ul className="space-y-2">
-      {targets.map((target, index) => (
-        <li
-          key={target.id || index}
-          className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200"
-        >
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">
-              Target {index + 1}
-            </p>
-            <p className="text-base text-white">{target.label || `TP +${target.ticks}`}</p>
-          </div>
-          <div className="text-right text-xs text-slate-400">
-            {target.r_multiple !== null && target.r_multiple !== undefined ? (
-              <p>{formatNumber(target.r_multiple)} R</p>
-            ) : target.price !== null && target.price !== undefined ? (
-              <p>@ {formatNumber(target.price)}</p>
-            ) : (
-              <p>{formatNumber(target.ticks)} ticks</p>
-            )}
-            <p>{formatNumber(target.contracts)} contracts</p>
-          </div>
-        </li>
-      ))}
-    </ul>
-  )
+
+  return `${trigger} → ${action}`
 }
 
-export default function ATMTemplateSummary({ template }) {
+export default function ATMTemplateSummary({ template, compact = false }) {
   const config = cloneATMTemplate(template || DEFAULT_ATM_TEMPLATE)
   const targets = Array.isArray(config.take_profit_orders) ? config.take_profit_orders : []
-  const breakeven = config.breakeven || {}
+  const stopAdjustments = Array.isArray(config.stop_adjustments) ? config.stop_adjustments : []
   const trailing = config.trailing || {}
-  const meta = config._meta || {}
+  const templateName = config.name?.trim() || 'Untitled template'
 
-  const resolvedTickSize = config.tick_size ?? meta.tick_size ?? null
-  const latestAtrValue = meta.latest_atr ?? meta.atr_preview ?? meta.atr ?? null
-  const rMode = config.rMode || 'atr'
-  const riskTicks = config.rRiskTicks
-  const rAtrMultiplier = config.rAtrMultiplier ?? 1
+  const targetLabels = targets.reduce((acc, target, index) => {
+    const label = target.label || `TP ${index + 1}`
+    const key = target?.id || label
+    acc[key] = label
+    return acc
+  }, {})
 
-  const oneRPrice =
-    rMode === 'ticks'
-      ? riskTicks && resolvedTickSize
-        ? riskTicks * resolvedTickSize
-        : null
-      : latestAtrValue
-        ? rAtrMultiplier * Number(latestAtrValue)
-        : null
-  const oneRTicks = resolvedTickSize && oneRPrice ? oneRPrice / resolvedTickSize : riskTicks ?? null
+  const contractsLabel =
+    config.contracts !== null && config.contracts !== undefined
+      ? `${formatNumber(config.contracts)} contracts`
+      : 'Contracts not set'
+  const stopLabel =
+    config.stop_r_multiple !== null && config.stop_r_multiple !== undefined
+      ? `${formatNumber(config.stop_r_multiple)}R stop`
+      : 'Stop not set'
+  const targetsStory = targets.length
+    ? targets
+        .map((target, index) => {
+          // v2 schema: size_fraction (0-1 range)
+          const sizePercent = (target.size_fraction ?? 0) * 100
+          return `${target.label || `TP ${index + 1}`} ${formatNumber(target.r_multiple)}R (${formatNumber(sizePercent)}%)`
+        })
+        .join(', ')
+    : 'No take-profit targets defined.'
+  const adjustmentsStory = stopAdjustments.length
+    ? stopAdjustments.map((rule) => describeStopAdjustment(rule, targetLabels)).join(' • ')
+    : 'None'
+  const trailingStory = trailing?.enabled
+    ? trailing.activation_type === 'target_hit'
+      ? `After ${targetLabels[trailing.target_id] || 'target'} → trail by ${formatNumber(
+          trailing.atr_multiplier ?? trailing.distance_r ?? trailing.distance ?? 1,
+        )}R`
+      : `After ${formatNumber(trailing.r_multiple ?? 1)}R → trail by ${formatNumber(
+          trailing.atr_multiplier ?? trailing.distance_r ?? trailing.distance ?? 1,
+        )}R`
+    : 'Trailing stop disabled.'
 
-  const describeField = (value, flag) => {
-    if (flag) {
-      return formatNumber(value)
-    }
-    return 'Auto'
+  if (compact) {
+    return (
+      <div className="space-y-3 rounded-xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template</p>
+            <p className="text-lg font-semibold text-white">{templateName}</p>
+          </div>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-100">{contractsLabel}</span>
+        </div>
+        <div className="space-y-1 text-sm text-slate-200">
+          <p>Stop: {stopLabel}</p>
+          <p>Targets: {targetsStory}</p>
+          <p>Adjustments: {adjustmentsStory}</p>
+          <p>Trailing: {trailingStory}</p>
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className="space-y-4 rounded-2xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
-      <div className="grid gap-4 md:grid-cols-3">
+    <div className="space-y-3 rounded-2xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Contracts</p>
-          <p className="text-lg font-semibold text-white">{formatNumber(config.contracts)}</p>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template</p>
+          <p className="text-lg font-semibold text-white">{templateName}</p>
         </div>
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Risk unit</p>
-          <p className="text-sm text-white">
-            {rMode === 'ticks'
-              ? `${formatNumber(riskTicks)} ticks${oneRPrice ? ` (${formatNumber(oneRPrice)} pts)` : ''}`
-              : oneRPrice
-                ? `${formatNumber(oneRPrice)} per R`
-                : `${formatNumber(rAtrMultiplier)} x ATR`}
-          </p>
-          <p className="text-[11px] text-slate-500">1R definition for R-based stops and targets.</p>
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Initial stop</p>
-          <p className="text-lg font-semibold text-white">
-            {config.stop_r_multiple !== null && config.stop_r_multiple !== undefined
-              ? `${formatNumber(config.stop_r_multiple)} R`
-              : config.stop_price !== null && config.stop_price !== undefined
-                ? `@ ${formatNumber(config.stop_price)}`
-                : `${formatNumber(config.stop_ticks)} ticks`}
-          </p>
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Breakeven</p>
-          <p className="text-sm text-white">
-            {breakeven?.enabled === false
-              ? 'Disabled'
-              : breakeven?.target_index !== undefined && breakeven?.target_index !== null
-                ? `After target ${Number(breakeven.target_index) + 1}`
-                : breakeven?.r_multiple !== null && breakeven?.r_multiple !== undefined
-                  ? `${formatNumber(breakeven.r_multiple)} R`
-                  : breakeven?.ticks
-                    ? `${formatNumber(breakeven.ticks)} ticks`
-                    : 'Manual'}
-          </p>
-        </div>
+        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-100">{contractsLabel}</span>
       </div>
-
-      <div className="grid gap-4 md:grid-cols-3">
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Tick size</p>
-          <p className="text-base text-white">{describeField(config.tick_size, meta.tick_size_override)}</p>
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Tick value</p>
-          <p className="text-base text-white">{describeField(config.tick_value, meta.tick_value_override)}</p>
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Contract size</p>
-          <p className="text-base text-white">{describeField(config.contract_size, meta.contract_size_override)}</p>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Take-profit targets</p>
-        <div className="mt-3">{renderTargets(targets)}</div>
-      </div>
-
-      <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
-        {trailing?.enabled ? (
-          <dl className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-2">
-            <div>
-              <dt className="uppercase tracking-[0.3em] text-slate-500">Activate after</dt>
-              <dd className="text-base text-white">
-                {trailing.target_index !== undefined && trailing.target_index !== null
-                  ? `Target ${Number(trailing.target_index) + 1}`
-                  : trailing.r_multiple !== null && trailing.r_multiple !== undefined
-                    ? `${formatNumber(trailing.r_multiple)} R`
-                    : trailing.ticks
-                      ? `${formatNumber(trailing.ticks)} ticks`
-                      : 'Manual'}
-              </dd>
-            </div>
-            <div>
-              <dt className="uppercase tracking-[0.3em] text-slate-500">ATR multiplier</dt>
-              <dd className="text-base text-white">{formatNumber(trailing.atr_multiplier ?? 1)}</dd>
-            </div>
-            <div>
-              <dt className="uppercase tracking-[0.3em] text-slate-500">ATR period</dt>
-              <dd className="text-base text-white">{formatNumber(trailing.atr_period ?? 14)}</dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="mt-3 text-sm text-slate-400">Trailing stop disabled.</p>
-        )}
+      <div className="space-y-1 text-sm text-slate-200">
+        <p>Stop: {stopLabel}</p>
+        <p>Targets: {targetsStory}</p>
+        <p>Adjustments: {adjustmentsStory}</p>
+        <p>Trailing: {trailingStory}</p>
       </div>
     </div>
   )

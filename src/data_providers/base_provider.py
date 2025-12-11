@@ -76,8 +76,16 @@ class BaseDataProvider(ABC):
         """Return a binary instrument classification (spot vs futures/perps)."""
 
     @abstractmethod
+    def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Raise if the instrument type cannot be confirmed."""
+
+    @abstractmethod
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return tick_size, contract_size, and tick_value for a trading unit."""
+
+    @abstractmethod
+    def validate_symbol(self, venue: str, symbol: str) -> None:
+        """Raise if the symbol does not exist for the provider/venue."""
 
     @staticmethod
     def _normalize_metadata(

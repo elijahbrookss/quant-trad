@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import provider_service, strategy_service
+from ..service import provider_service
+from ..service.strategy_service import facade as strategy_service
 
 
 router = APIRouter()
@@ -96,6 +97,12 @@ class StrategyOut(BaseModel):
     instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
     rules: List[StrategyRuleOut]
     atm_template: Dict[str, Any] = Field(default_factory=dict)
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -114,6 +121,12 @@ class StrategyCreateRequest(BaseModel):
     venue_id: Optional[str] = None
     indicator_ids: List[str] = Field(default_factory=list)
     atm_template: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Optional[Dict[str, Any]] = None
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -130,6 +143,12 @@ class StrategyUpdateRequest(BaseModel):
     venue_id: Optional[str] = None
     indicator_ids: Optional[List[str]] = None
     atm_template: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Optional[Dict[str, Any]] = None
 
 
 class RuleConditionCreate(BaseModel):
@@ -170,6 +189,23 @@ class StrategyRuleUpdateRequest(BaseModel):
     match: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class ATMTemplateRequest(BaseModel):
+    """Payload for saving an ATM template."""
+
+    id: Optional[str] = None
+    name: str
+    template: Dict[str, Any]
+    owner_id: Optional[str] = None
+
+
+class ATMTemplateOut(ATMTemplateRequest):
+    """Response payload for ATM templates."""
+
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class StrategySignalRequest(BaseModel):
@@ -236,6 +272,12 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
             exchange=payload.get("exchange"),
             indicator_ids=payload.get("indicator_ids") or [],
             atm_template=payload.get("atm_template"),
+            atm_template_id=payload.get("atm_template_id"),
+            base_risk_per_trade=payload.get("base_risk_per_trade"),
+            global_risk_multiplier=payload.get("global_risk_multiplier"),
+            atr_period=payload.get("atr_period"),
+            atr_multiplier=payload.get("atr_multiplier"),
+            risk_overrides=payload.get("risk_overrides"),
         )
         return _attach_market_aliases(record)
     except Exception as exc:  # noqa: BLE001
@@ -279,6 +321,24 @@ async def delete_strategy(strategy_id: str) -> Response:
         raise HTTPException(404, str(exc)) from exc
 
     return Response(status_code=204)
+
+
+@router.get("/atm-templates", response_model=List[ATMTemplateOut])
+async def list_atm_templates() -> List[Dict[str, Any]]:
+    """Return all saved ATM templates."""
+
+    return strategy_service.list_atm_templates()
+
+
+@router.post("/atm-templates", response_model=ATMTemplateOut, status_code=201)
+async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
+    """Create or update an ATM template."""
+
+    try:
+        return strategy_service.save_atm_template(body.dict())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("atm_template_save_failed")
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyOut)

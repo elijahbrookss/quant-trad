@@ -6,6 +6,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.enums import DataFeed
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import AssetClass
+from alpaca.common.exceptions import APIError
 from core.logger import logger
 from .base_provider import DataSource, BaseDataProvider, InstrumentMetadata, InstrumentType
 
@@ -14,10 +17,20 @@ load_dotenv("secrets.env")
 
 class AlpacaProvider(BaseDataProvider):
     def __init__(self):
+        self._api_key = os.getenv("ALPACA_API_KEY")
+        self._secret_key = os.getenv("ALPACA_SECRET_KEY")
+
         self.client = StockHistoricalDataClient(
-            os.getenv("ALPACA_API_KEY"),
-            os.getenv("ALPACA_SECRET_KEY"),
+            self._api_key,
+            self._secret_key,
         )
+        self._trading_client = None
+        if self._api_key and self._secret_key:
+            self._trading_client = TradingClient(
+                self._api_key,
+                self._secret_key,
+                paper=self._paper_trading_enabled(),
+            )
 
     def fetch_from_api(
         self,
@@ -66,12 +79,78 @@ class AlpacaProvider(BaseDataProvider):
         return DataSource.ALPACA.value
 
     def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
-        """Alpaca's equities API only delivers spot instruments."""
+        """Return the Alpaca asset class mapped into our instrument enum."""
 
-        return InstrumentType.SPOT
+        asset = self._get_asset(symbol)
+        asset_class = getattr(asset, "asset_class", None) or getattr(asset, "assetClass", None) or getattr(asset, "class", None)
+
+        # Normalize AssetClass enums and string representations like "AssetClass.US_EQUITY".
+        if isinstance(asset_class, AssetClass):
+            normalized = str(asset_class.value).strip().lower()
+        else:
+            normalized = str(asset_class or "").replace("AssetClass.", "").replace("assetclass.", "").strip().lower()
+
+        if normalized in {"us_equity", "equity", "stock", "us_equities"}:
+            return InstrumentType.SPOT
+        if normalized in {"crypto", "cryptocurrency"}:
+            return InstrumentType.SPOT
+        if normalized in {"future", "futures", "fut", "us_futures"}:
+            return InstrumentType.FUTURE
+        if normalized in {"option", "options", "opt"}:
+            return InstrumentType.FUTURE
+
+        raise ValueError(f"Unsupported Alpaca asset class '{asset_class}' for symbol '{symbol}'")
+
+    def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
+        """Validate existence and return the instrument type using Alpaca assets."""
+
+        return self.get_instrument_type(venue, symbol)
 
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return tick and contract details for Alpaca equities."""
 
         # US equities trade in $0.01 increments; one share is one trading unit.
+        # Validation happens inside ``_get_asset`` to ensure the symbol exists.
+        self._get_asset(symbol)
         return self._normalize_metadata(tick_size=0.01, contract_size=1.0)
+
+    def validate_symbol(self, venue: str, symbol: str) -> None:
+        """Confirm the symbol exists via Alpaca's asset lookup."""
+
+        self._get_asset(symbol)
+
+    def _get_asset(self, symbol: str):
+        """Return the Alpaca asset object or raise if unavailable."""
+
+        if not symbol:
+            raise ValueError("Symbol is required for Alpaca validation")
+
+        if not self._trading_client:
+            raise ValueError("Alpaca credentials are required for symbol validation")
+
+        try:
+            asset = self._trading_client.get_asset(symbol)
+        except APIError as exc:
+            logger.warning(
+                "alpaca_symbol_lookup_failed | symbol=%s | error=%s",
+                symbol,
+                exc,
+            )
+            raise ValueError(f"Alpaca symbol '{symbol}' not found") from exc
+        except Exception as exc:
+            logger.warning(
+                "alpaca_symbol_lookup_error | symbol=%s | error=%s",
+                symbol,
+                exc,
+            )
+            raise ValueError(f"Alpaca symbol lookup failed: {exc}") from exc
+
+        if not asset or getattr(asset, "symbol", None) is None:
+            raise ValueError(f"Alpaca symbol '{symbol}' not found")
+
+        return asset
+
+    @staticmethod
+    def _paper_trading_enabled() -> bool:
+        flag = os.getenv("ALPACA_PAPER", "true").strip().lower()
+        return flag in {"1", "true", "yes", "on"}
