@@ -7,193 +7,55 @@ import math
 import uuid
 from collections.abc import Mapping, MutableMapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
-from data_providers.alpaca_provider import AlpacaProvider
 from data_providers.base_provider import DataSource
-from data_providers.factory import get_provider
 from indicators.config import DataContext
 from indicators.vwap import VWAPIndicator
 from indicators.pivot_level import PivotLevelIndicator
 from indicators.trendline import TrendlineIndicator
 from indicators.market_profile import MarketProfileIndicator
-from signals.engine.signal_generator import (
-    build_signal_overlays,
-    describe_indicator_rules,
-    run_indicator_rules,
-)
-from .storage import (
-    delete_indicator as storage_delete_indicator,
-    get_indicator as storage_get_indicator,
-    load_indicators as storage_load_indicators,
-    strategies_for_indicator as storage_strategies_for_indicator,
-    upsert_indicator as storage_upsert_indicator,
-    upsert_strategy_indicator as storage_upsert_strategy_indicator,
-)
 from signals.base import BaseSignal
 from signals.engine import market_profile_generator  # noqa: F401
 from signals.engine import pivot_level_generator  # noqa: F401
 from signals.engine.market_profile_generator import build_value_area_payloads
-from signals.rules.market_profile import (
-    MarketProfileBreakoutConfig,
-    _BREAKOUT_CACHE_INITIALISED,
-    _BREAKOUT_CACHE_KEY,
-    _BREAKOUT_READY_FLAG,
-)
-from signals.rules.pivot import PivotBreakoutConfig, _PIVOT_BREAKOUT_READY_FLAG
+from signals.rules.market_profile import MarketProfileBreakoutConfig
+from signals.rules.pivot import PivotBreakoutConfig
+from .data_provider_resolver import DataProviderResolver, default_resolver
+from .indicator_breakout_cache import IndicatorBreakoutCache, default_breakout_cache
+from .indicator_cache import IndicatorCacheEntry, IndicatorCacheManager, default_cache_manager
+from .indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
+from .indicator_factory import IndicatorFactory
+from .indicator_repository import IndicatorRepository, default_repository
+from .indicator_signal_runner import IndicatorSignalRunner, default_signal_runner
 
 pivot_level_generator.ensure_registration()
 
 logger = logging.getLogger(__name__)
 
-# Registered indicator types
-_INDICATOR_MAP = {
-    "vwap":           VWAPIndicator,
-    "pivot_level":    PivotLevelIndicator,
-    "trendline":      TrendlineIndicator,
-    "market_profile": MarketProfileIndicator,
-}
-
-# Ensure default signal rules are registered for built-in indicators
-
-
-@dataclass
-class IndicatorCacheEntry:
-    """Lightweight cache entry holding an indicator instance."""
-
-    meta: Dict[str, Any]
-    instance: Any
-    updated_at: Optional[str] = None
-
-
-_INSTANCE_CACHE: Dict[str, IndicatorCacheEntry] = {}
-_CONTEXT_KEYS = ("symbol", "start", "end", "interval")
-
-
-def _normalize_context_values(payload: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    if not payload:
-        return {}
-    context: Dict[str, Any] = {}
-    for key in _CONTEXT_KEYS:
-        value = payload.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        context[key] = value
-    return context
-
-
-def _maybe_backfill_context(
-    record: Mapping[str, Any],
-    fallback: Optional[Mapping[str, Any]] = None,
-    *,
-    persist: bool = False,
-) -> Mapping[str, Any]:
-    """Ensure legacy indicator rows have chart context available."""
-
-    params = dict(record.get("params") or {})
-    missing = [key for key in _CONTEXT_KEYS if not params.get(key)]
-    if not missing:
-        return record
-
-    ctx_patch = _normalize_context_values(fallback)
-    if not ctx_patch:
-        return record
-
-    updated = False
-    for key in missing:
-        value = ctx_patch.get(key)
-        if value is None:
-            continue
-        params[key] = value
-        updated = True
-
-    if not updated:
-        return record
-
-    patched = dict(record)
-    patched["params"] = params
-
-    if not persist:
-        return patched
-
-    storage_upsert_indicator(patched)
-    refreshed = storage_get_indicator(str(record.get("id")))
-    return refreshed or patched
-
-
-def _coerce_record_meta(record: Mapping[str, Any]) -> Dict[str, Any]:
-    inst_id = str(record.get("id") or "").strip()
-    payload = {
-        "id": inst_id,
-        "type": record.get("type"),
-        "name": record.get("name") or record.get("type") or inst_id or "Indicator",
-        "params": deepcopy(record.get("params") or {}),
-        "color": record.get("color"),
-        "datasource": record.get("datasource"),
-        "exchange": record.get("exchange"),
-        "enabled": bool(record.get("enabled", True)),
-    }
-    return _ensure_color(payload)
-
-
-def _cache_indicator(inst_id: str, meta: Dict[str, Any], inst: Any, updated_at: Optional[str]) -> None:
-    if not inst_id:
-        return
-    _INSTANCE_CACHE[inst_id] = IndicatorCacheEntry(meta=deepcopy(meta), instance=inst, updated_at=updated_at)
-
-
-def _evict_indicator(inst_id: str) -> None:
-    if not inst_id:
-        return
-    _INSTANCE_CACHE.pop(inst_id, None)
+_repository: IndicatorRepository = default_repository()
+_resolver: DataProviderResolver = default_resolver()
+_factory: IndicatorFactory = IndicatorFactory(resolver=_resolver)
+_cache_manager: IndicatorCacheManager = default_cache_manager(
+    _repository, factory=_factory
+)
+_signal_runner: IndicatorSignalRunner = default_signal_runner()
+_breakout_cache: IndicatorBreakoutCache = default_breakout_cache()
 
 
 def _build_meta_from_record(record: Mapping[str, Any]) -> Dict[str, Any]:
-    meta = _coerce_record_meta(record)
-    return _ensure_color(meta)
+    return _factory.build_meta_from_record(record)
 
 
 def _build_indicator_instance(meta: Mapping[str, Any]):
-    inst_id = str(meta.get("id") or "").strip()
-    type_str = str(meta.get("type") or "").strip()
-    Cls = _INDICATOR_MAP.get(type_str)
-    if not inst_id or not Cls:
-        raise KeyError(f"Unknown indicator: {inst_id}")
-
-    params = deepcopy(meta.get("params") or {})
-    ctx_kwargs: Dict[str, Any] = {}
-    missing: List[str] = []
-    for key in ("symbol", "start", "end", "interval"):
-        if key in params:
-            ctx_kwargs[key] = params.pop(key)
-        else:
-            missing.append(key)
-    if missing:
-        raise ValueError(f"Indicator {inst_id} missing required context: {', '.join(missing)}")
-
-    datasource = _normalize_datasource(meta.get("datasource"))
-    exchange = _normalize_exchange(meta.get("exchange"))
-    if exchange and not datasource:
-        datasource = DataSource.CCXT.value
-
-    ctx = DataContext(**ctx_kwargs)
-    ctx.validate()
-    provider = _resolve_data_provider(datasource, exchange=exchange)
-    inst = Cls.from_context(provider=provider, ctx=ctx, **params)
-    if isinstance(inst, MarketProfileIndicator):
-        setattr(inst, "symbol", ctx_kwargs.get("symbol"))
-    return inst
+    return _factory.build_indicator_instance(meta)
 
 
 def _load_indicator_record(inst_id: str) -> Dict[str, Any]:
-    record = storage_get_indicator(inst_id)
+    record = _repository.get(inst_id)
     if not record:
         raise KeyError("Indicator not found")
     return record
@@ -205,29 +67,17 @@ def _get_indicator_entry(
     fallback_context: Optional[Mapping[str, Any]] = None,
     persist_backfill: bool = False,
 ) -> IndicatorCacheEntry:
-    record = _load_indicator_record(inst_id)
-    if fallback_context:
-        record = _maybe_backfill_context(
-            record,
-            fallback_context,
-            persist=persist_backfill,
-        )
-    record_version = str(record.get("updated_at") or "")
-    cached = _INSTANCE_CACHE.get(inst_id)
-    if cached and cached.updated_at == record_version and cached.instance is not None:
-        return cached
-
-    meta = _build_meta_from_record(record)
-    inst = _build_indicator_instance(meta)
-    entry = IndicatorCacheEntry(meta=meta, instance=inst, updated_at=record_version)
-    _INSTANCE_CACHE[inst_id] = entry
-    return entry
+    return _cache_manager.get_entry(
+        inst_id,
+        fallback_context=fallback_context,
+        persist_backfill=persist_backfill,
+    )
 
 
 def _refresh_strategy_links(inst_id: str, meta: Mapping[str, Any]) -> None:
     """Update stored strategy indicator snapshots after metadata changes."""
 
-    strategies = storage_strategies_for_indicator(inst_id)
+    strategies = _repository.strategies_for_indicator(inst_id)
     if not strategies:
         return
     snapshot = deepcopy(meta)
@@ -235,114 +85,21 @@ def _refresh_strategy_links(inst_id: str, meta: Mapping[str, Any]) -> None:
         strategy_id = strategy.get("id")
         if not strategy_id:
             continue
-        storage_upsert_strategy_indicator(
+        _repository.upsert_strategy_indicator(
             strategy_id=strategy_id,
             indicator_id=inst_id,
             snapshot=snapshot,
         )
 
 
-@dataclass(frozen=True)
-class BreakoutCacheSpec:
-    breakout_rule_id: str
-    retest_rule_id: str
-    cache_context_key: str
-    ready_flag_key: str
-    initialised_flag_key: Optional[str]
-    config_signature_builder: Callable[[Mapping[str, Any]], Tuple[Any, ...]]
-    rule_signal_types: Dict[str, Set[str]] = field(default_factory=dict)
-    context_defaults: Mapping[str, Any] = field(default_factory=dict)
-
-
-_PIVOT_BREAKOUT_CACHE_KEY = "pivot_breakouts"
-
+_RUNTIME_PARAM_KEYS = {"datasource", "exchange"}
 
 _DEFAULT_PIVOT_BREAKOUT_CONFIG = PivotBreakoutConfig()
 _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG = MarketProfileBreakoutConfig()
 
 
-_BREAKOUT_CACHE_SPECS: Dict[str, BreakoutCacheSpec] = {}
-
-
-_BREAKOUT_SIGNAL_CACHE: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
-
-
-_RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "market_profile": {
-        "market_profile_breakout": {
-            "signal_type": "breakout",
-            "directions": [
-                {
-                    "id": "long",
-                    "label": "Long breakout",
-                    "description": "Breakout above the active value area high (VAH) that confirms continuation.",
-                },
-                {
-                    "id": "short",
-                    "label": "Short breakdown",
-                    "description": "Breakdown below the active value area low (VAL) signalling downside momentum.",
-                },
-            ],
-        },
-        "market_profile_retest": {
-            "signal_type": "retest",
-            "directions": [
-                {
-                    "id": "long",
-                    "label": "Long retest",
-                    "description": (
-                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
-                        " favouring continuation to the upside."
-                    ),
-                },
-                {
-                    "id": "short",
-                    "label": "Short retest",
-                    "description": (
-                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds," \
-                        " signalling continuation lower."
-                    ),
-                },
-            ],
-        },
-    },
-    "pivot_level": {
-        "pivot_breakout": {
-            "signal_type": "breakout",
-        },
-        "pivot_retest": {
-            "signal_type": "retest",
-        },
-    },
-}
-
-
-_RUNTIME_PARAM_KEYS = {"datasource", "exchange"}
-
-
 def _purge_breakout_cache(inst_id: str) -> None:
-    if not inst_id:
-        return
-    stale_keys = [key for key in _BREAKOUT_SIGNAL_CACHE if key and key[0] == inst_id]
-    for cache_key in stale_keys:
-        _BREAKOUT_SIGNAL_CACHE.pop(cache_key, None)
-
-
-def _hashable_signature(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool, type(None))):
-        return value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if hasattr(value, "isoformat"):
-        try:
-            return value.isoformat()
-        except Exception:
-            pass
-    if isinstance(value, Mapping):
-        return tuple(sorted((k, _hashable_signature(v)) for k, v in value.items()))
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return tuple(_hashable_signature(v) for v in value)
-    return str(value)
+    _breakout_cache.purge_indicator(inst_id)
 
 
 def _scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -378,223 +135,15 @@ def _coerce_float(value: Any, default: float, *, minimum: Optional[float] = None
     return result
 
 
-def _pivot_breakout_signature(config: Mapping[str, Any]) -> Tuple[Any, ...]:
-    cfg = config.get("pivot_breakout_config")
-    if isinstance(cfg, PivotBreakoutConfig):
-        confirmation = cfg.confirmation_bars
-        early_window = cfg.early_confirmation_window
-        early_pct = cfg.early_confirmation_distance_pct
-    else:
-        confirmation = _coerce_int(
-            config.get("pivot_breakout_confirmation_bars"),
-            _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
-            minimum=1,
-        )
-        early_window = _coerce_int(
-            config.get("pivot_breakout_early_window"),
-            _DEFAULT_PIVOT_BREAKOUT_CONFIG.early_confirmation_window,
-            minimum=1,
-        )
-        early_pct = _coerce_float(
-            config.get("pivot_breakout_early_distance_pct"),
-            _DEFAULT_PIVOT_BREAKOUT_CONFIG.early_confirmation_distance_pct,
-            minimum=0.0,
-        )
-    mode = str(config.get("mode", "backtest")).lower()
-    return (mode, confirmation, early_window, float(early_pct))
-
-
-def _market_profile_breakout_signature(config: Mapping[str, Any]) -> Tuple[Any, ...]:
-    cfg = config.get("market_profile_breakout_config")
-    if isinstance(cfg, MarketProfileBreakoutConfig):
-        confirmation = cfg.confirmation_bars
-        early_window = cfg.early_confirmation_window
-        early_pct = cfg.early_confirmation_distance_pct
-    else:
-        confirmation = _coerce_int(
-            config.get("market_profile_breakout_confirmation_bars"),
-            _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
-            minimum=1,
-        )
-        early_window = _coerce_int(
-            config.get("market_profile_breakout_early_window"),
-            _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.early_confirmation_window,
-            minimum=1,
-        )
-        early_pct = _coerce_float(
-            config.get("market_profile_breakout_early_distance_pct"),
-            _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.early_confirmation_distance_pct,
-            minimum=0.0,
-        )
-    mode = str(config.get("mode", "backtest")).lower()
-    payload_sig = _hashable_signature(config.get("rule_payloads"))
-    return (mode, confirmation, early_window, float(early_pct), payload_sig)
-
-
-def _clone_breakouts(breakouts: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    return deepcopy(list(breakouts)) if breakouts else []
-
-
-def _get_cached_breakouts(cache_key: Tuple[Any, ...]) -> Optional[List[Dict[str, Any]]]:
-    cached = _BREAKOUT_SIGNAL_CACHE.get(cache_key)
-    if cached is None:
-        return None
-    return deepcopy(cached)
-
-
-def _store_breakout_cache(
-    cache_key: Tuple[Any, ...], breakouts: Sequence[Mapping[str, Any]]
-) -> None:
-    _BREAKOUT_SIGNAL_CACHE[cache_key] = _clone_breakouts(breakouts)
-
-
-def _flatten_breakout_signal(signal: BaseSignal) -> Dict[str, Any]:
-    metadata = dict(signal.metadata or {})
-    metadata.setdefault("type", signal.type)
-    metadata.setdefault("symbol", signal.symbol)
-    metadata.setdefault("time", signal.time)
-    metadata.setdefault("confidence", signal.confidence)
-    return metadata
-
-
-def _build_market_profile_overlay_indicator(
-    indicator: MarketProfileIndicator,
-    df: pd.DataFrame,
-    *,
-    interval: Optional[str] = None,
-    symbol: Optional[str] = None,
-) -> MarketProfileIndicator:
-    """Create a fresh MarketProfileIndicator aligned with the overlay request window."""
-
-    base_symbol = getattr(indicator, "symbol", None)
-    sanitized_symbol = symbol or base_symbol
-    bin_size_locked = bool(getattr(indicator, "_bin_size_locked", False))
-    symbol_changed = sanitized_symbol is not None and sanitized_symbol != base_symbol
-    runtime_bin_size = getattr(indicator, "bin_size", None)
-    if not bin_size_locked and symbol_changed:
-        runtime_bin_size = None
-
-    runtime = MarketProfileIndicator(
-        df=df.copy(),
-        bin_size=runtime_bin_size,
-        mode=getattr(indicator, "mode", "tpo"),
-        interval=interval or getattr(indicator, "interval", "30m"),
-        extend_value_area_to_chart_end=getattr(
-            indicator,
-            "extend_value_area_to_chart_end",
-            True,
-        ),
-        use_merged_value_areas=getattr(indicator, "use_merged_value_areas", True),
-        merge_threshold=getattr(indicator, "merge_threshold", 0.6),
-        min_merge_sessions=getattr(
-            indicator,
-            "min_merge_sessions",
-            getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-        ),
-    )
-
-    if sanitized_symbol is not None:
-        setattr(runtime, "symbol", sanitized_symbol)
-
-    return runtime
-
-
-_BREAKOUT_CACHE_SPECS.update(
-    {
-        PivotLevelIndicator.NAME: BreakoutCacheSpec(
-            breakout_rule_id="pivot_breakout",
-            retest_rule_id="pivot_retest",
-            cache_context_key=_PIVOT_BREAKOUT_CACHE_KEY,
-            ready_flag_key=_PIVOT_BREAKOUT_READY_FLAG,
-            initialised_flag_key=None,
-            config_signature_builder=_pivot_breakout_signature,
-            rule_signal_types={
-                "pivot_breakout": {"breakout"},
-                "pivot_retest": {"retest"},
-            },
-        ),
-        MarketProfileIndicator.NAME: BreakoutCacheSpec(
-            breakout_rule_id="market_profile_breakout",
-            retest_rule_id="market_profile_retest",
-            cache_context_key=_BREAKOUT_CACHE_KEY,
-            ready_flag_key=_BREAKOUT_READY_FLAG,
-            initialised_flag_key=_BREAKOUT_CACHE_INITIALISED,
-            config_signature_builder=_market_profile_breakout_signature,
-            rule_signal_types={
-                "market_profile_breakout": {"breakout"},
-                "market_profile_retest": {"retest"},
-            },
-            context_defaults={_BREAKOUT_CACHE_INITIALISED: True},
-        ),
-    }
-)
-
-
-def _guess_signal_type(indicator_type: str, rule_id: str) -> str:
-    hints = _RULE_HINTS.get(indicator_type.lower(), {}).get(rule_id.lower(), {})
-    if hints.get("signal_type"):
-        return str(hints["signal_type"])
-
-    rule_key = rule_id.lower()
-    if "retest" in rule_key:
-        return "retest"
-    if "breakout" in rule_key or "break" in rule_key:
-        return "breakout"
-    if "touch" in rule_key:
-        return "touch"
-    if "trend" in rule_key:
-        return "trend"
-    return rule_key or "signal"
-
-
-def _default_direction_hints(signal_type: str) -> List[Dict[str, str]]:
-    normalized = (signal_type or "").lower()
-    if normalized in {"breakout", "retest", "touch", "trend"}:
-        return [
-            {
-                "id": "long",
-                "label": "Long",
-                "description": "Setup that supports a long bias.",
-            },
-            {
-                "id": "short",
-                "label": "Short",
-                "description": "Setup that supports a short bias.",
-            },
-        ]
-    return []
-
-
-def _build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
-    rule_meta = describe_indicator_rules(indicator_type) or []
-    if not rule_meta:
-        return []
-
-    catalog: List[Dict[str, Any]] = []
-    indicator_key = indicator_type.lower()
-    hints_for_indicator = _RULE_HINTS.get(indicator_key, {})
-
-    for entry in rule_meta:
-        rule_id = str(entry.get("id", "")).strip()
-        if not rule_id:
-            continue
-        hint = hints_for_indicator.get(rule_id.lower(), {})
-        signal_type = hint.get("signal_type") or _guess_signal_type(indicator_key, rule_id)
-        directions = hint.get("directions") or _default_direction_hints(signal_type)
-        enriched = dict(entry)
-        enriched["signal_type"] = signal_type
-        if directions:
-            enriched["directions"] = directions
-        catalog.append(enriched)
-
-    return catalog
+    if not inst_id:
+        return
 
 
 def _attach_signal_catalog(meta: Dict[str, Any]) -> Dict[str, Any]:
     indicator_type = meta.get("type") or meta.get("name")
     if not indicator_type:
         return meta
-    catalog = _build_signal_catalog(str(indicator_type))
+    catalog = _signal_runner.build_signal_catalog(str(indicator_type))
     if catalog:
         meta["signal_rules"] = catalog
     return meta
@@ -617,17 +166,11 @@ def _ensure_color(meta: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_datasource(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    cleaned = str(value).strip().upper()
-    return cleaned or None
+    return _resolver.normalize_datasource(value)
 
 
 def _normalize_exchange(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    cleaned = str(value).strip().lower()
-    return cleaned or None
+    return _resolver.normalize_exchange(value)
 
 
 def _resolve_data_provider(
@@ -635,16 +178,9 @@ def _resolve_data_provider(
 ):
     """Return a data provider instance honouring local monkeypatches."""
 
-    ds = _normalize_datasource(datasource)
+    ds = _normalize_datasource(datasource) or DataSource.ALPACA.value
     ex = _normalize_exchange(exchange)
-
-    if not ds:
-        ds = DataSource.ALPACA.value
-
-    if ds == DataSource.ALPACA.value:
-        return AlpacaProvider()
-
-    return get_provider(ds, exchange=ex)
+    return _resolver.resolve(ds, exchange=ex)
 
 def _extract_ctor_params(inst) -> Dict[str, Any]:
     """Reflectively capture constructor params currently set on the instance."""
@@ -723,7 +259,7 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
         "field_types": field_types,
     }
 
-    rule_meta = _build_signal_catalog(indicator_name)
+    rule_meta = _signal_runner.build_signal_catalog(indicator_name)
     if rule_meta:
         details["signal_rules"] = rule_meta
 
@@ -731,7 +267,7 @@ def get_type_details(type_id: str) -> Dict[str, Any]:
 
 
 def list_instances_meta() -> List[Dict[str, Any]]:
-    records = storage_load_indicators()
+    records = _repository.load()
     if not records:
         return []
     return [_build_meta_from_record(record) for record in records]
@@ -745,13 +281,13 @@ def get_instance_meta(inst_id: str) -> Dict[str, Any]:
 def list_indicator_strategies(inst_id: str) -> List[Dict[str, Any]]:
     """Return persisted strategies referencing the indicator."""
 
-    return storage_strategies_for_indicator(inst_id)
+    return _repository.strategies_for_indicator(inst_id)
 
 def delete_instance(inst_id: str) -> None:
     _load_indicator_record(inst_id)  # ensure it exists
-    _evict_indicator(inst_id)
+    _cache_manager.evict(inst_id)
     _purge_breakout_cache(inst_id)
-    storage_delete_indicator(inst_id)
+    _repository.delete(inst_id)
 
 
 def duplicate_instance(inst_id: str, name: Optional[str] = None) -> Dict[str, Any]:
@@ -762,11 +298,13 @@ def duplicate_instance(inst_id: str, name: Optional[str] = None) -> Dict[str, An
     clone_record = deepcopy(base_record)
     clone_record["id"] = clone_id
     clone_record["name"] = name or f"{base_record.get('name') or base_record.get('type')} Copy"
-    storage_upsert_indicator(clone_record)
-    refreshed = storage_get_indicator(clone_id)
+    _repository.upsert(clone_record)
+    refreshed = _repository.get(clone_id)
     persisted = _build_meta_from_record(refreshed) if refreshed else _build_meta_from_record(clone_record)
     inst = _build_indicator_instance(persisted)
-    _cache_indicator(clone_id, persisted, inst, (refreshed or {}).get("updated_at"))
+    _cache_manager.cache_indicator(
+        clone_id, persisted, inst, (refreshed or {}).get("updated_at")
+    )
     return persisted
 
 
@@ -776,10 +314,10 @@ def set_instance_enabled(inst_id: str, enabled: bool) -> Dict[str, Any]:
     record = _load_indicator_record(inst_id)
     updated = deepcopy(record)
     updated["enabled"] = bool(enabled)
-    storage_upsert_indicator(updated)
-    refreshed = storage_get_indicator(inst_id)
+    _repository.upsert(updated)
+    refreshed = _repository.get(inst_id)
     persisted = _build_meta_from_record(refreshed) if refreshed else _build_meta_from_record(updated)
-    _evict_indicator(inst_id)
+    _cache_manager.evict(inst_id)
     return persisted
 
 
@@ -861,10 +399,12 @@ def create_instance(
     if exchange:
         meta["exchange"] = exchange
     meta["color"] = _normalize_color(color)
-    storage_upsert_indicator(meta)
-    persisted = storage_get_indicator(inst_id)
-    persisted_meta = _build_meta_from_record(persisted) if persisted else _ensure_color(meta)
-    _cache_indicator(inst_id, persisted_meta, inst, (persisted or {}).get("updated_at"))
+    _repository.upsert(meta)
+    persisted = _repository.get(inst_id)
+    persisted_meta = _build_meta_from_record(persisted) if persisted else _factory.ensure_color(meta)
+    _cache_manager.cache_indicator(
+        inst_id, persisted_meta, inst, (persisted or {}).get("updated_at")
+    )
     _refresh_strategy_links(inst_id, persisted_meta)
     return persisted_meta
 
@@ -883,8 +423,12 @@ def update_instance(
         raise ValueError("Cannot change indicator type; create a new instance instead")
 
     params = dict(params)
-    cached_entry = _INSTANCE_CACHE.get(inst_id)
-    cached_inst = cached_entry.instance if cached_entry else None
+    try:
+        cached_entry = _cache_manager.get_entry(inst_id)
+        cached_inst = cached_entry.instance
+    except KeyError:
+        cached_entry = None
+        cached_inst = None
     if (
         type_str == MarketProfileIndicator.NAME
         and isinstance(cached_inst, MarketProfileIndicator)
@@ -945,10 +489,12 @@ def update_instance(
     elif "exchange" in meta_payload:
         meta_payload.pop("exchange", None)
     meta_payload = _ensure_color(meta_payload)
-    storage_upsert_indicator(meta_payload)
-    refreshed = storage_get_indicator(inst_id)
+    _repository.upsert(meta_payload)
+    refreshed = _repository.get(inst_id)
     persisted_meta = _build_meta_from_record(refreshed) if refreshed else meta_payload
-    _cache_indicator(inst_id, persisted_meta, new_inst, (refreshed or {}).get("updated_at"))
+    _cache_manager.cache_indicator(
+        inst_id, persisted_meta, new_inst, (refreshed or {}).get("updated_at")
+    )
     _refresh_strategy_links(inst_id, persisted_meta)
     return persisted_meta
 
@@ -1018,7 +564,7 @@ def overlays_for_instance(
     overlay_indicator = inst
     options = dict(overlay_options or {})
     if isinstance(inst, MarketProfileIndicator) and hasattr(inst, "to_lightweight"):
-        overlay_indicator = _build_market_profile_overlay_indicator(
+        overlay_indicator = _breakout_cache.build_market_profile_overlay_indicator(
             inst,
             df,
             interval=interval,
@@ -1195,7 +741,7 @@ def generate_signals_for_instance(
         rule_config["rule_payloads"] = payloads
 
     indicator_name = getattr(inst, "NAME", inst.__class__.__name__)
-    cache_spec = _BREAKOUT_CACHE_SPECS.get(indicator_name)
+    cache_spec = _breakout_cache.spec_for(indicator_name)
 
     requested_rule_ids: Optional[Set[str]] = None
     cache_key: Optional[Tuple[Any, ...]] = None
@@ -1224,7 +770,7 @@ def generate_signals_for_instance(
 
     if cache_spec is not None:
         signature = cache_spec.config_signature_builder(rule_config)
-        cache_key = (
+        cache_key = _breakout_cache.build_cache_key(
             inst_id,
             indicator_name,
             sym,
@@ -1238,7 +784,7 @@ def generate_signals_for_instance(
             and cache_spec.retest_rule_id in requested_rule_ids
             and cache_spec.breakout_rule_id not in requested_rule_ids
         ):
-            cached_breakouts = _get_cached_breakouts(cache_key)
+            cached_breakouts = _breakout_cache.get_cached_breakouts(cache_key)
             if cached_breakouts:
                 using_cached_breakouts = True
                 rule_config[cache_spec.cache_context_key] = cached_breakouts
@@ -1292,18 +838,18 @@ def generate_signals_for_instance(
         log_config,
     )
 
-    signals_all = run_indicator_rules(inst, df, **rule_config)
+    signals_all = _signal_runner.run_rules(inst, df, **rule_config)
 
     if cache_spec is not None and cache_key is not None and not using_cached_breakouts:
         enabled_for_run = rule_config.get("enabled_rules")
         ran_breakout = enabled_for_run is None or cache_spec.breakout_rule_id in enabled_for_run
         if ran_breakout:
             breakout_payloads = [
-                _flatten_breakout_signal(sig)
+                _breakout_cache.flatten_breakout_signal(sig)
                 for sig in signals_all
                 if sig.type == "breakout"
             ]
-            _store_breakout_cache(cache_key, breakout_payloads)
+            _breakout_cache.store_breakout_cache(cache_key, breakout_payloads)
             logger.debug(
                 "event=indicator_breakout_cache_store indicator=%s rule=%s entries=%d",
                 inst_id,
@@ -1334,7 +880,7 @@ def generate_signals_for_instance(
             len(filtered_signals),
         )
 
-    overlays = build_signal_overlays(inst, filtered_signals, df, **rule_config)
+    overlays = _signal_runner.build_overlays(inst, filtered_signals, df, **rule_config)
 
     logger.info(
         "event=indicator_signal_complete indicator=%s signals=%d overlays=%d",
