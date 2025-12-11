@@ -12,12 +12,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..db import (
+    ATMTemplateRecord,
     BotRecord,
     BotStrategyLink,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,
     InstrumentRecord,
+    StrategyATMTemplateLink,
     StrategyIndicatorLink,
     StrategyRecord,
     StrategyRuleRecord,
@@ -182,6 +184,74 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
     except SQLAlchemyError as exc:
         logger.warning("instrument_persist_failed | id=%s | error=%s", instrument_id, exc)
     return meta
+
+
+def load_atm_templates() -> List[Dict[str, Any]]:
+    """Return all persisted ATM templates."""
+
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = session.execute(select(ATMTemplateRecord)).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def get_atm_template(template_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single ATM template."""
+
+    if not db.available:
+        return None
+    with db.session() as session:
+        record = session.get(ATMTemplateRecord, template_id)
+        return record.to_dict() if record else None
+
+
+def upsert_atm_template(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert or update an ATM template record."""
+
+    template_id = payload.get("id") or str(uuid.uuid4())
+    if not db.available:
+        return {**payload, "id": template_id}
+    try:
+        with db.session() as session:
+            record = session.get(ATMTemplateRecord, template_id)
+            now = _utcnow()
+            if record is None:
+                record = ATMTemplateRecord(id=template_id)
+                session.add(record)
+            record.name = payload.get("name") or payload.get("label") or template_id
+            record.owner_id = payload.get("owner_id")
+            record.template = dict(payload.get("template") or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
+            payload = record.to_dict()
+    except SQLAlchemyError as exc:
+        logger.warning("atm_template_persist_failed | id=%s | error=%s", template_id, exc)
+    return payload
+
+
+def link_strategy_template(strategy_id: str, template_id: str) -> None:
+    """Ensure a single template link exists for the strategy."""
+
+    if not db.available:
+        return
+    try:
+        with db.session() as session:
+            link = session.execute(
+                select(StrategyATMTemplateLink).where(StrategyATMTemplateLink.strategy_id == strategy_id)
+            ).scalar_one_or_none()
+            now = _utcnow()
+            if link is None:
+                link = StrategyATMTemplateLink(id=str(uuid.uuid4()), strategy_id=strategy_id, template_id=template_id)
+                session.add(link)
+            else:
+                link.template_id = template_id
+            link.updated_at = now
+            if link.created_at is None:
+                link.created_at = now
+    except SQLAlchemyError as exc:
+        logger.warning("strategy_template_link_failed | strategy=%s | template=%s | error=%s", strategy_id, template_id, exc)
 
 
 def delete_instrument(instrument_id: str) -> None:
@@ -364,10 +434,20 @@ def load_strategies() -> List[Dict[str, Any]]:
         return []
     with db.session() as session:
         strategies = session.execute(select(StrategyRecord)).scalars().all()
+        template_links = session.execute(select(StrategyATMTemplateLink)).scalars().all()
+        templates = {row.id: row for row in session.execute(select(ATMTemplateRecord)).scalars().all()}
+        link_map = {link.strategy_id: link.template_id for link in template_links}
         payload: List[Dict[str, Any]] = []
         for strategy in strategies:
             record = strategy.to_dict()
-            record["atm_template"] = normalise_template(record.get("atm_template"))
+            template_id = link_map.get(strategy.id) or strategy.atm_template_id
+            if template_id and template_id in templates:
+                record["atm_template_id"] = template_id
+                record["atm_template"] = normalise_template(templates[template_id].template)
+                record.setdefault("atm_template_name", templates[template_id].name)
+            else:
+                # No template found - use default
+                record["atm_template"] = None
             links = session.execute(
                 select(StrategyIndicatorLink).where(
                     StrategyIndicatorLink.strategy_id == strategy.id
@@ -408,7 +488,10 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
             record.datasource = payload.get("datasource")
             record.exchange = payload.get("exchange")
             record.indicator_ids = list(payload.get("indicator_ids") or [])
-            record.atm_template = dict(payload.get("atm_template") or {})
+            record.atm_template_id = payload.get("atm_template_id")
+            record.base_risk_per_trade = payload.get("base_risk_per_trade")
+            record.global_risk_multiplier = payload.get("global_risk_multiplier")
+            record.risk_overrides = payload.get("risk_overrides") or {}
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -685,15 +768,13 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
             if net is not None:
                 record.net_pnl = net
             quote = snapshot.get("quote_currency")
-        if quote:
-            record.quote_currency = str(quote).upper()
-        if snapshot.get("atm_template") is not None:
-            record.atm_template = dict(snapshot.get("atm_template") or {})
-        if snapshot.get("metrics") is not None:
-            record.metrics = dict(snapshot.get("metrics") or {})
-        record.updated_at = now
-        if record.created_at is None:
-            record.created_at = now
+            if quote:
+                record.quote_currency = str(quote).upper()
+            if snapshot.get("metrics") is not None:
+                record.metrics = dict(snapshot.get("metrics") or {})
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("bot_trade_persist_failed | trade=%s | error=%s", trade_id, exc)
 

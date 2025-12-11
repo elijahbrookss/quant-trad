@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import provider_service, strategy_service
+from ..service import provider_service
+from ..service.strategy_service import facade as strategy_service
 
 
 router = APIRouter()
@@ -68,6 +69,14 @@ class StrategyRuleOut(BaseModel):
     updated_at: str
 
 
+class InstrumentSlotIn(BaseModel):
+    """Lightweight instrument slot definition for strategies."""
+
+    symbol: str
+    enabled: bool = Field(default=True)
+    risk_multiplier: Optional[float] = Field(default=None)
+
+
 class StrategyOut(BaseModel):
     """Response model representing a strategy record."""
 
@@ -75,6 +84,7 @@ class StrategyOut(BaseModel):
     name: str
     description: Optional[str] = None
     symbols: List[str]
+    instrument_slots: List[Dict[str, Any]] = Field(default_factory=list)
     timeframe: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -87,6 +97,12 @@ class StrategyOut(BaseModel):
     instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
     rules: List[StrategyRuleOut]
     atm_template: Dict[str, Any] = Field(default_factory=dict)
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -95,7 +111,8 @@ class StrategyCreateRequest(BaseModel):
     """Payload for creating a new strategy."""
 
     name: str
-    symbols: List[str] = Field(default_factory=list)
+    symbols: List[Any] = Field(default_factory=list)
+    instrument_slots: List[InstrumentSlotIn] = Field(default_factory=list)
     timeframe: str
     description: Optional[str] = None
     datasource: Optional[str] = None
@@ -104,13 +121,20 @@ class StrategyCreateRequest(BaseModel):
     venue_id: Optional[str] = None
     indicator_ids: List[str] = Field(default_factory=list)
     atm_template: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Optional[Dict[str, Any]] = None
 
 
 class StrategyUpdateRequest(BaseModel):
     """Payload for updating a strategy."""
 
     name: Optional[str] = None
-    symbols: Optional[List[str]] = None
+    symbols: Optional[List[Any]] = None
+    instrument_slots: Optional[List[InstrumentSlotIn]] = None
     timeframe: Optional[str] = None
     description: Optional[str] = None
     datasource: Optional[str] = None
@@ -119,6 +143,12 @@ class StrategyUpdateRequest(BaseModel):
     venue_id: Optional[str] = None
     indicator_ids: Optional[List[str]] = None
     atm_template: Optional[Dict[str, Any]] = None
+    atm_template_id: Optional[str] = None
+    base_risk_per_trade: Optional[float] = None
+    global_risk_multiplier: Optional[float] = None
+    atr_period: Optional[int] = None
+    atr_multiplier: Optional[float] = None
+    risk_overrides: Optional[Dict[str, Any]] = None
 
 
 class RuleConditionCreate(BaseModel):
@@ -159,6 +189,23 @@ class StrategyRuleUpdateRequest(BaseModel):
     match: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class ATMTemplateRequest(BaseModel):
+    """Payload for saving an ATM template."""
+
+    id: Optional[str] = None
+    name: str
+    template: Dict[str, Any]
+    owner_id: Optional[str] = None
+
+
+class ATMTemplateOut(ATMTemplateRequest):
+    """Response payload for ATM templates."""
+
+    id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class StrategySignalRequest(BaseModel):
@@ -210,15 +257,27 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
 
     try:
         payload = _apply_market_aliases(body.dict())
+        symbols_payload = (
+            payload.get("instrument_slots")
+            or body.instrument_slots
+            or payload.get("symbols")
+            or body.symbols
+        )
         record = strategy_service.create_strategy(
             payload.get("name") or body.name,
-            symbols=payload.get("symbols") or body.symbols,
+            symbols=symbols_payload,
             timeframe=payload.get("timeframe") or body.timeframe,
             description=payload.get("description"),
             datasource=payload.get("datasource"),
             exchange=payload.get("exchange"),
             indicator_ids=payload.get("indicator_ids") or [],
             atm_template=payload.get("atm_template"),
+            atm_template_id=payload.get("atm_template_id"),
+            base_risk_per_trade=payload.get("base_risk_per_trade"),
+            global_risk_multiplier=payload.get("global_risk_multiplier"),
+            atr_period=payload.get("atr_period"),
+            atr_multiplier=payload.get("atr_multiplier"),
+            risk_overrides=payload.get("risk_overrides"),
         )
         return _attach_market_aliases(record)
     except Exception as exc:  # noqa: BLE001
@@ -262,6 +321,24 @@ async def delete_strategy(strategy_id: str) -> Response:
         raise HTTPException(404, str(exc)) from exc
 
     return Response(status_code=204)
+
+
+@router.get("/atm-templates", response_model=List[ATMTemplateOut])
+async def list_atm_templates() -> List[Dict[str, Any]]:
+    """Return all saved ATM templates."""
+
+    return strategy_service.list_atm_templates()
+
+
+@router.post("/atm-templates", response_model=ATMTemplateOut, status_code=201)
+async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
+    """Create or update an ATM template."""
+
+    try:
+        return strategy_service.save_atm_template(body.dict())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("atm_template_save_failed")
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/{strategy_id}/indicators/{indicator_id}", response_model=StrategyOut)

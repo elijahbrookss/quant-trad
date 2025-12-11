@@ -164,3 +164,18 @@ export async function deleteSymbolPreset(presetId) {
   return handleResponse(res)
 }
 
+export async function fetchATMTemplates() {
+  const res = await fetch(`${BASE}/api/strategies/atm-templates`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+export async function saveATMTemplate(payload) {
+  const res = await fetch(`${BASE}/api/strategies/atm-templates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+

@@ -6,6 +6,8 @@ import logging
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from data_providers.factory import get_provider
+
 try:  # pragma: no cover - optional dependency wiring
     import ccxt  # type: ignore
 except Exception:  # pragma: no cover - CCXT unavailable at runtime
@@ -274,6 +276,83 @@ def _instrument_payload_from_market(
         "metadata": metadata,
     }
     return payload
+
+
+def validate_instrument(
+    datasource: Optional[str],
+    exchange: Optional[str],
+    symbol: Optional[str],
+    *,
+    provider_id: Optional[str] = None,
+    venue_id: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate that an instrument exists for the provider/venue and persist metadata."""
+
+    normalized_symbol = _normalize_symbol(symbol)
+    if not normalized_symbol:
+        return None, "Symbol is required for instrument validation"
+
+    datasource_id = (datasource or provider_id or "").strip()
+    exchange_id = (exchange or venue_id or "").strip()
+
+    if datasource_id.upper() == "CCXT":
+        record, error = auto_sync_instrument(datasource_id, exchange_id, normalized_symbol)
+        if record or error:
+            return record, error
+
+    try:
+        provider = get_provider(datasource_id, venue=exchange_id or venue_id, exchange=exchange_id)
+    except Exception as exc:  # pragma: no cover - runtime resolution
+        logger.warning(
+            "instrument_provider_lookup_failed | provider=%s venue=%s symbol=%s error=%s",
+            datasource_id,
+            exchange_id or venue_id,
+            normalized_symbol,
+            exc,
+        )
+        return None, f"Provider lookup failed: {exc}"
+
+    venue_arg = exchange_id or venue_id or ""
+    try:
+        provider.validate_symbol(venue_arg, normalized_symbol)
+        instrument_type = provider.validate_instrument_type(venue_arg, normalized_symbol)
+        metadata = provider.get_instrument_metadata(venue_arg, normalized_symbol)
+    except Exception as exc:  # pragma: no cover - provider integration
+        logger.warning(
+            "instrument_validation_failed | provider=%s venue=%s symbol=%s error=%s",
+            datasource_id,
+            venue_arg,
+            normalized_symbol,
+            exc,
+        )
+        return None, f"Instrument validation failed: {exc}"
+
+    if metadata is None or (metadata.tick_size is None and metadata.tick_value is None):
+        return None, "Provider did not return tick metadata for this symbol"
+
+    payload = {
+        "symbol": normalized_symbol,
+        "datasource": getattr(provider, "get_datasource", lambda: datasource_id)(),
+        "exchange": exchange_id or venue_id,
+        "instrument_type": getattr(instrument_type, "value", instrument_type),
+        "tick_size": metadata.tick_size,
+        "tick_value": metadata.tick_value,
+        "contract_size": metadata.contract_size,
+    }
+
+    try:
+        record = upsert_instrument(payload)
+    except Exception as exc:  # pragma: no cover - storage failure
+        logger.warning(
+            "instrument_persist_failed | provider=%s venue=%s symbol=%s error=%s",
+            datasource_id,
+            venue_arg,
+            normalized_symbol,
+            exc,
+        )
+        return None, f"Unable to persist instrument metadata: {exc}"
+
+    return record, None
 
 
 def auto_sync_instrument(

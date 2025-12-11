@@ -6,11 +6,8 @@ pytest.importorskip("numpy")
 
 from datetime import datetime, timezone
 
-from portal.backend.service.strategy_service import (
-    RuleCondition,
-    _build_markers_for_results,
-    _evaluate_condition,
-)
+from portal.backend.service.strategy_service import RuleCondition
+from portal.backend.service.strategy_service import evaluator, markers
 
 
 def test_market_profile_rule_aliases_match_strategy_conditions():
@@ -36,7 +33,7 @@ def test_market_profile_rule_aliases_match_strategy_conditions():
 
     payloads = {"indicator-1": {"signals": [signal_payload]}}
 
-    result = _evaluate_condition(condition, payloads)
+    result = evaluator._evaluate_condition(condition, payloads)
 
     assert result["matched"] is True
     assert result["signal"] is signal_payload
@@ -71,7 +68,7 @@ def test_condition_collects_all_matching_signals():
 
     payloads = {"indicator-1": {"signals": [first, second]}}
 
-    result = _evaluate_condition(condition, payloads)
+    result = evaluator._evaluate_condition(condition, payloads)
 
     assert result["matched"] is True
     assert result["signal"] is second
@@ -93,10 +90,10 @@ def test_build_markers_uses_metadata_time():
         ],
     }
 
-    markers = _build_markers_for_results([rule_result], action="buy")
+    chart_markers = markers._build_markers_for_results([rule_result], action="buy")
 
-    assert len(markers) == 1
-    marker = markers[0]
+    assert len(chart_markers) == 1
+    marker = chart_markers[0]
     expected_epoch = int(datetime(2025, 1, 3, 12, tzinfo=timezone.utc).timestamp())
     assert marker["time"] == expected_epoch
     assert marker["price"] == 80.5
@@ -127,7 +124,7 @@ def test_pivot_retest_signals_match_strategy_conditions():
 
     payloads = {"indicator-1": {"signals": [signal_payload]}}
 
-    result = _evaluate_condition(condition, payloads)
+    result = evaluator._evaluate_condition(condition, payloads)
 
     assert result["matched"] is True
     assert result.get("direction_detected") == "long"
@@ -159,10 +156,44 @@ def test_direction_mismatch_reason_is_descriptive():
 
     payloads = {"indicator-1": {"signals": [signal_payload]}}
 
-    result = _evaluate_condition(condition, payloads)
+    result = evaluator._evaluate_condition(condition, payloads)
 
     assert result["matched"] is False
     assert result.get("reason") == "No matching signals (direction mismatch)"
     stats = result.get("stats") or {}
     assert stats.get("rule_matches") == 1
     assert stats.get("direction_matches") == 0
+
+
+def test_build_chart_markers_splits_actions():
+    buy_rule = {
+        "rule_id": "buy-rule",
+        "rule_name": "Buy Rule",
+        "signals": [
+            {
+                "type": "retest",
+                "time": "2025-01-04T15:00:00Z",
+                "price": 101.5,
+            }
+        ],
+    }
+    sell_rule = {
+        "rule_id": "sell-rule",
+        "rule_name": "Sell Rule",
+        "signals": [
+            {
+                "type": "breakout",
+                "metadata": {
+                    "bar_time": "2025-01-05T10:30:00Z",
+                    "price": 88.2,
+                },
+            }
+        ],
+    }
+
+    chart_payload = markers.build_chart_markers([buy_rule], [sell_rule])
+
+    assert chart_payload["buy"][0]["shape"] == "arrowUp"
+    assert chart_payload["buy"][0]["position"] == "belowBar"
+    assert chart_payload["sell"][0]["shape"] == "arrowDown"
+    assert chart_payload["sell"][0]["position"] == "aboveBar"

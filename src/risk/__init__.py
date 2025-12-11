@@ -1,13 +1,6 @@
-"""Shared risk math utilities for R/ATR driven risk management.
+"""Risk management utilities for trading systems."""
 
-This module is a compatibility wrapper that re-exports functionality from src.risk.
-All core risk calculation logic now lives in the src/ library.
-"""
-
-from __future__ import annotations
-
-# Re-export from src.risk
-from risk import (
+from .math import (
     clamp_stop,
     direction_sign,
     price_from_r,

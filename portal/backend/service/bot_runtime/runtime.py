@@ -1,4 +1,4 @@
-"""Backtesting runtime with ladder risk logic for bot simulations."""
+"""Bot runtime orchestrator combining domain, runtime, and reporting layers."""
 
 from __future__ import annotations
 
@@ -6,785 +6,55 @@ import logging
 import re
 import threading
 import time
-import uuid
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-import pandas as pd
-
-from . import indicator_service, risk_math, storage, strategy_service
-from .atm import DEFAULT_ATM_TEMPLATE, merge_templates
-from .candle_service import fetch_ohlcv
-
+from .. import risk_math, storage, strategy_service
+from ..candle_service import fetch_ohlcv
+from .domain import (
+    DEFAULT_RISK,
+    Candle,
+    LadderRiskEngine,
+    StrategySignal,
+    coerce_float,
+    isoformat,
+    timeframe_duration,
+    timeframe_to_seconds,
+)
+from .reporting import (
+    TRADE_OVERLAY_SOURCE,
+    TRADE_STOP_COLOR,
+    TRADE_TARGET_COLOR,
+    TRADE_RAY_MIN_SECONDS,
+    TRADE_RAY_SPAN_MULTIPLIER,
+    instrument_key,
+)
+from .series_builder import SeriesBuilder, StrategySeries
 
 logger = logging.getLogger(__name__)
 
-
-DEFAULT_RISK = {
-    "contracts": 3,
-    "targets": [20, 40, 60],
-    "stop_ticks": 30,
-    "breakeven_trigger_ticks": 20,
-    "tick_size": 0.01,
-}
-
 DEFAULT_SIM_LOOKBACK_DAYS = 7
-
 MAX_LOG_ENTRIES = 500
-
-TRADE_OVERLAY_SOURCE = "trade_levels"
-TRADE_STOP_COLOR = "#f87171"
-TRADE_TARGET_COLOR = "#22d3ee"
-TRADE_RAY_MIN_SECONDS = 900
-TRADE_RAY_SPAN_MULTIPLIER = 120
 INTRABAR_BASE_SECONDS = 0.4
 
 
-def _isoformat(value: Optional[datetime]) -> Optional[str]:
-    """Return a UTC ISO8601 string with Z suffix for *value*."""
-
-    if value is None:
-        return None
-    target = value
-    if target.tzinfo is None:
-        return target.replace(tzinfo=None).isoformat() + "Z"
-    return target.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def _coerce_float(value: Optional[object], default: Optional[float] = None) -> Optional[float]:
-    try:
-        if value is None:
-            return default
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return default
-    return numeric
+    return coerce_float(value, default)
 
 
-def _instrument_key(datasource: Optional[str], exchange: Optional[str], symbol: Optional[str]) -> str:
-    return "::".join(
-        [
-            (datasource or "").strip().lower(),
-            (exchange or "").strip().lower(),
-            (symbol or "").strip().upper(),
-        ]
-    )
-
-
-_TIMEFRAME_MULTIPLIERS = {
-    "s": 1,
-    "m": 60,
-    "h": 60 * 60,
-    "d": 60 * 60 * 24,
-    "w": 60 * 60 * 24 * 7,
-}
+def _isoformat(value: Optional[datetime]) -> Optional[str]:
+    return isoformat(value)
 
 
 def _timeframe_to_seconds(label: Optional[str]) -> Optional[int]:
-    """Convert timeframe strings like '15m' or '4h' into seconds."""
-
-    if not label:
-        return None
-    value = str(label).strip().lower()
-    if not value:
-        return None
-    match = re.fullmatch(r"(\d+)([a-z]+)", value)
-    if not match:
-        return None
-    amount = int(match.group(1))
-    suffix = match.group(2)
-    key = suffix[0]
-    multiplier = _TIMEFRAME_MULTIPLIERS.get(key)
-    if not multiplier:
-        return None
-    return amount * multiplier
+    return timeframe_to_seconds(label)
 
 
 def _timeframe_duration(label: Optional[str]) -> Optional[timedelta]:
-    seconds = _timeframe_to_seconds(label)
-    if not seconds:
-        return None
-    return timedelta(seconds=seconds)
-
-
-@dataclass
-class Candle:
-    """Single OHLC datapoint used by the simulated bot."""
-
-    time: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    end: Optional[datetime] = None
-    atr: Optional[float] = None
-    volume: Optional[float] = None
-    range: Optional[float] = None
-    lookback_15: Optional[Dict[str, Optional[float]]] = None
-
-    def to_dict(self) -> Dict[str, float]:
-        payload = {
-            "time": _isoformat(self.time),
-            "open": round(self.open, 4),
-            "high": round(self.high, 4),
-            "low": round(self.low, 4),
-            "close": round(self.close, 4),
-        }
-        if self.end:
-            payload["end"] = _isoformat(self.end)
-        if self.atr is not None:
-            payload["atr"] = round(self.atr, 6)
-        if self.volume is not None:
-            payload["volume"] = round(self.volume, 6)
-        return payload
-
-    @property
-    def start_time(self) -> datetime:
-        return self.time
-
-    @property
-    def end_time(self) -> datetime:
-        return self.end or self.time
-
-
-@dataclass
-class StrategySignal:
-    """Queued strategy action derived from rule markers."""
-
-    epoch: int
-    direction: str
-
-
-@dataclass
-class Leg:
-    """Take-profit leg metadata."""
-
-    name: str
-    ticks: int
-    target_price: float
-    status: str = "open"
-    exit_price: Optional[float] = None
-    exit_time: Optional[str] = None
-    contracts: int = 1
-    pnl: float = 0.0
-
-    def serialize(self) -> Dict[str, Optional[float]]:
-        return {
-            "name": self.name,
-            "ticks": self.ticks,
-            "target_price": round(self.target_price, 4),
-            "status": self.status,
-            "exit_price": None if self.exit_price is None else round(self.exit_price, 4),
-            "exit_time": self.exit_time,
-            "contracts": self.contracts,
-            "pnl": round(self.pnl, 4),
-        }
-
-
-@dataclass
-class LadderPosition:
-    """Track laddered take-profit and stop-loss behaviour for a trade."""
-
-    entry_time: datetime
-    entry_price: float
-    direction: str
-    stop_price: float
-    tick_size: float
-    legs: List[Leg] = field(default_factory=list)
-    breakeven_trigger_ticks: float = 20.0
-    tick_value: float = 1.0
-    contract_size: float = 1.0
-    maker_fee_rate: float = 0.0
-    taker_fee_rate: float = 0.0
-    quote_currency: str = "USD"
-    moved_to_breakeven: bool = False
-    closed_at: Optional[datetime] = None
-    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    gross_pnl: float = 0.0
-    fees_paid: float = 0.0
-    net_pnl: float = 0.0
-    atr_at_entry: Optional[float] = None
-    r_multiple_at_entry: Optional[float] = None
-    r_value: Optional[float] = None
-    r_ticks: Optional[float] = None
-    mae_ticks: float = 0.0
-    mfe_ticks: float = 0.0
-    bars_held: int = 0
-    best_price: float = 0.0
-    worst_price: float = 0.0
-    trailing_activation_ticks: Optional[float] = None
-    trailing_distance_ticks: Optional[float] = None
-    trailing_active: bool = False
-    trailing_atr_multiple: float = 0.0
-    pre_entry_context: Optional[Dict[str, Optional[float]]] = None
-
-    def __post_init__(self) -> None:
-        self.best_price = self.entry_price
-        self.worst_price = self.entry_price
-
-    def register_entry_fee(self) -> None:
-        total_contracts = sum(max(leg.contracts, 0) for leg in self.legs) or 1
-        self._apply_fee(self.entry_price, total_contracts)
-
-    def _update_excursions(self, candle: Candle) -> None:
-        favorable_price = candle.high if self.direction == "long" else candle.low
-        adverse_price = candle.low if self.direction == "long" else candle.high
-        self.best_price = max(self.best_price, favorable_price) if self.direction == "long" else min(self.best_price, favorable_price)
-        self.worst_price = min(self.worst_price, adverse_price) if self.direction == "long" else max(self.worst_price, adverse_price)
-        favorable_ticks = self._ticks_from_entry(favorable_price)
-        adverse_ticks = self._ticks_from_entry(adverse_price)
-        self.mfe_ticks = max(self.mfe_ticks, favorable_ticks)
-        self.mae_ticks = min(self.mae_ticks, adverse_ticks)
-        self.bars_held += 1
-
-    def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
-        events: List[Dict[str, str]] = []
-        ordered = sorted(self.legs, key=lambda leg: leg.ticks)
-        if self.direction == "long":
-            for leg in ordered:
-                if leg.status != "open":
-                    continue
-                if candle.high >= leg.target_price:
-                    leg.status = "target"
-                    leg.exit_price = leg.target_price
-                    leg.exit_time = _isoformat(candle.time)
-                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(leg.target_price, leg.contracts)
-                    events.append(
-                        {
-                            "type": "target",
-                            "leg": leg.name,
-                            "trade_id": self.trade_id,
-                            "price": round(leg.target_price, 4),
-                            "time": leg.exit_time,
-                            "pnl": round(pnl, 4),
-                            "currency": self.quote_currency,
-                            "contracts": leg.contracts,
-                            "ticks": leg.ticks,
-                            "direction": self.direction,
-                        }
-                    )
-                    if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
-                        self.stop_price = self.entry_price
-                        self.moved_to_breakeven = True
-        else:
-            for leg in ordered:
-                if leg.status != "open":
-                    continue
-                if candle.low <= leg.target_price:
-                    leg.status = "target"
-                    leg.exit_price = leg.target_price
-                    leg.exit_time = _isoformat(candle.time)
-                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(leg.target_price, leg.contracts)
-                    events.append(
-                        {
-                            "type": "target",
-                            "leg": leg.name,
-                            "trade_id": self.trade_id,
-                            "price": round(leg.target_price, 4),
-                            "time": leg.exit_time,
-                            "pnl": round(pnl, 4),
-                            "currency": self.quote_currency,
-                            "contracts": leg.contracts,
-                            "ticks": leg.ticks,
-                            "direction": self.direction,
-                        }
-                    )
-                    if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
-                        self.stop_price = self.entry_price
-                        self.moved_to_breakeven = True
-        return events
-
-    def _maybe_move_breakeven(self) -> None:
-        if self.moved_to_breakeven:
-            return
-        if self.breakeven_trigger_ticks and self.mfe_ticks >= self.breakeven_trigger_ticks:
-            self.stop_price = risk_math.clamp_stop(self.stop_price, self.entry_price, self.direction)
-            self.moved_to_breakeven = True
-
-    def _maybe_trail_stop(self) -> None:
-        if self.trailing_distance_ticks in (None, 0):
-            return
-        if self.trailing_activation_ticks is not None and self.mfe_ticks < self.trailing_activation_ticks:
-            return
-        distance_price = self.trailing_distance_ticks * self.tick_size
-        if distance_price <= 0:
-            return
-        self.trailing_active = True
-        candidate = (
-            self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
-        )
-        self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
-
-    def _apply_stop(self, candle: Candle) -> List[Dict[str, str]]:
-        events: List[Dict[str, str]] = []
-        triggered = False
-        if self.direction == "long" and candle.low <= self.stop_price:
-            triggered = True
-        elif self.direction == "short" and candle.high >= self.stop_price:
-            triggered = True
-        if triggered:
-            tick_distance = round(self._ticks_from_entry(self.stop_price), 4)
-            for leg in self.legs:
-                if leg.status == "open":
-                    leg.status = "stop"
-                    leg.exit_price = self.stop_price
-                    leg.exit_time = _isoformat(candle.time)
-                    pnl = self._pnl_for_exit(self.stop_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(self.stop_price, leg.contracts)
-                    events.append(
-                        {
-                            "type": "stop",
-                            "trade_id": self.trade_id,
-                            "price": round(self.stop_price, 4),
-                            "time": leg.exit_time,
-                            "currency": self.quote_currency,
-                            "leg": leg.name,
-                            "contracts": leg.contracts,
-                            "pnl": round(pnl, 4),
-                            "ticks": tick_distance,
-                            "direction": self.direction,
-                        }
-                    )
-            self.closed_at = candle.time
-        elif all(leg.status != "open" for leg in self.legs):
-            self.closed_at = candle.time
-        return events
-
-    def apply_bar(self, candle: Candle) -> List[Dict[str, str]]:
-        """Advance the position with the latest candle."""
-
-        events: List[Dict[str, str]] = []
-        self._update_excursions(candle)
-        leg_events = self._apply_leg_fills(candle)
-        events.extend(leg_events)
-        self._maybe_move_breakeven()
-        self._maybe_trail_stop()
-        stop_events = self._apply_stop(candle)
-        if stop_events:
-            events.extend(stop_events)
-        if not self.is_active():
-            events.append(
-                {
-                    "type": "close",
-                    "trade_id": self.trade_id,
-                    "time": _isoformat(self.closed_at or candle.time),
-                    "gross_pnl": round(self.gross_pnl, 4),
-                    "fees_paid": round(self.fees_paid, 4),
-                    "net_pnl": round(self.net_pnl, 4),
-                    "currency": self.quote_currency,
-                    "contracts": sum(max(leg.contracts, 0) for leg in self.legs),
-                    "direction": self.direction,
-                    "metrics": self._metrics_snapshot(),
-                }
-            )
-        return events
-
-    def is_active(self) -> bool:
-        return self.closed_at is None
-
-    def serialize(self) -> Dict[str, object]:
-        return {
-            "trade_id": self.trade_id,
-            "entry_time": _isoformat(self.entry_time),
-            "entry_price": round(self.entry_price, 4),
-            "direction": self.direction,
-            "stop_price": round(self.stop_price, 4),
-            "moved_to_breakeven": self.moved_to_breakeven,
-            "legs": [leg.serialize() for leg in self.legs],
-            "closed_at": _isoformat(self.closed_at),
-            "tick_size": self.tick_size,
-            "tick_value": round(self.tick_value, 6),
-            "contract_size": round(self.contract_size, 6),
-            "gross_pnl": round(self.gross_pnl, 4),
-            "fees_paid": round(self.fees_paid, 4),
-            "net_pnl": round(self.net_pnl, 4),
-            "currency": self.quote_currency,
-            "atr_at_entry": None if self.atr_at_entry is None else round(self.atr_at_entry, 6),
-            "r_value": None if self.r_value is None else round(self.r_value, 6),
-            "r_ticks": None if self.r_ticks is None else round(self.r_ticks, 4),
-            "mae_ticks": round(self.mae_ticks, 4),
-            "mfe_ticks": round(self.mfe_ticks, 4),
-            "bars_held": self.bars_held,
-            "metrics": self._metrics_snapshot(),
-        }
-
-    def _pnl_for_exit(self, exit_price: float, contracts: int) -> float:
-        if contracts <= 0:
-            return 0.0
-        direction = 1 if self.direction == "long" else -1
-        ticks = ((exit_price - self.entry_price) / self.tick_size) * direction
-        return ticks * self.tick_value * contracts
-
-    def _ticks_from_entry(self, price: float) -> float:
-        if not self.tick_size:
-            return 0.0
-        direction = 1 if self.direction == "long" else -1
-        return ((price - self.entry_price) / self.tick_size) * direction
-
-    def _apply_fee(self, price: float, contracts: int) -> None:
-        if contracts <= 0:
-            return
-        notional = abs(price * self.contract_size * contracts)
-        fee_rate = self.taker_fee_rate or 0.0
-        fee = notional * fee_rate
-        if fee:
-            self.fees_paid += fee
-            self._update_net()
-
-    def _record_pnl(self, pnl: float) -> None:
-        self.gross_pnl += pnl
-        self._update_net()
-
-    def _update_net(self) -> None:
-        self.net_pnl = self.gross_pnl - self.fees_paid
-
-    def _metrics_snapshot(self) -> Dict[str, object]:
-        mae_r = (self.mae_ticks / self.r_ticks) if self.r_ticks else None
-        mfe_r = (self.mfe_ticks / self.r_ticks) if self.r_ticks else None
-        return {
-            "atr_at_entry": None if self.atr_at_entry is None else round(self.atr_at_entry, 6),
-            "r_multiple_at_entry": self.r_multiple_at_entry,
-            "r_value": None if self.r_value is None else round(self.r_value, 6),
-            "r_ticks": None if self.r_ticks is None else round(self.r_ticks, 4),
-            "mae_ticks": round(self.mae_ticks, 4),
-            "mfe_ticks": round(self.mfe_ticks, 4),
-            "mae_r": None if mae_r is None else round(mae_r, 6),
-            "mfe_r": None if mfe_r is None else round(mfe_r, 6),
-            "bars_held": self.bars_held,
-            "pre_entry_context": dict(self.pre_entry_context or {}),
-        }
-
-
-class LadderRiskEngine:
-    """Create and manage laddered trades for simulated bots."""
-
-    def __init__(
-        self,
-        config: Optional[Dict[str, object]] = None,
-        instrument: Optional[Dict[str, Any]] = None,
-    ):
-        provided_template = config or {}
-        self.template = merge_templates(provided_template)
-        self.instrument = instrument or {}
-        config_tick = _coerce_float(provided_template.get("tick_size"))
-        instrument_tick = _coerce_float(self.instrument.get("tick_size"))
-        fallback_tick = _coerce_float(DEFAULT_RISK.get("tick_size"), 0.01)
-        if config_tick not in (None, 0):
-            self.tick_size = float(config_tick)
-        elif instrument_tick not in (None, 0):
-            self.tick_size = float(instrument_tick)
-        elif fallback_tick not in (None, 0):
-            self.tick_size = float(fallback_tick)
-        else:
-            self.tick_size = 0.01
-        self.orders = self._orders_from_template()
-        self.targets = [int(order.get("ticks") or 0) for order in self.orders]
-        self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
-        self.stop_r_multiple = _coerce_float(self.template.get("stop_r_multiple"))
-        self.r_multiple = float(self.template.get("atr_r_multiple") or 1.0)
-        self.breakeven_config: Dict[str, Any] = dict(self.template.get("breakeven") or {})
-        self.trailing_config: Dict[str, Any] = dict(self.template.get("trailing") or {})
-        config_contract = _coerce_float(self.template.get("contract_size"))
-        instrument_contract = _coerce_float(self.instrument.get("contract_size"))
-        self.contract_size = (
-            float(config_contract)
-            if config_contract not in (None, 0)
-            else float(instrument_contract)
-            if instrument_contract not in (None, 0)
-            else 1.0
-        )
-        config_tick_value = _coerce_float(self.template.get("tick_value"))
-        instrument_tick_value = _coerce_float(self.instrument.get("tick_value"))
-        if config_tick_value not in (None, 0):
-            tick_value = float(config_tick_value)
-        elif instrument_tick_value not in (None, 0):
-            tick_value = float(instrument_tick_value)
-        else:
-            tick_value = self.tick_size * self.contract_size
-        self.tick_value = float(tick_value or self.tick_size)
-        quote_value = self.template.get("quote_currency") or self.instrument.get("quote_currency") or "USD"
-        self.quote_currency = str(quote_value).upper()
-        config_maker = _coerce_float(self.template.get("maker_fee_rate"))
-        instrument_maker = _coerce_float(self.instrument.get("maker_fee_rate"), 0.0)
-        config_taker = _coerce_float(self.template.get("taker_fee_rate"))
-        instrument_taker = _coerce_float(self.instrument.get("taker_fee_rate"), 0.0)
-        self.maker_fee = (
-            float(config_maker)
-            if config_maker is not None
-            else float(instrument_maker or 0.0)
-        )
-        self.taker_fee = (
-            float(config_taker)
-            if config_taker is not None
-            else float(instrument_taker or 0.0)
-        )
-        self.active_trade: Optional[LadderPosition] = None
-        self.trades: List[LadderPosition] = []
-        logger.info(
-            "ladder_risk_configured | targets=%s | stop_ticks=%s | tick=%.5f | instrument=%s",
-            ",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
-            self.stop_ticks,
-            self.tick_size,
-            self.instrument.get("symbol"),
-        )
-
-    def _orders_from_template(self) -> List[Dict[str, Any]]:
-        orders: List[Dict[str, Any]] = []
-        entries = self.template.get("take_profit_orders") or []
-        for idx, entry in enumerate(entries):
-            ticks = _coerce_float(entry.get("ticks"))
-            r_multiple = _coerce_float(entry.get("r_multiple"))
-            price = _coerce_float(entry.get("price"))
-            if ticks is None and r_multiple is None and price is None:
-                continue
-            label = entry.get("label") or f"Target {idx + 1}"
-            contracts = int(entry.get("contracts") or 0)
-            orders.append(
-                {
-                    "label": label,
-                    "ticks": int(ticks) if ticks is not None else None,
-                    "r_multiple": r_multiple,
-                    "price": price,
-                    "contracts": max(contracts, 1),
-                }
-            )
-        if orders:
-            return orders
-
-        fallback_targets: Sequence[int] = (
-            self.template.get("targets")
-            or DEFAULT_RISK.get("targets")
-            or [20, 40, 60]
-        )
-        total_contracts = int(self.template.get("contracts") or len(fallback_targets) or 1)
-        distribution = self._distribute_contracts(len(fallback_targets), total_contracts)
-        built: List[Dict[str, Any]] = []
-        for idx, ticks in enumerate(fallback_targets):
-            built.append(
-                {
-                    "label": f"TP +{int(ticks)}",
-                    "ticks": int(ticks),
-                    "contracts": distribution[idx] if idx < len(distribution) else 1,
-                }
-            )
-        return built
-
-    @staticmethod
-    def _distribute_contracts(count: int, total: int) -> List[int]:
-        if count <= 0:
-            return []
-        slots = [0 for _ in range(count)]
-        total = total if total > 0 else count
-        for idx in range(total):
-            slots[idx % count] += 1
-        return slots
-
-    def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
-        config = self.breakeven_config
-        if config.get("enabled") is False:
-            return 0.0
-        if config.get("target_index") is not None and legs:
-            index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
-            target_ticks = legs[index].ticks
-            if target_ticks is not None:
-                return float(target_ticks)
-        ticks = _coerce_float(config.get("ticks"))
-        if ticks and ticks > 0:
-            return float(ticks)
-        r_multiple = _coerce_float(config.get("r_multiple"))
-        if r_multiple is not None and r_ticks:
-            return float(r_multiple) * float(r_ticks)
-        fallback = self.template.get("breakeven_trigger_ticks")
-        value = _coerce_float(fallback) or DEFAULT_RISK["breakeven_trigger_ticks"]
-        return float(value)
-
-    def _trailing_activation_ticks(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> Optional[float]:
-        config = self.trailing_config or {}
-        if not config.get("enabled"):
-            return None
-        if config.get("target_index") is not None and legs:
-            index = max(0, min(int(config.get("target_index") or 0), len(legs) - 1))
-            target_ticks = legs[index].ticks
-            if target_ticks is not None:
-                return float(target_ticks)
-        ticks = _coerce_float(config.get("ticks"))
-        if ticks and ticks > 0:
-            return float(ticks)
-        r_multiple = _coerce_float(config.get("r_multiple"))
-        if r_multiple is not None and r_ticks:
-            return float(r_multiple) * float(r_ticks)
-        return None
-
-    def _trailing_distance_ticks(self, atr_at_entry: Optional[float]) -> Optional[float]:
-        if not (self.trailing_config.get("enabled") and atr_at_entry not in (None, 0)):
-            ticks = _coerce_float(self.trailing_config.get("ticks"))
-            return float(ticks) if ticks else None
-        atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
-        if atr_multiple == 0:
-            return None
-        distance_price = float(atr_at_entry) * atr_multiple
-        return risk_math.ticks_for_r(distance_price, self.tick_size)
-
-    def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
-        direction = "long" if direction == "long" else "short"
-        atr_at_entry = getattr(candle, "atr", None)
-        r_value = risk_math.r_value_from_atr(atr_at_entry, self.r_multiple)
-        r_ticks = risk_math.ticks_for_r(r_value, self.tick_size)
-        stop_price = None
-        explicit_stop = _coerce_float(self.template.get("stop_price"))
-        if explicit_stop not in (None, 0):
-            stop_price = float(explicit_stop)
-        if self.stop_r_multiple is not None and r_value is not None and stop_price is None:
-            stop_price = risk_math.price_from_r(candle.close, direction, r_value, self.stop_r_multiple)
-        if stop_price is None:
-            stop_distance = self.stop_ticks * self.tick_size
-            stop_price = (
-                candle.close - stop_distance if direction == "long" else candle.close + stop_distance
-            )
-        legs: List[Leg] = []
-        for idx, order in enumerate(self.orders):
-            ticks = order.get("ticks")
-            r_multiple = order.get("r_multiple")
-            price = order.get("price")
-            target_price: Optional[float] = None
-            target_ticks: Optional[int] = ticks if ticks is not None else None
-            if r_multiple is not None and r_value is not None:
-                target_price = risk_math.price_from_r(candle.close, direction, r_value, r_multiple)
-                computed_ticks = risk_math.ticks_from_entry(
-                    candle.close, target_price, direction, self.tick_size
-                )
-                target_ticks = int(round(computed_ticks))
-            elif ticks is not None:
-                distance = ticks * self.tick_size
-                target_price = candle.close + distance if direction == "long" else candle.close - distance
-            elif price is not None:
-                target_price = float(price)
-                computed_ticks = risk_math.ticks_from_entry(
-                    candle.close, target_price, direction, self.tick_size
-                )
-                target_ticks = int(round(computed_ticks))
-            if target_price is None:
-                continue
-            legs.append(
-                Leg(
-                    name=order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
-                    ticks=target_ticks or 0,
-                    target_price=target_price,
-                    contracts=order.get("contracts", 1),
-                )
-            )
-        breakeven_ticks = self._breakeven_threshold(legs, r_ticks)
-        trailing_activation_ticks = self._trailing_activation_ticks(legs, r_ticks)
-        trailing_distance_ticks = self._trailing_distance_ticks(atr_at_entry)
-        position = LadderPosition(
-            entry_time=candle.time,
-            entry_price=candle.close,
-            direction=direction,
-            stop_price=stop_price,
-            tick_size=self.tick_size,
-            legs=legs,
-            breakeven_trigger_ticks=breakeven_ticks,
-            tick_value=self.tick_value,
-            contract_size=self.contract_size,
-            maker_fee_rate=self.maker_fee,
-            taker_fee_rate=self.taker_fee,
-            quote_currency=self.quote_currency,
-            atr_at_entry=atr_at_entry,
-            r_multiple_at_entry=self.r_multiple,
-            r_value=r_value,
-            r_ticks=r_ticks,
-            trailing_activation_ticks=trailing_activation_ticks,
-            trailing_distance_ticks=trailing_distance_ticks,
-            trailing_atr_multiple=float(self.trailing_config.get("atr_multiplier") or 0.0),
-            pre_entry_context=getattr(candle, "lookback_15", None),
-        )
-        position.register_entry_fee()
-        return position
-
-    def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
-        if direction is None or self.active_trade is not None:
-            return None
-        self.active_trade = self._new_position(candle, direction)
-        self.trades.append(self.active_trade)
-        return self.active_trade
-
-    def step(self, candle: Candle) -> List[Dict[str, Any]]:
-        if self.active_trade is None:
-            return []
-        events = self.active_trade.apply_bar(candle)
-        if not self.active_trade.is_active():
-            self.active_trade = None
-        return events
-
-    def serialise_trades(self) -> List[Dict[str, object]]:
-        return [trade.serialize() for trade in self.trades]
-
-    def stats(self) -> Dict[str, float]:
-        legs = [leg for trade in self.trades for leg in trade.legs]
-        leg_wins = sum(1 for leg in legs if leg.status == "target")
-        leg_losses = sum(1 for leg in legs if leg.status == "stop")
-        completed = [trade for trade in self.trades if not trade.is_active()]
-        tolerance = 1e-8
-        trade_wins = sum(1 for trade in completed if trade.net_pnl > tolerance)
-        trade_losses = sum(1 for trade in completed if trade.net_pnl < -tolerance)
-        breakeven = max(len(completed) - trade_wins - trade_losses, 0)
-        completed_total = len(completed)
-        denominator = completed_total or 1
-        long_trades = sum(1 for trade in self.trades if trade.direction == "long")
-        short_trades = sum(1 for trade in self.trades if trade.direction == "short")
-        gross = sum(trade.gross_pnl for trade in self.trades)
-        fees = sum(trade.fees_paid for trade in self.trades)
-        net = gross - fees
-        return {
-            "total_trades": len(self.trades),
-            "completed_trades": completed_total,
-            "legs_closed": leg_wins + leg_losses,
-            "wins": trade_wins,
-            "losses": trade_losses,
-            "breakeven_trades": breakeven,
-            "win_rate": round(trade_wins / denominator, 4),
-            "long_trades": long_trades,
-            "short_trades": short_trades,
-            "gross_pnl": round(gross, 4),
-            "fees_paid": round(fees, 4),
-            "net_pnl": round(net, 4),
-            "quote_currency": self.quote_currency,
-        }
-
-
-@dataclass
-class StrategySeries:
-    """Runtime payload describing a single strategy stream."""
-
-    strategy_id: str
-    name: str
-    symbol: str
-    timeframe: str
-    datasource: Optional[str]
-    exchange: Optional[str]
-    candles: List[Candle]
-    signals: Deque[StrategySignal] = field(default_factory=deque)
-    overlays: List[Dict[str, Any]] = field(default_factory=list)
-    risk_engine: LadderRiskEngine = field(default_factory=LadderRiskEngine)
-    window_start: Optional[str] = None
-    window_end: Optional[str] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
-    last_consumed_epoch: int = 0
-    instrument: Optional[Dict[str, Any]] = None
-    atm_template: Dict[str, Any] = field(default_factory=dict)
-    trade_overlay: Optional[Dict[str, Any]] = None
+    return timeframe_duration(label)
 
 
 class BotRuntime:
@@ -824,9 +94,9 @@ class BotRuntime:
         self._intrabar_cache: Dict[str, List[Candle]] = {}
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
-        self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
         self._prepare_error: Optional[Dict[str, Any]] = None
+        self._series_builder = SeriesBuilder(self.bot_id, self.config, self.run_type, self._log_candle_sequence)
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -881,7 +151,7 @@ class BotRuntime:
             raise ValueError("Runtime requires strategy metadata to initialise")
         self._prepare_error = None
         try:
-            streams = self._build_series(meta)
+            streams = self._series_builder.build_series(meta)
         except Exception as exc:
             details = self._prepare_error or {"message": str(exc)}
             self._prepare_error = details
@@ -911,201 +181,23 @@ class BotRuntime:
         self._chart_overlays = overlays
 
     def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
-        series_list: List[StrategySeries] = []
-        for strategy in strategies:
-            stream = self._build_series_for_strategy(strategy)
-            series_list.append(stream)
-        return series_list
+        return self._series_builder.build_series(strategies)
 
     def _build_series_for_strategy(self, strategy: Mapping[str, Any]) -> Optional[StrategySeries]:
-        symbol = self._resolve_symbol(strategy)
-        if not symbol:
-            message = "Strategy missing symbol"
-            self._prepare_error = {"message": message, "strategy_id": strategy.get("id")}
-            raise RuntimeError(message)
-        timeframe = self._resolve_timeframe(strategy)
-        datasource = self._resolve_datasource(strategy)
-        exchange = self._resolve_exchange(strategy)
-        if self.run_type == "backtest":
-            start_iso = self.config.get("backtest_start")
-            end_iso = self.config.get("backtest_end")
-            if not start_iso or not end_iso:
-                start_iso, end_iso = self._resolve_live_window()
-        else:
-            start_iso, end_iso = self._resolve_live_window()
-
-        try:
-            df = fetch_ohlcv(
-                symbol,
-                start_iso,
-                end_iso,
-                timeframe,
-                datasource=datasource,
-                exchange=exchange,
-            )
-        except Exception as exc:
-            message = f"Failed to fetch OHLCV data: {exc}"
-            self._prepare_error = {
-                "message": message,
-                "strategy_id": strategy.get("id"),
-                "symbol": symbol,
-                "timeframe": timeframe,
-            }
-            raise RuntimeError(message) from exc
-        if df is None or getattr(df, "empty", False):
-            message = "No OHLCV data returned for strategy"
-            self._prepare_error = {
-                "message": message,
-                "strategy_id": strategy.get("id"),
-                "symbol": symbol,
-                "timeframe": timeframe,
-            }
-            logger.error(
-                "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
-                self.bot_id,
-                strategy.get("id"),
-                symbol,
-                timeframe,
-            )
-            raise RuntimeError(message)
-        if not df.index.is_monotonic_increasing:
-            first_idx = df.index[0] if len(df.index) else None
-            second_idx = df.index[1] if len(df.index) > 1 else None
-            logger.warning(
-                "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
-                self.bot_id,
-                strategy.get("id"),
-                symbol,
-                timeframe,
-                first_idx,
-                second_idx,
-                len(df.index),
-            )
-
-        candles = self._build_candles(df, timeframe)
-        if not candles:
-            message = "No valid candles could be built for strategy"
-            self._prepare_error = {
-                "message": message,
-                "strategy_id": strategy.get("id"),
-                "symbol": symbol,
-                "timeframe": timeframe,
-            }
-            raise RuntimeError(message)
-        self._log_candle_sequence("build_series", strategy.get("id"), candles)
-
-        try:
-            evaluation = strategy_service.generate_strategy_signals(
-                strategy_id=strategy.get("id"),
-                start=start_iso,
-                end=end_iso,
-                interval=timeframe,
-                symbol=symbol,
-                datasource=datasource,
-                exchange=exchange,
-                config={"mode": self.run_type},
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            message = f"Strategy evaluation failed: {exc}"
-            self._prepare_error = {
-                "message": message,
-                "strategy_id": strategy.get("id"),
-                "symbol": symbol,
-                "timeframe": timeframe,
-            }
-            logger.exception(
-                "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
-                self.bot_id,
-                strategy.get("id"),
-                exc,
-            )
-            raise RuntimeError(message)
-
-        overlays = self._extract_indicator_overlays(evaluation)
-        signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
-        instrument = self._instrument_for(datasource, exchange, symbol)
-        bot_override = self.config.get("risk") or {}
-        override_payload = bot_override if bot_override and bot_override != DEFAULT_ATM_TEMPLATE else None
-        atm_template = merge_templates(
-            strategy.get("atm_template"),
-            override_payload,
-        )
-        template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
-
-        def _apply_instrument_field(field: str) -> None:
-            if template_meta.get(f"{field}_override"):
-                return
-            if not instrument:
-                return
-            value = instrument.get(field)
-            if value is None:
-                return
-            atm_template[field] = value
-
-        for field_name in (
-            "tick_size",
-            "tick_value",
-            "contract_size",
-            "maker_fee_rate",
-            "taker_fee_rate",
-            "quote_currency",
-        ):
-            _apply_instrument_field(field_name)
-        risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
-        series_meta = dict(strategy)
-        if instrument:
-            series_meta["instrument"] = instrument
-        series_meta["atm_template"] = atm_template
-        logger.info(
-            "bot_runtime_series_ready | bot=%s | strategy=%s | contracts=%s | targets=%s",
-            self.bot_id,
-            strategy.get("id"),
-            atm_template.get("contracts"),
-            ",".join(str(order.get("ticks")) for order in atm_template.get("take_profit_orders", [])),
-        )
-
-        return StrategySeries(
-            strategy_id=str(strategy.get("id")),
-            name=strategy.get("name") or str(strategy.get("id")) or "strategy",
-            symbol=symbol,
-            timeframe=timeframe,
-            datasource=datasource,
-            exchange=exchange,
-            candles=candles,
-            signals=signals,
-            overlays=overlays
-            + self._indicator_overlay_entries(
-                strategy,
-                start_iso,
-                end_iso,
-                timeframe,
-                symbol,
-                datasource,
-                exchange,
-            ),
-            risk_engine=risk_engine,
-            window_start=start_iso,
-            window_end=end_iso,
-            meta=series_meta,
-            instrument=instrument,
-            atm_template=atm_template,
-        )
+        return self._series_builder._build_series_for_strategy(strategy)
 
     @staticmethod
     def _resolve_symbol(strategy: Mapping[str, Any]) -> Optional[str]:
-        symbols = strategy.get("symbols") or []
-        if symbols:
-            return str(symbols[0])
-        return strategy.get("symbol") or None
+        return SeriesBuilder._resolve_symbol(strategy)
 
     def _resolve_timeframe(self, strategy: Mapping[str, Any]) -> str:
-        return str(strategy.get("timeframe") or self.config.get("timeframe") or "15m")
+        return self._series_builder._resolve_timeframe(strategy)
 
     def _resolve_datasource(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self.config.get("datasource") or strategy.get("datasource")
+        return self._series_builder._resolve_datasource(strategy)
 
     def _resolve_exchange(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self.config.get("exchange") or strategy.get("exchange")
+        return self._series_builder._resolve_exchange(strategy)
 
     def _instrument_for(
         self,
@@ -1113,26 +205,10 @@ class BotRuntime:
         exchange: Optional[str],
         symbol: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        index = self.config.get("instrument_index") or {}
-        if not symbol:
-            return None
-        keys = [
-            _instrument_key(datasource, exchange, symbol),
-            _instrument_key(datasource, None, symbol),
-            _instrument_key(None, exchange, symbol),
-            _instrument_key(None, None, symbol),
-        ]
-        for key in keys:
-            if key in index:
-                return index[key]
-        return None
+        return self._series_builder._instrument_for(datasource, exchange, symbol)
 
     def _resolve_live_window(self) -> Tuple[str, str]:
-        lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
-        lookback_days = max(lookback_days, 1)
-        end_dt = datetime.now(timezone.utc)
-        start_dt = end_dt - timedelta(days=lookback_days)
-        return _isoformat(start_dt), _isoformat(end_dt)
+        return self._series_builder._resolve_live_window()
 
     def _indicator_overlay_entries(
         self,
@@ -1144,64 +220,15 @@ class BotRuntime:
         datasource: Optional[str],
         exchange: Optional[str],
     ) -> List[Dict[str, Any]]:
-        overlays: List[Dict[str, Any]] = []
-        strategy_meta = strategy or {}
-        links = list(strategy_meta.get("indicator_links") or [])
-        if not links and strategy_meta.get("indicator_ids"):
-            links = [
-                {"indicator_id": indicator_id}
-                for indicator_id in strategy_meta.get("indicator_ids")
-                if indicator_id
-            ]
-        seen: set[str] = set()
-        for link in links:
-            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
-            if not indicator_id or indicator_id in seen:
-                continue
-            seen.add(indicator_id)
-            snapshot = dict(link.get("indicator_snapshot") or {})
-            params = dict(snapshot.get("params") or {})
-            indicator_type = snapshot.get("type") or link.get("indicator_type") or "indicator"
-            color = snapshot.get("color") or link.get("color")
-            window_symbol = symbol or params.get("symbol")
-            interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
-            ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
-            ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
-            cache_key = self._indicator_overlay_cache_key(indicator_id, start_iso, end_iso, interval, window_symbol, ds, ex)
-            cached = self._indicator_overlay_cache.get(cache_key)
-            if cached:
-                overlays.append(deepcopy(cached))
-                continue
-            try:
-                payload = indicator_service.overlays_for_instance(
-                    indicator_id,
-                    start=start_iso,
-                    end=end_iso,
-                    interval=str(interval),
-                    symbol=window_symbol,
-                    datasource=ds,
-                    exchange=ex,
-                )
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.debug(
-                    "bot_indicator_overlay_failed | bot=%s | strategy=%s | indicator=%s | error=%s",
-                    self.bot_id,
-                    strategy_meta.get("id"),
-                    indicator_id,
-                    exc,
-                )
-                continue
-            overlays.append(
-                {
-                    "ind_id": indicator_id,
-                    "type": indicator_type,
-                    "payload": payload,
-                    "color": color,
-                    "source": "indicator",
-                }
-            )
-            self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
-        return overlays
+        return self._series_builder._indicator_overlay_entries(
+            strategy,
+            start_iso,
+            end_iso,
+            timeframe,
+            symbol,
+            datasource,
+            exchange,
+        )
 
     @staticmethod
     def _indicator_overlay_cache_key(
@@ -1213,16 +240,9 @@ class BotRuntime:
         datasource: Optional[str],
         exchange: Optional[str],
     ) -> str:
-        parts = [
-            indicator_id or "",
-            start_iso or "",
-            end_iso or "",
-            str(interval or ""),
-            (symbol or "").upper(),
-            (datasource or "").lower(),
-            (exchange or "").lower(),
-        ]
-        return "::".join(parts)
+        return SeriesBuilder._indicator_overlay_cache_key(
+            indicator_id, start_iso, end_iso, interval, symbol, datasource, exchange
+        )
 
     def _update_trade_overlay(self, series: Optional[StrategySeries]) -> None:
         if series is None:
@@ -1300,86 +320,12 @@ class BotRuntime:
         }
 
     @staticmethod
-    def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:
-        frame = df.copy()
-        frame.index = pd.to_datetime(frame.index, utc=True)
-        if not frame.index.is_monotonic_increasing:
-            frame = frame.sort_index()
-        range_series = frame.get("high", frame.get("High")) - frame.get("low", frame.get("Low"))
-        frame["__range__"] = range_series
-        atr_col = None
-        for candidate in ("ATR_Wilder", "atr", "atr_wilder"):
-            if candidate in frame.columns:
-                atr_col = candidate
-                break
-        volume_col = None
-        for candidate in ("volume", "Volume"):
-            if candidate in frame.columns:
-                volume_col = candidate
-                break
-        if atr_col:
-            frame["__avg_atr_15"] = frame[atr_col].rolling(window=15).mean().shift(1)
-        frame["__avg_range_15"] = range_series.rolling(window=15).mean().shift(1)
-        if volume_col:
-            frame["__avg_volume_15"] = frame[volume_col].rolling(window=15).mean().shift(1)
-        candles: List[Candle] = []
-        duration = _timeframe_duration(timeframe)
-        for ts, row in frame.iterrows():
-            try:
-                open_price = float(row.get("open", row.get("Open")))
-                high_price = float(row.get("high", row.get("High")))
-                low_price = float(row.get("low", row.get("Low")))
-                close_price = float(row.get("close", row.get("Close")))
-            except (TypeError, ValueError):
-                continue
-            start_dt = ts.to_pydatetime()
-            end_dt = start_dt + duration if duration else None
-            atr_value = None
-            if atr_col and row.get(atr_col) is not None:
-                try:
-                    atr_value = float(row.get(atr_col))
-                except (TypeError, ValueError):
-                    atr_value = None
-            volume_value = None
-            if volume_col and row.get(volume_col) is not None:
-                try:
-                    volume_value = float(row.get(volume_col))
-                except (TypeError, ValueError):
-                    volume_value = None
-            lookback = {
-                "avg_range_15": row.get("__avg_range_15"),
-                "avg_atr_15": row.get("__avg_atr_15"),
-                "avg_volume_15": row.get("__avg_volume_15"),
-            }
-            candles.append(
-                Candle(
-                    time=start_dt,
-                    open=open_price,
-                    high=high_price,
-                    low=low_price,
-                    close=close_price,
-                    end=end_dt,
-                    atr=atr_value,
-                    volume=volume_value,
-                    range=float(high_price - low_price),
-                    lookback_15={k: float(v) if v is not None and not pd.isna(v) else None for k, v in lookback.items()},
-                )
-            )
-        return candles
+    def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:
+        return SeriesBuilder._build_candles(df, timeframe)
 
     @staticmethod
     def _build_signals_from_markers(markers: Mapping[str, Any]) -> Deque[StrategySignal]:
-        queued: List[StrategySignal] = []
-        for entry in markers.get("buy", []) or []:
-            epoch = BotRuntime._normalise_epoch(entry.get("time"))
-            if epoch is not None:
-                queued.append(StrategySignal(epoch=epoch, direction="long"))
-        for entry in markers.get("sell", []) or []:
-            epoch = BotRuntime._normalise_epoch(entry.get("time"))
-            if epoch is not None:
-                queued.append(StrategySignal(epoch=epoch, direction="short"))
-        queued.sort(key=lambda signal: signal.epoch)
-        return deque(queued)
+        return SeriesBuilder._build_signals_from_markers(markers)
 
     @staticmethod
     def _intrabar_interval_for(timeframe: Optional[str]) -> Optional[str]:
@@ -1578,7 +524,7 @@ class BotRuntime:
         # Indicator results include overlays that visualize raw signal markers.
         # The bot lens should only render the strategy's configured indicator
         # overlays, so skip signal-driven visuals entirely.
-        return []
+        return SeriesBuilder._extract_indicator_overlays(result)
 
     def reset(self) -> None:
         """Clear cached series so the runtime can restart fresh."""
@@ -1596,12 +542,12 @@ class BotRuntime:
             self._next_bar_at = None
             self._logs.clear()
             self._intrabar_cache.clear()
-            self._indicator_overlay_cache.clear()
             self._intrabar_snapshots.clear()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
         self._paused = False
+        self._series_builder.reset()
 
     def needs_reset(self) -> bool:
         """Return True when the runtime finished and can be rerun."""
@@ -1799,61 +745,7 @@ class BotRuntime:
         return updated
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
-        df = fetch_ohlcv(
-            series.symbol,
-            start_iso,
-            end_iso,
-            series.timeframe,
-            datasource=series.datasource,
-            exchange=series.exchange,
-        )
-        if df is None or df.empty:
-            return False
-        new_candles = [
-            c
-            for c in self._build_candles(df, series.timeframe)
-            if not series.candles or c.time > series.candles[-1].time
-        ]
-        if not new_candles:
-            return False
-        series.candles.extend(new_candles)
-        try:
-            evaluation = strategy_service.evaluate(
-                strategy_id=series.strategy_id,
-                start=series.window_start or start_iso,
-                end=end_iso,
-                interval=series.timeframe,
-                symbol=series.symbol,
-                datasource=series.datasource,
-                exchange=series.exchange,
-                config={"mode": self.run_type},
-            )
-            overlays = self._extract_indicator_overlays(evaluation)
-            overlays.extend(
-                self._indicator_overlay_entries(
-                    series.meta or {},
-                    series.window_start or start_iso,
-                    end_iso,
-                    series.timeframe,
-                    series.symbol,
-                    series.datasource,
-                    series.exchange,
-                )
-            )
-            series.overlays = overlays
-            signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
-            while signals and signals[0].epoch <= series.last_consumed_epoch:
-                signals.popleft()
-            series.signals = signals
-            series.window_end = end_iso
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception(
-                "bot_runtime_refresh_failed | bot=%s | strategy=%s | error=%s",
-                self.bot_id,
-                series.strategy_id,
-                exc,
-            )
-        return True
+        return self._series_builder.append_series_updates(series, start_iso, end_iso)
 
     def pause(self) -> None:
         self._ensure_prepared()
@@ -1988,7 +880,6 @@ class BotRuntime:
                 "stop_price": trade.stop_price,
                 "contracts": contracts,
                 "status": "open",
-                "atm_template": series.atm_template,
                 "quote_currency": trade.quote_currency,
                 "metrics": trade._metrics_snapshot(),
             }
