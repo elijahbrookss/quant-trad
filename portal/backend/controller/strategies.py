@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import provider_service, strategy_service
+from ..service import provider_service
+from ..service.strategy_service import facade as strategy_service
 
 
 router = APIRouter()
