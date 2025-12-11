@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+from indicators.config import DataContext
+from indicators.market_profile import MarketProfileIndicator
+
+from .context import IndicatorServiceContext, _context
+from .utils import (
+    get_indicator_entry,
+    normalize_datasource,
+    normalize_exchange,
+    resolve_data_provider,
+    sanitize_json,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class IndicatorOverlayBuilder:
+    """Compose overlay generation from small, reusable steps."""
+
+    def __init__(self, ctx: IndicatorServiceContext = _context) -> None:
+        self._ctx = ctx
+
+    def build(
+        self,
+        inst_id: str,
+        start: str,
+        end: str,
+        interval: str,
+        *,
+        symbol: Optional[str] = None,
+        datasource: Optional[str] = None,
+        exchange: Optional[str] = None,
+        overlay_options: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        entry = self._load_entry(inst_id, start, end, interval, symbol)
+        sym = self._resolve_symbol(entry, symbol)
+        provider, data_ctx = self._prepare_provider(
+            entry.meta, sym, start, end, interval, datasource, exchange
+        )
+        df = self._load_candles(provider, data_ctx, inst_id, sym, interval)
+        overlay_indicator = self._build_overlay_indicator(
+            entry.instance, df, inst_id, sym, interval, overlay_options
+        )
+        payload, raw_payload = self._serialize_payload(overlay_indicator, df)
+        self._validate_payload(payload)
+        self._log_counts(inst_id, payload, raw_payload)
+        return payload
+
+    def _load_entry(
+        self, inst_id: str, start: str, end: str, interval: str, symbol: Optional[str]
+    ):
+        return get_indicator_entry(
+            inst_id,
+            fallback_context={
+                "symbol": symbol,
+                "start": start,
+                "end": end,
+                "interval": interval,
+            },
+            persist_backfill=True,
+            ctx=self._ctx,
+        )
+
+    def _resolve_symbol(self, entry, symbol: Optional[str]) -> str:
+        base_params = entry.meta.get("params", {})
+        sym = symbol or base_params.get("symbol")
+        if not sym:
+            raise ValueError("Stored indicator has no symbol and none was provided")
+        return sym
+
+    def _prepare_provider(
+        self,
+        meta: Mapping[str, Any],
+        symbol: str,
+        start: str,
+        end: str,
+        interval: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+    ):
+        stored_params = meta.get("params", {})
+        stored_datasource = normalize_datasource(
+            meta.get("datasource") or stored_params.get("datasource"), ctx=self._ctx
+        )
+        stored_exchange = normalize_exchange(
+            meta.get("exchange") or stored_params.get("exchange"), ctx=self._ctx
+        )
+
+        req_datasource = normalize_datasource(datasource, ctx=self._ctx)
+        req_exchange = normalize_exchange(exchange, ctx=self._ctx)
+
+        effective_datasource = req_datasource or stored_datasource
+        effective_exchange = req_exchange or stored_exchange
+        if effective_exchange and not effective_datasource:
+            effective_datasource = "ccxt"
+
+        provider = resolve_data_provider(
+            effective_datasource,
+            exchange=effective_exchange,
+            ctx=self._ctx,
+        )
+        data_ctx = DataContext(symbol=symbol, start=start, end=end, interval=interval)
+        return provider, data_ctx
+
+    def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):
+        logger.info(
+            "event=indicator_overlay_prepare indicator=%s symbol=%s interval=%s start=%s end=%s",
+            inst_id,
+            symbol,
+            interval,
+            data_ctx.start,
+            data_ctx.end,
+        )
+        df = provider.get_ohlcv(data_ctx)
+        if df is None or df.empty:
+            raise LookupError("No candles available for given window")
+        return df
+
+    def _build_overlay_indicator(
+        self,
+        instance,
+        df,
+        inst_id: str,
+        symbol: str,
+        interval: str,
+        overlay_options: Optional[Mapping[str, Any]],
+    ):
+        options = dict(overlay_options or {})
+        if isinstance(instance, MarketProfileIndicator) and hasattr(instance, "to_lightweight"):
+            clone = self._ctx.breakout_cache.build_market_profile_overlay_indicator(
+                instance,
+                df,
+                interval=interval,
+                symbol=symbol,
+            )
+            logger.debug(
+                "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s",
+                inst_id,
+                symbol,
+                interval,
+            )
+            if "extend_value_area_to_chart_end" in options:
+                setattr(
+                    clone,
+                    "extend_value_area_to_chart_end",
+                    bool(options["extend_value_area_to_chart_end"]),
+                )
+            return clone
+        return instance
+
+    def _serialize_payload(self, overlay_indicator, df) -> Tuple[Dict[str, Any], Any]:
+        if hasattr(overlay_indicator, "to_lightweight"):
+            payload = overlay_indicator.to_lightweight(df)
+        elif hasattr(overlay_indicator, "to_overlays"):
+            payload = overlay_indicator.to_overlays(df)
+        else:
+            raise RuntimeError("Indicator does not implement overlay serialization")
+        return sanitize_json(payload), payload
+
+    def _validate_payload(self, payload: Optional[Dict[str, Any]]) -> None:
+        if not payload:
+            raise LookupError("No overlays computed for given window")
+        layers = ("price_lines", "markers", "boxes", "segments", "polylines")
+        has_visuals = any(
+            isinstance(payload.get(k), (list, tuple)) and len(payload.get(k)) > 0
+            for k in layers
+        )
+        if not has_visuals:
+            raise LookupError("No overlays computed for given window")
+
+    def _log_counts(self, inst_id: str, payload: Dict[str, Any], raw_payload: Any) -> None:
+        layers = ("price_lines", "markers", "boxes", "segments", "polylines")
+        counts = {}
+        if isinstance(payload, dict):
+            counts = {
+                k: len(payload.get(k) or [])
+                for k in layers
+                if isinstance(payload.get(k), (list, tuple))
+            }
+        logger.info(
+            "event=indicator_overlay_result indicator=%s price_lines=%s markers=%s boxes=%s segments=%s polylines=%s",
+            inst_id,
+            counts.get("price_lines", 0),
+            counts.get("markers", 0),
+            counts.get("boxes", 0),
+            counts.get("segments", 0),
+            counts.get("polylines", 0),
+        )
+        boxes = []
+        if isinstance(raw_payload, dict):
+            boxes = raw_payload.get("boxes") or []
+        if isinstance(boxes, list):
+            for idx, box in enumerate(boxes):
+                if not isinstance(box, dict):
+                    continue
+                logger.debug(
+                    "event=indicator_overlay_box indicator=%s index=%d x1=%s x2=%s y1=%s y2=%s",
+                    inst_id,
+                    idx,
+                    box.get("x1"),
+                    box.get("x2"),
+                    box.get("y1"),
+                    box.get("y2"),
+                )
+
+
+__all__ = ["IndicatorOverlayBuilder"]
