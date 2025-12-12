@@ -24,6 +24,16 @@ RuleCallable = Callable[[Mapping[str, Any], Any], Optional[Sequence[Mapping[str,
 OverlayAdapter = Callable[[Sequence[BaseSignal], "DataFrame"], Sequence[Mapping[str, Any]]]
 
 
+@dataclass
+class _DecoratedRegistration:
+    """Mutable container for decorator-driven registrations."""
+
+    indicator_type: str
+    rules: List[RuleCallable]
+    overlay_adapter: Optional[OverlayAdapter] = None
+    registered: bool = False
+
+
 @dataclass(frozen=True)
 class IndicatorRegistration:
     """Container describing how to process rules for an indicator."""
@@ -33,6 +43,7 @@ class IndicatorRegistration:
 
 
 _REGISTRY: MutableMapping[str, IndicatorRegistration] = {}
+_DECORATED: MutableMapping[str, _DecoratedRegistration] = {}
 _RESERVED_CONFIG_KEYS = {"rule_payloads", "enabled_rules"}
 _TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
 
@@ -69,8 +80,16 @@ def register_indicator_rules(
     if not indicator_type:
         raise ValueError("indicator_type must be provided for registration")
 
-    if indicator_type in _REGISTRY:
-        raise ValueError(f"Rules for indicator '{indicator_type}' are already registered")
+    existing = _REGISTRY.get(indicator_type)
+    if existing is not None:
+        if tuple(existing.rules) != tuple(rules):
+            raise ValueError(f"Rules for indicator '{indicator_type}' are already registered")
+        if existing.overlay_adapter is None and overlay_adapter is not None:
+            _REGISTRY[indicator_type] = IndicatorRegistration(
+                rules=existing.rules,
+                overlay_adapter=overlay_adapter,
+            )
+        return
 
     normalized_rules = tuple(rules or ())
     if not normalized_rules:
@@ -96,7 +115,43 @@ def register_indicator_rules(
 def _normalise_indicator_type(indicator: Union[str, Any]) -> str:
     if isinstance(indicator, str):
         return indicator
+    if isinstance(indicator, type):
+        return getattr(indicator, "NAME", indicator.__name__)
     return getattr(indicator, "NAME", indicator.__class__.__name__)
+
+
+def _get_decorated_registration(indicator: Union[str, Any]) -> _DecoratedRegistration:
+    indicator_type = _normalise_indicator_type(indicator)
+    registration = _DECORATED.get(indicator_type)
+    if registration is None:
+        registration = _DecoratedRegistration(indicator_type=indicator_type, rules=[])
+        _DECORATED[indicator_type] = registration
+    return registration
+
+
+def _attempt_autoregistration(registration: _DecoratedRegistration) -> None:
+    if registration.registered or not registration.rules:
+        return
+
+    try:
+        register_indicator_rules(
+            registration.indicator_type,
+            tuple(registration.rules),
+            overlay_adapter=registration.overlay_adapter,
+        )
+        registration.registered = True
+    except ValueError:
+        existing = _REGISTRY.get(registration.indicator_type)
+        if existing is None:
+            raise
+        if tuple(existing.rules) != tuple(registration.rules):
+            raise
+        if existing.overlay_adapter is None and registration.overlay_adapter is not None:
+            _REGISTRY[registration.indicator_type] = IndicatorRegistration(
+                rules=existing.rules,
+                overlay_adapter=registration.overlay_adapter,
+            )
+        registration.registered = True
 
 
 def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
@@ -123,6 +178,62 @@ def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
     # Normalise identifiers for comparisons (case-insensitive)
     normalised = tuple({ident.lower(): ident for ident in identifiers}.values())
     return normalised if normalised else (repr(rule),)
+
+
+def indicator(indicator_type: Optional[Union[str, Any]] = None) -> Callable[[Any], Any]:
+    """Decorator to mark an indicator type for declarative rule registration."""
+
+    def decorator(obj: Any) -> Any:
+        _get_decorated_registration(indicator_type or obj)
+        return obj
+
+    return decorator
+
+
+def signal_rule(
+    indicator: Union[str, Any],
+    *,
+    rule_id: Optional[str] = None,
+    label: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Callable[[RuleCallable], RuleCallable]:
+    """Decorator to attach metadata and register a signal rule for an indicator."""
+
+    def decorator(func: RuleCallable) -> RuleCallable:
+        if rule_id:
+            setattr(func, "signal_id", rule_id)
+        if label:
+            setattr(func, "signal_label", label)
+        if description:
+            setattr(func, "signal_description", description)
+
+        registration = _get_decorated_registration(indicator)
+        registration.rules.append(func)
+        registration.registered = False
+        _attempt_autoregistration(registration)
+        return func
+
+    return decorator
+
+
+def overlay_adapter(indicator: Union[str, Any]) -> Callable[[OverlayAdapter], OverlayAdapter]:
+    """Decorator to register an overlay adapter alongside an indicator's rules."""
+
+    def decorator(func: OverlayAdapter) -> OverlayAdapter:
+        registration = _get_decorated_registration(indicator)
+        registration.overlay_adapter = func
+
+        existing = _REGISTRY.get(registration.indicator_type)
+        if existing is not None and existing.overlay_adapter is None:
+            _REGISTRY[registration.indicator_type] = IndicatorRegistration(
+                rules=existing.rules,
+                overlay_adapter=func,
+            )
+
+        _attempt_autoregistration(registration)
+        return func
+
+    return decorator
 
 
 def _filter_enabled_rules(
@@ -367,6 +478,9 @@ def describe_indicator_rules(indicator_type: str) -> List[Mapping[str, Any]]:
 
 
 __all__ = [
+    "indicator",
+    "signal_rule",
+    "overlay_adapter",
     "register_indicator_rules",
     "run_indicator_rules",
     "build_signal_overlays",

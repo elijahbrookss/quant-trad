@@ -1,224 +1,36 @@
-"""Signal rules for Market Profile indicators."""
+"""Breakout and retest evaluators for Market Profile rules."""
 
 from __future__ import annotations
 
 import logging
-import math
 import time
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set
 
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
-from signals.rules.pivot import _detect_retest as _pivot_detect_retest
-from signals.rules.pivot import _evaluate_level as _pivot_evaluate_level
-from signals.rules.patterns import (
-    SignalPattern,
-    assign_rule_metadata,
-    evaluate_signal_patterns,
-    maybe_mutable_context,
+from signals.rules.common.utils import (
+    as_timestamp,
+    clean_numeric,
+    normalise_meta_timestamp,
+    resolve_index_position,
+    value_area_identifier,
 )
+from signals.rules.market_profile.config import (
+    MarketProfileBreakoutConfig,
+    _DEFAULT_BREAKOUT_CONFIG,
+    resolve_breakout_config,
+)
+from signals.rules.pivot import _detect_retest as _pivot_detect_retest, _evaluate_level as _pivot_evaluate_level
+from signals.rules.patterns import SignalPattern, evaluate_signal_patterns
 
 log = logging.getLogger("MarketProfileRules")
-
-_BREAKOUT_CACHE_KEY = "market_profile_breakouts"
-_BREAKOUT_CACHE_INITIALISED = "_market_profile_breakouts_initialised"
-_BREAKOUT_READY_FLAG = "_market_profile_breakouts_ready"
-@dataclass(frozen=True)
-class MarketProfileBreakoutConfig:
-    """Configuration for Market Profile breakout confirmations."""
-
-    confirmation_bars: int = 3
-    early_confirmation_window: int = 3
-    early_confirmation_distance_pct: float = 0.01
-    require_full_candle_confirmation: bool = False
-    accelerated_confirmation_min_bars: int = 2
-
-    def __post_init__(self) -> None:  # pragma: no cover - dataclass guard
-        if self.confirmation_bars < 1:
-            raise ValueError("confirmation_bars must be >= 1")
-        if self.early_confirmation_window < 1:
-            raise ValueError("early_confirmation_window must be >= 1")
-        if self.early_confirmation_distance_pct < 0:
-            raise ValueError("early_confirmation_distance_pct must be >= 0")
-        if self.accelerated_confirmation_min_bars < 1:
-            raise ValueError("accelerated_confirmation_min_bars must be >= 1")
-        object.__setattr__(
-            self,
-            "accelerated_confirmation_min_bars",
-            min(self.confirmation_bars, self.accelerated_confirmation_min_bars),
-        )
-
-
-_DEFAULT_BREAKOUT_CONFIG = MarketProfileBreakoutConfig()
-
-
-def _as_timestamp(value: Any, tz: Optional[str]) -> Optional[pd.Timestamp]:
-    if value is None:
-        return None
-    try:
-        ts = pd.Timestamp(value)
-    except Exception:
-        return None
-    if ts.tzinfo is None and tz is not None:
-        return ts.tz_localize(tz)
-    if tz is not None:
-        try:
-            ts = ts.tz_convert(tz)
-        except Exception:
-            pass
-    return ts
-
-
-def _normalise_meta_timestamp(value: Any, tz: Optional[str]) -> Optional[pd.Timestamp]:
-    """Convert metadata timestamps into timezone-aware pandas timestamps."""
-
-    if value is None:
-        return None
-
-    try:
-        ts = pd.Timestamp(value)
-    except Exception:
-        return None
-
-    if tz is not None:
-        if ts.tzinfo is None:
-            try:
-                ts = ts.tz_localize(tz)  # type: ignore[arg-type]
-            except Exception:
-                return None
-        else:
-            try:
-                ts = ts.tz_convert(tz)  # type: ignore[arg-type]
-            except Exception:
-                return None
-    return ts
-
-
-def _value_area_identifier(value_area: Mapping[str, Any]) -> Optional[str]:
-    start = value_area.get("start") or value_area.get("start_date")
-    if start is None:
-        return None
-    try:
-        return pd.Timestamp(start).isoformat()
-    except Exception:
-        return None
-
-
-def _resolve_index_position(index: pd.Index, ts: Optional[pd.Timestamp]) -> Optional[int]:
-    """Return the integer position of ``ts`` within ``index`` when possible."""
-
-    if ts is None:
-        return None
-
-    try:
-        positions = index.get_indexer([ts], method="nearest")
-    except Exception:
-        return None
-
-    if positions.size and positions[0] >= 0:
-        return int(positions[0])
-    return None
 
 
 def _compute_confidence(distance_pct: float) -> float:
     scaled = abs(distance_pct) * 5.0
     return max(0.1, min(scaled, 1.0))
-
-
-def _clean_numeric(value: Any, default: Optional[float] = None) -> Optional[float]:
-    """Return a float if the value is finite, otherwise ``default``."""
-
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return default
-
-    if math.isnan(numeric) or math.isinf(numeric):
-        return default
-
-    return numeric
-
-
-def _resolve_breakout_config(context: Mapping[str, Any]) -> MarketProfileBreakoutConfig:
-    explicit_confirmation = "market_profile_breakout_confirmation_bars" in context
-    confirmation = context.get(
-        "market_profile_breakout_confirmation_bars",
-        _DEFAULT_BREAKOUT_CONFIG.confirmation_bars,
-    )
-    try:
-        confirmation = int(confirmation)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
-    if confirmation < 1:
-        confirmation = _DEFAULT_BREAKOUT_CONFIG.confirmation_bars
-    mode_str = str(context.get("mode", "backtest")).lower()
-    if not explicit_confirmation and mode_str in {"live", "sim"}:
-        confirmation = 1
-
-    early_window = context.get(
-        "market_profile_breakout_early_window",
-        _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window,
-    )
-    try:
-        early_window = int(early_window)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        early_window = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window
-    if early_window < 1:
-        early_window = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_window
-
-    early_pct = context.get(
-        "market_profile_breakout_early_distance_pct",
-        _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct,
-    )
-    try:
-        early_pct = float(early_pct)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        early_pct = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct
-    if early_pct < 0:
-        early_pct = _DEFAULT_BREAKOUT_CONFIG.early_confirmation_distance_pct
-
-    require_full_candle = context.get("market_profile_breakout_require_full_candle")
-    if require_full_candle is None:
-        require_full_candle = _DEFAULT_BREAKOUT_CONFIG.require_full_candle_confirmation
-    elif isinstance(require_full_candle, str):
-        require_full_candle = require_full_candle.strip().lower() in {"1", "true", "yes", "on"}
-    else:
-        require_full_candle = bool(require_full_candle)
-
-    accel_min = context.get(
-        "market_profile_breakout_acceleration_min_bars",
-        _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars,
-    )
-    try:
-        accel_min = int(accel_min)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        accel_min = _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars
-    if accel_min < 1:
-        accel_min = _DEFAULT_BREAKOUT_CONFIG.accelerated_confirmation_min_bars
-    accel_min = min(accel_min, confirmation)
-
-    resolved = MarketProfileBreakoutConfig(
-        confirmation_bars=confirmation,
-        early_confirmation_window=early_window,
-        early_confirmation_distance_pct=early_pct,
-        require_full_candle_confirmation=bool(require_full_candle),
-        accelerated_confirmation_min_bars=accel_min,
-    )
-    log.debug(
-        (
-            "mp_brk | config_resolved | confirmation_bars=%d | early_window=%d "
-            "| early_pct=%.5f | require_full_candle=%s | accel_min=%d"
-        ),
-        resolved.confirmation_bars,
-        resolved.early_confirmation_window,
-        resolved.early_confirmation_distance_pct,
-        resolved.require_full_candle_confirmation,
-        resolved.accelerated_confirmation_min_bars,
-    )
-    return resolved
 
 
 def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -244,8 +56,8 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         log.debug("mp_brk | skip | reason=insufficient_bars | bars=%s", len(df))
         return []
 
-    vah = _clean_numeric(value_area.get("VAH"))
-    val = _clean_numeric(value_area.get("VAL"))
+    vah = clean_numeric(value_area.get("VAH"))
+    val = clean_numeric(value_area.get("VAL"))
     if vah is None or val is None:
         log.debug("mp_brk | skip | reason=invalid_value_area_bounds | value_area=%s", value_area)
         return []
@@ -253,10 +65,10 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     mode = str(context.get("mode", "backtest")).lower()
 
     tz = getattr(df.index, "tz", None)
-    start_ts = _as_timestamp(value_area.get("start"), tz) or _as_timestamp(
+    start_ts = as_timestamp(value_area.get("start"), tz) or as_timestamp(
         value_area.get("start_date"), tz
     )
-    end_ts = _as_timestamp(value_area.get("end"), tz) or _as_timestamp(
+    end_ts = as_timestamp(value_area.get("end"), tz) or as_timestamp(
         value_area.get("end_date"), tz
     )
 
@@ -303,8 +115,8 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         except Exception:  # pragma: no cover - defensive
             min_allowed_ts = None
 
-    session_id = _value_area_identifier(value_area)
-    config = _resolve_breakout_config(context)
+    session_id = value_area_identifier(value_area)
+    config = resolve_breakout_config(context)
     symbol = context.get("symbol") or getattr(indicator, "symbol", None)
 
     profile_for_session: Optional[Mapping[str, Any]] = None
@@ -314,7 +126,7 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             for profile in profiles:
                 if not isinstance(profile, Mapping):
                     continue
-                profile_id = _value_area_identifier(profile)
+                profile_id = value_area_identifier(profile)
                 if profile_id == session_id:
                     profile_for_session = profile
                     break
@@ -334,10 +146,10 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
 
     value_area_range = float(vah - val)
     value_area_mid = float((vah + val) / 2.0)
-    poc = _clean_numeric(value_area.get("POC"))
+    poc = clean_numeric(value_area.get("POC"))
 
-    start_index = _resolve_index_position(df.index, start_ts)
-    end_index = _resolve_index_position(df.index, end_ts)
+    start_index = resolve_index_position(df.index, start_ts)
+    end_index = resolve_index_position(df.index, end_ts)
 
     boundaries = (
         ("VAH", float(vah), "resistance"),
@@ -353,7 +165,7 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
         candidate_prices = [float(level_price)]
         fallback_price: Optional[float] = None
         if profile_for_session is not None:
-            fallback_price = _clean_numeric(profile_for_session.get(level_type))
+            fallback_price = clean_numeric(profile_for_session.get(level_type))
             if fallback_price is not None:
                 fallback_price = float(fallback_price)
                 if not candidate_prices or not math.isclose(
@@ -421,7 +233,7 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             metas_to_process = directional_candidates if directional_candidates else metas
 
             for meta in metas_to_process:
-                trigger_ts = _normalise_meta_timestamp(meta.get("trigger_time"), tz)
+                trigger_ts = normalise_meta_timestamp(meta.get("trigger_time"), tz)
                 if trigger_ts is None:
                     continue
 
@@ -511,13 +323,13 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                     if not allow_beyond_end:
                         continue
 
-                breakout_start_ts = _normalise_meta_timestamp(enriched.get("breakout_start"), tz)
+                breakout_start_ts = normalise_meta_timestamp(enriched.get("breakout_start"), tz)
                 if breakout_start_ts is not None:
                     if start_ts is not None and breakout_start_ts < start_ts:
                         continue
                     if min_allowed_ts is not None and breakout_start_ts < min_allowed_ts:
                         continue
-                    breakout_start_idx = _resolve_index_position(df.index, breakout_start_ts)
+                    breakout_start_idx = resolve_index_position(df.index, breakout_start_ts)
                     if end_index is not None and breakout_start_idx is not None and breakout_start_idx > end_index:
                         if not allow_beyond_end:
                             continue
@@ -601,7 +413,7 @@ def _detect_value_area_retest(
     min_bars: int,
     mode: str,
 ) -> Optional[Dict[str, Any]]:
-    level_price = _clean_numeric(breakout_meta.get("level_price"))
+    level_price = clean_numeric(breakout_meta.get("level_price"))
     direction = breakout_meta.get("breakout_direction")
     if level_price is None or direction not in {"above", "below"}:
         log.debug(
@@ -719,8 +531,8 @@ def _detect_value_area_retest(
     if result is None:
         return None
 
-    level_price_value = _clean_numeric(result.get("level_price"))
-    close_value = _clean_numeric(result.get("retest_close"))
+    level_price_value = clean_numeric(result.get("level_price"))
+    close_value = clean_numeric(result.get("retest_close"))
     tolerance_abs = max(
         0.0, abs(level_price_value) * float(max(tolerance_pct, 0.0)) if level_price_value is not None else 0.0
     )
@@ -868,7 +680,7 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
     except (TypeError, ValueError):
         min_bars = 1
 
-    target_session = _value_area_identifier(value_area)
+    target_session = value_area_identifier(value_area)
     results: List[Dict[str, Any]] = []
     for breakout_meta in breakouts:
         if not isinstance(breakout_meta, Mapping):
@@ -936,80 +748,3 @@ _RETEST_PATTERN = SignalPattern(
 )
 
 
-def _initialise_breakout_cache(context: Mapping[str, Any]) -> MutableMapping[str, Any] | None:
-    mutable = maybe_mutable_context(context)
-    if mutable is None:
-        return None
-
-    if not mutable.get(_BREAKOUT_CACHE_INITIALISED):
-        mutable[_BREAKOUT_CACHE_KEY] = []
-        mutable[_BREAKOUT_CACHE_INITIALISED] = True
-    elif not isinstance(mutable.get(_BREAKOUT_CACHE_KEY), list):
-        mutable[_BREAKOUT_CACHE_KEY] = []
-    return mutable
-
-
-def market_profile_breakout_rule(context: Mapping[str, Any], payload: Any) -> List[Dict[str, Any]]:
-    mutable = _initialise_breakout_cache(context)
-    if mutable is not None:
-        mutable[_BREAKOUT_READY_FLAG] = False
-
-    results = evaluate_signal_patterns(context, payload, [_BREAKOUT_PATTERN])
-
-    if mutable is not None and results:
-        breakout_cache = mutable.get(_BREAKOUT_CACHE_KEY)
-        if isinstance(breakout_cache, list):
-            breakout_cache.extend(results)
-
-    if mutable is not None:
-        mutable[_BREAKOUT_READY_FLAG] = True
-
-    cache_size = None
-    if mutable and isinstance(mutable.get(_BREAKOUT_CACHE_KEY), list):
-        cache_size = len(mutable[_BREAKOUT_CACHE_KEY])
-
-    log.debug("mp_brk_rule | emitted=%d | cache_size=%s", len(results), cache_size)
-    return results
-
-
-def market_profile_retest_rule(context: Mapping[str, Any], payload: Any) -> List[Dict[str, Any]]:
-    df = context.get("df")
-    if df is None or getattr(df, "empty", True):
-        return []
-
-    if not context.get(_BREAKOUT_READY_FLAG):
-        market_profile_breakout_rule(context, payload)
-
-    results = evaluate_signal_patterns(context, payload, [_RETEST_PATTERN])
-
-    mutable = maybe_mutable_context(context)
-    if mutable is not None:
-        mutable[_BREAKOUT_READY_FLAG] = True
-
-    log.debug("mp_retest_rule | emitted=%d", len(results))
-    return results
-
-
-assign_rule_metadata(
-    market_profile_breakout_rule,
-    rule_id="market_profile_breakout",
-    label="Value Area Breakout",
-    description=(
-        "Detects when price closes outside the current value area, flagging potential initiative order flow."
-    ),
-)
-
-assign_rule_metadata(
-    market_profile_retest_rule,
-    rule_id="market_profile_retest",
-    label="Value Area Retest",
-    description=(
-        "Highlights pullbacks to a recently broken value area boundary that hold, signalling continuation setups."
-    ),
-)
-
-
-__all__ = [
-    "market_profile_breakout_rule",
-    "market_profile_retest_rule",
-]
