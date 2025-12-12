@@ -3,7 +3,7 @@ from typing import Optional
 
 import pandas as pd
 
-from data_providers.factory import get_provider
+from data_providers.providers.factory import get_provider
 
 def fetch_ohlcv(
     symbol: str,

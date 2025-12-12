@@ -7,17 +7,17 @@ from typing import Any, Dict, List, Optional
 
 from atm import merge_templates
 
-from .configuration import InstrumentConfig, RiskConfig
-from .models import Candle
-from .orders import OrderTemplateBuilder
-from .position import LadderPosition
-from .strategies import (
+from ..domain.configuration import InstrumentConfig, RiskConfig
+from ..domain.models import Candle
+from ..domain.position import LadderPosition
+from ..strategies import (
     DefaultRiskSizingStrategy,
     DefaultStopTargetStrategy,
     RiskSizingStrategy,
     StopTargetStrategy,
 )
-from .utils import coerce_float
+from ..utils import coerce_float
+from .orders import OrderTemplateBuilder
 
 logger = logging.getLogger(__name__)
 

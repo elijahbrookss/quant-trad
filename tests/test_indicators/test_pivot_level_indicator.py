@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 from indicators.pivot_level import PivotLevelIndicator, Level
-from data_providers.alpaca_provider import AlpacaProvider
+from data_providers import AlpacaProvider
 from indicators.config import DataContext
 
 @pytest.mark.integration

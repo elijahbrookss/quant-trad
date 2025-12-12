@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from data_providers.base_provider import DataSource
+from data_providers import DataSource
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
 

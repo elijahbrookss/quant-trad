@@ -1,5 +1,5 @@
-from engines.backtest.orders import OrderTemplateBuilder
-from engines.backtest.risk_engine import DEFAULT_RISK
+from engines.backtest.services.orders import OrderTemplateBuilder
+from engines.backtest.services.risk_engine import DEFAULT_RISK
 
 
 def test_order_builder_respects_size_fraction_and_contracts():

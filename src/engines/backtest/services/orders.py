@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
 
-from .utils import coerce_float
+from ..utils import coerce_float
 
 
 @dataclass

@@ -58,12 +58,13 @@ def _load_bot_runtime(monkeypatch):
     monkeypatch.setitem(sys.modules, "portal.backend.service.strategy_service", strategy_service_stub)
     monkeypatch.setitem(sys.modules, "ib_insync", SimpleNamespace(IB=object, Contract=object, util=SimpleNamespace()))
     monkeypatch.setitem(sys.modules, "data_providers", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "data_providers.factory", SimpleNamespace(get_provider=lambda *_: None))
-    monkeypatch.setitem(sys.modules, "data_providers.base_provider", SimpleNamespace(DataSource=object))
-    monkeypatch.setitem(sys.modules, "data_providers.alpaca_provider", SimpleNamespace(AlpacaProvider=object))
+    monkeypatch.setitem(sys.modules, "data_providers.providers", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "data_providers.providers.factory", SimpleNamespace(get_provider=lambda *_: None))
+    monkeypatch.setitem(sys.modules, "data_providers.providers.base", SimpleNamespace(DataSource=object))
+    monkeypatch.setitem(sys.modules, "data_providers.providers.alpaca", SimpleNamespace(AlpacaProvider=object))
     monkeypatch.setitem(
         sys.modules,
-        "data_providers.interactive_brokers_provider",
+        "data_providers.providers.interactive_brokers",
         SimpleNamespace(InteractiveBrokersProvider=object),
     )
     bot_service_stub = SimpleNamespace(load_strategies=lambda: [])
