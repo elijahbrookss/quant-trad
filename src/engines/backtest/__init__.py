@@ -4,10 +4,10 @@ This module provides the core backtesting infrastructure for running
 trading strategies in simulation mode.
 """
 
-from .models import Candle, Leg, StrategySignal
-from .position import LadderPosition
-from .risk_engine import DEFAULT_RISK, LadderRiskEngine
-from .series import StrategySeries
+from .domain.models import Candle, Leg, StrategySignal
+from .domain.position import LadderPosition
+from .domain.series import StrategySeries
+from .services.risk_engine import DEFAULT_RISK, LadderRiskEngine
 from .utils import (
     coerce_float,
     instrument_key,

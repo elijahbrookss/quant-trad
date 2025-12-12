@@ -6,7 +6,7 @@ import logging
 from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from data_providers.factory import get_provider
+from data_providers.providers.factory import get_provider
 
 try:  # pragma: no cover - optional dependency wiring
     import ccxt  # type: ignore

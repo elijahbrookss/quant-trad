@@ -8,13 +8,21 @@ import pandas as pd
 import ccxt
 
 from core.logger import logger
-from .base_provider import BaseDataProvider, InstrumentMetadata, InstrumentType
+from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
 
 class CCXTProvider(BaseDataProvider):
     """Data provider that fetches OHLCV candles via CCXT exchanges."""
 
-    def __init__(self, exchange_id: str, *, sandbox: Optional[bool] = None):
+    def __init__(
+        self,
+        exchange_id: str,
+        *,
+        sandbox: Optional[bool] = None,
+        persistence=None,
+        settings=None,
+    ):
+        super().__init__(persistence=persistence, settings=settings)
         if not exchange_id:
             raise ValueError("exchange_id is required for CCXTProvider")
 

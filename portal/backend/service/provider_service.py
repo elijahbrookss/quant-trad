@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from data_providers.factory import get_provider
+from data_providers.providers.factory import get_provider
 from data_providers.registry import (
     exchange_slug_for_venue,
     get_provider_config,

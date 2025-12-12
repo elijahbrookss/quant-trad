@@ -1,7 +1,6 @@
-import os
 import datetime as dt
+import os
 import pandas as pd
-from dotenv import load_dotenv
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -10,13 +9,12 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass
 from alpaca.common.exceptions import APIError
 from core.logger import logger
-from .base_provider import DataSource, BaseDataProvider, InstrumentMetadata, InstrumentType
-
-
-load_dotenv("secrets.env")
+from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 class AlpacaProvider(BaseDataProvider):
-    def __init__(self):
+    def __init__(self, *, persistence=None, settings=None):
+        super().__init__(persistence=persistence, settings=settings)
+
         self._api_key = os.getenv("ALPACA_API_KEY")
         self._secret_key = os.getenv("ALPACA_SECRET_KEY")
 

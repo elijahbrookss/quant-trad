@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
 
 from .models import Candle, StrategySignal
-from .risk_engine import LadderRiskEngine
+from ..services.risk_engine import LadderRiskEngine
 
 
 @dataclass

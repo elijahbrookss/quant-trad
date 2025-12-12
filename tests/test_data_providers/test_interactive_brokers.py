@@ -5,9 +5,9 @@ import pytest
 
 pd = pytest.importorskip("pandas")
 
-from data_providers import factory as provider_factory
-from data_providers import interactive_brokers_provider as ib_module
-from data_providers.base_provider import DataSource
+from data_providers.providers import DataSource
+from data_providers.providers import factory as provider_factory
+from data_providers.providers import interactive_brokers as ib_module
 
 
 class DummyIB:

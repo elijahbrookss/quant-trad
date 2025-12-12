@@ -1,5 +1,5 @@
-from engines.backtest.configuration import InstrumentConfig, RiskConfig
-from engines.backtest.risk_engine import DEFAULT_RISK
+from engines.backtest.domain.configuration import InstrumentConfig, RiskConfig
+from engines.backtest.services.risk_engine import DEFAULT_RISK
 
 
 def test_instrument_config_normalises_values_and_constraints():

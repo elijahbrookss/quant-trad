@@ -7,9 +7,9 @@ from typing import Dict, List, Optional, Protocol, Sequence
 
 from risk import price_from_r, r_value_from_atr, ticks_for_r, ticks_from_entry
 
-from .configuration import InstrumentConfig, RiskConfig
-from .models import Leg
-from .utils import coerce_float
+from ..domain.configuration import InstrumentConfig, RiskConfig
+from ..domain.models import Leg
+from ..utils import coerce_float
 
 
 @dataclass

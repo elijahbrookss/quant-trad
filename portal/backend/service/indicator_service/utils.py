@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from data_providers.base_provider import DataSource
+from data_providers import DataSource
 
 from .context import IndicatorServiceContext, _context
 

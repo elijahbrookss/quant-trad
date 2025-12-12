@@ -4,12 +4,9 @@ from typing import Dict, Optional, Tuple
 
 from core.logger import logger
 
-from .alpaca_provider import AlpacaProvider
-from .ccxt_provider import CCXTProvider
-from .interactive_brokers_provider import InteractiveBrokersProvider
-from .yahoo_provider import YahooFinanceProvider
-from .base_provider import BaseDataProvider, DataSource
-from .registry import (
+from ..config import runtime_config_from_env
+from ..services import DataPersistenceService
+from ..registry import (
     exchange_slug_for_venue,
     get_provider_config,
     get_venue_config,
@@ -17,9 +14,23 @@ from .registry import (
     normalize_venue_id,
     provider_for_venue,
 )
+from .alpaca import AlpacaProvider
+from .base import BaseDataProvider, DataSource
+from .ccxt import CCXTProvider
+from .interactive_brokers import InteractiveBrokersProvider
+from .yahoo import YahooFinanceProvider
 
 
 _PROVIDER_CACHE: Dict[Tuple[str, str], BaseDataProvider] = {}
+_RUNTIME_CONFIG = runtime_config_from_env()
+_PERSISTENCE: DataPersistenceService | None = None
+
+
+def _get_persistence() -> DataPersistenceService:
+    global _PERSISTENCE
+    if _PERSISTENCE is None:
+        _PERSISTENCE = DataPersistenceService(_RUNTIME_CONFIG.persistence)
+    return _PERSISTENCE
 
 
 def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -56,17 +67,23 @@ def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = No
     if not provider_cfg:
         raise ValueError(f"Unsupported provider: {provider}")
 
+    persistence = _get_persistence()
+
     if provider == DataSource.ALPACA.value or provider == "ALPACA":
-        instance = AlpacaProvider()
+        instance = AlpacaProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
     elif provider == DataSource.YFINANCE.value or provider == "YAHOO":
-        instance = YahooFinanceProvider()
+        instance = YahooFinanceProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
     elif provider == DataSource.IBKR.value or provider == "INTERACTIVE_BROKERS":
-        instance = InteractiveBrokersProvider(exchange=exchange or resolved_venue)
+        instance = InteractiveBrokersProvider(
+            exchange=exchange or resolved_venue,
+            persistence=persistence,
+            settings=_RUNTIME_CONFIG,
+        )
     elif provider == DataSource.CCXT.value or provider == "CCXT":
         slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()
         if not slug:
             raise ValueError("CCXT provider requires a venue/exchange identifier")
-        instance = CCXTProvider(slug)
+        instance = CCXTProvider(slug, persistence=persistence, settings=_RUNTIME_CONFIG)
     else:
         raise ValueError(f"No provider implementation for {provider}")
 

@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from data_providers.alpaca_provider import AlpacaProvider
-from data_providers.base_provider import DataSource
-from data_providers.factory import get_provider
+from data_providers import AlpacaProvider, DataSource
+from data_providers.providers.factory import get_provider
 
 
 class DataProviderResolver:

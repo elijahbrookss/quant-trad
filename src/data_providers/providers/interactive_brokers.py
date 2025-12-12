@@ -2,7 +2,7 @@
 
 This provider bridges the QuantLab data pipeline with the Interactive
  Brokers Trader Workstation (TWS) / Gateway API using :mod:`ib_insync`.
-It reuses the common :class:`~data_providers.base_provider.BaseDataProvider`
+It reuses the common :class:`~data_providers.providers.base.BaseDataProvider`
 contract so downstream services can request OHLCV windows via the existing
 factory helpers.
 
@@ -43,7 +43,7 @@ import pandas as pd
 from ib_insync import IB, Contract, util
 
 from core.logger import logger
-from .base_provider import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
+from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,9 @@ class InteractiveBrokersProvider(BaseDataProvider):
 
     _lock = threading.Lock()
 
-    def __init__(self, *, exchange: Optional[str] = None):
+    def __init__(self, *, exchange: Optional[str] = None, persistence=None, settings=None):
+        super().__init__(persistence=persistence, settings=settings)
+
         self._host = os.getenv("IB_HOST", "ibkr-gateway")
         # The IB Gateway paper-trading endpoint defaults to 4002 while the
         # production endpoint listens on 4001. Users can override the port via

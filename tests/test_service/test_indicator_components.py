@@ -47,13 +47,13 @@ class _DummyIndicator:
 
 
 sys.modules.setdefault(
-    "data_providers.alpaca_provider", types.SimpleNamespace(AlpacaProvider=object)
+    "data_providers.providers.alpaca", types.SimpleNamespace(AlpacaProvider=object)
 )
 sys.modules.setdefault(
-    "data_providers.base_provider", types.SimpleNamespace(DataSource=_DataSource)
+    "data_providers.providers.base", types.SimpleNamespace(DataSource=_DataSource)
 )
 sys.modules.setdefault(
-    "data_providers.factory", types.SimpleNamespace(get_provider=lambda *_, **__: object())
+    "data_providers.providers.factory", types.SimpleNamespace(get_provider=lambda *_, **__: object())
 )
 sys.modules.setdefault("indicators.config", types.SimpleNamespace(DataContext=_DataContext))
 sys.modules.setdefault("indicators.market_profile", types.SimpleNamespace(MarketProfileIndicator=_DummyIndicator))
