@@ -116,7 +116,8 @@ class DefaultStopTargetStrategy:
             if explicit_stop not in (None, 0):
                 stop_price = float(explicit_stop)
             if risk.stop_r_multiple is not None and r_value is not None and stop_price is None:
-                stop_price = price_from_r(candle.close, direction, r_value, risk.stop_r_multiple)
+                # stop_r_multiple is stored as positive, negate for stop calculation
+                stop_price = price_from_r(candle.close, direction, r_value, -abs(risk.stop_r_multiple))
             if stop_price is None:
                 stop_distance = risk.stop_ticks * risk.tick_size
                 stop_price = (

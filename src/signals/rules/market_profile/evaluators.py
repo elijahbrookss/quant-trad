@@ -22,7 +22,7 @@ from signals.rules.market_profile.config import (
     _DEFAULT_BREAKOUT_CONFIG,
     resolve_breakout_config,
 )
-from signals.rules.pivot import _detect_retest as _pivot_detect_retest, _evaluate_level as _pivot_evaluate_level
+from ..pivot import _detect_retest as _pivot_detect_retest, _evaluate_level as _pivot_evaluate_level
 from signals.rules.patterns import SignalPattern, evaluate_signal_patterns
 
 log = logging.getLogger("MarketProfileRules")

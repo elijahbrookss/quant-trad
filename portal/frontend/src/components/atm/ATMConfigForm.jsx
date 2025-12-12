@@ -197,86 +197,66 @@ export default function ATMConfigForm({
   const handleTargetChange = (index, field, rawValue) => {
     const nextTargets = targets.map((target, idx) => {
       if (idx !== index) return target
-      let valueToApply = rawValue
+
+      const updated = { ...target }
+
       if (field === 'size_percent') {
         const numeric = rawValue === '' ? null : Number(rawValue)
-        valueToApply = Number.isFinite(numeric) ? Math.round(numeric) : null
-      }
-      if (field === 'r_multiple') {
+        const roundedPercent = Number.isFinite(numeric) ? Math.round(numeric) : null
+        updated.size_percent = roundedPercent
+        // Also update size_fraction for v2 schema
+        updated.size_fraction = roundedPercent !== null ? roundedPercent / 100 : null
+      } else if (field === 'r_multiple') {
         const numeric = rawValue === '' ? null : Number(rawValue)
-        valueToApply = Number.isFinite(numeric) ? numeric : null
+        updated.r_multiple = Number.isFinite(numeric) ? numeric : null
+      } else if (field === 'label' && typeof rawValue === 'string') {
+        updated.label = rawValue
+      } else {
+        updated[field] = rawValue
       }
-      if (field === 'label' && typeof rawValue === 'string') {
-        valueToApply = rawValue
-      }
-      return { ...target, [field]: valueToApply }
+
+      return updated
     })
-    applyTargets(nextTargets, { manualSizing: field === 'size_percent' })
+    // Don't auto-distribute when manually editing - just apply the changes
+    applyTargets(nextTargets, { autoDistribute: false })
   }
 
-  const applyTargets = (nextTargets, { manualSizing = false } = {}) => {
-    const meta = { ...(template._meta || {}) }
-    if (manualSizing) {
-      meta.targetSizeManual = true
-    }
-
+  const applyTargets = (nextTargets, { autoDistribute = false } = {}) => {
     let normalised = normalizeTargets({ ...template, take_profit_orders: nextTargets })
-    const autoSizeAllowed = meta.targetSizeManual !== true
 
-    if (normalised.length === 1) {
-      normalised = [{ ...normalised[0], size_percent: 100 }]
-    } else if (autoSizeAllowed && normalised.length > 1) {
-      const evenPercents = distributeEvenPercents(normalised.length)
-      normalised = normalised.map((target, idx) => ({ ...target, size_percent: evenPercents[idx] }))
+    // Always auto-distribute when requested (add/remove target)
+    if (autoDistribute) {
+      if (normalised.length === 1) {
+        normalised = [{ ...normalised[0], size_percent: 100, size_fraction: 1.0 }]
+      } else if (normalised.length > 1) {
+        const evenPercents = distributeEvenPercents(normalised.length)
+        normalised = normalised.map((target, idx) => ({
+          ...target,
+          size_percent: evenPercents[idx],
+          size_fraction: evenPercents[idx] / 100,
+        }))
+      }
     }
 
-    update({ take_profit_orders: normalised, _meta: meta })
+    update({ take_profit_orders: normalised })
   }
 
   const addTarget = () => {
-    if (targets.length === 0) {
-      applyTargets([
-        {
-          id: 'tp-1',
-          label: 'TP 1',
-          r_multiple: 1,
-          size_percent: 100,
-        },
-      ])
-      return
-    }
-
-    if (targets.length === 1) {
-      applyTargets([
-        { ...targets[0], size_percent: 50 },
-        {
-          id: `tp-2`,
-          label: 'TP 2',
-          r_multiple: 2,
-          size_percent: 50,
-        },
-      ])
-      return
-    }
-
-    const meta = template._meta || {}
-    const manualSizing = meta.targetSizeManual === true
-    const remaining = Math.max(0, Math.round(100 - targetSizeTotal))
     const nextTargets = [
       ...targets,
       {
         id: `tp-${targets.length + 1}`,
         label: `TP ${targets.length + 1}`,
         r_multiple: targets.length + 1,
-        size_percent: manualSizing ? remaining || null : null,
+        size_percent: null,
       },
     ]
-    applyTargets(nextTargets, { manualSizing })
+    applyTargets(nextTargets, { autoDistribute: true })
   }
 
   const removeTarget = (index) => {
     const nextTargets = targets.filter((_, idx) => idx !== index)
-    applyTargets(nextTargets, { manualSizing: template._meta?.targetSizeManual === true })
+    applyTargets(nextTargets, { autoDistribute: true })
   }
 
   const stopAdjustments = useMemo(
@@ -475,9 +455,9 @@ export default function ATMConfigForm({
 
   const stopDistance = template.stop_r_multiple
   const stopDistanceInvalid =
-    stopDistance !== null && stopDistance !== undefined && Number.isFinite(Number(stopDistance)) && Number(stopDistance) >= 0
+    stopDistance !== null && stopDistance !== undefined && Number.isFinite(Number(stopDistance)) && Number(stopDistance) <= 0
   const stopDistanceError =
-    validationErrors.stop_r_multiple || (stopDistanceInvalid ? 'Stop distance must be negative (below entry).' : null)
+    validationErrors.stop_r_multiple || (stopDistanceInvalid ? 'Stop distance must be positive.' : null)
 
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm">
@@ -628,7 +608,7 @@ export default function ATMConfigForm({
                   className={inputClasses}
                   type="number"
                   step="0.1"
-                  value={template.stop_r_multiple ?? ''}
+                  value={stopDistance ?? ''}
                   onChange={(event) =>
                     update({
                       stop_ticks: null,
@@ -637,7 +617,7 @@ export default function ATMConfigForm({
                     })
                   }
                 />
-                <p className="text-[11px] text-slate-500">Distance in R (must be negative).</p>
+                <p className="text-[11px] text-slate-500">Distance in R (must be positive).</p>
                 {stopDistanceError ? <p className="text-[11px] text-rose-400">{stopDistanceError}</p> : null}
               </div>
             )}
@@ -722,9 +702,9 @@ export default function ATMConfigForm({
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Stop adjustment</p>
-                <p className="text-[11px] text-slate-500">Modify the protective stop after predefined progress.</p>
+                <p className="text-[11px] text-slate-500">Modify or trail the protective stop after predefined progress.</p>
                 <p className="text-[11px] text-slate-500">
-                  Stop adjustments apply until a trailing stop activates. After that, trailing controls all future stop movement.
+                  Available actions: move to breakeven, move to a specific R level, or trail with ATR.
                 </p>
               </div>
               {stopAdjustments.length > 0 && (
@@ -898,145 +878,6 @@ export default function ATMConfigForm({
                     </div>
                   )
                 })}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Trailing stop</p>
-                <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
-                <p className="text-[11px] text-slate-500">Trailing takes over once active and ignores remaining stop adjustments.</p>
-              </div>
-              {trailingEnabled && (
-                <button
-                  type="button"
-                  className="text-[11px] text-slate-400 hover:text-slate-200"
-                  onClick={() => updateTrailing({ enabled: false })}
-                >
-                  Remove
-                </button>
-              )}
-            </div>
-            {!trailingEnabled && (
-              <div className="mt-3 flex items-start justify-between rounded-xl border border-white/10 bg-black/40 p-3">
-                <div>
-                  <p className="text-sm font-medium text-slate-100">Add trailing stop</p>
-                  <p className="text-[11px] text-slate-500">Tighten the stop as the trade moves in your favor.</p>
-                </div>
-                <button
-                  type="button"
-                  className={fieldButtonClasses}
-                  onClick={() =>
-                    updateTrailing({
-                      enabled: true,
-                      activation_type: 'r_multiple',
-                      target_id: null,
-                      target_index: null,
-                      r_multiple: trailing.r_multiple ?? 1,
-                      atr_multiplier:
-                        trailing.atr_multiplier ?? (template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier),
-                      atr_period: template.rAtrPeriod ?? DEFAULT_ATM_TEMPLATE.rAtrPeriod,
-                    })
-                  }
-                >
-                  Add trailing stop
-                </button>
-              </div>
-            )}
-            {trailingEnabled && (
-              <div className="mt-3 space-y-3">
-                <div className="grid gap-3 md:grid-cols-[1.1fr,1.1fr,0.6fr] md:items-end">
-                  <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation type</label>
-                    <select
-                      className={inputClasses}
-                      value={trailingActivationType}
-                      onChange={(event) => handleTrailingActivationTypeChange(event.target.value)}
-                    >
-                      <option value="r_multiple">R multiple</option>
-                      <option value="target_hit" disabled={targets.length === 0}>
-                        Target hit
-                      </option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Activation value</label>
-                    {trailingActivationType === 'target_hit' ? (
-                      <select
-                        className={inputClasses}
-                        value={trailingActivationTarget?.value ?? ''}
-                        disabled={targets.length === 0}
-                        onChange={(event) => handleTrailingTargetChange(event.target.value)}
-                      >
-                        <option value="" disabled>
-                          {targets.length ? 'Select target' : 'Add a target first'}
-                        </option>
-                        {trailingTargetOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        className={inputClasses}
-                        type="number"
-                        step="0.1"
-                        value={trailing.r_multiple ?? ''}
-                        onChange={(event) => handleTrailingActivationValueChange(event.target.value)}
-                      />
-                    )}
-                    {trailingActivationWarning && (
-                      <p className="mt-1 text-[11px] text-amber-400">
-                        Trailing stop may never activate if all size is closed by the last target.
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      className="text-[11px] text-slate-400 hover:text-slate-200"
-                      onClick={() => updateTrailing({ enabled: false })}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <label className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Trail distance (R)</label>
-                    <input
-                      className={inputClasses}
-                      type="number"
-                      step="0.1"
-                      min={0}
-                      value={(() => {
-                        const base = template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier
-                        const distance = trailing.atr_multiplier ?? base
-                        return base ? distance / base : distance
-                      })() ?? ''}
-                      onChange={(event) => {
-                        const base = template.rAtrMultiplier ?? DEFAULT_ATM_TEMPLATE.rAtrMultiplier ?? 1
-                        const desiredR = event.target.value === '' ? null : Number(event.target.value)
-                        update({
-                          trailing: {
-                            ...trailing,
-                            atr_multiplier: desiredR === null ? null : desiredR * base,
-                            atr_period: template.rAtrPeriod ?? DEFAULT_ATM_TEMPLATE.rAtrPeriod,
-                          },
-                        })
-                      }}
-                    />
-                  </div>
-                  <div className="text-[11px] text-slate-500">Trail distance is expressed in R multiples from entry.</div>
-                </div>
-
-                <p className="text-[11px] text-slate-500" title="Trailing only tightens the stop; it never loosens after activation.">
-                  Trailing tightens toward price after activation; it never loosens.
-                </p>
               </div>
             )}
           </div>

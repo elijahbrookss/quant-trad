@@ -127,33 +127,24 @@ const ActionButton = ({ variant = 'default', className = '', ...props }) => {
   return <button className={classes} {...props} />
 }
 
-const AccordionSection = ({
-  title,
-  description,
-  open,
-  onToggle,
-  action,
-  children,
-}) => {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0d1320]">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-white/5"
-      >
-        <div>
-          <p className="text-sm font-semibold text-white">{title}</p>
-          {description && <p className="text-xs text-slate-500">{description}</p>}
-        </div>
-        <div className="flex items-center gap-2">
-          {action}
-          <span className="text-lg text-slate-400">{open ? '−' : '+'}</span>
-        </div>
-      </button>
-      {open && <div className="border-t border-white/10 p-4">{children}</div>}
-    </div>
-  )
+const TabButton = ({ active, onClick, children, icon }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium transition ${
+      active
+        ? 'border-[color:var(--accent-base)] text-white'
+        : 'border-transparent text-slate-400 hover:text-slate-200'
+    }`}
+  >
+    {icon && <span className="h-4 w-4">{icon}</span>}
+    {children}
+  </button>
+)
+
+const TabPanel = ({ active, children }) => {
+  if (!active) return null
+  return <div className="p-6">{children}</div>
 }
 
 function StrategyFormModal({
@@ -163,6 +154,7 @@ function StrategyFormModal({
   onCancel,
   submitting,
   availableATMTemplates = [],
+  error = null,
 }) {
   const [form, setForm] = useState(() => ({
     ...STRATEGY_FORM_DEFAULT,
@@ -760,9 +752,9 @@ function StrategyFormModal({
     const stopValue = template.stop_r_multiple
     const stopNumeric = Number(stopValue)
     if (stopValue === null || stopValue === undefined || Number.isNaN(stopNumeric)) {
-      errors.stop_r_multiple = 'Enter a negative stop distance in R.'
-    } else if (stopNumeric >= 0) {
-      errors.stop_r_multiple = 'Stop distance must be negative.'
+      errors.stop_r_multiple = 'Enter a positive stop distance in R.'
+    } else if (stopNumeric <= 0) {
+      errors.stop_r_multiple = 'Stop distance must be positive.'
     }
 
     const targets = Array.isArray(template.take_profit_orders) ? template.take_profit_orders : []
@@ -965,9 +957,9 @@ function StrategyFormModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="relative w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#1b1e28] text-slate-100 shadow-xl">
+      <div className="relative w-full max-w-4xl space-y-6 overflow-hidden rounded-2xl border border-white/10 bg-[#14171f] text-slate-100 shadow-xl">
         {saveAnimationVisible && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#11131c]/90 backdrop-blur-sm">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/90 backdrop-blur-sm">
             {saveAnimationStage === 'saving' && (
               <div className="flex flex-col items-center gap-3 text-slate-200">
                 <div className="flex h-14 w-14 items-center justify-center rounded-full border-2 border-emerald-400/40 border-t-transparent animate-spin" />
@@ -1518,6 +1510,14 @@ function StrategyFormModal({
               </div>
             </div>
           )}
+
+          {error && (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3">
+              <p className="text-sm font-semibold text-rose-300">Failed to save strategy</p>
+              <p className="mt-1 text-xs text-rose-200">{error}</p>
+            </div>
+          )}
+
           <footer className="flex items-center justify-between border-t border-white/5 pt-4">
             <div className="text-xs text-slate-500">
               Step {currentStep + 1} of {steps.length}
@@ -1737,7 +1737,7 @@ function RuleFormModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-2xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+      <div className="w-full max-w-2xl space-y-6 rounded-2xl border border-white/10 bg-[#14171f] p-6 text-slate-100 shadow-xl">
         <header className="space-y-1">
           <h3 className="text-lg font-semibold">
             {initialValues ? 'Edit rule' : 'Create rule'}
@@ -2023,7 +2023,7 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
-      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#1b1e28] p-6 text-slate-100 shadow-xl">
+      <div className="w-full max-w-xl space-y-6 rounded-2xl border border-white/10 bg-[#14171f] p-6 text-slate-100 shadow-xl">
         <header className="space-y-1">
           <h3 className="text-lg font-semibold">Add instrument metadata</h3>
           <p className="text-sm text-slate-400">
@@ -2165,45 +2165,107 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
   )
 }
 
-const StrategyList = ({ strategies, selectedId, onSelect }) => {
+const StrategyGrid = ({ strategies, selectedId, onSelect, onEdit, onDelete }) => {
   if (!strategies.length) {
     return (
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center text-sm text-slate-400">
-        No strategies yet. Create your first blueprint to combine indicators into rules.
+      <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-12 text-center">
+        <div className="mx-auto max-w-sm space-y-3">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-white/5">
+            <svg className="h-8 w-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            </svg>
+          </div>
+          <div>
+            <p className="text-sm font-medium text-slate-300">No strategies yet</p>
+            <p className="mt-1 text-xs text-slate-500">Create your first strategy to combine indicators, rules, and risk management.</p>
+          </div>
+        </div>
       </div>
     )
   }
 
   return (
-    <ul className="space-y-2">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {strategies.map((strategy) => {
         const isActive = strategy.id === selectedId
+        const ruleCount = Array.isArray(strategy.rules) ? strategy.rules.length : 0
+        const indicatorCount = Array.isArray(strategy.indicator_ids) ? strategy.indicator_ids.length : 0
+        const atmTargets = strategy.atm_template?.take_profit_orders?.length || 0
+        const stopR = strategy.atm_template?.initial_stop?.atr_multiplier || strategy.atm_template?.stop_r_multiple || null
+
         return (
-          <li key={strategy.id}>
+          <div
+            key={strategy.id}
+            className={`group relative rounded-2xl border p-5 transition-all ${
+              isActive
+                ? 'border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] shadow-lg shadow-[color:var(--accent-shadow-soft)]'
+                : 'border-white/10 bg-black/30 hover:border-white/20 hover:bg-black/40'
+            }`}
+          >
             <button
               onClick={() => onSelect(strategy.id)}
-              className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
-                isActive
-                  ? 'border-white/30 bg-white/10 text-white'
-                  : 'border-white/10 bg-[#111726] text-slate-200 hover:border-white/20 hover:bg-[#1a2133]'
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-semibold">{strategy.name}</h4>
-                  <p className="text-xs text-slate-400">
-                    {strategy.timeframe} • {strategy.symbols.join(', ')}
-                  </p>
-                </div>
-                <span className="rounded-full bg-black/40 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-400">
-                  {Array.isArray(strategy.rules) ? strategy.rules.length : 0} rules
-                </span>
+              className="absolute inset-0 z-0 rounded-2xl"
+              aria-label={`Select ${strategy.name}`}
+            />
+
+            <div className="relative z-10 space-y-4">
+              {/* Header */}
+              <div>
+                <h3 className="text-base font-semibold text-white">{strategy.name}</h3>
+                <p className="mt-1 text-xs text-slate-400">
+                  {strategy.timeframe} • {strategy.symbols?.slice(0, 3).join(', ')}{strategy.symbols?.length > 3 ? ` +${strategy.symbols.length - 3}` : ''}
+                </p>
               </div>
-            </button>
-          </li>
+
+              {/* Stats */}
+              <div className="flex flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-black/40 px-2 py-1 text-xs text-slate-300">
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                  </svg>
+                  {ruleCount} {ruleCount === 1 ? 'rule' : 'rules'}
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-black/40 px-2 py-1 text-xs text-slate-300">
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                  </svg>
+                  {indicatorCount} {indicatorCount === 1 ? 'indicator' : 'indicators'}
+                </span>
+                {atmTargets > 0 && (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-black/40 px-2 py-1 text-xs text-slate-300">
+                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    </svg>
+                    {atmTargets} {atmTargets === 1 ? 'target' : 'targets'}
+                  </span>
+                )}
+                {stopR && (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg bg-black/40 px-2 py-1 text-xs text-slate-300">
+                    {stopR > 0 ? '+' : ''}{stopR}R stop
+                  </span>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+                <button
+                  onClick={(e) => { e.stopPropagation(); onEdit(strategy); }}
+                  className="relative z-20 rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-white/20 hover:bg-black/50 hover:text-white"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDelete(strategy); }}
+                  className="relative z-20 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 transition hover:border-rose-500/30 hover:bg-rose-500/20 hover:text-rose-200"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
         )
       })}
-    </ul>
+    </div>
   )
 }
 
@@ -2445,7 +2507,7 @@ const ConditionBadge = ({ label, signalType, direction, ruleId }) => {
   }
 
   return (
-    <div className="flex min-w-[220px] items-stretch gap-3 rounded-2xl border border-white/12 bg-[#141a26] px-3 py-2">
+    <div className="flex min-w-[220px] items-stretch gap-3 rounded-2xl border border-white/12 bg-black/25 px-3 py-2">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-xs font-semibold text-white">{label}</span>
@@ -2715,16 +2777,15 @@ const StrategyDetails = ({
       : 'No stop'
   const atmBadge = `ATM: ${atmTargets.length || 0} target${atmTargets.length === 1 ? '' : 's'}, ${atmStopLabel}`
 
-  const [instrumentOpen, setInstrumentOpen] = useState(instrumentMessages.length > 0)
-  const [atmOpen, setAtmOpen] = useState(true)
-  const [logicOpen, setLogicOpen] = useState(true)
-  const [previewOpen, setPreviewOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState('overview')
 
   useEffect(() => {
-    setInstrumentOpen(instrumentMessages.length > 0)
-    setAtmOpen(true)
-    setLogicOpen(true)
-    setPreviewOpen(false)
+    // Reset to overview tab when strategy changes, unless there are instrument messages
+    if (instrumentMessages.length > 0) {
+      setActiveTab('instruments')
+    } else {
+      setActiveTab('overview')
+    }
   }, [strategy?.id, instrumentMessages.length])
 
   const formatInstrumentNumber = useCallback((value) => {
@@ -2760,7 +2821,7 @@ const StrategyDetails = ({
 
   if (!hasStrategy) {
     return (
-      <div className="rounded-2xl border border-dashed border-white/10 bg-[#121520] p-6 text-center text-sm text-slate-400">
+      <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-center text-sm text-slate-400">
         Select a strategy to manage indicators, rules, and signal evaluations.
       </div>
     )
@@ -2768,10 +2829,10 @@ const StrategyDetails = ({
 
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-white/10 bg-[#101526] p-4">
+      <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Strategy overview</p>
+            <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Strategy details</p>
             <p className="text-lg font-semibold text-white">{strategy.name}</p>
             <p className="text-sm text-slate-400">
               {strategy.timeframe} • {(strategy.symbols || []).join(', ')}
@@ -2813,223 +2874,320 @@ const StrategyDetails = ({
         </div>
       )}
 
-      <AccordionSection
-        title="Instrument metadata"
-        description="Validate tick sizes, fees, and instrument types."
-        open={instrumentOpen}
-        onToggle={() => setInstrumentOpen((prev) => !prev)}
-      >
-        {instrumentMessages.length > 0 && (
-          <div className="mb-3 flex gap-3 rounded-xl border border-amber-400/40 bg-amber-500/5 p-3 text-xs text-amber-100">
-            <div className="text-lg leading-5">⚠️</div>
-            <div>
-              <p className="font-semibold text-amber-200">Metadata issues</p>
-              <ul className="mt-1 list-disc space-y-1 pl-4">
-                {instrumentMessages.map((entry, idx) => (
-                  <li key={`${entry.symbol || 'instrument'}-${idx}`}>
-                    <span className="font-semibold">{entry.symbol || 'Symbol'}:</span>{' '}
-                    {entry.message || 'No metadata stored'}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
+      <div className="rounded-2xl border border-white/10 bg-black/20">
+        {/* Tab navigation */}
+        <div className="flex gap-1 border-b border-white/10">
+          <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>
+            Overview
+          </TabButton>
+          <TabButton
+            active={activeTab === 'instruments'}
+            onClick={() => setActiveTab('instruments')}
+          >
+            Instruments
+            {instrumentMessages.length > 0 && (
+              <span className="ml-1 flex h-5 w-5 items-center justify-center rounded-full bg-amber-500/20 text-xs text-amber-300">
+                {instrumentMessages.length}
+              </span>
+            )}
+          </TabButton>
+          <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
+            ATM Template
+          </TabButton>
+          <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
+            Rules & Indicators
+          </TabButton>
+          <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>
+            Signal Preview
+          </TabButton>
+        </div>
 
-        <div className="space-y-3">
-          {(strategy.symbols || []).map((symbol) => {
-            const key = (symbol || '').toUpperCase()
-            const record = key ? instrumentMap.get(key) : null
-            const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)
-            return (
-              <div key={key || symbol} className="rounded-2xl border border-white/10 bg-[#111726] p-4 text-sm text-slate-200">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbol</p>
-                    <p className="text-lg font-semibold text-white">{symbol || '—'}</p>
-                  </div>
-                  <ActionButton variant="ghost" onClick={() => handleAddInstrument(symbol)}>
-                    {hasMetadata ? 'Update metadata' : 'Add metadata'}
-                  </ActionButton>
+        {/* Tab panels */}
+        <TabPanel active={activeTab === 'overview'}>
+          <div className="space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Strategy Information</h3>
+              <dl className="mt-3 grid gap-4 text-sm md:grid-cols-2">
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Name</dt>
+                  <dd className="mt-1 text-white">{strategy.name || '—'}</dd>
                 </div>
-                {hasMetadata ? (
-                  <dl className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-2">
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Instrument type</dt>
-                      <dd className="text-base text-white">{record.instrument_type || '—'}</dd>
-                    </div>
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Tick size</dt>
-                      <dd className="text-base text-white">{formatInstrumentNumber(record.tick_size)}</dd>
-                    </div>
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Tick value</dt>
-                      <dd className="text-base text-white">
-                        {formatInstrumentNumber(record.tick_value)} {record.quote_currency || ''}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Contract size</dt>
-                      <dd className="text-base text-white">{formatInstrumentNumber(record.contract_size)}</dd>
-                    </div>
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
-                      <dd className="text-base text-white">
-                        {record.maker_fee_rate != null ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%` : '—'} /{' '}
-                        {record.taker_fee_rate != null ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%` : '—'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="uppercase tracking-[0.3em] text-slate-500">Min order size</dt>
-                      <dd className="text-base text-white">{formatInstrumentNumber(record.min_order_size)}</dd>
-                    </div>
-                  </dl>
-                ) : (
-                  <p className="mt-3 text-sm text-slate-400">No tick or fee metadata stored yet.</p>
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Timeframe</dt>
+                  <dd className="mt-1 text-white">{strategy.timeframe || '—'}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbols</dt>
+                  <dd className="mt-1 text-white">{(strategy.symbols || []).join(', ') || '—'}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Data Source</dt>
+                  <dd className="mt-1 text-white">{strategy.datasource || '—'}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Exchange</dt>
+                  <dd className="mt-1 text-white">{strategy.exchange || '—'}</dd>
+                </div>
+                {strategy.description && (
+                  <div className="md:col-span-2">
+                    <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Description</dt>
+                    <dd className="mt-1 text-slate-300">{strategy.description}</dd>
+                  </div>
                 )}
+              </dl>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-semibold text-white">Risk Configuration</h3>
+              <dl className="mt-3 grid gap-4 text-sm md:grid-cols-2">
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Base Risk per Trade</dt>
+                  <dd className="mt-1 text-white">
+                    {strategy.base_risk_per_trade != null ? `$${formatNumber(strategy.base_risk_per_trade)}` : '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Global Risk Multiplier</dt>
+                  <dd className="mt-1 text-white">
+                    {strategy.global_risk_multiplier != null ? `${formatNumber(strategy.global_risk_multiplier)}x` : '—'}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-semibold text-white">Statistics</h3>
+              <div className="mt-3 grid gap-3 text-sm md:grid-cols-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Rules</dt>
+                  <dd className="mt-1 text-2xl font-semibold text-white">{ruleCount}</dd>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Indicators</dt>
+                  <dd className="mt-1 text-2xl font-semibold text-white">{indicatorCount}</dd>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">TP Targets</dt>
+                  <dd className="mt-1 text-2xl font-semibold text-white">{atmTargets.length}</dd>
+                </div>
               </div>
-            )
-          })}
-        </div>
-      </AccordionSection>
-
-      <AccordionSection
-        title="ATM template"
-        description="Stops, targets, adjustments, and trailing rules."
-        open={atmOpen}
-        onToggle={() => setAtmOpen((prev) => !prev)}
-        action={
-          <ActionButton variant="ghost" onClick={onEdit}>
-            Edit
-          </ActionButton>
-        }
-      >
-        <ATMTemplateSummary template={strategy.atm_template} />
-      </AccordionSection>
-
-      <AccordionSection
-        title="Logic & signals"
-        description="Manage indicators and execution rules."
-        open={logicOpen}
-        onToggle={() => setLogicOpen((prev) => !prev)}
-        action={
-          <ActionButton variant="ghost" onClick={onEdit}>
-            Edit
-          </ActionButton>
-        }
-      >
-        <div className="space-y-6">
-          <div className="space-y-3">
-            <h4 className="text-sm font-semibold text-white">Indicators</h4>
-            <AttachedIndicators
-              strategy={strategy}
-              attached={attachedIndicators}
-              availableIndicators={availableIndicators}
-              onAttach={onAttachIndicator}
-              onDetach={onDetachIndicator}
-            />
+            </div>
           </div>
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'instruments'}>
+          {instrumentMessages.length > 0 && (
+            <div className="mb-4 flex gap-3 rounded-xl border border-amber-400/40 bg-amber-500/5 p-3 text-xs text-amber-100">
+              <div className="text-lg leading-5">⚠️</div>
+              <div>
+                <p className="font-semibold text-amber-200">Metadata issues</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {instrumentMessages.map((entry, idx) => (
+                    <li key={`${entry.symbol || 'instrument'}-${idx}`}>
+                      <span className="font-semibold">{entry.symbol || 'Symbol'}:</span>{' '}
+                      {entry.message || 'No metadata stored'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          <p className="mb-4 text-sm text-slate-400">
+            Validate tick sizes, fees, and instrument types for accurate position sizing and cost calculations.
+          </p>
 
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h4 className="text-sm font-semibold text-white">Rules</h4>
-              <ActionButton onClick={onAddRule}>New rule</ActionButton>
+            {(strategy.symbols || []).map((symbol) => {
+              const key = (symbol || '').toUpperCase()
+              const record = key ? instrumentMap.get(key) : null
+              const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)
+              return (
+                <div key={key || symbol} className="rounded-xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbol</p>
+                      <p className="text-lg font-semibold text-white">{symbol || '—'}</p>
+                    </div>
+                    <ActionButton variant="ghost" onClick={() => handleAddInstrument(symbol)}>
+                      {hasMetadata ? 'Update metadata' : 'Add metadata'}
+                    </ActionButton>
+                  </div>
+                  {hasMetadata ? (
+                    <dl className="mt-3 grid gap-3 text-xs text-slate-300 md:grid-cols-2">
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Instrument type</dt>
+                        <dd className="text-base text-white">{record.instrument_type || '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Tick size</dt>
+                        <dd className="text-base text-white">{formatInstrumentNumber(record.tick_size)}</dd>
+                      </div>
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Tick value</dt>
+                        <dd className="text-base text-white">
+                          {formatInstrumentNumber(record.tick_value)} {record.quote_currency || ''}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Contract size</dt>
+                        <dd className="text-base text-white">{formatInstrumentNumber(record.contract_size)}</dd>
+                      </div>
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
+                        <dd className="text-base text-white">
+                          {record.maker_fee_rate != null ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%` : '—'} /{' '}
+                          {record.taker_fee_rate != null ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%` : '—'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="uppercase tracking-[0.3em] text-slate-500">Min order size</dt>
+                        <dd className="text-base text-white">{formatInstrumentNumber(record.min_order_size)}</dd>
+                      </div>
+                    </dl>
+                  ) : (
+                    <p className="mt-3 text-sm text-slate-400">No tick or fee metadata stored yet.</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'atm'}>
+          <p className="mb-4 text-sm text-slate-400">
+            Stops, targets, adjustments, and trailing rules for automated trade management.
+          </p>
+          <ATMTemplateSummary template={strategy.atm_template} />
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'logic'}>
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-white">Indicators</h4>
+              <p className="text-xs text-slate-400">
+                Attach indicators to this strategy to enable signal generation and rule evaluation.
+              </p>
+              <AttachedIndicators
+                strategy={strategy}
+                attached={attachedIndicators}
+                availableIndicators={availableIndicators}
+                onAttach={onAttachIndicator}
+                onDetach={onDetachIndicator}
+              />
             </div>
-            <RuleList
-              rules={Array.isArray(strategy.rules) ? strategy.rules : []}
-              onEdit={onEditRule}
-              onDelete={onDeleteRule}
-              indicatorLookup={indicatorLookup}
+
+            <div className="h-px bg-white/10" />
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-white">Rules</h4>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Define entry and exit conditions based on indicator signals.
+                  </p>
+                </div>
+                <ActionButton onClick={onAddRule}>New rule</ActionButton>
+              </div>
+              <RuleList
+                rules={Array.isArray(strategy.rules) ? strategy.rules : []}
+                onEdit={onEditRule}
+                onDelete={onDeleteRule}
+                indicatorLookup={indicatorLookup}
+              />
+            </div>
+          </div>
+        </TabPanel>
+
+        <TabPanel active={activeTab === 'signals'}>
+          <p className="mb-4 text-sm text-slate-400">
+            Preview raw BUY/SELL signals from your rules. No PnL or positions.
+          </p>
+
+          <form onSubmit={handleSubmit} className="space-y-4 rounded-xl border border-white/10 bg-white/5 p-4 text-sm">
+            <DateRangePickerComponent
+              dateRange={signalWindow.dateRange}
+              setDateRange={handleDateRangeChange}
             />
-          </div>
-        </div>
-      </AccordionSection>
 
-      <AccordionSection
-        title="Quick signal preview"
-        description="Preview raw BUY/SELL signals from your rules. No PnL or positions."
-        open={previewOpen}
-        onToggle={() => setPreviewOpen((prev) => !prev)}
-      >
-        <form onSubmit={handleSubmit} className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm">
-          <DateRangePickerComponent
-            dateRange={signalWindow.dateRange}
-            setDateRange={handleDateRangeChange}
-          />
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                  Interval
+                </label>
+                <input
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  value={signalWindow.interval}
+                  onChange={handleWindowChange('interval')}
+                  placeholder={strategy.timeframe || '15m'}
+                />
+              </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Interval
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={signalWindow.interval}
-                onChange={handleWindowChange('interval')}
-                placeholder={strategy.timeframe || '15m'}
-              />
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                  Symbol
+                </label>
+                <input
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-300 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  value={strategy.symbols?.[0] || signalWindow.symbol}
+                  readOnly
+                />
+              </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Symbol
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-300 focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={strategy.symbols?.[0] || signalWindow.symbol}
-                readOnly
-              />
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <DropdownSelect
+                  label="Data source (market data)"
+                  value={signalWindow.datasource || strategy.datasource || ''}
+                  onChange={handleWindowChange('datasource')}
+                  options={[
+                    {
+                      value: '',
+                      label: `Use strategy data source (${strategy.datasource || DEFAULT_DATASOURCE})`,
+                      description: 'Follow the strategy default',
+                    },
+                    { value: 'ALPACA', label: 'Market data • ALPACA' },
+                    { value: 'IBKR', label: 'Interactive Brokers • IBKR' },
+                    { value: 'CCXT', label: 'Crypto data • CCXT' },
+                  ]}
+                  className="mt-1 w-full"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Choose the provider used to load candles when checking these rules.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                  Broker / Exchange
+                </label>
+                <input
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  value={signalWindow.exchange || strategy.exchange || ''}
+                  onChange={handleWindowChange('exchange')}
+                  placeholder="e.g. ALPACA, BINANCE"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Specify where trades would be routed in the future.
+                </p>
+              </div>
             </div>
-          </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <DropdownSelect
-                label="Data source (market data)"
-                value={signalWindow.datasource || strategy.datasource || ''}
-                onChange={handleWindowChange('datasource')}
-                options={[
-                  {
-                    value: '',
-                    label: `Use strategy data source (${strategy.datasource || DEFAULT_DATASOURCE})`,
-                    description: 'Follow the strategy default',
-                  },
-                  { value: 'ALPACA', label: 'Market data • ALPACA' },
-                  { value: 'IBKR', label: 'Interactive Brokers • IBKR' },
-                  { value: 'CCXT', label: 'Crypto data • CCXT' },
-                ]}
-                className="mt-1 w-full"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                Choose the provider used to load candles when checking these rules.
-              </p>
+            <div className="flex items-end justify-end">
+              <ActionButton type="submit" disabled={signalsLoading} className="w-full justify-center md:w-auto">
+                {signalsLoading ? 'Running…' : 'Generate signals'}
+              </ActionButton>
             </div>
+          </form>
 
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                Broker / Exchange
-              </label>
-              <input
-                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-                value={signalWindow.exchange || strategy.exchange || ''}
-                onChange={handleWindowChange('exchange')}
-                placeholder="e.g. ALPACA, BINANCE"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                Specify where trades would be routed in the future.
-              </p>
+          {signalResult && (
+            <div className="mt-4">
+              <SignalSummary result={signalResult} />
             </div>
-          </div>
-
-          <div className="flex items-end justify-end">
-            <ActionButton type="submit" disabled={signalsLoading} className="w-full justify-center md:w-auto">
-              {signalsLoading ? 'Running…' : 'Generate signals'}
-            </ActionButton>
-          </div>
-        </form>
-
-        {signalResult && <SignalSummary result={signalResult} />}
-      </AccordionSection>
+          )}
+        </TabPanel>
+      </div>
     </div>
   )
 }
@@ -3312,9 +3470,18 @@ const StrategyTab = ({ chartId }) => {
     loadIndicators()
   }, [loadIndicators])
 
-  const openCreateStrategy = () => setStrategyModal({ open: true, strategy: null })
-  const openEditStrategy = (strategy) => setStrategyModal({ open: true, strategy })
-  const closeStrategyModal = () => setStrategyModal({ open: false, strategy: null })
+  const openCreateStrategy = () => {
+    setErrorMessage(null) // Clear any previous errors
+    setStrategyModal({ open: true, strategy: null })
+  }
+  const openEditStrategy = (strategy) => {
+    setErrorMessage(null) // Clear any previous errors
+    setStrategyModal({ open: true, strategy })
+  }
+  const closeStrategyModal = () => {
+    setErrorMessage(null) // Clear errors when closing
+    setStrategyModal({ open: false, strategy: null })
+  }
 
   const openRuleModal = (rule = null) => setRuleModal({ open: true, rule })
   const closeRuleModal = () => setRuleModal({ open: false, rule: null })
@@ -3516,48 +3683,67 @@ const StrategyTab = ({ chartId }) => {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start gap-6">
-        <div className="w-full max-w-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-400">
-              Strategies
-            </h2>
-            <ActionButton onClick={openCreateStrategy}>New</ActionButton>
-          </div>
-          {loading ? (
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-center text-sm text-slate-400">
-              Loading strategies…
-            </div>
-          ) : (
-            <StrategyList strategies={strategies} selectedId={selectedId} onSelect={setSelectedId} />
-          )}
-          {errorMessage && (
-            <p className="text-xs text-rose-300">{errorMessage}</p>
-          )}
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Strategies</h2>
+          <p className="mt-1 text-sm text-slate-400">Manage your trading strategies, indicators, and execution rules.</p>
         </div>
-
-        <div className="flex-1">
-          <StrategyDetails
-            strategy={selectedStrategy}
-            attachedIndicators={attachedIndicators}
-            availableIndicators={indicators}
-            indicatorLookup={indicatorLookup}
-            onEdit={() => openEditStrategy(selectedStrategy)}
-            onDelete={() => handleDeleteStrategy(selectedStrategy)}
-            onAttachIndicator={handleAttachIndicator}
-            onDetachIndicator={handleDetachIndicator}
-            onAddRule={() => openRuleModal(null)}
-            onEditRule={(rule) => openRuleModal(rule)}
-            onDeleteRule={handleDeleteRule}
-            onRunSignals={runSignals}
-            signalWindow={signalWindow}
-            setSignalWindow={setSignalWindow}
-            signalResult={signalResult}
-            signalsLoading={signalsLoading}
-            onAddInstrument={(defaults) => openInstrumentModal(defaults)}
-          />
-        </div>
+        <ActionButton onClick={openCreateStrategy}>
+          <svg className="mr-1.5 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+          New Strategy
+        </ActionButton>
       </div>
+
+      {/* Error Message */}
+      {errorMessage && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3">
+          <p className="text-sm text-rose-200">{errorMessage}</p>
+        </div>
+      )}
+
+      {/* Strategy Grid */}
+      {loading ? (
+        <div className="flex items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/10 p-16">
+          <div className="text-center">
+            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/80"></div>
+            <p className="mt-3 text-sm text-slate-400">Loading strategies…</p>
+          </div>
+        </div>
+      ) : (
+        <StrategyGrid
+          strategies={strategies}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onEdit={openEditStrategy}
+          onDelete={handleDeleteStrategy}
+        />
+      )}
+
+      {/* Strategy Details (shown when a strategy is selected) */}
+      {selectedStrategy && (
+        <StrategyDetails
+          strategy={selectedStrategy}
+          attachedIndicators={attachedIndicators}
+          availableIndicators={indicators}
+          indicatorLookup={indicatorLookup}
+          onEdit={() => openEditStrategy(selectedStrategy)}
+          onDelete={() => handleDeleteStrategy(selectedStrategy)}
+          onAttachIndicator={handleAttachIndicator}
+          onDetachIndicator={handleDetachIndicator}
+          onAddRule={() => openRuleModal(null)}
+          onEditRule={(rule) => openRuleModal(rule)}
+          onDeleteRule={handleDeleteRule}
+          onRunSignals={runSignals}
+          signalWindow={signalWindow}
+          setSignalWindow={setSignalWindow}
+          signalResult={signalResult}
+          signalsLoading={signalsLoading}
+          onAddInstrument={(defaults) => openInstrumentModal(defaults)}
+        />
+      )}
 
       <StrategyFormModal
         open={strategyModal.open}
@@ -3566,6 +3752,7 @@ const StrategyTab = ({ chartId }) => {
         onCancel={closeStrategyModal}
         submitting={savingStrategy}
         availableATMTemplates={availableATMTemplates}
+        error={errorMessage}
       />
 
       <RuleFormModal

@@ -82,12 +82,27 @@ def register_indicator_rules(
 
     existing = _REGISTRY.get(indicator_type)
     if existing is not None:
-        if tuple(existing.rules) != tuple(rules):
-            raise ValueError(f"Rules for indicator '{indicator_type}' are already registered")
-        if existing.overlay_adapter is None and overlay_adapter is not None:
+        # Allow updating with a superset of rules (for decorator accumulation)
+        existing_rules_set = set(existing.rules)
+        new_rules_set = set(rules)
+
+        # If new rules is a superset or equal, allow the update
+        if not existing_rules_set.issubset(new_rules_set):
+            # New rules is missing some existing rules - this is an error
+            raise ValueError(f"Rules for indicator '{indicator_type}' are already registered with different rules")
+
+        # Update if we have new rules or a new overlay adapter
+        if existing_rules_set != new_rules_set or (existing.overlay_adapter is None and overlay_adapter is not None):
             _REGISTRY[indicator_type] = IndicatorRegistration(
-                rules=existing.rules,
-                overlay_adapter=overlay_adapter,
+                rules=tuple(rules),
+                overlay_adapter=overlay_adapter or existing.overlay_adapter,
+            )
+            logger.debug(
+                "Updated %d rule(s) for indicator '%s': %s | overlay_adapter=%s",
+                len(rules),
+                indicator_type,
+                [getattr(r, "__name__", repr(r)) for r in rules],
+                getattr(overlay_adapter or existing.overlay_adapter, "__name__", None),
             )
         return
 
@@ -209,6 +224,7 @@ def signal_rule(
 
         registration = _get_decorated_registration(indicator)
         registration.rules.append(func)
+        # Reset registered flag to trigger re-registration with updated rules
         registration.registered = False
         _attempt_autoregistration(registration)
         return func

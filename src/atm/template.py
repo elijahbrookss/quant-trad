@@ -345,9 +345,9 @@ def normalise_template(
     if stop_r_multiple is not None:
         value = float(stop_r_multiple)
         if value == 0:
-            result["stop_r_multiple"] = result.get("stop_r_multiple") or -1.0
+            result["stop_r_multiple"] = result.get("stop_r_multiple") or 1.0
         else:
-            result["stop_r_multiple"] = -abs(value)
+            result["stop_r_multiple"] = abs(value)
 
     stop_price = _coerce_float(payload.get("stop_price"))
     if stop_price is not None:

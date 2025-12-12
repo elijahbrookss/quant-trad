@@ -100,8 +100,6 @@ class StrategyOut(BaseModel):
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
     global_risk_multiplier: Optional[float] = None
-    atr_period: Optional[int] = None
-    atr_multiplier: Optional[float] = None
     risk_overrides: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
@@ -124,8 +122,6 @@ class StrategyCreateRequest(BaseModel):
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
     global_risk_multiplier: Optional[float] = None
-    atr_period: Optional[int] = None
-    atr_multiplier: Optional[float] = None
     risk_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -146,8 +142,6 @@ class StrategyUpdateRequest(BaseModel):
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
     global_risk_multiplier: Optional[float] = None
-    atr_period: Optional[int] = None
-    atr_multiplier: Optional[float] = None
     risk_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -275,8 +269,6 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
             atm_template_id=payload.get("atm_template_id"),
             base_risk_per_trade=payload.get("base_risk_per_trade"),
             global_risk_multiplier=payload.get("global_risk_multiplier"),
-            atr_period=payload.get("atr_period"),
-            atr_multiplier=payload.get("atr_multiplier"),
             risk_overrides=payload.get("risk_overrides"),
         )
         return _attach_market_aliases(record)

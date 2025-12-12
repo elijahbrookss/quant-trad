@@ -737,7 +737,7 @@ def test_ladder_risk_engine_prefers_template_tick_size():
 def test_ladder_risk_engine_supports_r_stops_and_targets():
     template = {
         "atr_r_multiple": 1.5,
-        "stop_r_multiple": -1,
+        "stop_r_multiple": 1,
         "take_profit_orders": [
             {"label": "R2", "r_multiple": 2, "contracts": 1},
         ],
@@ -766,7 +766,7 @@ def test_ladder_risk_engine_supports_r_stops_and_targets():
 def test_trade_tracks_mae_mfe_in_r_units():
     template = {
         "atr_r_multiple": 1.0,
-        "stop_r_multiple": -1.0,
+        "stop_r_multiple": 1.0,
         "stop_ticks": 10,
         "take_profit_orders": [{"ticks": 100, "contracts": 1}],
     }
