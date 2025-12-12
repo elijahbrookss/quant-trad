@@ -11,13 +11,13 @@ import pandas as pd
 
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
+from signals.engine.signal_generator import overlay_adapter, signal_rule
 from signals.rules.breakout import (
     BreakoutRunState,
     mark_breakout_emitted,
     reset_breakout_state,
     update_breakout_state,
 )
-from signals.rules.patterns import assign_rule_metadata
 
 
 @dataclass(frozen=True)
@@ -450,6 +450,14 @@ def _evaluate_level(
     return results
 
 
+@signal_rule(
+    PivotLevelIndicator,
+    rule_id=_PIVOT_BREAKOUT_RULE_ID,
+    label="Breakout",
+    description=(
+        "Detects when price closes beyond a pivot-derived level with confirmation."
+    ),
+)
 def pivot_breakout_rule(
     context: Mapping[str, Any],
     _: Any = None,
@@ -691,6 +699,14 @@ def _detect_retest(
     return None
 
 
+@signal_rule(
+    PivotLevelIndicator,
+    rule_id=_PIVOT_RETEST_RULE_ID,
+    label="Retest",
+    description=(
+        "Labels the first pullback to a freshly broken pivot level while it holds."
+    ),
+)
 def pivot_retest_rule(context: Mapping[str, Any], payload: Any = None) -> List[Dict[str, Any]]:
     indicator = context.get("indicator")
     if not isinstance(indicator, PivotLevelIndicator):
@@ -751,25 +767,6 @@ def pivot_retest_rule(context: Mapping[str, Any], payload: Any = None) -> List[D
     if mutable_context is not None:
         mutable_context[_PIVOT_BREAKOUT_READY_FLAG] = True
     return results
-
-
-assign_rule_metadata(
-    pivot_breakout_rule,
-    rule_id="pivot_breakout",
-    label="Breakout",
-    description=(
-        "Detects when price closes beyond a pivot-derived level with confirmation."
-    ),
-)
-
-assign_rule_metadata(
-    pivot_retest_rule,
-    rule_id="pivot_retest",
-    label="Retest",
-    description=(
-        "Labels the first pullback to a freshly broken pivot level while it holds."
-    ),
-)
 
 
 def _to_unix_seconds(value: Any) -> Optional[int]:
@@ -848,6 +845,7 @@ def _readable_text_color(color: str) -> str:
     return "#0f172a" if luminance > 0.55 else "#f8fafc"
 
 
+@overlay_adapter(PivotLevelIndicator)
 def pivot_signals_to_overlays(
     signals: Sequence[BaseSignal],
     plot_df: "pd.DataFrame",
