@@ -55,10 +55,6 @@ export default function ATMTemplateSummary({ template, compact = false }) {
     return acc
   }, {})
 
-  const contractsLabel =
-    config.contracts !== null && config.contracts !== undefined
-      ? `${formatNumber(config.contracts)} contracts`
-      : 'Contracts not set'
   const stopLabel =
     config.stop_r_multiple !== null && config.stop_r_multiple !== undefined
       ? `${formatNumber(config.stop_r_multiple)}R stop`
@@ -66,7 +62,7 @@ export default function ATMTemplateSummary({ template, compact = false }) {
   const targetsStory = targets.length
     ? targets
         .map((target, index) => {
-          // v2 schema: size_fraction (0-1 range)
+          // Backend stores size_fraction as 0-1 range, convert to percentage for display
           const sizePercent = (target.size_fraction ?? 0) * 100
           return `${target.label || `TP ${index + 1}`} ${formatNumber(target.r_multiple)}R (${formatNumber(sizePercent)}%)`
         })
@@ -88,12 +84,9 @@ export default function ATMTemplateSummary({ template, compact = false }) {
   if (compact) {
     return (
       <div className="space-y-3 rounded-xl border border-white/10 bg-[#101524] p-4 text-sm text-slate-200">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template</p>
-            <p className="text-lg font-semibold text-white">{templateName}</p>
-          </div>
-          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-100">{contractsLabel}</span>
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template</p>
+          <p className="text-lg font-semibold text-white">{templateName}</p>
         </div>
         <div className="space-y-1 text-sm text-slate-200">
           <p>Stop: {stopLabel}</p>
@@ -109,12 +102,9 @@ export default function ATMTemplateSummary({ template, compact = false }) {
     <div className="space-y-6">
       {/* Template Header */}
       <div className="rounded-xl border border-white/10 bg-[#101524] p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template Name</p>
-            <p className="text-lg font-semibold text-white">{templateName}</p>
-          </div>
-          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-100">{contractsLabel}</span>
+        <div>
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Template Name</p>
+          <p className="text-lg font-semibold text-white">{templateName}</p>
         </div>
       </div>
 
@@ -139,6 +129,7 @@ export default function ATMTemplateSummary({ template, compact = false }) {
         {targets.length > 0 ? (
           <div className="space-y-3">
             {targets.map((target, index) => {
+              // Backend stores size_fraction as 0-1 range, convert to percentage for display
               const sizePercent = (target.size_fraction ?? 0) * 100
               return (
                 <div key={target.id || index} className="flex items-center justify-between rounded-lg border border-white/5 bg-white/5 p-3">

@@ -39,45 +39,35 @@ def _normalise_take_profits(
     cleaned: list[Dict[str, Any]] = []
     fallback = max(int(fallback_contracts or len(entries)), len(entries) or 1)
 
-    percents: list[Optional[float]] = []
+    fractions: list[Optional[float]] = []
     for entry in entries:
         # v2 schema: size_fraction (0-1 range)
         raw_fraction = entry.get("size_fraction")
         value = _coerce_float(raw_fraction)
-        # Convert to percentage for internal processing
+        # Keep as fraction (0-1 range) for consistency
         if value is not None and 0 <= value <= 1:
-            value *= 100
-        percents.append(value if value is None or value >= 0 else None)
+            fractions.append(value)
+        elif value is not None and value > 1:
+            # If value > 1, assume it's a percentage and convert to fraction
+            fractions.append(value / 100)
+        else:
+            fractions.append(None)
 
-    has_percent = any(value is not None for value in percents)
+    has_fraction = any(value is not None for value in fractions)
 
-    specified_contracts = [max(_coerce_int(entry.get("contracts"), 0) or 0, 0) for entry in entries]
-    contract_counts: list[int] = []
-    if has_percent:
-        weights = [max(value or 0, 0.0) for value in percents]
+    # Normalize fractions to sum to 1.0
+    if has_fraction:
+        weights = [max(value or 0, 0.0) for value in fractions]
         weight_total = sum(weights)
         if weight_total > 0:
-            scaled = [(weight / weight_total) * fallback for weight in weights]
-            floors = [int(math.floor(value)) for value in scaled]
-            remainder = max(fallback - sum(floors), 0)
-            order = sorted(range(len(scaled)), key=lambda idx: scaled[idx] - floors[idx], reverse=True)
-            for idx in range(remainder):
-                floors[order[idx % len(order)]] += 1
-            contract_counts = floors
+            # Normalize so fractions sum to 1.0
+            normalized_fractions = [weight / weight_total for weight in weights]
         else:
-            base = max(fallback // len(entries), 1)
-            remainder = max(fallback - base * len(entries), 0)
-            for idx in range(len(entries)):
-                contract_counts.append(base + (1 if idx < remainder else 0))
+            # Equal distribution if no weights
+            normalized_fractions = [1.0 / len(entries) for _ in entries]
     else:
-        use_distribution = sum(specified_contracts) == 0
-        if use_distribution:
-            base = max(fallback // len(entries), 1)
-            remainder = max(fallback - base * len(entries), 0)
-            for idx in range(len(entries)):
-                contract_counts.append(base + (1 if idx < remainder else 0))
-        else:
-            contract_counts = [count if count > 0 else 1 for count in specified_contracts]
+        # Equal distribution if no fractions specified
+        normalized_fractions = [1.0 / len(entries) for _ in entries]
 
     for idx, entry in enumerate(entries):
         ticks = _coerce_int(
@@ -90,9 +80,7 @@ def _normalise_take_profits(
         order_id = entry.get("id") or f"tp-{idx + 1}"
         r_multiple = _coerce_float(entry.get("r_multiple"))
         price = _coerce_float(entry.get("price"))
-        contracts = contract_counts[idx] if idx < len(contract_counts) else 1
-        size_percent = percents[idx] if idx < len(percents) else None
-        computed_percent = (contracts / fallback * 100) if fallback else None
+        size_fraction = normalized_fractions[idx] if idx < len(normalized_fractions) else (1.0 / len(entries))
         cleaned.append(
             {
                 "id": order_id,
@@ -100,13 +88,11 @@ def _normalise_take_profits(
                 "ticks": ticks,
                 "r_multiple": r_multiple,
                 "price": price,
-                "contracts": contracts,
-                "size_percent": size_percent if size_percent is not None else computed_percent,
+                "size_fraction": size_fraction,
             }
         )
 
-    total_contracts = sum(order["contracts"] for order in cleaned)
-    return cleaned, total_contracts
+    return cleaned, 0  # No longer calculating contracts
 
 
 def _extract_take_profits(payload: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
