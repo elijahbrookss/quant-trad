@@ -9,6 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .controller import bots, candles, indicators, instruments, providers, strategies
 
+# Auto-discover indicators and signal rules via package imports
+# Indicators: pure computation, returns domain objects
+import indicators  # noqa: F401
+
+# Signals: auto-discovers all @signal_rule decorated functions
+# This triggers decorator execution and registration in _REGISTRY
+import signals  # noqa: F401
+
 
 def _allowed_origins() -> List[str]:
     """Load allowed origins from env, defaulting to common dev hosts."""

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
 from signals.rules.common.utils import (
@@ -68,7 +67,7 @@ def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"Confidence {percent}%"
 
 
-@overlay_adapter(MarketProfileIndicator)
+@overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],
     plot_df: pd.DataFrame,
