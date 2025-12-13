@@ -428,3 +428,13 @@ class MarketProfileIndicator(ComputeIndicator):
         if not hasattr(self, '_cached_merged'):
             self._cached_merged = self.get_merged_profiles()
         return [p.to_dict() for p in self._cached_merged]
+
+    # -----------------------------------------------------------------------
+    # Legacy compatibility
+    # -----------------------------------------------------------------------
+    def merge_value_areas(self, threshold: float = 0.6, min_merge: Optional[int] = None):
+        """Backward-compatible wrapper that returns merged profiles as dicts."""
+
+        min_sessions = self.min_merge_sessions if min_merge is None else min_merge
+        merged_profiles = self.get_merged_profiles(threshold, min_sessions)
+        return [profile.to_dict() for profile in merged_profiles]

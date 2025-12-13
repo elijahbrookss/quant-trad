@@ -104,11 +104,11 @@ def test_default_min_merge_consistency_between_overlay_and_signal(monkeypatch):
 
     captured_min_merge = []
 
-    def _capture_merge(self, threshold=None, min_merge=None):
-        captured_min_merge.append(min_merge)
+    def _capture_merge(self, threshold=None, min_sessions=None):
+        captured_min_merge.append(min_sessions)
         return []
 
-    monkeypatch.setattr(MarketProfileIndicator, "merge_value_areas", _capture_merge)
+    monkeypatch.setattr(MarketProfileIndicator, "get_merged_profiles", _capture_merge)
 
     indicator.to_lightweight(df, use_merged=True)
     build_value_area_payloads(indicator, df)
