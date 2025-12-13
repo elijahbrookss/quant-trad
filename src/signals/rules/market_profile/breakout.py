@@ -13,6 +13,8 @@ from signals.engine.signal_generator import signal_rule
 from signals.rules.common.cache import append_to_cache, ensure_cache, mark_ready
 from signals.rules.patterns import evaluate_signal_patterns
 
+from ._meta import ensure_market_profile_rule_metadata
+
 from ._evaluators import (
     BREAKOUT_PATTERN,
     _resolve_breakout_bar_index,
@@ -73,7 +75,15 @@ def market_profile_breakout_rule(
         context[_BREAKOUT_CACHE_INITIALISED] = True
 
     # Evaluate breakout pattern
-    matches = evaluate_signal_patterns(context, payload, [BREAKOUT_PATTERN])
+    matches = [
+        ensure_market_profile_rule_metadata(
+            meta,
+            rule_id=BREAKOUT_PATTERN.rule_id or "market_profile_breakout",
+            pattern_id=BREAKOUT_PATTERN.pattern_id,
+            aliases=(BREAKOUT_PATTERN.signal_type,),
+        )
+        for meta in evaluate_signal_patterns(context, payload, [BREAKOUT_PATTERN])
+    ]
 
     results = []
     for match in matches:

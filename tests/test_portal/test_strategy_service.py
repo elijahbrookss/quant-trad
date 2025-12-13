@@ -13,6 +13,8 @@ from portal.backend.service.indicator_service.signals import (
 from portal.backend.service.strategy_service import RuleCondition
 from portal.backend.service.strategy_service import evaluator, markers
 from signals.base import BaseSignal
+from signals.engine.signal_generator import _metadata_to_signal
+from signals.rules.market_profile._meta import ensure_market_profile_rule_metadata
 
 
 def test_market_profile_rule_aliases_match_strategy_conditions():
@@ -251,3 +253,33 @@ def test_strategy_preview_enabled_rules_accept_rule_suffix():
     filtered = executor._filter_signals([signal], cache_ctx)
 
     assert filtered == [signal]
+
+
+def test_market_profile_signals_embed_rule_identifiers_for_filters():
+    executor = IndicatorSignalExecutor()
+
+    meta = ensure_market_profile_rule_metadata(
+        {
+            "type": "breakout",
+            "symbol": "CL",
+            "time": datetime(2025, 1, 8, tzinfo=timezone.utc),
+            "confidence": 0.95,
+            "metadata": {"note": "expected to keep aliases"},
+        },
+        rule_id="market_profile_breakout",
+        pattern_id="value_area_breakout",
+        aliases=("market_profile_breakout_rule",),
+    )
+
+    signal = _metadata_to_signal(meta)
+
+    cache_ctx = BreakoutCacheContext(
+        cache_spec=None,
+        cache_key=("strategy-preview",),
+        requested_rule_ids={"market_profile_breakout_rule"},
+    )
+
+    filtered = executor._filter_signals([signal], cache_ctx)
+
+    assert filtered == [signal]
+    assert "market_profile_breakout_rule" in signal.metadata.get("aliases", [])
