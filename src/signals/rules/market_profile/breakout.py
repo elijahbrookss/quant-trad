@@ -81,11 +81,18 @@ def market_profile_breakout_rule(
         if bar_index is None:
             continue
 
+        signal_time = match.get("time") or match.get("breakout_time") or match.get("trigger_time")
+        if signal_time is None:
+            log.debug("Breakout rule | skip | reason=no_time | match=%s", match)
+            continue
+
         signal_data = {
             "bar_index": bar_index,
             "direction": match.get("direction"),
             "level_type": match.get("level_type"),
             "level_price": match.get("level_price"),
+            "time": signal_time,
+            "type": match.get("type") or match.get("pattern_id") or "market_profile_breakout",
             "metadata": match,
         }
 

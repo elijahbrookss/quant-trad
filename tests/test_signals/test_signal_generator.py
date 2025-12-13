@@ -252,7 +252,13 @@ def test_market_profile_breakout_uses_list_cache(monkeypatch):
         eval_calls["patterns"] = patterns
         eval_calls["default_confidence"] = default_confidence
         return [
-            {"direction": "up", "level_type": "VAH", "level_price": 101.0}
+            {
+                "direction": "up",
+                "level_type": "VAH",
+                "level_price": 101.0,
+                "time": 123,
+                "type": "breakout",
+            }
         ]
 
     monkeypatch.setattr(
@@ -282,4 +288,6 @@ def test_market_profile_breakout_uses_list_cache(monkeypatch):
     assert breakout_module._BREAKOUT_CACHE_KEY in context
     assert appended and appended[0][0]["level_type"] == "VAH"
     assert results and results[0]["direction"] == "up"
+    assert results[0]["time"] == 123
+    assert results[0]["type"] == "breakout"
     assert context.get(breakout_module._BREAKOUT_READY_FLAG) is True
