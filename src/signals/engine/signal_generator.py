@@ -303,6 +303,11 @@ def _build_context(
         context[key] = value
     if "symbol" not in context and hasattr(indicator, "symbol"):
         context["symbol"] = getattr(indicator, "symbol")
+    if indicator_type == "market_profile" and "market_profile" not in context:
+        from indicators.market_profile import MarketProfileIndicator
+
+        if isinstance(indicator, MarketProfileIndicator):
+            context["market_profile"] = indicator
     return context
 
 

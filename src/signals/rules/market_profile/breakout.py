@@ -50,7 +50,7 @@ def market_profile_breakout_rule(
     Returns:
         List of signal dictionaries
     """
-    breakout_config = resolve_breakout_config(context)
+    resolve_breakout_config(context)
     df = context.get("df")
     if df is None or df.empty:
         return []
@@ -69,18 +69,11 @@ def market_profile_breakout_rule(
 
     # Initialize cache if needed
     if not context.get(_BREAKOUT_CACHE_INITIALISED):
-        ensure_cache(context, _BREAKOUT_CACHE_KEY)
+        ensure_cache(context, _BREAKOUT_CACHE_KEY, list)
         context[_BREAKOUT_CACHE_INITIALISED] = True
 
     # Evaluate breakout pattern
-    matches = evaluate_signal_patterns(
-        df=df,
-        patterns=[BREAKOUT_PATTERN],
-        evaluator_context={
-            "profiles": profiles,
-            "confirmation_bars": breakout_config.confirmation_bars,
-        },
-    )
+    matches = evaluate_signal_patterns(context, payload, [BREAKOUT_PATTERN])
 
     results = []
     for match in matches:
@@ -97,7 +90,7 @@ def market_profile_breakout_rule(
         }
 
         # Check cache to avoid duplicates
-        if append_to_cache(context, _BREAKOUT_CACHE_KEY, signal_data):
+        if append_to_cache(context, _BREAKOUT_CACHE_KEY, [signal_data]):
             results.append(signal_data)
 
     # Mark cache as ready
