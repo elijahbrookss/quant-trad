@@ -23,6 +23,7 @@ from signals.rules.market_profile._config import (
     _DEFAULT_BREAKOUT_CONFIG,
     resolve_breakout_config,
 )
+from signals.rules.market_profile._evaluators.breakout_eval import _resolve_breakout_bar_index
 from signals.rules.pivot import _detect_retest as _pivot_detect_retest, _evaluate_level as _pivot_evaluate_level
 from signals.rules.patterns import SignalPattern, evaluate_signal_patterns, maybe_mutable_context
 
@@ -262,7 +263,14 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
         if mutable_context is not None:
             mutable_context[BREAKOUT_CACHE_KEY] = list(breakouts)
 
-    if not breakouts:
+    breakout_buckets: Dict[Optional[str], List[Mapping[str, Any]]] = {}
+    for breakout_meta in breakouts:
+        if not isinstance(breakout_meta, Mapping):
+            continue
+        breakout_session = breakout_meta.get("value_area_id")
+        breakout_buckets.setdefault(breakout_session, []).append(breakout_meta)
+
+    if not breakout_buckets:
         log.debug("mp_retest | skip | reason=empty_breakout_cache")
         return []
 
@@ -283,18 +291,20 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
     except (TypeError, ValueError):
         min_bars = 1
 
-    target_session = value_area_identifier(value_area)
+    target_session = value_area.get("value_area_id") or value_area_identifier(value_area)
     results: List[Dict[str, Any]] = []
-    for breakout_meta in breakouts:
-        if not isinstance(breakout_meta, Mapping):
-            continue
-        if target_session and breakout_meta.get("value_area_id") != target_session:
+    if target_session:
+        candidates = breakout_buckets.get(target_session, [])
+        if not candidates:
             log.debug(
-                "mp_retest | continue | reason=session_mismatch | target=%s | breakout_session=%s",
+                "mp_retest | skip | reason=no_matching_breakouts | session=%s",
                 target_session,
-                breakout_meta.get("value_area_id"),
             )
-            continue
+            return []
+    else:
+        candidates = [meta for bucket in breakout_buckets.values() for meta in bucket]
+
+    for breakout_meta in candidates:
         retest = _detect_value_area_retest(
             df,
             breakout_meta,
