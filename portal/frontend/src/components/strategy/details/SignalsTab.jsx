@@ -1,5 +1,5 @@
 import React from 'react'
-import { Input, Select, Button } from '../../ui'
+import { Button } from '../../ui'
 import { DEFAULT_DATASOURCE } from '../../../utils/constants'
 import { SignalSummary } from '../signals'
 
@@ -13,11 +13,14 @@ export const SignalsTab = ({
   signalResult,
   onSubmit,
   onDateRangeChange,
-  onWindowChange,
   // These components need to be passed in
   DateRangePickerComponent,
-  DropdownSelect
 }) => {
+  const symbol = strategy.symbols?.[0] || '—'
+  const interval = strategy.timeframe || '—'
+  const datasource = strategy.datasource || DEFAULT_DATASOURCE
+  const exchange = strategy.exchange || '—'
+
   return (
     <>
       <p className="mb-4 text-sm text-slate-400">
@@ -30,53 +33,26 @@ export const SignalsTab = ({
           setDateRange={onDateRangeChange}
         />
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <Input
-            label="Interval"
-            value={signalWindow.interval}
-            onChange={onWindowChange('interval')}
-            placeholder={strategy.timeframe || '15m'}
-          />
-
-          <Input
-            label="Symbol"
-            value={strategy.symbols?.[0] || signalWindow.symbol}
-            readOnly
-          />
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <DropdownSelect
-              label="Data source (market data)"
-              value={signalWindow.datasource || strategy.datasource || ''}
-              onChange={onWindowChange('datasource')}
-              options={[
-                {
-                  value: '',
-                  label: `Use strategy data source (${strategy.datasource || DEFAULT_DATASOURCE})`,
-                  description: 'Follow the strategy default',
-                },
-                { value: 'ALPACA', label: 'Market data • ALPACA' },
-                { value: 'IBKR', label: 'Interactive Brokers • IBKR' },
-                { value: 'CCXT', label: 'Crypto data • CCXT' },
-              ]}
-              className="mt-1 w-full"
-            />
-            <p className="mt-1 text-[11px] text-slate-500">
-              Choose the provider used to load candles when checking these rules.
-            </p>
+        <div className="space-y-2 rounded-lg border border-white/10 bg-white/5 p-3 text-xs text-slate-200">
+          <div className="flex items-center justify-between">
+            <span className="uppercase tracking-[0.25em] text-[10px] text-slate-400">Symbol</span>
+            <span className="font-semibold text-white">{symbol}</span>
           </div>
-
-          <div>
-            <Input
-              label="Broker / Exchange"
-              value={signalWindow.exchange || strategy.exchange || ''}
-              onChange={onWindowChange('exchange')}
-              placeholder="e.g. ALPACA, BINANCE"
-              hint="Specify where trades would be routed in the future."
-            />
+          <div className="flex items-center justify-between">
+            <span className="uppercase tracking-[0.25em] text-[10px] text-slate-400">Interval</span>
+            <span className="font-semibold text-white">{interval}</span>
           </div>
+          <div className="flex items-center justify-between">
+            <span className="uppercase tracking-[0.25em] text-[10px] text-slate-400">Data source</span>
+            <span className="font-semibold text-white">{datasource || DEFAULT_DATASOURCE}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="uppercase tracking-[0.25em] text-[10px] text-slate-400">Broker / Exchange</span>
+            <span className="font-semibold text-white">{exchange}</span>
+          </div>
+          <p className="pt-1 text-[11px] text-slate-400">
+            We will automatically reuse your strategy inputs for the preview; pick a date range to generate signals.
+          </p>
         </div>
 
         <div className="flex items-end justify-end">

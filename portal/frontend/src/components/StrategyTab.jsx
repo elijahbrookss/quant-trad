@@ -2197,18 +2197,6 @@ const StrategyDetails = ({
     setSignalWindow((prev) => ({ ...prev, dateRange: range }))
   }
 
-  const handleWindowChange = (field) => (input) => {
-    let value = input && typeof input === 'object' && 'target' in input
-      ? input.target.value
-      : input
-
-    if (field === 'datasource' && typeof value === 'string') {
-      value = value.toUpperCase()
-    }
-
-    setSignalWindow((prev) => ({ ...prev, [field]: value }))
-  }
-
   const instrumentMap = useMemo(() => {
     const map = new Map()
     for (const entry of strategyInstruments) {
@@ -2405,9 +2393,7 @@ const StrategyDetails = ({
             signalResult={signalResult}
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
-            onWindowChange={handleWindowChange}
             DateRangePickerComponent={DateRangePickerComponent}
-            DropdownSelect={DropdownSelect}
           />
         </TabPanel>
       </div>
@@ -2441,10 +2427,6 @@ const StrategyTab = ({ chartId }) => {
     const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
     return {
       dateRange: [start, end],
-      interval: '15m',
-      symbol: '',
-      datasource: '',
-      exchange: '',
     }
   })
 
@@ -2599,33 +2581,9 @@ const StrategyTab = ({ chartId }) => {
   }, [attachedIndicators, ruleModal?.rule, indicatorLookup])
 
   useEffect(() => {
-    const nextSymbol = selectedStrategy?.symbols?.[0] || chartSnapshot?.symbol || ''
-    const nextInterval = selectedStrategy?.timeframe || chartSnapshot?.interval || '15m'
-    const nextDatasource = selectedStrategy?.datasource || chartSnapshot?.datasource || ''
-    const nextExchange = selectedStrategy?.exchange || chartSnapshot?.exchange || ''
     const chartRange = Array.isArray(chartSnapshot?.dateRange) ? chartSnapshot.dateRange : null
 
     setSignalWindow((prev) => {
-      const updates = { ...prev }
-      let changed = false
-
-      if (prev.symbol !== nextSymbol) {
-        updates.symbol = nextSymbol
-        changed = true
-      }
-      if (prev.interval !== nextInterval) {
-        updates.interval = nextInterval
-        changed = true
-      }
-      if ((prev.datasource || '') !== nextDatasource) {
-        updates.datasource = nextDatasource
-        changed = true
-      }
-      if ((prev.exchange || '') !== nextExchange) {
-        updates.exchange = nextExchange
-        changed = true
-      }
-
       const hasValidRange = Array.isArray(prev.dateRange)
         && prev.dateRange[0] instanceof Date
         && !Number.isNaN(prev.dateRange[0]?.valueOf())
@@ -2633,13 +2591,11 @@ const StrategyTab = ({ chartId }) => {
         && !Number.isNaN(prev.dateRange[1]?.valueOf())
 
       if (!hasValidRange && Array.isArray(chartRange) && chartRange[0] instanceof Date && chartRange[1] instanceof Date) {
-        updates.dateRange = chartRange
-        changed = true
+        return { ...prev, dateRange: chartRange }
       }
-
-      return changed ? updates : prev
+      return prev
     })
-  }, [selectedStrategy?.id, selectedStrategy?.symbols, selectedStrategy?.timeframe, selectedStrategy?.datasource, selectedStrategy?.exchange, chartSnapshot?.symbol, chartSnapshot?.interval, chartSnapshot?.datasource, chartSnapshot?.exchange, chartSnapshot?.dateRange])
+  }, [chartSnapshot?.dateRange])
 
   const refreshStrategies = useCallback(async () => {
     setLoading(true)
@@ -2841,10 +2797,16 @@ const StrategyTab = ({ chartId }) => {
     setSignalResult(null)
     setErrorMessage(null)
     try {
-      const symbol = selectedStrategy.symbols?.[0] || window.symbol || chartSnapshot?.symbol
-      const interval = window.interval || selectedStrategy.timeframe || chartSnapshot?.interval || '15m'
-      const datasource = window.datasource || selectedStrategy.datasource || chartSnapshot?.datasource || ''
-      const exchange = window.exchange || selectedStrategy.exchange || chartSnapshot?.exchange || ''
+      const symbol = selectedStrategy.symbols?.[0] || chartSnapshot?.symbol
+      const interval = selectedStrategy.timeframe || chartSnapshot?.interval || '15m'
+      const datasource = selectedStrategy.datasource || chartSnapshot?.datasource || ''
+      const exchange = selectedStrategy.exchange || chartSnapshot?.exchange || ''
+
+      if (!symbol) {
+        setErrorMessage('A symbol is required to generate signals.')
+        setSignalsLoading(false)
+        return
+      }
 
       const result = await generateStrategySignals(selectedStrategy.id, {
         start: startDate.toISOString(),
