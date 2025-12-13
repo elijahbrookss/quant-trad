@@ -106,6 +106,11 @@ def market_profile_breakout_rule(
             "metadata": match,
         }
 
+        # Preserve rule identifiers for signal filtering
+        for identifier_key in ("rule_id", "pattern_id", "aliases", "rule_aliases", "pattern_aliases"):
+            if identifier_key in match:
+                signal_data[identifier_key] = match[identifier_key]
+
         # Preserve value area/session metadata for downstream retest evaluation.
         for key in (
             "value_area_id",

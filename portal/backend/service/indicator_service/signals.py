@@ -72,7 +72,8 @@ class IndicatorSignalExecutor:
             entry.instance, filtered, df, **rule_config
         )
         payload = ensure_color(dict(entry.meta), ctx=self._ctx)
-        payload["signals"] = filtered
+        # Convert BaseSignal objects to dicts for JSON serialization and strategy evaluation
+        payload["signals"] = [sig.to_dict() if hasattr(sig, "to_dict") else sig for sig in filtered]
         payload["overlays"] = overlays
         return payload
 
@@ -217,10 +218,30 @@ class IndicatorSignalExecutor:
                 "market_profile_merge_threshold",
                 getattr(instance, "merge_threshold", 0.6),
             )
+
+            # Log merge parameters to diagnose discrepancies between Signal Preview and Generate Signals
+            logger.info(
+                "market_profile_merge_config | use_merged=%s | threshold=%s | min_sessions=%s | from_config=%s | instance_values=[use_merged=%s, threshold=%s, min_sessions=%s]",
+                rule_config.get("market_profile_use_merged_value_areas"),
+                rule_config.get("market_profile_merge_threshold"),
+                rule_config.get("market_profile_merge_min_sessions"),
+                {
+                    "has_use_merged": "market_profile_use_merged_value_areas" in rule_config,
+                    "has_threshold": "market_profile_merge_threshold" in rule_config,
+                    "has_min_sessions": "market_profile_merge_min_sessions" in rule_config,
+                },
+                getattr(instance, "use_merged_value_areas", None),
+                getattr(instance, "merge_threshold", None),
+                getattr(instance, "min_merge_sessions", None),
+            )
+
+            # CRITICAL FIX: Do NOT pass the stored instance as runtime_indicator
+            # The stored instance has stale data from when it was last computed.
+            # Instead, let build_value_area_payloads clone the indicator with the current dataframe.
             payloads = build_value_area_payloads(
                 instance,
                 df,
-                runtime_indicator=instance,
+                runtime_indicator=None,  # Force fresh computation with current df
                 interval=interval,
                 use_merged=rule_config.get("market_profile_use_merged_value_areas"),
                 merge_threshold=rule_config.get("market_profile_merge_threshold"),
@@ -359,15 +380,58 @@ class IndicatorSignalExecutor:
     ) -> Sequence[BaseSignal]:
         filtered_signals = signals_all
         if cache_ctx.requested_rule_ids is not None:
+            logger.info(
+                "signal_filtering | raw_signals=%d | requested_rule_ids=%s | drop_breakout=%s",
+                len(signals_all),
+                sorted(cache_ctx.requested_rule_ids) if cache_ctx.requested_rule_ids else None,
+                cache_ctx.drop_breakout_from_response,
+            )
             filtered_signals = []
-            for sig in signals_all:
+            matched_count = 0
+            for idx, sig in enumerate(signals_all):
                 identifiers = self._collect_signal_identifiers(sig)
-                if identifiers.intersection(cache_ctx.requested_rule_ids):
+                intersection = identifiers.intersection(cache_ctx.requested_rule_ids)
+                matched = bool(intersection)
+                if matched:
                     filtered_signals.append(sig)
+                    matched_count += 1
+                # Log first 3 signals for debugging
+                if idx < 3:
+                    # Extract metadata for debugging
+                    sig_metadata = getattr(sig, "metadata", None)
+                    metadata_keys = list(sig_metadata.keys()) if isinstance(sig_metadata, dict) else None
+                    metadata_rule_id = sig_metadata.get("rule_id") if isinstance(sig_metadata, dict) else None
+                    metadata_aliases = sig_metadata.get("aliases") if isinstance(sig_metadata, dict) else None
+
+                    logger.info(
+                        "signal_filtering_debug | signal_idx=%d | signal_type=%s | has_metadata=%s | metadata_keys=%s | metadata_rule_id=%s | metadata_aliases=%s | collected_identifiers=%s | requested_ids=%s | matched=%s | intersection=%s",
+                        idx,
+                        getattr(sig, "type", None),
+                        sig_metadata is not None,
+                        metadata_keys,
+                        metadata_rule_id,
+                        metadata_aliases,
+                        sorted(identifiers) if identifiers else [],
+                        sorted(cache_ctx.requested_rule_ids),
+                        matched,
+                        sorted(intersection) if intersection else [],
+                    )
+            logger.info(
+                "signal_filtering_after_rules | filtered_signals=%d | matched=%d | dropped=%d",
+                len(filtered_signals),
+                matched_count,
+                len(signals_all) - matched_count,
+            )
             if cache_ctx.drop_breakout_from_response:
+                before_drop = len(filtered_signals)
                 filtered_signals = [
                     sig for sig in filtered_signals if sig.type != "breakout"
                 ]
+                logger.info(
+                    "signal_filtering_after_breakout_drop | before=%d | after=%d",
+                    before_drop,
+                    len(filtered_signals),
+                )
         if len(filtered_signals) != len(signals_all):
             logger.debug(
                 "event=indicator_signal_filtered indicator=%s total=%d returned=%d requested_rules=%s",

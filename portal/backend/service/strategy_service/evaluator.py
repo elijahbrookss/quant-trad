@@ -345,9 +345,30 @@ def _evaluate_condition(
     observed_rules: set[str] = set()
     observed_directions: set[str] = set()
 
-    for candidate in signals:
+    for idx, candidate in enumerate(signals):
         if not isinstance(candidate, Mapping):
             continue
+
+        # Log first 3 signals for debugging
+        if idx < 3:
+            signal_type = str(candidate.get("type", "")).strip().lower()
+            signal_keys = list(candidate.keys()) if isinstance(candidate, Mapping) else []
+            metadata = candidate.get("metadata")
+            metadata_keys = list(metadata.keys()) if isinstance(metadata, Mapping) else None
+
+            import logging
+            logger = logging.getLogger("StrategyEvaluator")
+            logger.info(
+                "strategy_signal_debug | idx=%d | is_mapping=%s | signal_type=%s | condition_type=%s | signal_keys=%s | has_metadata=%s | metadata_keys=%s",
+                idx,
+                isinstance(candidate, Mapping),
+                signal_type,
+                condition.signal_type.strip().lower(),
+                signal_keys,
+                metadata is not None,
+                metadata_keys,
+            )
+
         signal_type = str(candidate.get("type", "")).strip().lower()
         if signal_type != condition.signal_type.strip().lower():
             continue
