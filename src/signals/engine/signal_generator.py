@@ -359,6 +359,12 @@ def run_indicator_rules(
         except Exception:
             logger.exception("Failed to initialise market profile breakouts")
 
+    logger.info(
+        "Signal run triggered | indicator=%s | payloads=%d",
+        indicator_type,
+        len(payloads),
+    )
+
     trace = bool(config.get("trace") or config.get("log_context"))
     validate_only = bool(config.get("validate_only"))
 
@@ -376,12 +382,15 @@ def run_indicator_rules(
     active_rules = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
 
     signals: List[BaseSignal] = []
+    market_profile_counts = {"breakouts": 0, "retests": 0}
     total_rules = len(active_rules)
     for r_idx, rule in enumerate(active_rules):
         rule_name = getattr(rule, "__name__", repr(rule))
+        rule_id = getattr(rule, "signal_id", rule_name)
         t_rule_start = time.perf_counter()
         logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
 
+        rule_emitted = 0
         for p_idx, payload in enumerate(payloads):
             t_payload_start = time.perf_counter()
             try:
@@ -432,15 +441,38 @@ def run_indicator_rules(
                     continue
 
                 signals.append(sig)
+                rule_emitted += 1
 
         logger.debug(
             "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
             rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
         )
+        if indicator_type == "market_profile":
+            if rule_id == "market_profile_breakout":
+                market_profile_counts["breakouts"] += rule_emitted
+                logger.info(
+                    "Market profile breakout checks complete | emitted=%d",
+                    rule_emitted,
+                )
+            elif rule_id == "market_profile_retest":
+                market_profile_counts["retests"] += rule_emitted
+                logger.info(
+                    "Market profile retest checks complete | emitted=%d",
+                    rule_emitted,
+                )
 
-    logger.debug(
-        "Generated %d signal(s) for indicator '%s' using %d payload(s)",
-        len(signals), indicator_type, len(payloads)
+    if indicator_type == "market_profile":
+        logger.info(
+            "Market profile signal summary | total=%d | breakouts=%d | retests=%d",
+            len(signals),
+            market_profile_counts["breakouts"],
+            market_profile_counts["retests"],
+        )
+
+    logger.info(
+        "Signal run complete | indicator=%s | total_signals=%d",
+        indicator_type,
+        len(signals),
     )
     return signals
 

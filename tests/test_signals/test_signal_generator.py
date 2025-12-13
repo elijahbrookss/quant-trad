@@ -291,3 +291,73 @@ def test_market_profile_breakout_uses_list_cache(monkeypatch):
     assert results[0]["time"] == 123
     assert results[0]["type"] == "breakout"
     assert context.get(breakout_module._BREAKOUT_READY_FLAG) is True
+
+
+def test_market_profile_signal_logging_summary(monkeypatch, caplog):
+    import sys
+    import types
+
+    if "pandas" not in sys.modules:
+        sys.modules["pandas"] = types.SimpleNamespace(
+            DataFrame=object,
+            Timestamp=object,
+            Timedelta=lambda *_, **__: None,
+        )
+    sys.modules.setdefault("requests", types.SimpleNamespace())
+    sys.modules.setdefault("numpy", types.SimpleNamespace())
+
+    signals_rules_module = types.ModuleType("signals.rules")
+    signals_rules_module.__path__ = []
+    market_profile_module = types.ModuleType("signals.rules.market_profile")
+    market_profile_module.__path__ = []
+    bootstrap_module = types.ModuleType("signals.rules.market_profile._bootstrap")
+    bootstrap_module.ensure_breakouts_ready = lambda *_, **__: None
+    market_profile_module._bootstrap = bootstrap_module
+    signals_rules_module.market_profile = market_profile_module
+
+    sys.modules.setdefault("signals.rules", signals_rules_module)
+    sys.modules.setdefault("signals.rules.market_profile", market_profile_module)
+    sys.modules.setdefault("signals.rules.market_profile._bootstrap", bootstrap_module)
+
+    caplog.set_level(logging.INFO, logger="signals.engine.signal_generator")
+
+    breakout_called = {}
+
+    def fake_breakout(context, payload):
+        breakout_called["payload"] = payload
+        return [
+            {"type": "breakout", "time": 1, "symbol": context["symbol"]},
+            {"type": "breakout", "time": 2, "symbol": context["symbol"]},
+        ]
+    fake_breakout.signal_id = "market_profile_breakout"
+
+    def fake_retest(context, payload):
+        return [
+            {"type": "retest", "time": 3, "symbol": context["symbol"]},
+        ]
+    fake_retest.signal_id = "market_profile_retest"
+
+    register_indicator_rules(
+        "market_profile", [fake_breakout, fake_retest]
+    )
+
+    class DummyFrame:
+        empty = False
+        index = []
+        shape = (0, 0)
+
+    signals = run_indicator_rules(
+        "market_profile",
+        DummyFrame(),
+        rule_payloads=[{"foo": "bar"}],
+        symbol="ABC",
+        market_profile=object(),
+    )
+
+    assert breakout_called["payload"] == {"foo": "bar"}
+    assert len(signals) == 3
+    assert "Signal run triggered | indicator=market_profile | payloads=1" in caplog.text
+    assert "Market profile breakout checks complete | emitted=2" in caplog.text
+    assert "Market profile retest checks complete | emitted=1" in caplog.text
+    assert "Market profile signal summary | total=3 | breakouts=2 | retests=1" in caplog.text
+    assert "Signal run complete | indicator=market_profile | total_signals=3" in caplog.text
