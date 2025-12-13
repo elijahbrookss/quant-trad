@@ -277,12 +277,12 @@ def _value_area_retest_evaluator(context: Mapping[str, Any], value_area: Mapping
     mode = str(context.get("mode", "backtest")).lower()
 
     try:
-        tolerance_pct = float(context.get("market_profile_retest_tolerance_pct", 0.0015))
+        tolerance_pct = float(context.get("market_profile_retest_tolerance_pct", 0.0008))
     except (TypeError, ValueError):
-        tolerance_pct = 0.0015
+        tolerance_pct = 0.0008
 
     try:
-        max_bars = int(context.get("market_profile_retest_max_bars", 20))
+        max_bars = int(context.get("market_profile_retest_max_bars", 30))
     except (TypeError, ValueError):
         max_bars = 20
 
