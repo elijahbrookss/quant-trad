@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
 from signals.base import BaseSignal
+from signals.overlays.schema import normalize_overlays
 
 
 import time
@@ -458,7 +459,8 @@ def build_signal_overlays(
         indicator_type, len(signals), _df_summary(plot_df), list(kwargs.keys())
     )
     try:
-        overlays = list(adapter(signals, plot_df, **kwargs))
+        raw_overlays = list(adapter(signals, plot_df, **kwargs))
+        overlays = normalize_overlays(indicator_type, raw_overlays)
     except Exception:
         logger.exception("Overlay adapter error | indicator=%s", indicator_type)
         return []

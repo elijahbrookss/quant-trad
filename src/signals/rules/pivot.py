@@ -12,6 +12,7 @@ import pandas as pd
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter, signal_rule
+from signals.overlays.schema import build_overlay
 from signals.rules.breakout import (
     BreakoutRunState,
     mark_breakout_emitted,
@@ -1020,12 +1021,7 @@ def pivot_signals_to_overlays(
         "bubbles": bubbles,
     }
 
-    return [
-        {
-            "type": PivotLevelIndicator.NAME,
-            "payload": payload,
-        }
-    ]
+    return [build_overlay(PivotLevelIndicator.NAME, payload)]
 
 
 __all__ = [

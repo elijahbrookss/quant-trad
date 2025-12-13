@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 
 from core.logger import logger
-from indicators.base import BaseIndicator
+from indicators.base import ComputeIndicator
+from indicators.registry import indicator
 
 from .domain import Profile, ValueArea
 from ._internal.computation import build_tpo_histogram, extract_value_area
@@ -20,7 +21,8 @@ from ._internal.bin_size import select_bin_size, infer_precision_from_step
 from ._internal.merging import merge_profiles
 
 
-class MarketProfileIndicator(BaseIndicator):
+@indicator(name="market_profile", inputs=["ohlc"], outputs=["profiles"])
+class MarketProfileIndicator(ComputeIndicator):
     """
     Computes daily market profiles using Time Price Opportunity (TPO) methodology.
 

@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Literal, Optional
 import logging
 
-from .base import BaseIndicator
-from .config import DataContext
+from indicators.base import ComputeIndicator
+from indicators.config import DataContext
+from indicators.registry import indicator
 
 log = logging.getLogger("TrendlineIndicator")
 
@@ -101,7 +102,8 @@ def _ransac_line(x: np.ndarray, y: np.ndarray,
 
 # ---------- the indicator ----------
 
-class TrendlineIndicator(BaseIndicator):
+@indicator(name="trendline", inputs=["ohlcv"], outputs=["trendlines"])
+class TrendlineIndicator(ComputeIndicator):
     """
     Minimal, pivot-anchored trendlines:
       • find pivot highs / lows (rolling lookback)
@@ -130,7 +132,7 @@ class TrendlineIndicator(BaseIndicator):
         ransac_min_inliers: int = RANSAC_MIN_INLIERS,
         max_lines_per_side: int = MAX_LINES_PER_SIDE,
     ):
-        self.df = df.copy()
+        super().__init__(df)
         self.lookbacks = tuple(int(x) for x in lookbacks)
         self.tolerance = float(tolerance)
         self.timeframe = timeframe

@@ -93,7 +93,19 @@ def test_build_signal_overlays_uses_registered_adapter():
 
     overlays = build_signal_overlays("overlay", [dummy_signal], df, label_prefix="ok")
 
-    assert overlays == [{"kind": "custom", "label": "ok"}]
+    assert overlays == [
+        {
+            "type": "overlay",
+            "payload": {
+                "kind": "custom",
+                "label": "ok",
+                "bubbles": [],
+                "markers": [],
+                "price_lines": [],
+                "polylines": [],
+            },
+        }
+    ]
     assert called["signals"] == [dummy_signal]
     assert called["plot_df_shape"] == df.shape
 

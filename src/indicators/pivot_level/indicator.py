@@ -1,11 +1,14 @@
 from dataclasses import dataclass, field
-from .config import DataContext
-from typing import List, Optional, Tuple, Set, Dict, Any
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import pandas as pd
-from mplfinance.plotting import make_addplot
-from core.logger import logger as core_logger
 from matplotlib import patches
-from .base import BaseIndicator
+from mplfinance.plotting import make_addplot
+
+from core.logger import logger as core_logger
+from indicators.base import ComputeIndicator
+from indicators.config import DataContext
+from indicators.registry import indicator
 
 log = core_logger.getChild("PivotLevelIndicator")
 
@@ -48,7 +51,8 @@ class Level:
         )
         return touches
 
-class PivotLevelIndicator(BaseIndicator):
+@indicator(name="pivot_level", inputs=["ohlc"], outputs=["levels"])
+class PivotLevelIndicator(ComputeIndicator):
     """
     Detects horizontal support and resistance levels by clustering pivot highs/lows,
     and provides mplfinance overlays with optional touch markers.
@@ -78,7 +82,7 @@ class PivotLevelIndicator(BaseIndicator):
         :param lookbacks: tuple of pivot lookback sizes
         :param threshold: price dedup threshold (fractional)
         """
-        self.df = df
+        super().__init__(df)
         self.timeframe = timeframe
         self.lookbacks = lookbacks
         self.threshold = threshold
