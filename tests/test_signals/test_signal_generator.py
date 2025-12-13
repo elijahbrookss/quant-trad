@@ -167,6 +167,85 @@ def test_build_signal_overlays_fallback_bubbles():
     assert bubble_payload["time"] == int(signal.time.timestamp())
 
 
+def test_market_profile_breakout_cache_carries_value_area(monkeypatch):
+    import pkgutil
+    import sys
+    import types
+
+    sys.modules.setdefault("requests", types.SimpleNamespace())
+    sys.modules.setdefault("numpy", types.SimpleNamespace())
+    sys.modules.setdefault("matplotlib", types.SimpleNamespace(patches=types.SimpleNamespace()))
+    sys.modules.setdefault(
+        "mplfinance",
+        types.SimpleNamespace(plotting=types.SimpleNamespace(make_addplot=lambda *_, **__: None)),
+    )
+    sys.modules.setdefault("mplfinance.plotting", types.SimpleNamespace(make_addplot=lambda *_, **__: None))
+    sys.modules.setdefault("indicators", types.SimpleNamespace(__path__=[], __spec__=None))
+    sys.modules.setdefault(
+        "indicators.market_profile",
+        types.SimpleNamespace(MarketProfileIndicator=type("MarketProfileIndicator", (), {})),
+    )
+    sys.modules.setdefault(
+        "indicators.trendline",
+        types.SimpleNamespace(
+            TrendlineIndicator=type("TrendlineIndicator", (), {}),
+            trendline_overlay_adapter=lambda *_, **__: None,
+        ),
+    )
+    sys.modules.setdefault(
+        "indicators.pivot_level",
+        types.SimpleNamespace(
+            PivotLevelIndicator=type("PivotLevelIndicator", (), {}),
+            Level=type("Level", (), {}),
+            pivot_level_overlay_adapter=lambda *_, **__: None,
+        ),
+    )
+    monkeypatch.setattr(pkgutil, "walk_packages", lambda *_, **__: [])
+
+    import signals.rules.market_profile.breakout as breakout_rule
+
+    match = {
+        "type": "breakout",
+        "pattern_id": "value_area_breakout",
+        "time": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        "breakout_direction": "above",
+        "level_type": "VAH",
+        "level_price": 101.0,
+        "value_area_id": "session-123",
+        "value_area_start": datetime(2024, 12, 31, tzinfo=timezone.utc),
+        "value_area_end": datetime(2025, 1, 2, tzinfo=timezone.utc),
+        "value_area_start_index": 10,
+        "value_area_end_index": 20,
+        "VAH": 101.5,
+        "VAL": 99.5,
+        "POC": 100.5,
+    }
+
+    monkeypatch.setattr(breakout_rule, "evaluate_signal_patterns", lambda *_, **__: [match])
+    monkeypatch.setattr(breakout_rule, "resolve_breakout_config", lambda *_: None)
+    monkeypatch.setattr(breakout_rule, "_resolve_breakout_bar_index", lambda *_: 12)
+
+    class DummyIndicator:
+        daily_profiles = [object()]
+
+    class DummyFrame:
+        empty = False
+        index = list(range(30))
+
+    context = {
+        "df": DummyFrame(),
+        "market_profile": DummyIndicator(),
+    }
+
+    signals = breakout_rule.market_profile_breakout_rule(context, {})
+
+    assert signals, "Expected breakout signals"
+    cached = context.get("market_profile_breakouts")
+    assert cached and cached[0]["value_area_id"] == "session-123"
+    assert cached[0]["value_area_start_index"] == 10
+    assert cached[0]["value_area_end_index"] == 20
+
+
 def test_run_indicator_rules_injects_symbol_into_context():
     captured = {}
 

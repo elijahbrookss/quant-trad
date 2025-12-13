@@ -96,6 +96,32 @@ def market_profile_breakout_rule(
             "metadata": match,
         }
 
+        # Preserve value area/session metadata for downstream retest evaluation.
+        for key in (
+            "value_area_id",
+            "value_area_start",
+            "value_area_end",
+            "value_area_start_index",
+            "value_area_end_index",
+            "value_area_range",
+            "value_area_mid",
+            "VAH",
+            "VAL",
+            "POC",
+            "breakout_direction",
+            "pointer_direction",
+            "symbol",
+            "source",
+            "trigger_time",
+            "trigger_index_label",
+            "trigger_bar_index",
+            "breakout_start",
+            "breakout_start_bar_index",
+            "confidence",
+        ):
+            if key in match:
+                signal_data[key] = match[key]
+
         # Check cache to avoid duplicates
         if append_to_cache(context, _BREAKOUT_CACHE_KEY, [signal_data]):
             results.append(signal_data)
