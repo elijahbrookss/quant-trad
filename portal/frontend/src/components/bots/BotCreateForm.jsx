@@ -130,6 +130,7 @@ export function BotCreateForm({
                   startValue={form.backtest_start}
                   endValue={form.backtest_end}
                   onChange={onBacktestRangeChange}
+                  setDateRange={onBacktestRangeChange}
                 />
                 <p className="text-[11px] text-slate-500">Provide start/end dates to walk through history.</p>
               </div>

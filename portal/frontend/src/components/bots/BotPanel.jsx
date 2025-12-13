@@ -187,10 +187,13 @@ export function BotPanel() {
       const time = value.getTime()
       return Number.isNaN(time) ? '' : new Date(time).toISOString()
     }
+    let norm_start = normalize(start)
+    let norm_end = normalize(end)
+    
     setForm((prev) => ({
       ...prev,
-      backtest_start: normalize(start),
-      backtest_end: normalize(end),
+      backtest_start: norm_start,
+      backtest_end: norm_end,
     }))
   }, [])
 
