@@ -236,6 +236,7 @@ class IndicatorSignalExecutor:
             return None
         normalised_rules: List[str] = []
         seen: Set[str] = set()
+        requested: Set[str] = set()
         for rule_id in enabled_rules_config:
             if rule_id is None:
                 continue
@@ -246,9 +247,10 @@ class IndicatorSignalExecutor:
             if norm not in seen:
                 normalised_rules.append(norm)
                 seen.add(norm)
+                requested.update(self._expand_rule_identifier(norm))
         if normalised_rules:
             rule_config["enabled_rules"] = normalised_rules
-            return set(normalised_rules)
+            return requested
         rule_config.pop("enabled_rules", None)
         return None
 
@@ -368,10 +370,11 @@ class IndicatorSignalExecutor:
                 ]
         if len(filtered_signals) != len(signals_all):
             logger.debug(
-                "event=indicator_signal_filtered indicator=%s total=%d returned=%d",
+                "event=indicator_signal_filtered indicator=%s total=%d returned=%d requested_rules=%s",
                 cache_ctx.cache_key,
                 len(signals_all),
                 len(filtered_signals),
+                sorted(cache_ctx.requested_rule_ids) if cache_ctx.requested_rule_ids else None,
             )
         return filtered_signals
 
@@ -407,7 +410,20 @@ class IndicatorSignalExecutor:
             for alias_key in alias_keys:
                 _append(source.get(alias_key))
 
-        return identifiers
+        expanded: Set[str] = set(identifiers)
+        for identifier in identifiers:
+            expanded.update(self._expand_rule_identifier(identifier))
+
+        return expanded
+
+    @staticmethod
+    def _expand_rule_identifier(identifier: str) -> Set[str]:
+        variants = {identifier}
+        if identifier.endswith("_rule"):
+            variants.add(identifier[: -len("_rule")])
+        else:
+            variants.add(f"{identifier}_rule")
+        return variants
 
 
 __all__ = ["IndicatorSignalExecutor", "BreakoutCacheContext"]

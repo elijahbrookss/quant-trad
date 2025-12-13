@@ -227,3 +227,27 @@ def test_strategy_preview_enabled_rules_keep_alias_signals():
     filtered = executor._filter_signals([signal], cache_ctx)
 
     assert filtered == [signal]
+
+
+def test_strategy_preview_enabled_rules_accept_rule_suffix():
+    executor = IndicatorSignalExecutor()
+    signal = BaseSignal(
+        type="breakout",
+        symbol="GC",
+        time=datetime(2025, 1, 7, tzinfo=timezone.utc),
+        confidence=0.7,
+        metadata={
+            "rule_id": "market_profile_breakout",
+            "pattern_id": "value_area_breakout",
+        },
+    )
+
+    cache_ctx = BreakoutCacheContext(
+        cache_spec=None,
+        cache_key=("strategy-preview",),
+        requested_rule_ids={"market_profile_breakout_rule"},
+    )
+
+    filtered = executor._filter_signals([signal], cache_ctx)
+
+    assert filtered == [signal]
