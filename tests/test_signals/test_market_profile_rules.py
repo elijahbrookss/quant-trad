@@ -11,6 +11,7 @@ from signals.rules.market_profile import (
     market_profile_breakout_rule,
     market_profile_retest_rule,
     _BREAKOUT_CACHE_KEY,
+    _BREAKOUT_READY_FLAG,
 )
 
 
@@ -360,6 +361,21 @@ def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_v
 
     bars_since = sorted(retest["bars_since_breakout"] for retest in retests)
     assert bars_since == [1, 1]
+
+
+def test_retest_rule_uses_preinitialised_breakout_cache(sample_context, sample_value_area):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
+    # Prime breakout cache and ready flag once, simulating generator bootstrap.
+    breakouts = market_profile_breakout_rule(sample_context, sample_value_area)
+    assert breakouts, "Expected breakout cache primed before retest evaluation"
+
+    primed_context = dict(sample_context)
+    primed_context[_BREAKOUT_CACHE_KEY] = list(sample_context[_BREAKOUT_CACHE_KEY])
+    primed_context[_BREAKOUT_READY_FLAG] = True
+
+    retests = market_profile_retest_rule(primed_context, sample_value_area)
+    assert len(retests) == len(breakouts)
 
 
 def test_retest_rule_sets_canonical_rule_identifiers(sample_context, sample_value_area):

@@ -49,11 +49,9 @@ def market_profile_retest_rule(
     if df is None or getattr(df, "empty", True):
         return []
 
-    # Ensure breakouts are detected first (retest depends on breakout cache)
     if not context.get(_BREAKOUT_READY_FLAG):
-        # Import here to avoid circular dependency
-        from .breakout import market_profile_breakout_rule
-        market_profile_breakout_rule(context, payload)
+        log.debug("Retest rule | skip | reason=breakouts_not_ready")
+        return []
 
     # Evaluate retest pattern
     results = evaluate_signal_patterns(context, payload, [RETEST_PATTERN])

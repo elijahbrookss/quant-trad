@@ -346,6 +346,14 @@ def run_indicator_rules(
     context = _build_context(indicator, indicator_type, market_df, config)
     payloads = _resolve_payloads(config)
 
+    if indicator_type == "market_profile":
+        from signals.rules.market_profile._bootstrap import ensure_breakouts_ready
+
+        try:
+            ensure_breakouts_ready(context, payloads)
+        except Exception:
+            logger.exception("Failed to initialise market profile breakouts")
+
     trace = bool(config.get("trace") or config.get("log_context"))
     validate_only = bool(config.get("validate_only"))
 
