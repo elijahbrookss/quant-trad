@@ -1,5 +1,8 @@
-import pytest
 from datetime import datetime, timezone
+import logging
+
+import pytest
+
 
 from signals.base import BaseSignal
 from signals.engine import signal_generator
@@ -129,3 +132,43 @@ def test_run_indicator_rules_injects_symbol_into_context():
     run_indicator_rules(indicator_type, df, symbol="NQ")
 
     assert captured.get("symbol") == "NQ"
+
+
+def test_market_profile_indicator_injected_before_rules(monkeypatch, caplog):
+    pd = pytest.importorskip("pandas")
+    from indicators.market_profile import MarketProfileIndicator
+    from signals.rules.market_profile import market_profile_breakout_rule
+    import signals.rules.market_profile._bootstrap as bootstrap
+
+    original_breakout = market_profile_breakout_rule
+    captured_contexts = []
+
+    def capturing_breakout(context, payload):
+        captured_contexts.append(dict(context))
+        return original_breakout(context, payload)
+
+    monkeypatch.setattr(bootstrap, "market_profile_breakout_rule", capturing_breakout)
+
+    register_indicator_rules("market_profile", [capturing_breakout])
+
+    index = pd.date_range("2025-01-01 09:30", periods=3, freq="15min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 100.5, 100.2],
+            "high": [100.6, 101.0, 100.8],
+            "low": [99.8, 100.2, 100.0],
+            "close": [100.4, 100.7, 100.1],
+            "volume": [1000, 1100, 1050],
+        },
+        index=index,
+    )
+
+    indicator = MarketProfileIndicator(df)
+
+    caplog.set_level(logging.DEBUG, logger="MarketProfileBreakout")
+
+    run_indicator_rules(indicator, df, rule_payloads=[{}])
+
+    assert captured_contexts
+    assert captured_contexts[0].get("market_profile") is indicator
+    assert "No market profile data in context" not in caplog.text
