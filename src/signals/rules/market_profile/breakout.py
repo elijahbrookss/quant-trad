@@ -69,7 +69,7 @@ def market_profile_breakout_rule(
 
     # Initialize cache if needed
     if not context.get(_BREAKOUT_CACHE_INITIALISED):
-        ensure_cache(context, _BREAKOUT_CACHE_KEY)
+        ensure_cache(context, _BREAKOUT_CACHE_KEY, list)
         context[_BREAKOUT_CACHE_INITIALISED] = True
 
     # Evaluate breakout pattern
@@ -97,7 +97,7 @@ def market_profile_breakout_rule(
         }
 
         # Check cache to avoid duplicates
-        if append_to_cache(context, _BREAKOUT_CACHE_KEY, signal_data):
+        if append_to_cache(context, _BREAKOUT_CACHE_KEY, [signal_data]):
             results.append(signal_data)
 
     # Mark cache as ready
