@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
@@ -357,9 +357,11 @@ class IndicatorSignalExecutor:
     ) -> Sequence[BaseSignal]:
         filtered_signals = signals_all
         if cache_ctx.requested_rule_ids is not None:
-            filtered_signals = [
-                sig for sig in signals_all if sig.type in cache_ctx.requested_rule_ids
-            ]
+            filtered_signals = []
+            for sig in signals_all:
+                identifiers = self._collect_signal_identifiers(sig)
+                if identifiers.intersection(cache_ctx.requested_rule_ids):
+                    filtered_signals.append(sig)
             if cache_ctx.drop_breakout_from_response:
                 filtered_signals = [
                     sig for sig in filtered_signals if sig.type != "breakout"
@@ -372,6 +374,40 @@ class IndicatorSignalExecutor:
                 len(filtered_signals),
             )
         return filtered_signals
+
+    def _collect_signal_identifiers(self, signal: BaseSignal) -> Set[str]:
+        identifiers: Set[str] = set()
+
+        def _append(value: Any) -> None:
+            if isinstance(value, str):
+                normalised = value.strip().lower()
+                if normalised:
+                    identifiers.add(normalised)
+            elif isinstance(value, Iterable) and not isinstance(
+                value, (str, bytes, Mapping)
+            ):
+                for item in value:
+                    _append(item)
+
+        base_fields: Dict[str, Any] = {}
+        if getattr(signal, "type", None):
+            base_fields["type"] = signal.type
+
+        sources: List[Mapping[str, Any]] = [base_fields]
+        metadata = getattr(signal, "metadata", None)
+        if isinstance(metadata, Mapping):
+            sources.append(metadata)
+
+        keys = ("rule_id", "pattern_id", "signal_id", "pattern", "id", "type")
+        alias_keys = ("aliases", "rule_aliases", "pattern_aliases", "signal_aliases")
+
+        for source in sources:
+            for key in keys:
+                _append(source.get(key))
+            for alias_key in alias_keys:
+                _append(source.get(alias_key))
+
+        return identifiers
 
 
 __all__ = ["IndicatorSignalExecutor", "BreakoutCacheContext"]
