@@ -8,6 +8,7 @@ import pandas as pd
 
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
+from signals.overlays.schema import build_overlay
 from signals.rules.common.utils import (
     bias_label_from_direction,
     finite_float,
@@ -233,12 +234,7 @@ def market_profile_overlay_adapter(
         "bubbles": bubbles,
     }
 
-    return [
-        {
-            "type": MarketProfileIndicator.NAME,
-            "payload": payload,
-        }
-    ]
+    return [build_overlay(MarketProfileIndicator.NAME, payload)]
 
 
 __all__ = ["market_profile_overlay_adapter"]

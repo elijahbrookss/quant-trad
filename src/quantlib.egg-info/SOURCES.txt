@@ -39,10 +39,14 @@ engines/backtest/utils.py
 indicators/__init__.py
 indicators/base.py
 indicators/config.py
-indicators/market_profile.py
-indicators/pivot_level.py
-indicators/trendline.py
-indicators/vwap.py
+indicators/pivot_level/__init__.py
+indicators/pivot_level/indicator.py
+indicators/trendline/__init__.py
+indicators/trendline/indicator.py
+indicators/trendline/overlays.py
+indicators/vwap/__init__.py
+indicators/vwap/indicator.py
+indicators/vwap/overlays.py
 risk/__init__.py
 risk/math.py
 signals/__init__.py
@@ -53,6 +57,8 @@ signals/engine/market_profile/payloads.py
 signals/engine/market_profile_generator.py
 signals/engine/pivot_level_generator.py
 signals/engine/signal_generator.py
+signals/overlays/__init__.py
+signals/overlays/schema.py
 signals/rules/__init__.py
 signals/rules/breakout.py
 signals/rules/common/cache.py

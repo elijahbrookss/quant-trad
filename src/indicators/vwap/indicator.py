@@ -1,8 +1,12 @@
+from typing import List, Set, Tuple
+
 import pandas as pd
-from mplfinance.plotting import make_addplot
 from matplotlib import patches
-from indicators.base import BaseIndicator
+from mplfinance.plotting import make_addplot
+
+from indicators.base import ComputeIndicator
 from indicators.config import DataContext
+from indicators.registry import indicator
 
 def _to_unix_s(ts) -> int:
     ts = pd.Timestamp(ts)
@@ -12,7 +16,8 @@ def _to_unix_s(ts) -> int:
         ts = ts.tz_convert("UTC")
     return int(ts.timestamp())
 
-class VWAPIndicator(BaseIndicator):
+@indicator(name="vwap", inputs=["ohlcv"], outputs=["vwap", "bands"])
+class VWAPIndicator(ComputeIndicator):
     """
     Computes anchored VWAP and its rolling standard-deviation bands (VWAP ± nσ).
     """
@@ -31,7 +36,7 @@ class VWAPIndicator(BaseIndicator):
         :param stddev_multipliers: list of multipliers for band offsets.
         :param reset_by: 'D' to reset VWAP daily; any other value for cumulative.
         """
-        self.df = df.copy()
+        super().__init__(df)
         self.stddev_window = stddev_window
         self.stddev_multipliers = stddev_multipliers
         self.reset_by = reset_by
