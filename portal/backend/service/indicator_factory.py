@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, TYPE_CHECKING
 
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
@@ -13,6 +13,9 @@ from indicators.trendline import TrendlineIndicator
 from indicators.vwap import VWAPIndicator
 
 from .data_provider_resolver import DataProviderResolver, default_resolver
+
+if TYPE_CHECKING:
+    from .context import IndicatorServiceContext
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +31,36 @@ INDICATOR_MAP = {
 class IndicatorFactory:
     """Build indicator metadata and runtime instances."""
 
-    def __init__(self, resolver: Optional[DataProviderResolver] = None) -> None:
+    def __init__(
+        self,
+        resolver: Optional[DataProviderResolver] = None,
+        ctx: Optional[IndicatorServiceContext] = None
+    ) -> None:
         self._resolver = resolver or default_resolver()
+        self._ctx = ctx  # Will be set by context during initialization
 
     def build_meta_from_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
+        from .indicator_service.utils import attach_signal_catalog
+
         meta = self._coerce_record_meta(record)
-        return self._ensure_color(meta)
+        meta = self._ensure_color(meta)
+
+        # Attach signal catalog to enrich metadata with available signal rules
+        if self._ctx:
+            meta = attach_signal_catalog(meta, ctx=self._ctx)
+            logger.debug(
+                "build_meta_from_record | id=%s | type=%s | signal_rules_attached=%s",
+                meta.get("id"),
+                meta.get("type"),
+                "signal_rules" in meta
+            )
+        else:
+            logger.warning(
+                "⚠ build_meta_from_record: No context available, signal catalog not attached | id=%s",
+                record.get("id")
+            )
+
+        return meta
 
     def ensure_color(self, meta: Dict[str, Any]) -> Dict[str, Any]:
         return self._ensure_color(meta)

@@ -327,7 +327,14 @@ class StrategyDefinition:
             active_meta: Optional[Dict[str, Any]] = None
             try:
                 active_meta = get_instance_meta(identifier)
+                logger.debug(
+                    "Strategy indicator meta | indicator_id=%s | has_signal_rules=%s | count=%d",
+                    identifier,
+                    "signal_rules" in (active_meta or {}),
+                    len(active_meta.get("signal_rules", [])) if active_meta else 0
+                )
             except KeyError:
+                logger.warning("⚠ Indicator %s not found for strategy", identifier)
                 active_meta = None
             payload = {
                 "id": identifier,

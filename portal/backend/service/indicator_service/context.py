@@ -27,7 +27,9 @@ class IndicatorServiceContext:
         resolver = default_resolver()
         factory = IndicatorFactory(resolver=resolver)
         cache_manager = default_cache_manager(repository, factory=factory)
-        return cls(
+
+        # Create context first, then inject it back into factory
+        context = cls(
             repository=repository,
             resolver=resolver,
             factory=factory,
@@ -35,6 +37,11 @@ class IndicatorServiceContext:
             signal_runner=default_signal_runner(),
             breakout_cache=default_breakout_cache(),
         )
+
+        # Inject context back into factory so it can attach signal catalogs
+        factory._ctx = context
+
+        return context
 
 
 _context = IndicatorServiceContext.default()

@@ -243,18 +243,19 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
 
     const required = Array.isArray(meta.required_params) ? meta.required_params : []
     const preferred = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
-    const contextKeys = ['symbol', 'interval', 'start', 'end', 'timeframe', 'days_back']
-      .filter((key) => fieldOrder.includes(key))
+    // Exclude chart-context fields - these are runtime parameters, not indicator config
+    const chartContextKeys = new Set(['symbol', 'interval', 'start', 'end', 'timeframe'])
+    const filteredOrder = fieldOrder.filter((key) => !chartContextKeys.has(key))
 
-    const essential = new Set([...required, ...preferred, ...contextKeys])
+    const essential = new Set([...required, ...preferred])
 
-    for (const key of fieldOrder) {
-      if (essential.size >= Math.max(required.length, Math.min(fieldOrder.length, 6))) break
+    for (const key of filteredOrder) {
+      if (essential.size >= Math.max(required.length, Math.min(filteredOrder.length, 6))) break
       essential.add(key)
     }
 
-    const primary = fieldOrder.filter((key) => essential.has(key))
-    const advanced = fieldOrder.filter((key) => !essential.has(key))
+    const primary = filteredOrder.filter((key) => essential.has(key))
+    const advanced = filteredOrder.filter((key) => !essential.has(key))
 
     return { primaryKeys: primary, advancedKeys: advanced }
   }, [fieldOrder, meta])

@@ -13,10 +13,9 @@ from signals.engine.signal_generator import signal_rule
 from signals.rules.common.cache import append_to_cache, ensure_cache, mark_ready
 from signals.rules.patterns import evaluate_signal_patterns
 
-from ._evaluators.breakout_eval import (
+from ._evaluators import (
     BREAKOUT_PATTERN,
-    value_area_breakout_evaluator,
-    resolve_breakout_bar_index,
+    _resolve_breakout_bar_index,
 )
 from ._config import MarketProfileBreakoutConfig
 
@@ -77,7 +76,6 @@ def market_profile_breakout_rule(
     matches = evaluate_signal_patterns(
         df=df,
         patterns=[BREAKOUT_PATTERN],
-        evaluator=value_area_breakout_evaluator,
         evaluator_context={
             "profiles": profiles,
             "confirmation_bars": cfg.confirmation_bars,

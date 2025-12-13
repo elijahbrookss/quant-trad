@@ -110,9 +110,27 @@ def attach_signal_catalog(
     meta: Dict[str, Any], *, ctx: IndicatorServiceContext = _context
 ) -> Dict[str, Any]:
     indicator_type = meta.get("type") or meta.get("name")
+
+    logger.debug(
+        "attach_signal_catalog | meta.type=%s | meta.name=%s | resolved_type='%s'",
+        meta.get("type"),
+        meta.get("name"),
+        indicator_type
+    )
+
     if not indicator_type:
+        logger.warning("⚠ attach_signal_catalog: No indicator type in meta | meta_keys=%s", list(meta.keys()))
         return meta
+
     catalog = ctx.signal_runner.build_signal_catalog(str(indicator_type))
+
+    logger.info(
+        "attach_signal_catalog | indicator_type='%s' | catalog_size=%d | signal_ids=%s",
+        indicator_type,
+        len(catalog) if catalog else 0,
+        [s.get('id') for s in catalog] if catalog else []
+    )
+
     if catalog:
         meta["signal_rules"] = catalog
     return meta

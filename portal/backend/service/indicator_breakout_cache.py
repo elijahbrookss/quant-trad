@@ -92,37 +92,34 @@ class IndicatorBreakoutCache:
         interval: Optional[str] = None,
         symbol: Optional[str] = None,
     ) -> MarketProfileIndicator:
-        """Clone market profile indicator with overlay-specific context."""
+        """
+        Clone market profile indicator for overlay rendering.
 
-        base_symbol = getattr(indicator, "symbol", None)
-        sanitized_symbol = symbol or base_symbol
-        bin_size_locked = bool(getattr(indicator, "_bin_size_locked", False))
-        symbol_changed = sanitized_symbol is not None and sanitized_symbol != base_symbol
-        runtime_bin_size = getattr(indicator, "bin_size", None)
-        if not bin_size_locked and symbol_changed:
-            runtime_bin_size = None
+        IMPORTANT: This method reuses pre-computed profiles from the base indicator
+        instead of recomputing them from the chart's df. Market Profile profiles are
+        computed from 30m data and should work on any chart timeframe.
 
-        runtime = MarketProfileIndicator(
-            df=df.copy(),
-            bin_size=runtime_bin_size,
-            mode=getattr(indicator, "mode", "tpo"),
-            interval=interval or getattr(indicator, "interval", "30m"),
-            extend_value_area_to_chart_end=getattr(
-                indicator,
-                "extend_value_area_to_chart_end",
-                True,
-            ),
-            use_merged_value_areas=getattr(indicator, "use_merged_value_areas", True),
-            merge_threshold=getattr(indicator, "merge_threshold", 0.6),
-            min_merge_sessions=getattr(
-                indicator,
-                "min_merge_sessions",
-                getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-            ),
+        Args:
+            indicator: Base MarketProfileIndicator with pre-computed profiles
+            df: Chart's plot_df (NOT used for profile computation, only for visual boundaries)
+            interval: Chart's interval (for metadata only)
+            symbol: Chart's symbol (for metadata only)
+
+        Returns:
+            Cloned MarketProfileIndicator sharing the same profiles
+        """
+        # Clone with existing profiles (don't recompute!)
+        # Always extend value areas to chart end for overlay display
+        runtime = indicator.clone_for_overlay(
+            extend_value_area_to_chart_end=True
         )
 
-        if sanitized_symbol is not None:
-            setattr(runtime, "symbol", sanitized_symbol)
+        # Set runtime attributes for metadata
+        if symbol is not None:
+            setattr(runtime, "symbol", symbol)
+
+        if interval is not None:
+            setattr(runtime, "interval", interval)
 
         return runtime
 

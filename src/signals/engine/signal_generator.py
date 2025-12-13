@@ -98,12 +98,11 @@ def register_indicator_rules(
                 rules=tuple(rules),
                 overlay_adapter=overlay_adapter or existing.overlay_adapter,
             )
-            logger.debug(
-                "Updated %d rule(s) for indicator '%s': %s | overlay_adapter=%s",
-                len(rules),
+            logger.info(
+                "✓ Registered rules for '%s' | rules=%s | registry_keys=%s",
                 indicator_type,
-                [getattr(r, "__name__", repr(r)) for r in rules],
-                getattr(overlay_adapter or existing.overlay_adapter, "__name__", None),
+                [getattr(r, "__name__", repr(r))[:50] for r in rules],
+                sorted(_REGISTRY.keys())
             )
         return
 
@@ -119,12 +118,11 @@ def register_indicator_rules(
         rules=normalized_rules,
         overlay_adapter=overlay_adapter,
     )
-    logger.debug(
-        "Registered %d rule(s) for indicator '%s': %s | overlay_adapter=%s",
-        len(normalized_rules),
+    logger.info(
+        "✓ Registered rules for '%s' | rules=%s | registry_keys=%s",
         indicator_type,
-        [getattr(r, "__name__", repr(r)) for r in normalized_rules],
-        getattr(overlay_adapter, "__name__", None),
+        [getattr(r, "__name__", repr(r))[:50] for r in normalized_rules],
+        sorted(_REGISTRY.keys())
     )
 
 

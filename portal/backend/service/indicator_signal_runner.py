@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
 
+import logging
+
 from signals.engine.signal_generator import (
     build_signal_overlays,
     describe_indicator_rules,
     run_indicator_rules,
 )
 
+logger = logging.getLogger(__name__)
 
 _RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "market_profile": {
@@ -74,7 +77,22 @@ class IndicatorSignalRunner:
 
     def build_signal_catalog(self, indicator_type: str) -> List[Dict[str, Any]]:
         rule_meta = self.describe_rules(indicator_type)
+
+        logger.info(
+            "build_signal_catalog | indicator_type='%s' | describe_rules_returned=%d rules",
+            indicator_type,
+            len(rule_meta) if rule_meta else 0
+        )
+
         if not rule_meta:
+            logger.warning(
+                "⚠ No rules found for indicator_type='%s' | Check: "
+                "1) Rules decorated with @signal_rule('%s', ...) "
+                "2) Rules imported in src/signals/__init__.py "
+                "3) Indicator NAME matches decorator arg",
+                indicator_type,
+                indicator_type
+            )
             return []
 
         catalog: List[Dict[str, Any]] = []
