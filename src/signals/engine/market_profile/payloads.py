@@ -76,6 +76,7 @@ def build_value_area_payloads(
     indicator: MarketProfileIndicator,
     df: pd.DataFrame,
     *,
+    runtime_indicator: Optional[MarketProfileIndicator] = None,
     interval: Optional[str] = None,
     use_merged: Optional[bool] = None,
     merge_threshold: Optional[float] = None,
@@ -93,7 +94,9 @@ def build_value_area_payloads(
         return []
 
     start_time = perf_counter()
-    runtime = _clone_indicator_for_runtime(indicator, df, interval=interval)
+    runtime = runtime_indicator or _clone_indicator_for_runtime(
+        indicator, df, interval=interval
+    )
     if runtime is None:
         log.info(
             "Market profile payloads skipped | symbol=%s | reason=indicator-init",
