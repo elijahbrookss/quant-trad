@@ -13,6 +13,18 @@ from signals.rules.common.utils import format_duration
 log = logging.getLogger("MarketProfilePayloads")
 
 
+def _profiles_to_dicts(profiles: Optional[Sequence[Any]]) -> List[Dict[str, Any]]:
+    """Normalize Profile objects or mappings into payload dictionaries."""
+
+    normalized: List[Dict[str, Any]] = []
+    for profile in profiles or []:
+        if isinstance(profile, Mapping):
+            normalized.append(dict(profile))
+        elif hasattr(profile, "to_dict"):
+            normalized.append(profile.to_dict())
+    return normalized
+
+
 def _clone_indicator_for_runtime(
     indicator: MarketProfileIndicator,
     df: pd.DataFrame,
@@ -76,6 +88,7 @@ def build_value_area_payloads(
     indicator: MarketProfileIndicator,
     df: pd.DataFrame,
     *,
+    runtime_indicator: Optional[MarketProfileIndicator] = None,
     interval: Optional[str] = None,
     use_merged: Optional[bool] = None,
     merge_threshold: Optional[float] = None,
@@ -93,7 +106,9 @@ def build_value_area_payloads(
         return []
 
     start_time = perf_counter()
-    runtime = _clone_indicator_for_runtime(indicator, df, interval=interval)
+    runtime = runtime_indicator or _clone_indicator_for_runtime(
+        indicator, df, interval=interval
+    )
     if runtime is None:
         log.info(
             "Market profile payloads skipped | symbol=%s | reason=indicator-init",
@@ -118,9 +133,16 @@ def build_value_area_payloads(
             getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
         )
         min_merge = default_min_merge if min_merge_sessions is None else int(min_merge_sessions)
-        value_areas = runtime.merge_value_areas(threshold=threshold, min_merge=min_merge)
+        merged_profiles = None
+        if hasattr(runtime, "get_merged_profiles"):
+            merged_profiles = runtime.get_merged_profiles(
+                threshold=threshold, min_sessions=min_merge
+            )
+        elif hasattr(runtime, "merged_profiles"):
+            merged_profiles = runtime.merged_profiles
+        value_areas = _profiles_to_dicts(merged_profiles)
     else:
-        value_areas = runtime.daily_profiles
+        value_areas = _profiles_to_dicts(getattr(runtime, "daily_profiles", None))
 
     payloads: List[Dict[str, Any]] = []
     profile_labels: List[str] = []

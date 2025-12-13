@@ -45,6 +45,7 @@ class MarketProfileSignalGenerator(BaseSignalGenerator):
             payloads = build_value_area_payloads(
                 self.indicator,
                 df,
+                runtime_indicator=self.indicator,
                 interval=getattr(self.indicator, "interval", None),
                 use_merged=config.get("market_profile_use_merged_value_areas"),
                 merge_threshold=config.get("market_profile_merge_threshold"),

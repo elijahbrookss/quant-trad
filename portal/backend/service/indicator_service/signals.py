@@ -216,6 +216,7 @@ class IndicatorSignalExecutor:
             payloads = build_value_area_payloads(
                 instance,
                 df,
+                runtime_indicator=instance,
                 interval=interval,
                 use_merged=rule_config.get("market_profile_use_merged_value_areas"),
                 merge_threshold=rule_config.get("market_profile_merge_threshold"),

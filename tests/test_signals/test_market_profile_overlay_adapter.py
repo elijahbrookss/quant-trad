@@ -5,6 +5,7 @@ pd = pytest.importorskip("pandas")
 from datetime import datetime
 
 from indicators.market_profile import MarketProfileIndicator
+import signals.engine.market_profile.payloads as payloads_module
 from signals.base import BaseSignal
 from signals.engine.signal_generator import build_signal_overlays
 from signals.engine.market_profile_generator import build_value_area_payloads
@@ -103,11 +104,11 @@ def test_default_min_merge_consistency_between_overlay_and_signal(monkeypatch):
 
     captured_min_merge = []
 
-    def _capture_merge(self, threshold=None, min_merge=None):
-        captured_min_merge.append(min_merge)
+    def _capture_merge(self, threshold=None, min_sessions=None):
+        captured_min_merge.append(min_sessions)
         return []
 
-    monkeypatch.setattr(MarketProfileIndicator, "merge_value_areas", _capture_merge)
+    monkeypatch.setattr(MarketProfileIndicator, "get_merged_profiles", _capture_merge)
 
     indicator.to_lightweight(df, use_merged=True)
     build_value_area_payloads(indicator, df)
@@ -117,3 +118,21 @@ def test_default_min_merge_consistency_between_overlay_and_signal(monkeypatch):
         value == MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS
         for value in captured_min_merge
     ), "Default min-merge sessions should match for overlays and signals"
+
+
+def test_build_value_area_payloads_can_reuse_precomputed_indicator(monkeypatch):
+    df = _make_df()
+    indicator = MarketProfileIndicator(df)
+
+    def _fail_clone(*args, **kwargs):  # pragma: no cover - defensive
+        raise AssertionError("_clone_indicator_for_runtime should not be called")
+
+    monkeypatch.setattr(payloads_module, "_clone_indicator_for_runtime", _fail_clone)
+
+    payloads = build_value_area_payloads(
+        indicator,
+        df,
+        runtime_indicator=indicator,
+    )
+
+    assert payloads, "Expected payloads when using precomputed indicator"
