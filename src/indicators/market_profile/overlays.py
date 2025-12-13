@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
+from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
 from signals.overlays.schema import build_overlay
