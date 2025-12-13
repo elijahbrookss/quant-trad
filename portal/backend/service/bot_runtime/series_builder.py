@@ -246,7 +246,7 @@ class SeriesBuilder:
             "quote_currency",
         ):
             _apply_instrument_field(field_name)
-        risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
+        risk_engine = LadderRiskEngine(atm_template, instrument=instrument, mode=self.run_type)
         series_meta = dict(strategy)
         if instrument:
             series_meta["instrument"] = instrument

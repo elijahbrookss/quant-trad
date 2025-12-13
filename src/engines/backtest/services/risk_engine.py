@@ -40,13 +40,20 @@ class LadderRiskEngine:
         risk_sizing_strategy: Optional[RiskSizingStrategy] = None,
         stop_target_strategy: Optional[StopTargetStrategy] = None,
         order_builder: Optional[OrderTemplateBuilder] = None,
+        mode: str = "backtest",
     ):
         provided_template = config or {}
+        self.mode = mode.lower() if isinstance(mode, str) else "backtest"
         self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
+
+        # Validate template in trading modes
+        if self.mode in ("sim_trade", "paper", "live"):
+            self._validate_trading_config(self.template)
+
         default_tick = coerce_float(DEFAULT_RISK.get("tick_size"), 0.01) or 0.01
-        self.instrument_config = InstrumentConfig.from_dict(self.instrument, default_tick)
-        self.risk_config = RiskConfig.from_dict(self.template, self.instrument_config, DEFAULT_RISK)
+        self.instrument_config = InstrumentConfig.from_dict(self.instrument, default_tick, self.mode)
+        self.risk_config = RiskConfig.from_dict(self.template, self.instrument_config, DEFAULT_RISK, self.mode)
         self.order_builder = order_builder or OrderTemplateBuilder(self.template, DEFAULT_RISK)
         self.risk_sizing_strategy = risk_sizing_strategy or DefaultRiskSizingStrategy()
         self.stop_target_strategy = stop_target_strategy or DefaultStopTargetStrategy()
@@ -80,6 +87,32 @@ class LadderRiskEngine:
             self.tick_size,
             self.instrument.get("symbol"),
         )
+
+    def _validate_trading_config(self, template: Dict[str, Any]) -> None:
+        """Validate that required fields are present for trading modes."""
+        missing_fields = []
+
+        # Validate stop configuration exists
+        if not template.get("stop_ticks") and not template.get("initial_stop"):
+            missing_fields.append("stop_ticks or initial_stop")
+
+        # Validate take profit orders exist
+        if not template.get("take_profit_orders"):
+            missing_fields.append("take_profit_orders")
+
+        # Validate risk configuration
+        risk_config = template.get("risk")
+        if not isinstance(risk_config, dict):
+            missing_fields.append("risk (must be a dict)")
+        elif not risk_config.get("base_risk_per_trade"):
+            missing_fields.append("risk.base_risk_per_trade")
+
+        if missing_fields:
+            raise ValueError(
+                f"Trading mode ({self.mode}) requires complete ATM template. "
+                f"Missing fields: {', '.join(missing_fields)}. "
+                f"Defaults are only allowed in backtest mode."
+            )
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
         direction = "long" if direction == "long" else "short"
