@@ -13,6 +13,8 @@ from signals.engine.signal_generator import signal_rule
 from signals.rules.common.cache import mark_ready
 from signals.rules.patterns import evaluate_signal_patterns
 
+from ._meta import ensure_market_profile_rule_metadata
+
 from ._evaluators.retest_eval import RETEST_PATTERN
 
 log = logging.getLogger("MarketProfileRetest")
@@ -54,7 +56,15 @@ def market_profile_retest_rule(
         return []
 
     # Evaluate retest pattern
-    results = evaluate_signal_patterns(context, payload, [RETEST_PATTERN])
+    results = [
+        ensure_market_profile_rule_metadata(
+            meta,
+            rule_id=RETEST_PATTERN.rule_id or "market_profile_retest",
+            pattern_id=RETEST_PATTERN.pattern_id,
+            aliases=(RETEST_PATTERN.signal_type,),
+        )
+        for meta in evaluate_signal_patterns(context, payload, [RETEST_PATTERN])
+    ]
 
     mark_ready(context, _BREAKOUT_READY_FLAG, ready=True)
 

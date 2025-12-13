@@ -6,8 +6,15 @@ pytest.importorskip("numpy")
 
 from datetime import datetime, timezone
 
+from portal.backend.service.indicator_service.signals import (
+    BreakoutCacheContext,
+    IndicatorSignalExecutor,
+)
 from portal.backend.service.strategy_service import RuleCondition
 from portal.backend.service.strategy_service import evaluator, markers
+from signals.base import BaseSignal
+from signals.engine.signal_generator import _metadata_to_signal
+from signals.rules.market_profile._meta import ensure_market_profile_rule_metadata
 
 
 def test_market_profile_rule_aliases_match_strategy_conditions():
@@ -197,3 +204,82 @@ def test_build_chart_markers_splits_actions():
     assert chart_payload["buy"][0]["position"] == "belowBar"
     assert chart_payload["sell"][0]["shape"] == "arrowDown"
     assert chart_payload["sell"][0]["position"] == "aboveBar"
+
+
+def test_strategy_preview_enabled_rules_keep_alias_signals():
+    executor = IndicatorSignalExecutor()
+    signal = BaseSignal(
+        type="breakout",
+        symbol="CL",
+        time=datetime(2025, 1, 6, tzinfo=timezone.utc),
+        confidence=0.8,
+        metadata={
+            "rule_id": "market_profile_breakout",
+            "pattern_id": "value_area_breakout",
+            "aliases": ["mp_breakout"],
+        },
+    )
+
+    cache_ctx = BreakoutCacheContext(
+        cache_spec=None,
+        cache_key=("strategy-preview",),
+        requested_rule_ids={"market_profile_breakout"},
+    )
+
+    filtered = executor._filter_signals([signal], cache_ctx)
+
+    assert filtered == [signal]
+
+
+def test_strategy_preview_enabled_rules_accept_rule_suffix():
+    executor = IndicatorSignalExecutor()
+    signal = BaseSignal(
+        type="breakout",
+        symbol="GC",
+        time=datetime(2025, 1, 7, tzinfo=timezone.utc),
+        confidence=0.7,
+        metadata={
+            "rule_id": "market_profile_breakout",
+            "pattern_id": "value_area_breakout",
+        },
+    )
+
+    cache_ctx = BreakoutCacheContext(
+        cache_spec=None,
+        cache_key=("strategy-preview",),
+        requested_rule_ids={"market_profile_breakout_rule"},
+    )
+
+    filtered = executor._filter_signals([signal], cache_ctx)
+
+    assert filtered == [signal]
+
+
+def test_market_profile_signals_embed_rule_identifiers_for_filters():
+    executor = IndicatorSignalExecutor()
+
+    meta = ensure_market_profile_rule_metadata(
+        {
+            "type": "breakout",
+            "symbol": "CL",
+            "time": datetime(2025, 1, 8, tzinfo=timezone.utc),
+            "confidence": 0.95,
+            "metadata": {"note": "expected to keep aliases"},
+        },
+        rule_id="market_profile_breakout",
+        pattern_id="value_area_breakout",
+        aliases=("market_profile_breakout_rule",),
+    )
+
+    signal = _metadata_to_signal(meta)
+
+    cache_ctx = BreakoutCacheContext(
+        cache_spec=None,
+        cache_key=("strategy-preview",),
+        requested_rule_ids={"market_profile_breakout_rule"},
+    )
+
+    filtered = executor._filter_signals([signal], cache_ctx)
+
+    assert filtered == [signal]
+    assert "market_profile_breakout_rule" in signal.metadata.get("aliases", [])

@@ -1404,7 +1404,35 @@ class StrategyRegistry:
 
         indicator_payloads: Dict[str, Dict[str, Any]] = {}
         missing_indicators: List[str] = []
+        run_id = uuid.uuid4().hex
         base_config = dict(config or {})
+
+        def _config_diff(base: Mapping[str, Any], derived: Mapping[str, Any]) -> Dict[str, Any]:
+            diff: Dict[str, Any] = {}
+            base_keys = set(base.keys())
+            for key, value in derived.items():
+                if key not in base_keys or base.get(key) != value:
+                    diff[key] = value
+            removed = [key for key in base_keys if key not in derived]
+            if removed:
+                diff["_removed"] = sorted(removed)
+            return diff
+
+        logger.info(
+            "strategy_signal_preview_start | run_id=%s strategy=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s config_keys=%s indicator_count=%d",
+            run_id,
+            strategy_id,
+            start,
+            end,
+            interval,
+            effective_symbol,
+            effective_datasource,
+            effective_exchange,
+            sorted(base_config.keys()),
+            len(record.indicator_ids),
+        )
+
+        total_signals = 0
         for inst_id in record.indicator_ids:
             try:
                 per_config = dict(base_config)
@@ -1415,6 +1443,20 @@ class StrategyRegistry:
                         per_config["enabled_rules"] = merged_rules
                     else:
                         per_config.pop("enabled_rules", None)
+                logger.info(
+                    "strategy_signal_preview_generate | run_id=%s strategy=%s indicator=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s enabled_rules=%s config_diff=%s",
+                    run_id,
+                    strategy_id,
+                    inst_id,
+                    start,
+                    end,
+                    interval,
+                    effective_symbol,
+                    effective_datasource,
+                    effective_exchange,
+                    per_config.get("enabled_rules"),
+                    _config_diff(base_config, per_config),
+                )
                 payload = generate_signals_for_instance(
                     inst_id,
                     start=start,
@@ -1428,12 +1470,17 @@ class StrategyRegistry:
                 indicator_payloads[inst_id] = payload
                 signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
                 signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
+                total_signals += signal_count
                 error_hint = payload.get("error") if isinstance(payload, Mapping) else None
-                logger.debug(
-                    "strategy_indicator_payload | strategy=%s indicator=%s signals=%d error=%s",
+                logger.info(
+                    "strategy_signal_preview_result | run_id=%s strategy=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
+                    run_id,
                     strategy_id,
                     inst_id,
                     signal_count,
+                    start,
+                    end,
+                    interval,
                     error_hint,
                 )
                 if isinstance(signals_obj, list):
@@ -1461,12 +1508,28 @@ class StrategyRegistry:
                 continue
             except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
                 logger.warning(
-                    "strategy_indicator_signal_failed | strategy=%s indicator=%s error=%s",
+                    "strategy_signal_preview_failed | run_id=%s strategy=%s indicator=%s error=%s",
+                    run_id,
                     strategy_id,
                     inst_id,
                     exc,
                 )
                 indicator_payloads[inst_id] = {"error": str(exc)}
+
+        logger.info(
+            "strategy_signal_preview_complete | run_id=%s strategy=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s indicators=%d missing=%s total_signals=%d",
+            run_id,
+            strategy_id,
+            start,
+            end,
+            interval,
+            effective_symbol,
+            effective_datasource,
+            effective_exchange,
+            len(record.indicator_ids),
+            missing_indicators,
+            total_signals,
+        )
 
         rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
         for res in rule_results:

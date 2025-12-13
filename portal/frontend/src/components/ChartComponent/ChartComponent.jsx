@@ -41,6 +41,38 @@ const clampLookbackDays = (value) => {
   return Math.max(1, Math.min(MAX_LOOKBACK_DAYS, rounded));
 };
 
+// localStorage helpers for chart preferences
+const CHART_PREFS_KEY = 'qt.chartPreferences';
+
+const hasLocalStorage = () => {
+  try {
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch {
+    return false;
+  }
+};
+
+const loadChartPreferences = () => {
+  if (!hasLocalStorage()) return null;
+  try {
+    const raw = window.localStorage.getItem(CHART_PREFS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const saveChartPreferences = (prefs) => {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.setItem(CHART_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // Ignore persistence issues (private browsing, quota exceeded, etc.)
+  }
+};
+
 const deriveTimeScaleOptions = (rawInterval) => {
   const interval = (rawInterval || '').toString().toLowerCase();
   const base = { timeVisible: true, secondsVisible: false };
@@ -222,30 +254,39 @@ export const ChartComponent = ({ chartId }) => {
   const { registerChart, updateChart, bumpRefresh } = useChartState();
   const chartState = useChartValue(chartId);
 
-  // Local UI state.
-  const [symbol, setSymbol] = useState('CL');
-  const [symbolDraft, setSymbolDraft] = useState('CL');
-  const [interval, setInterval] = useState('15m');
+  // Load saved preferences on mount
+  const savedPrefs = useMemo(() => loadChartPreferences(), []);
+
+  // Local UI state with localStorage fallback
+  const [symbol, setSymbol] = useState(() => savedPrefs?.symbol || 'CL');
+  const [symbolDraft, setSymbolDraft] = useState(() => savedPrefs?.symbol || 'CL');
+  const [interval, setInterval] = useState(() => savedPrefs?.interval || '15m');
   const [providers, setProviders] = useState([]);
   const [providersLoading, setProvidersLoading] = useState(false);
-  const [providerId, setProviderId] = useState('');
-  const [venueId, setVenueId] = useState('');
-  const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
-  const [exchange, setExchange] = useState('');
+  const [providerId, setProviderId] = useState(() => savedPrefs?.providerId || '');
+  const [venueId, setVenueId] = useState(() => savedPrefs?.venueId || '');
+  const [datasource, setDatasource] = useState(() => savedPrefs?.datasource || DEFAULT_DATASOURCE);
+  const [exchange, setExchange] = useState(() => savedPrefs?.exchange || '');
   const [palOpen, setPalOpen] = useState(false);
   const [dateRange, setDateRange] = useState([
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
     new Date(),
   ]);
   const [historicalWindowMode, setHistoricalWindowMode] = useState(
-    HISTORICAL_WINDOW_MODES.LOOKBACK,
+    () => savedPrefs?.historicalWindowMode || HISTORICAL_WINDOW_MODES.LOOKBACK,
   );
-  const [historicalLookbackDays, setHistoricalLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
+  const [historicalLookbackDays, setHistoricalLookbackDays] = useState(
+    () => savedPrefs?.historicalLookbackDays || DEFAULT_LOOKBACK_DAYS
+  );
   const [historicalLookbackInput, setHistoricalLookbackInput] = useState(
-    String(DEFAULT_LOOKBACK_DAYS),
+    () => String(savedPrefs?.historicalLookbackDays || DEFAULT_LOOKBACK_DAYS)
   );
-  const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
-  const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
+  const [liveLookbackDays, setLiveLookbackDays] = useState(
+    () => savedPrefs?.liveLookbackDays || DEFAULT_LOOKBACK_DAYS
+  );
+  const [liveLookbackInput, setLiveLookbackInput] = useState(
+    () => String(savedPrefs?.liveLookbackDays || DEFAULT_LOOKBACK_DAYS)
+  );
   const [dataLoading, setDataLoading] = useState(false);
   const [dataLoaderContext, setDataLoaderContext] = useState(null);
   const [rangeWarning, setRangeWarning] = useState(null);
@@ -287,6 +328,32 @@ export const ChartComponent = ({ chartId }) => {
     const normalized = String(clampLookbackDays(liveLookbackDays));
     setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
   }, [historicalLookbackDays, liveLookbackDays]);
+
+  // Save chart preferences to localStorage whenever they change
+  useEffect(() => {
+    const prefs = {
+      symbol,
+      interval,
+      datasource,
+      providerId,
+      venueId,
+      exchange,
+      historicalWindowMode,
+      historicalLookbackDays,
+      liveLookbackDays,
+    };
+    saveChartPreferences(prefs);
+  }, [
+    symbol,
+    interval,
+    datasource,
+    providerId,
+    venueId,
+    exchange,
+    historicalWindowMode,
+    historicalLookbackDays,
+    liveLookbackDays,
+  ]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;

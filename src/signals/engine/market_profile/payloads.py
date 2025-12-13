@@ -37,16 +37,12 @@ def _clone_indicator_for_runtime(
         return None
 
     try:
+        # MarketProfileIndicator.__init__ accepts: df, bin_size, use_merged_value_areas,
+        # merge_threshold, min_merge_sessions, extend_value_area_to_chart_end, days_back
+        # Note: 'interval' and 'mode' are NOT __init__ parameters
         runtime = MarketProfileIndicator(
             df=df.copy(),
-            bin_size=getattr(indicator, "bin_size", 0.1),
-            mode=getattr(indicator, "mode", "tpo"),
-            interval=interval or getattr(indicator, "interval", "30m"),
-            extend_value_area_to_chart_end=getattr(
-                indicator,
-                "extend_value_area_to_chart_end",
-                True,
-            ),
+            bin_size=getattr(indicator, "bin_size", None),  # None = auto-infer
             use_merged_value_areas=getattr(
                 indicator,
                 "use_merged_value_areas",
@@ -57,6 +53,16 @@ def _clone_indicator_for_runtime(
                 indicator,
                 "min_merge_sessions",
                 getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
+            ),
+            extend_value_area_to_chart_end=getattr(
+                indicator,
+                "extend_value_area_to_chart_end",
+                True,
+            ),
+            days_back=getattr(
+                indicator,
+                "days_back",
+                getattr(MarketProfileIndicator, "DEFAULT_DAYS_BACK", 180),
             ),
         )
     except Exception:
@@ -105,6 +111,15 @@ def build_value_area_payloads(
         )
         return []
 
+    log.info(
+        "Market profile payload generation | symbol=%s | df_shape=%s | df_start=%s | df_end=%s | runtime_provided=%s",
+        symbol,
+        df.shape if df is not None else None,
+        df.index[0] if df is not None and not df.empty else None,
+        df.index[-1] if df is not None and not df.empty else None,
+        runtime_indicator is not None,
+    )
+
     start_time = perf_counter()
     runtime = runtime_indicator or _clone_indicator_for_runtime(
         indicator, df, interval=interval
@@ -121,6 +136,10 @@ def build_value_area_payloads(
     else:
         use_merged = bool(use_merged)
 
+    # Get daily profiles count before merging
+    daily_profiles = getattr(runtime, "daily_profiles", None) or getattr(runtime, "_profiles", None)
+    daily_count = len(daily_profiles) if daily_profiles else 0
+
     if use_merged:
         threshold = (
             getattr(runtime, "merge_threshold", 0.6)
@@ -133,6 +152,17 @@ def build_value_area_payloads(
             getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
         )
         min_merge = default_min_merge if min_merge_sessions is None else int(min_merge_sessions)
+
+        log.info(
+            "Market profile merge params | symbol=%s | use_merged=True | threshold=%s | min_merge_sessions=%s | daily_profiles=%d | param_source=[threshold_from_config=%s, min_sessions_from_config=%s]",
+            symbol,
+            threshold,
+            min_merge,
+            daily_count,
+            merge_threshold is not None,
+            min_merge_sessions is not None,
+        )
+
         merged_profiles = None
         if hasattr(runtime, "get_merged_profiles"):
             merged_profiles = runtime.get_merged_profiles(
@@ -141,8 +171,20 @@ def build_value_area_payloads(
         elif hasattr(runtime, "merged_profiles"):
             merged_profiles = runtime.merged_profiles
         value_areas = _profiles_to_dicts(merged_profiles)
+
+        log.info(
+            "Market profile merge result | symbol=%s | daily_profiles=%d | merged_profiles=%d",
+            symbol,
+            daily_count,
+            len(value_areas),
+        )
     else:
         value_areas = _profiles_to_dicts(getattr(runtime, "daily_profiles", None))
+        log.info(
+            "Market profile no merge | symbol=%s | use_merged=False | daily_profiles=%d",
+            symbol,
+            daily_count,
+        )
 
     payloads: List[Dict[str, Any]] = []
     profile_labels: List[str] = []
@@ -162,13 +204,24 @@ def build_value_area_payloads(
     else:
         session_summary = ""
 
+    # Log detailed payload info for debugging signal generation differences
+    payload_summary = []
+    for p in payloads[:3]:  # First 3 for diagnostics
+        payload_summary.append({
+            "value_area_id": p.get("value_area_id"),
+            "VAH": p.get("VAH"),
+            "VAL": p.get("VAL"),
+            "POC": p.get("POC"),
+        })
+
     log.info(
-        "Market profile payloads ready | symbol=%s | profiles=%d | merged=%s | duration=%s%s",
+        "Market profile payloads ready | symbol=%s | profiles=%d | merged=%s | duration=%s%s | sample_payloads=%s",
         symbol,
         len(payloads),
         use_merged,
         format_duration(elapsed),
         session_summary,
+        payload_summary if payloads else "[]",
     )
 
     return payloads
