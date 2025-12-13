@@ -52,6 +52,44 @@ def sample_context(sample_market_profile_df):
     }
 
 
+def test_breakout_rule_uses_resolved_config(monkeypatch):
+    index = pd.date_range("2025-01-01 09:30", periods=2, freq="15min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 100.5],
+            "high": [100.2, 100.7],
+            "low": [99.8, 100.1],
+            "close": [100.1, 100.6],
+        },
+        index=index,
+    )
+
+    class DummyIndicatorData:
+        daily_profiles = [object()]
+
+    captured_context = {}
+
+    def fake_evaluate_signal_patterns(*, df, patterns, evaluator_context):
+        captured_context["context"] = evaluator_context
+        return []
+
+    monkeypatch.setattr(
+        "signals.rules.market_profile.breakout.evaluate_signal_patterns",
+        fake_evaluate_signal_patterns,
+    )
+
+    context = {
+        "df": df,
+        "market_profile": DummyIndicatorData(),
+        "market_profile_breakout_confirmation_bars": 4,
+    }
+
+    result = market_profile_breakout_rule(context, payload={})
+
+    assert result == []
+    assert captured_context["context"]["confirmation_bars"] == 4
+
+
 def test_breakout_evaluator_detects_multiple_events(sample_context, sample_value_area, sample_market_profile_df):
     sample_context["market_profile_breakout_confirmation_bars"] = 1
 

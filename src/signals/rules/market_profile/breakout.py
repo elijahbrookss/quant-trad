@@ -17,7 +17,7 @@ from ._evaluators import (
     BREAKOUT_PATTERN,
     _resolve_breakout_bar_index,
 )
-from ._config import MarketProfileBreakoutConfig
+from ._config import resolve_breakout_config
 
 log = logging.getLogger("MarketProfileBreakout")
 
@@ -50,7 +50,7 @@ def market_profile_breakout_rule(
     Returns:
         List of signal dictionaries
     """
-    cfg = MarketProfileBreakoutConfig.from_context(context)
+    breakout_config = resolve_breakout_config(context)
     df = context.get("df")
     if df is None or df.empty:
         return []
@@ -78,13 +78,13 @@ def market_profile_breakout_rule(
         patterns=[BREAKOUT_PATTERN],
         evaluator_context={
             "profiles": profiles,
-            "confirmation_bars": cfg.confirmation_bars,
+            "confirmation_bars": breakout_config.confirmation_bars,
         },
     )
 
     results = []
     for match in matches:
-        bar_index = resolve_breakout_bar_index(match, df, cfg.confirmation_bars)
+        bar_index = _resolve_breakout_bar_index(match, df)
         if bar_index is None:
             continue
 
