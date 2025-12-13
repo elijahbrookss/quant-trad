@@ -172,3 +172,103 @@ def test_market_profile_indicator_injected_before_rules(monkeypatch, caplog):
     assert captured_contexts
     assert captured_contexts[0].get("market_profile") is indicator
     assert "No market profile data in context" not in caplog.text
+
+
+def test_market_profile_breakout_uses_list_cache(monkeypatch):
+    import sys
+    import types
+
+    if "pandas" not in sys.modules:
+        sys.modules["pandas"] = types.SimpleNamespace(
+            DataFrame=object,
+            Timestamp=object,
+            Timedelta=lambda *_, **__: None,
+        )
+
+    # Provide lightweight stubs for indicator package imports to avoid optional dependencies.
+    if "indicators.market_profile" not in sys.modules:
+        indicators_mod = types.ModuleType("indicators")
+        indicators_mod.__path__ = []
+        market_profile_mod = types.ModuleType("indicators.market_profile")
+
+        pivot_mod = types.ModuleType("indicators.pivot_level")
+
+        class _DummyLevel:
+            ...
+
+        class _DummyPivotIndicator:
+            ...
+
+        pivot_mod.Level = _DummyLevel
+        pivot_mod.PivotLevelIndicator = _DummyPivotIndicator
+
+        class _DummyIndicator:
+            NAME = "market_profile"
+
+            def __init__(self, *_args, **_kwargs):
+                self.daily_profiles = []
+
+        market_profile_mod.MarketProfileIndicator = _DummyIndicator
+        indicators_mod.market_profile = market_profile_mod
+        sys.modules.setdefault("indicators.pivot_level", pivot_mod)
+        sys.modules.setdefault("indicators", indicators_mod)
+        sys.modules.setdefault("indicators.market_profile", market_profile_mod)
+
+    from signals.rules.market_profile import breakout as breakout_module
+
+    calls = {}
+    appended = []
+
+    def fake_ensure_cache(context, key, default_factory, *, ready_flag=None, initialised_flag=None):
+        calls["default_factory_type"] = type(default_factory())
+        calls["ready_flag"] = ready_flag
+        calls["initialised_flag"] = initialised_flag
+        context.setdefault(key, default_factory())
+        return context
+
+    def fake_append_to_cache(context, key, items):
+        snapshot = list(items)
+        appended.append(snapshot)
+        cache = context.get(key)
+        if isinstance(cache, list):
+            cache.extend(snapshot)
+        else:
+            context[key] = snapshot
+        return context
+
+    monkeypatch.setattr(breakout_module, "ensure_cache", fake_ensure_cache)
+    monkeypatch.setattr(breakout_module, "append_to_cache", fake_append_to_cache)
+    monkeypatch.setattr(breakout_module, "_resolve_breakout_bar_index", lambda *_, **__: 0)
+    monkeypatch.setattr(
+        breakout_module,
+        "resolve_breakout_config",
+        lambda ctx: type("Cfg", (), {"confirmation_bars": 1})(),
+    )
+    monkeypatch.setattr(
+        breakout_module,
+        "evaluate_signal_patterns",
+        lambda **kwargs: [
+            {"direction": "up", "level_type": "VAH", "level_price": 101.0}
+        ],
+    )
+
+    class DummyIndicator:
+        daily_profiles = [object()]
+
+        def __bool__(self):
+            return True
+
+    class DummyFrame:
+        empty = False
+
+    context = {"df": DummyFrame(), "market_profile": DummyIndicator()}
+
+    results = breakout_module.market_profile_breakout_rule(context, payload={})
+
+    assert calls["default_factory_type"] is list
+    assert calls["ready_flag"] is None
+    assert calls["initialised_flag"] is None
+    assert breakout_module._BREAKOUT_CACHE_KEY in context
+    assert appended and appended[0][0]["level_type"] == "VAH"
+    assert results and results[0]["direction"] == "up"
+    assert context.get(breakout_module._BREAKOUT_READY_FLAG) is True
