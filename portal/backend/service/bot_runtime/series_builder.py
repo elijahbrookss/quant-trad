@@ -11,7 +11,6 @@ from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..atm import DEFAULT_ATM_TEMPLATE, merge_templates
 from .domain import (
-    DEFAULT_RISK,
     Candle,
     LadderRiskEngine,
     StrategySignal,
@@ -246,7 +245,7 @@ class SeriesBuilder:
             "quote_currency",
         ):
             _apply_instrument_field(field_name)
-        risk_engine = LadderRiskEngine(atm_template, instrument=instrument, mode=self.run_type)
+        risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
         series_meta = dict(strategy)
         if instrument:
             series_meta["instrument"] = instrument
@@ -536,6 +535,6 @@ class SeriesBuilder:
         return candles
 
     def _resolve_risk_template(self, strategy: Mapping[str, Any]) -> Dict[str, Any]:
-        bot_risk = self.config.get("risk") or DEFAULT_RISK
+        bot_risk = self.config.get("risk") or {}
         strategy_risk = strategy.get("risk") or {}
         return merge_templates(DEFAULT_ATM_TEMPLATE, bot_risk, strategy_risk)

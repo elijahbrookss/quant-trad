@@ -21,14 +21,6 @@ from .orders import OrderTemplateBuilder
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RISK = {
-    "contracts": 3,
-    "targets": [20, 40, 60],
-    "stop_ticks": 30,
-    "breakeven_trigger_ticks": 20,
-    "tick_size": 0.01,
-}
-
 
 class LadderRiskEngine:
     """Create and manage laddered trades for simulated bots."""
@@ -40,21 +32,18 @@ class LadderRiskEngine:
         risk_sizing_strategy: Optional[RiskSizingStrategy] = None,
         stop_target_strategy: Optional[StopTargetStrategy] = None,
         order_builder: Optional[OrderTemplateBuilder] = None,
-        mode: str = "backtest",
     ):
         provided_template = config or {}
-        self.mode = mode.lower() if isinstance(mode, str) else "backtest"
         self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
 
-        # Validate template in trading modes
-        if self.mode in ("sim_trade", "paper", "live"):
-            self._validate_trading_config(self.template)
+        # Always validate template - same for all modes (backtest, sim_trade, paper, live)
+        self._validate_template(self.template)
+        self._validate_instrument(self.instrument)
 
-        default_tick = coerce_float(DEFAULT_RISK.get("tick_size"), 0.01) or 0.01
-        self.instrument_config = InstrumentConfig.from_dict(self.instrument, default_tick, self.mode)
-        self.risk_config = RiskConfig.from_dict(self.template, self.instrument_config, DEFAULT_RISK, self.mode)
-        self.order_builder = order_builder or OrderTemplateBuilder(self.template, DEFAULT_RISK)
+        self.instrument_config = InstrumentConfig.from_dict(self.instrument)
+        self.risk_config = RiskConfig.from_dict(self.template, self.instrument_config)
+        self.order_builder = order_builder or OrderTemplateBuilder(self.template)
         self.risk_sizing_strategy = risk_sizing_strategy or DefaultRiskSizingStrategy()
         self.stop_target_strategy = stop_target_strategy or DefaultStopTargetStrategy()
 
@@ -88,13 +77,13 @@ class LadderRiskEngine:
             self.instrument.get("symbol"),
         )
 
-    def _validate_trading_config(self, template: Dict[str, Any]) -> None:
-        """Validate that required fields are present for trading modes."""
+    def _validate_template(self, template: Dict[str, Any]) -> None:
+        """Validate that required fields are present in template - same for all modes."""
         missing_fields = []
 
         # Validate stop configuration exists
-        if not template.get("stop_ticks") and not template.get("initial_stop"):
-            missing_fields.append("stop_ticks or initial_stop")
+        if not template.get("initial_stop"):
+            missing_fields.append("initial_stop")
 
         # Validate take profit orders exist
         if not template.get("take_profit_orders"):
@@ -109,9 +98,19 @@ class LadderRiskEngine:
 
         if missing_fields:
             raise ValueError(
-                f"Trading mode ({self.mode}) requires complete ATM template. "
-                f"Missing fields: {', '.join(missing_fields)}. "
-                f"Defaults are only allowed in backtest mode."
+                f"Incomplete ATM template. Missing required fields: {', '.join(missing_fields)}. "
+                f"All modes (backtest/sim_trade/paper/live) require complete templates."
+            )
+
+    def _validate_instrument(self, instrument: Dict[str, Any]) -> None:
+        """Validate that instrument configuration is complete."""
+        if not instrument:
+            raise ValueError("Instrument configuration is required. Cannot proceed without instrument metadata.")
+
+        if not instrument.get("tick_size"):
+            raise ValueError(
+                "Instrument configuration must include tick_size. "
+                "This is required for accurate position sizing and PnL calculation."
             )
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:

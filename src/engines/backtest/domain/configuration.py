@@ -24,20 +24,17 @@ class InstrumentConfig:
     quote_currency: str = "USD"
 
     @classmethod
-    def from_dict(
-        cls, instrument: Optional[Dict[str, Any]], default_tick_size: float, mode: str = "backtest"
-    ) -> "InstrumentConfig":
+    def from_dict(cls, instrument: Optional[Dict[str, Any]]) -> "InstrumentConfig":
         instrument = instrument or {}
-        tick_size = coerce_float(instrument.get("tick_size"), default_tick_size) or default_tick_size
 
-        # In trading modes, require explicit tick_size from instrument
-        if mode in ("sim_trade", "paper", "live"):
-            explicit_tick = instrument.get("tick_size") if instrument else None
-            if explicit_tick is None:
-                raise ValueError(
-                    f"Trading mode ({mode}) requires explicit tick_size in instrument configuration. "
-                    f"Cannot use default tick_size. Please ensure instrument metadata is complete."
-                )
+        # Always require tick_size from instrument - no defaults
+        tick_size = coerce_float(instrument.get("tick_size"))
+        if not tick_size or tick_size <= 0:
+            raise ValueError(
+                "Instrument configuration must include a valid tick_size. "
+                "No default tick_size is provided to ensure accurate pricing."
+            )
+
         contract_size = coerce_float(instrument.get("contract_size"), 1.0) or 1.0
         tick_value = coerce_float(instrument.get("tick_value"))
         if tick_value in (None, 0):
@@ -57,7 +54,7 @@ class InstrumentConfig:
         return cls(
             tick_size=float(tick_size),
             contract_size=float(contract_size),
-            tick_value=float(tick_value) if tick_value is not None else float(default_tick_size),
+            tick_value=float(tick_value) if tick_value is not None else float(tick_size),
             risk_multiplier=coerce_float(instrument.get("risk_multiplier"), 1.0) or 1.0,
             min_qty=float(min_qty) if min_qty not in (None, 0) else None,
             qty_step=float(qty_step) if qty_step not in (None, 0) else None,
@@ -121,16 +118,13 @@ class RiskConfig:
         cls,
         template: Optional[Dict[str, Any]],
         instrument: InstrumentConfig,
-        defaults: Dict[str, Any],
-        mode: str = "backtest",
     ) -> "RiskConfig":
         template = template or {}
         config_tick = coerce_float(template.get("tick_size"))
-        fallback_tick = coerce_float(defaults.get("tick_size"), 0.01) or 0.01
         tick_size = (
             float(config_tick)
             if config_tick not in (None, 0)
-            else float(instrument.tick_size or fallback_tick)
+            else float(instrument.tick_size)
         )
 
         initial_stop_config = template.get("initial_stop")
@@ -148,8 +142,7 @@ class RiskConfig:
         ticks_stop = int(
             template.get("ticks_stop")
             or template.get("stop_ticks")
-            or defaults.get("stop_ticks")
-            or 1
+            or 0  # Will be validated below
         )
         config_tick_value = coerce_float(template.get("tick_value"))
         tick_value = (
@@ -170,23 +163,23 @@ class RiskConfig:
         quote_value = template.get("quote_currency") or instrument.quote_currency or "USD"
 
         base_risk = coerce_float(risk_config.get("base_risk_per_trade"))
-        stop_ticks_value = int(template.get("stop_ticks") or defaults.get("stop_ticks") or 1)
+        stop_ticks_value = int(template.get("stop_ticks") or 0)
 
-        # Validate critical fields in trading modes
-        if mode in ("sim_trade", "paper", "live"):
-            validation_errors = []
+        # Always validate critical fields - same for all modes (backtest, sim_trade, paper, live)
+        validation_errors = []
 
-            if base_risk is None or base_risk <= 0:
-                validation_errors.append("risk.base_risk_per_trade must be a positive number")
+        if base_risk is None or base_risk <= 0:
+            validation_errors.append("risk.base_risk_per_trade must be a positive number")
 
-            if stop_ticks_value <= 0:
-                validation_errors.append("stop_ticks must be positive")
+        if stop_ticks_value <= 0:
+            validation_errors.append("stop_ticks must be positive")
 
-            if validation_errors:
-                raise ValueError(
-                    f"Trading mode ({mode}) requires valid risk configuration. "
-                    f"Errors: {'; '.join(validation_errors)}"
-                )
+        if validation_errors:
+            raise ValueError(
+                f"Incomplete or invalid risk configuration. "
+                f"Errors: {'; '.join(validation_errors)}. "
+                f"All modes (backtest/sim_trade/paper/live) require complete templates."
+            )
 
         return cls(
             tick_size=tick_size,

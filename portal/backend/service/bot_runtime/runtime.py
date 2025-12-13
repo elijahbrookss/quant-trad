@@ -15,7 +15,6 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence
 from .. import risk_math, storage, strategy_service
 from ..candle_service import fetch_ohlcv
 from .domain import (
-    DEFAULT_RISK,
     Candle,
     LadderRiskEngine,
     StrategySignal,
@@ -1382,5 +1381,4 @@ class BotRuntime:
 
 __all__ = [
     "BotRuntime",
-    "DEFAULT_RISK",
 ]

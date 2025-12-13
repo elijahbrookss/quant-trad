@@ -14,14 +14,6 @@ from ..atm import merge_templates
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RISK = {
-    "contracts": 3,
-    "targets": [20, 40, 60],
-    "stop_ticks": 30,
-    "breakeven_trigger_ticks": 20,
-    "tick_size": 0.01,
-}
-
 _TIMEFRAME_MULTIPLIERS = {
     "s": 1,
     "m": 60,
@@ -487,28 +479,27 @@ class LadderRiskEngine:
         self,
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
-        mode: str = "backtest",
     ):
         provided_template = config or {}
-        self.mode = mode.lower() if isinstance(mode, str) else "backtest"
         self.template = merge_templates(provided_template)
-
-        # Validate template in trading modes
-        if self.mode in ("sim_trade", "paper", "live"):
-            self._validate_trading_config(self.template, instrument)
         self.instrument = instrument or {}
+
+        # Always validate - same for all modes (backtest, sim_trade, paper, live)
+        self._validate_template(self.template)
+        self._validate_instrument(self.instrument)
+
         config_tick = coerce_float(provided_template.get("tick_size"))
         instrument_tick = coerce_float(self.instrument.get("tick_size"))
-        fallback_tick = coerce_float(DEFAULT_RISK.get("tick_size"), 0.01)
         if config_tick not in (None, 0):
             self.tick_size = float(config_tick)
         elif instrument_tick not in (None, 0):
             self.tick_size = float(instrument_tick)
-        elif fallback_tick not in (None, 0):
-            self.tick_size = float(fallback_tick)
         else:
-            self.tick_size = 0.01
-        self.stop_ticks = int(self.template.get("stop_ticks") or DEFAULT_RISK["stop_ticks"])
+            raise ValueError("tick_size required from either template or instrument configuration")
+
+        self.stop_ticks = int(self.template.get("stop_ticks") or 0)
+        if self.stop_ticks <= 0:
+            raise ValueError("stop_ticks must be a positive integer")
 
         initial_stop_config = self.template.get("initial_stop")
         if not isinstance(initial_stop_config, dict):
@@ -547,8 +538,7 @@ class LadderRiskEngine:
         self.ticks_stop = int(
             self.template.get("ticks_stop")
             or self.template.get("stop_ticks")
-            or DEFAULT_RISK.get("stop_ticks")
-            or 1
+            or self.stop_ticks  # Already validated above
         )
         self.global_risk_multiplier = coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
         self.instrument_risk_multiplier = coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
@@ -581,18 +571,13 @@ class LadderRiskEngine:
             self.instrument.get("symbol"),
         )
 
-    def _validate_trading_config(self, template: Dict[str, Any], instrument: Optional[Dict[str, Any]]) -> None:
-        """Validate that required fields are present for trading modes."""
+    def _validate_template(self, template: Dict[str, Any]) -> None:
+        """Validate that required fields are present in template - same for all modes."""
         missing_fields = []
 
-        # Validate instrument tick_size
-        if instrument:
-            if not instrument.get("tick_size"):
-                missing_fields.append("instrument.tick_size")
-
         # Validate stop configuration exists
-        if not template.get("stop_ticks") and not template.get("initial_stop"):
-            missing_fields.append("stop_ticks or initial_stop")
+        if not template.get("initial_stop"):
+            missing_fields.append("initial_stop")
 
         # Validate take profit orders exist
         if not template.get("take_profit_orders"):
@@ -607,9 +592,19 @@ class LadderRiskEngine:
 
         if missing_fields:
             raise ValueError(
-                f"Trading mode ({self.mode}) requires complete ATM template and instrument configuration. "
-                f"Missing fields: {', '.join(missing_fields)}. "
-                f"Defaults are only allowed in backtest mode."
+                f"Incomplete ATM template. Missing required fields: {', '.join(missing_fields)}. "
+                f"All modes (backtest/sim_trade/paper/live) require complete templates."
+            )
+
+    def _validate_instrument(self, instrument: Dict[str, Any]) -> None:
+        """Validate that instrument configuration is complete."""
+        if not instrument:
+            raise ValueError("Instrument configuration is required. Cannot proceed without instrument metadata.")
+
+        if not instrument.get("tick_size"):
+            raise ValueError(
+                "Instrument configuration must include tick_size. "
+                "This is required for accurate position sizing and PnL calculation."
             )
 
     def _orders_from_template(self) -> List[Dict[str, Any]]:
@@ -867,5 +862,4 @@ __all__ = [
     "isoformat",
     "timeframe_duration",
     "timeframe_to_seconds",
-    "DEFAULT_RISK",
 ]

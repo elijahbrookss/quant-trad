@@ -6,12 +6,10 @@ from .domain import (
     LadderRiskEngine,
     Leg,
     StrategySignal,
-    DEFAULT_RISK,
 )
 from .series_builder import StrategySeries
 __all__ = [
     "BotRuntime",
-    "DEFAULT_RISK",
     "Candle",
     "LadderPosition",
     "LadderRiskEngine",

@@ -7,7 +7,7 @@ trading strategies in simulation mode.
 from .domain.models import Candle, Leg, StrategySignal
 from .domain.position import LadderPosition
 from .domain.series import StrategySeries
-from .services.risk_engine import DEFAULT_RISK, LadderRiskEngine
+from .services.risk_engine import LadderRiskEngine
 from .utils import (
     coerce_float,
     instrument_key,
@@ -25,7 +25,6 @@ __all__ = [
     "LadderPosition",
     # Risk Engine
     "LadderRiskEngine",
-    "DEFAULT_RISK",
     # Series
     "StrategySeries",
     # Utilities

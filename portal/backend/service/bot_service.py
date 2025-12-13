@@ -11,7 +11,7 @@ import logging
 
 from . import instrument_service
 from .atm import DEFAULT_ATM_TEMPLATE, merge_templates, template_metrics
-from .bot_runtime import BotRuntime, DEFAULT_RISK
+from .bot_runtime import BotRuntime
 from .bot_stream import BotStreamManager
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
 

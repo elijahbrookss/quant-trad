@@ -1,8 +1,7 @@
 """Engine package exports."""
 
-from .backtest import DEFAULT_RISK, LadderRiskEngine
+from .backtest import LadderRiskEngine
 
 __all__ = [
-    "DEFAULT_RISK",
     "LadderRiskEngine",
 ]
