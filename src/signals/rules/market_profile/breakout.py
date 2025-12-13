@@ -50,7 +50,7 @@ def market_profile_breakout_rule(
     Returns:
         List of signal dictionaries
     """
-    breakout_config = resolve_breakout_config(context)
+    resolve_breakout_config(context)
     df = context.get("df")
     if df is None or df.empty:
         return []
@@ -69,18 +69,11 @@ def market_profile_breakout_rule(
 
     # Initialize cache if needed
     if not context.get(_BREAKOUT_CACHE_INITIALISED):
-        ensure_cache(context, _BREAKOUT_CACHE_KEY)
+        ensure_cache(context, _BREAKOUT_CACHE_KEY, list)
         context[_BREAKOUT_CACHE_INITIALISED] = True
 
     # Evaluate breakout pattern
-    matches = evaluate_signal_patterns(
-        df=df,
-        patterns=[BREAKOUT_PATTERN],
-        evaluator_context={
-            "profiles": profiles,
-            "confirmation_bars": breakout_config.confirmation_bars,
-        },
-    )
+    matches = evaluate_signal_patterns(context, payload, [BREAKOUT_PATTERN])
 
     results = []
     for match in matches:
@@ -88,16 +81,49 @@ def market_profile_breakout_rule(
         if bar_index is None:
             continue
 
+        signal_time = match.get("time") or match.get("breakout_time") or match.get("trigger_time")
+        if signal_time is None:
+            log.debug("Breakout rule | skip | reason=no_time | match=%s", match)
+            continue
+
         signal_data = {
             "bar_index": bar_index,
             "direction": match.get("direction"),
             "level_type": match.get("level_type"),
             "level_price": match.get("level_price"),
+            "time": signal_time,
+            "type": match.get("type") or match.get("pattern_id") or "market_profile_breakout",
             "metadata": match,
         }
 
+        # Preserve value area/session metadata for downstream retest evaluation.
+        for key in (
+            "value_area_id",
+            "value_area_start",
+            "value_area_end",
+            "value_area_start_index",
+            "value_area_end_index",
+            "value_area_range",
+            "value_area_mid",
+            "VAH",
+            "VAL",
+            "POC",
+            "breakout_direction",
+            "pointer_direction",
+            "symbol",
+            "source",
+            "trigger_time",
+            "trigger_index_label",
+            "trigger_bar_index",
+            "breakout_start",
+            "breakout_start_bar_index",
+            "confidence",
+        ):
+            if key in match:
+                signal_data[key] = match[key]
+
         # Check cache to avoid duplicates
-        if append_to_cache(context, _BREAKOUT_CACHE_KEY, signal_data):
+        if append_to_cache(context, _BREAKOUT_CACHE_KEY, [signal_data]):
             results.append(signal_data)
 
     # Mark cache as ready

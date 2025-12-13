@@ -5,6 +5,7 @@ import pytest
 pd = pytest.importorskip("pandas")
 
 from indicators.market_profile import MarketProfileIndicator
+from signals.rules.common.utils import value_area_identifier
 from signals.rules.market_profile import (
     _value_area_breakout_evaluator,
     _detect_value_area_retest,
@@ -361,6 +362,36 @@ def test_retest_rule_emits_retests_for_cached_breakouts(sample_context, sample_v
 
     bars_since = sorted(retest["bars_since_breakout"] for retest in retests)
     assert bars_since == [1, 1]
+
+
+def test_retest_rule_matches_breakouts_by_value_area_id(sample_context, sample_value_area):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
+    value_area = dict(sample_value_area)
+    value_area["value_area_id"] = value_area_identifier(sample_value_area)
+
+    breakouts = market_profile_breakout_rule(sample_context, value_area)
+    assert breakouts, "Expected breakout cache entries for retest evaluation"
+
+    retests = market_profile_retest_rule(sample_context, value_area)
+    assert retests, "Expected retests for matching value area"
+
+    assert {retest.get("value_area_id") for retest in retests} == {value_area["value_area_id"]}
+
+
+def test_retest_rule_skips_breakouts_when_sessions_differ(sample_context, sample_value_area):
+    sample_context["market_profile_breakout_confirmation_bars"] = 1
+
+    value_area = dict(sample_value_area)
+    value_area["value_area_id"] = value_area_identifier(sample_value_area)
+    market_profile_breakout_rule(sample_context, value_area)
+
+    other_value_area = dict(sample_value_area)
+    other_value_area["start"] = other_value_area["start"] - pd.Timedelta(days=30)
+    other_value_area["value_area_id"] = value_area_identifier(other_value_area)
+
+    retests = market_profile_retest_rule(sample_context, other_value_area)
+    assert retests == []
 
 
 def test_retest_rule_uses_preinitialised_breakout_cache(sample_context, sample_value_area):

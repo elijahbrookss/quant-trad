@@ -68,8 +68,12 @@ class IndicatorSignalExecutor:
         )
         filtered = self._filter_signals(signals_all, cache_ctx)
         self._persist_breakout_cache(signals_all, cache_ctx, inst_id)
+        overlays = self._ctx.signal_runner.build_overlays(
+            entry.instance, filtered, df, **rule_config
+        )
         payload = ensure_color(dict(entry.meta), ctx=self._ctx)
         payload["signals"] = filtered
+        payload["overlays"] = overlays
         return payload
 
     def _load_entry(
