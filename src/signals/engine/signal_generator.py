@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
@@ -382,11 +383,9 @@ def run_indicator_rules(
     active_rules = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
 
     signals: List[BaseSignal] = []
-    market_profile_counts = {"breakouts": 0, "retests": 0}
     total_rules = len(active_rules)
     for r_idx, rule in enumerate(active_rules):
         rule_name = getattr(rule, "__name__", repr(rule))
-        rule_id = getattr(rule, "signal_id", rule_name)
         t_rule_start = time.perf_counter()
         logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
 
@@ -447,26 +446,14 @@ def run_indicator_rules(
             "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
             rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
         )
-        if indicator_type == "market_profile":
-            if rule_id == "market_profile_breakout":
-                market_profile_counts["breakouts"] += rule_emitted
-                logger.info(
-                    "Market profile breakout checks complete | emitted=%d",
-                    rule_emitted,
-                )
-            elif rule_id == "market_profile_retest":
-                market_profile_counts["retests"] += rule_emitted
-                logger.info(
-                    "Market profile retest checks complete | emitted=%d",
-                    rule_emitted,
-                )
 
     if indicator_type == "market_profile":
+        type_counts = Counter(sig.type for sig in signals if getattr(sig, "type", None))
         logger.info(
             "Market profile signal summary | total=%d | breakouts=%d | retests=%d",
             len(signals),
-            market_profile_counts["breakouts"],
-            market_profile_counts["retests"],
+            type_counts.get("breakout", 0),
+            type_counts.get("retest", 0),
         )
 
     logger.info(

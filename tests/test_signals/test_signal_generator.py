@@ -357,7 +357,5 @@ def test_market_profile_signal_logging_summary(monkeypatch, caplog):
     assert breakout_called["payload"] == {"foo": "bar"}
     assert len(signals) == 3
     assert "Signal run triggered | indicator=market_profile | payloads=1" in caplog.text
-    assert "Market profile breakout checks complete | emitted=2" in caplog.text
-    assert "Market profile retest checks complete | emitted=1" in caplog.text
     assert "Market profile signal summary | total=3 | breakouts=2 | retests=1" in caplog.text
     assert "Signal run complete | indicator=market_profile | total_signals=3" in caplog.text
