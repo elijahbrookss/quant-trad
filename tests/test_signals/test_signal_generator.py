@@ -1,7 +1,33 @@
 from datetime import datetime, timezone
 import logging
+import sys
+import types
 
 import pytest
+
+if "pandas" not in sys.modules:
+    class _DummyTimestamp:
+        def __init__(self, value=None):
+            self._value = value
+            self.tzinfo = getattr(value, "tzinfo", None)
+            try:
+                self.value = int(value.timestamp() * 10**9) if value is not None else 0
+            except Exception:
+                self.value = 0
+
+        def tz_convert(self, *_args, **_kwargs):
+            return self
+
+        def tz_localize(self, *_args, **_kwargs):
+            return self
+
+    sys.modules["pandas"] = types.SimpleNamespace(
+        __spec__=None,
+        DataFrame=object,
+        Timestamp=_DummyTimestamp,
+        Timedelta=lambda *_, **__: None,
+        isna=lambda value: value is None,
+    )
 
 
 from signals.base import BaseSignal
@@ -111,6 +137,34 @@ def test_build_signal_overlays_uses_registered_adapter():
     ]
     assert called["signals"] == [dummy_signal]
     assert called["plot_df_shape"] == df.shape
+
+
+def test_build_signal_overlays_fallback_bubbles():
+    class NoOverlayIndicator:
+        NAME = "FallbackBubbleIndicator"
+
+    signal = BaseSignal(
+        type="breakout",
+        symbol="ES",
+        time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        confidence=0.5,
+        metadata={"level_price": 101.0, "direction": "above"},
+    )
+
+    def noop_rule(context, payload):
+        return []
+
+    register_indicator_rules(NoOverlayIndicator.NAME, [noop_rule])
+
+    overlays = signal_generator.build_signal_overlays(
+        NoOverlayIndicator.NAME, [signal], [signal.time]
+    )
+
+    assert overlays, "Expected fallback overlays when adapter returns none"
+    bubble_payload = overlays[0]["payload"]["bubbles"][0]
+    assert bubble_payload["subtype"] == "bubble"
+    assert bubble_payload["price"] == 101.0
+    assert bubble_payload["time"] == int(signal.time.timestamp())
 
 
 def test_run_indicator_rules_injects_symbol_into_context():

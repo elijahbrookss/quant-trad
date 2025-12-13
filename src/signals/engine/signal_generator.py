@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
 from signals.base import BaseSignal
-from signals.overlays.schema import normalize_overlays
+from signals.overlays.schema import build_overlay, normalize_overlays
+from signals.rules.common.utils import bias_label_from_direction, clean_numeric, to_epoch_seconds
 
 
 import time
@@ -481,8 +482,10 @@ def build_signal_overlays(
 
     adapter = registration.overlay_adapter
     if adapter is None:
-        logger.debug("No overlay adapter registered for '%s' -> returning []", indicator_type)
-        return []
+        logger.debug(
+            "No overlay adapter registered for '%s' -> returning fallback bubbles", indicator_type
+        )
+        return _signals_to_bubbles(indicator_type, signals)
 
     logger.debug(
         "Building overlays | indicator=%s | signals=%d | plot_df=%s | kwargs=%s",
@@ -490,16 +493,87 @@ def build_signal_overlays(
     )
     try:
         raw_overlays = list(adapter(signals, plot_df, **kwargs))
-        overlays = normalize_overlays(indicator_type, raw_overlays)
     except Exception:
         logger.exception("Overlay adapter error | indicator=%s", indicator_type)
         return []
 
-    logger.debug(
-        "Built %d overlay artefact(s) for indicator '%s'",
-        len(overlays), indicator_type
-    )
-    return overlays
+    overlays = normalize_overlays(indicator_type, raw_overlays)
+    if overlays:
+        logger.debug(
+            "Built %d overlay artefact(s) for indicator '%s'",
+            len(overlays), indicator_type
+        )
+        return overlays
+
+    fallback_overlays = _signals_to_bubbles(indicator_type, signals)
+    if fallback_overlays:
+        logger.debug(
+            "Overlay adapter returned none; emitted %d fallback bubble overlay(s) for indicator '%s'",
+            len(fallback_overlays),
+            indicator_type,
+        )
+    return fallback_overlays
+
+
+def _signals_to_bubbles(
+    indicator_type: str, signals: Sequence[BaseSignal]
+) -> List[Mapping[str, Any]]:
+    """Fallback bubble overlays when no adapter output is available."""
+
+    bubbles: List[Mapping[str, Any]] = []
+    for sig in signals:
+        meta = sig.metadata or {}
+        marker_time = to_epoch_seconds(getattr(sig, "time", None))
+        price = _resolve_signal_price(meta)
+
+        if marker_time is None or price is None:
+            continue
+
+        direction = meta.get("pointer_direction") or meta.get("direction")
+        label = meta.get("pattern_label") or f"{(sig.type or 'Signal').title()}"
+        detail = meta.get("pattern_description") or meta.get("rule_id") or sig.type
+        accent = _accent_for_direction(direction)
+        bubble_payload: Dict[str, Any] = {
+            "time": marker_time,
+            "price": float(price),
+            "label": label,
+            "detail": detail,
+            "direction": direction,
+            "accentColor": accent,
+            "backgroundColor": "rgba(14,165,233,0.2)",
+            "subtype": "bubble",
+        }
+
+        bias = bias_label_from_direction(direction)
+        if bias:
+            bubble_payload["bias"] = bias
+
+        bubbles.append(bubble_payload)
+
+    if not bubbles:
+        return []
+
+    payload = {"bubbles": bubbles, "markers": [], "price_lines": [], "polylines": []}
+    return [build_overlay(indicator_type, payload)]
+
+
+def _resolve_signal_price(metadata: Mapping[str, Any]) -> Optional[float]:
+    """Best-effort extraction of a numeric price for bubble overlays."""
+
+    for key in ("price", "level_price", "trigger_close", "close", "value"):
+        price = clean_numeric(metadata.get(key))
+        if price is not None:
+            return price
+    return None
+
+
+def _accent_for_direction(direction: Optional[str]) -> str:
+    hint = (direction or "").lower()
+    if hint in {"up", "above", "long", "buy"}:
+        return "#22c55e"
+    if hint in {"down", "below", "short", "sell"}:
+        return "#f43f5e"
+    return "#38bdf8"
 
 
 
