@@ -10,7 +10,7 @@ PIP         := $(VENV)/bin/pip
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
-CHANGELOG_MODEL ?= llama3.1
+CHANGELOG_MODEL ?= gpt-oss:20b
 
 UVICORN_APP ?= portal.backend.main:app
 UVICORN_OPTS?= --reload --host 0.0.0.0 --port 8000
@@ -267,8 +267,8 @@ changelog-pr: ## Generate changelog using the first open PR for the current bran
 	release_name=$${RELEASE_NAME:-$$pr_title}; \
 	dry_flag=$${DRY_RUN:+--dry-run}; \
 	config_path=$${CHANGELOG_CONFIG:-scripts/automation/config/prompts.yaml}; \
-	echo "📝 Writing diff for $$base_ref...$$head_ref to $$diff_file"; \
-	git log --no-merges --pretty=format:'%h%n%s%n%b%n---' "$$base_ref...$$head_ref" > "$$diff_file"; \
+	echo "📝 Writing diff for $$base_ref..$$head_ref to $$diff_file"; \
+	git log  --pretty=format:'%h%n%s%n%b%n---' "$$base_ref..$$head_ref" > "$$diff_file"; \
 	if [ ! -s "$$diff_file" ]; then echo "⚠️ Generated diff is empty"; exit 1; fi; \
 	echo "🚀 Generating changelog for PR $$pr_number (head: $$head_ref, base: $$base_ref)"; \
 	PYTHONPATH=scripts $(PY) scripts/automation/llm_changelog.py --diff-file "$$diff_file" --branch "$$head_ref" --release-name "$$release_name" --model "$$model" --config "$$config_path" $$dry_flag
