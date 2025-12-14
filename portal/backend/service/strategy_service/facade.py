@@ -64,8 +64,10 @@ delete_symbol_preset = persistence.delete_symbol_preset
 load_atm_templates = persistence.list_atm_templates
 get_atm_template = persistence.get_atm_template
 upsert_atm_template = persistence.upsert_atm_template
-link_strategy_template = persistence.link_strategy_template
 build_chart_markers = markers.build_chart_markers
+storage_upsert_strategy_instrument = persistence.upsert_strategy_instrument
+storage_delete_strategy_instrument = persistence.delete_strategy_instrument
+storage_list_strategy_instrument_symbols = persistence.list_strategy_instrument_symbols
 
 
 def _risk_fields_from_template(template: Optional[Mapping[str, Any]]) -> Dict[str, Optional[float]]:
@@ -358,14 +360,27 @@ class StrategyDefinition:
         for slot in self.instruments:
             symbol = slot.symbol
             record: Optional[Dict[str, Any]] = None
-            try:
-                record = instrument_service.resolve_instrument(
-                    self.datasource,
-                    self.exchange,
-                    symbol,
-                )
-            except Exception:
-                record = None
+            # Prefer an explicit instrument id stored on the slot metadata.
+            inst_id = None
+            if isinstance(slot.metadata, dict):
+                inst_id = slot.metadata.get("instrument_id")
+            if inst_id:
+                try:
+                    record = instrument_service.get_instrument_record(str(inst_id))
+                except Exception:
+                    record = None
+
+            # Fallback to resolving by provider identifiers and symbol
+            if record is None:
+                try:
+                    record = instrument_service.resolve_instrument(
+                        self.datasource,
+                        self.exchange,
+                        symbol,
+                    )
+                except Exception:
+                    record = None
+
             if record:
                 instruments.append({**slot.to_dict(), **record})
             else:
@@ -378,6 +393,17 @@ class StrategyDefinition:
                         }
                     )
 
+        # Derive a simple `symbols` array for frontend consumption. Prefer DB-derived
+        # authoritative symbols from the persisted instrument rows (via strategy links).
+        symbols_list: List[str] = []
+        try:
+            symbols_list = storage_list_strategy_instrument_symbols(self.id)
+        except Exception:
+            symbols_list = []
+        # Fallback to in-memory slot symbols if DB-derived list is empty
+        if not symbols_list:
+            symbols_list = [slot.symbol for slot in self.instruments if slot.symbol]
+
         # Fetch ATM template from storage if template_id is set
         atm_template = None
         if self.atm_template_id:
@@ -389,7 +415,7 @@ class StrategyDefinition:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": list(self.symbols),
+            "symbols": self.symbols,
             "instrument_slots": [slot.to_dict() for slot in self.instruments],
             "timeframe": self.timeframe,
             "datasource": self.datasource,
@@ -416,7 +442,7 @@ class StrategyDefinition:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": [slot.to_dict() for slot in self.instruments],
+            # Legacy `symbols` column removed from storage; instrument links are persisted separately.
             "timeframe": self.timeframe,
             "datasource": self.datasource,
             "exchange": self.exchange,
@@ -435,14 +461,7 @@ class StrategyDefinition:
         if "description" in fields:
             description = fields["description"]
             self.description = str(description).strip() if description else None
-        if "symbols" in fields and fields["symbols"] is not None:
-            slots: List[InstrumentSlot] = []
-            for raw_symbol in fields["symbols"]:
-                slot = InstrumentSlot.from_any(raw_symbol)
-                if slot.symbol:
-                    slots.append(slot)
-            if slots:
-                self.instruments = slots
+        # legacy `symbols` field removed; prefer `instrument_slots`
         if "instrument_slots" in fields and fields["instrument_slots"] is not None:
             slots: List[InstrumentSlot] = []
             for raw_slot in fields["instrument_slots"]:
@@ -513,8 +532,29 @@ class StrategyRegistry:
             strategy_id = str(entry.get("id") or "").strip()
             if not strategy_id:
                 continue
-            raw_symbols = entry.get("symbols") or []
-            slots = [InstrumentSlot.from_any(symbol) for symbol in raw_symbols]
+            # Prefer instrument links when available (normalised many-to-many).
+            raw_inst_links = entry.get("instrument_links") or []
+            slots = []
+            if raw_inst_links:
+                for link in raw_inst_links:
+                    inst_id = str(link.get("instrument_id") or "").strip()
+                    snapshot = link.get("instrument_snapshot") or {}
+                    symbol = snapshot.get("symbol") or None
+                    if not symbol and inst_id:
+                        try:
+                            rec = instrument_service.get_instrument_record(inst_id)
+                            symbol = rec.get("symbol")
+                        except Exception:
+                            symbol = None
+                    if not symbol:
+                        continue
+                    slot = InstrumentSlot(symbol=symbol)
+                    # Preserve instrument identity in slot metadata for future ops
+                    slot.metadata = {**(slot.metadata or {}), "instrument_id": inst_id, **(snapshot or {})}
+                    slots.append(slot)
+            else:
+                raw_symbols = entry.get("symbols") or []
+                slots = [InstrumentSlot.from_any(symbol) for symbol in raw_symbols]
             base = StrategyDefinition(
                 id=strategy_id,
                 name=str(entry.get("name") or strategy_id).strip(),
@@ -523,7 +563,7 @@ class StrategyRegistry:
                 timeframe=str(entry.get("timeframe") or "15m"),
                 datasource=entry.get("datasource"),
                 exchange=entry.get("exchange"),
-                indicator_ids=list(entry.get("indicator_ids") or []),
+                indicator_ids=[],
             )
             base.created_at = _parse_timestamp(entry.get("created_at"))
             base.updated_at = _parse_timestamp(entry.get("updated_at"))
@@ -681,21 +721,42 @@ class StrategyRegistry:
         self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
-        if record.atm_template_id:
-            link_strategy_template(strategy_id, record.atm_template_id)
         for inst_id in record.indicator_ids:
             storage_upsert_strategy_indicator(
                 strategy_id=strategy_id,
                 indicator_id=inst_id,
                 snapshot=record.indicator_snapshots.get(inst_id, {}),
             )
+        # Persist instrument links for any resolved instruments
+        for slot in record.instruments:
+            inst_id = slot.metadata.get("instrument_id") if isinstance(slot.metadata, dict) else None
+            instrument_rec = None
+            if inst_id:
+                try:
+                    instrument_rec = instrument_service.get_instrument_record(inst_id)
+                except Exception:
+                    instrument_rec = None
+            else:
+                try:
+                    instrument_rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
+                except Exception:
+                    instrument_rec = None
+            if instrument_rec:
+                storage_upsert_strategy_instrument(
+                    strategy_id=strategy_id,
+                    instrument_id=instrument_rec.get("id"),
+                    snapshot=instrument_rec,
+                )
         logger.info("strategy_created | id=%s name=%s", strategy_id, clean_name)
         return record.to_dict()
 
     def update(self, strategy_id: str, **fields: Any) -> Dict[str, Any]:
         """Update an existing strategy and return its payload."""
-
         record = self.get(strategy_id)
+        # Capture previous instrument slots and provider context for diffing
+        old_slots = [InstrumentSlot.from_any(slot.to_dict() if hasattr(slot, "to_dict") else slot) for slot in record.instruments]
+        old_datasource = record.datasource
+        old_exchange = record.exchange
         if fields.get("atm_template") is not None:
             normalised_template = normalise_template(fields.get("atm_template"), require_template=True)
             risk_fields = _risk_fields_from_template(normalised_template)
@@ -711,8 +772,6 @@ class StrategyRegistry:
             )
             record.atm_template_id = saved_template.get("id")
         record.update(**fields)
-        if record.atm_template_id:
-            link_strategy_template(strategy_id, record.atm_template_id)
         if record.instruments:
             record.risk_overrides = {
                 slot.symbol: slot.risk_multiplier
@@ -721,6 +780,46 @@ class StrategyRegistry:
             }
         self._sync_instruments(record)
         storage_upsert_strategy(record.to_storage_payload())
+        # Persist instrument link changes: upsert new links, delete removed links
+        try:
+            # Resolve previous instrument ids
+            def _resolve_slot_id(slot: InstrumentSlot, datasource: Optional[str], exchange: Optional[str]) -> Optional[str]:
+                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
+                    return str(slot.metadata.get("instrument_id"))
+                try:
+                    rec = instrument_service.resolve_instrument(datasource, exchange, slot.symbol)
+                    return rec.get("id") if rec else None
+                except Exception:
+                    return None
+
+            old_ids = {i for i in (_resolve_slot_id(s, old_datasource, old_exchange) for s in old_slots) if i}
+            new_ids = set()
+            for slot in record.instruments:
+                inst_id = None
+                if isinstance(slot.metadata, dict) and slot.metadata.get("instrument_id"):
+                    inst_id = str(slot.metadata.get("instrument_id"))
+                else:
+                    try:
+                        rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
+                        inst_id = rec.get("id") if rec else None
+                    except Exception:
+                        inst_id = None
+                if inst_id:
+                    new_ids.add(inst_id)
+                    # upsert snapshot
+                    try:
+                        rec = instrument_service.get_instrument_record(inst_id)
+                    except Exception:
+                        rec = None
+                    if rec:
+                        storage_upsert_strategy_instrument(strategy_id=strategy_id, instrument_id=inst_id, snapshot=rec)
+
+            # delete removed links
+            for removed in (old_ids - new_ids):
+                storage_delete_strategy_instrument(strategy_id, removed)
+        except Exception:
+            # Fail silently on resolution errors; main strategy update should still succeed
+            pass
         logger.info("strategy_updated | id=%s", strategy_id)
         return record.to_dict()
 
@@ -1278,7 +1377,6 @@ def save_atm_template(template: Mapping[str, Any]) -> Dict[str, Any]:
     request_payload = {
         "id": template.get("id"),
         "name": name,
-        "owner_id": template.get("owner_id"),
         "template": normalized,
     }
     return upsert_atm_template(request_payload)
@@ -1397,4 +1495,3 @@ def delete_symbol_preset_service(preset_id: str) -> None:
     """Delete a stored preset."""
 
     delete_symbol_preset(preset_id)
-

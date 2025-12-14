@@ -775,7 +775,7 @@ function StrategyFormModal({
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    if (currentStep !== 2) return
+    if (currentStep < 2) return
     const fallbackName = `Strategy ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`
     const name = form.name.trim() || fallbackName
     const rawGlobalRisk = riskSettings.globalRiskMultiplier
@@ -1537,7 +1537,7 @@ function StrategyFormModal({
                   {prefetchingMeta || providersLoading ? 'Loading…' : 'Next'}
                 </ActionButton>
               )}
-              {currentStep === 2 && (
+              {currentStep >= 2 && (
                 <ActionButton type="submit" disabled={submitting}>
                   {submitting ? 'Saving…' : 'Save strategy'}
                 </ActionButton>
@@ -2963,4 +2963,3 @@ const StrategyTab = ({ chartId }) => {
 }
 
 export default StrategyTab
-

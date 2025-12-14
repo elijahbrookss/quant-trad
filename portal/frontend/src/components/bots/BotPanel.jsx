@@ -14,7 +14,6 @@ import { BotPerformanceModal } from './BotPerformanceModal.jsx'
 import { BotCreateModal, buildDefaultForm } from './BotCreateForm.jsx'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
-import { cloneATMTemplate, DEFAULT_ATM_TEMPLATE } from '../atm/ATMConfigForm.jsx'
 
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
 
@@ -206,14 +205,6 @@ export function BotPanel() {
     })
   }
 
-  const handleATMTemplateChange = useCallback((template) => {
-    setForm((prev) => ({ ...prev, atm_template: cloneATMTemplate(template) }))
-  }, [])
-
-  const toggleCustomATM = () => {
-    setForm((prev) => ({ ...prev, use_custom_atm: !prev.use_custom_atm }))
-  }
-
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
@@ -230,14 +221,10 @@ export function BotPanel() {
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
     try {
-      const { use_custom_atm, atm_template, ...rest } = form
       const payloadBody = {
-        ...rest,
+        ...form,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
-      }
-      if (use_custom_atm) {
-        payloadBody.risk = atm_template
       }
       const payload = await createBot(payloadBody)
       console.info('[BotPanel] bot created', { id: payload?.id })
@@ -246,10 +233,6 @@ export function BotPanel() {
         ...buildDefaultForm(),
         strategy_ids: prev.strategy_ids,
         run_type: prev.run_type,
-        atm_template: use_custom_atm
-          ? cloneATMTemplate(atm_template)
-          : cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
-        use_custom_atm: use_custom_atm && Boolean(payloadBody.risk),
       }))
       closeCreateModal()
     } catch (err) {
@@ -523,11 +506,8 @@ export function BotPanel() {
           onChange={handleChange}
           onBacktestRangeChange={handleBacktestRangeChange}
           onStrategyToggle={handleStrategyToggle}
-          onATMTemplateChange={handleATMTemplateChange}
-          onToggleCustomATM={toggleCustomATM}
           error={createError}
         />
       </section>
     )
   }
-

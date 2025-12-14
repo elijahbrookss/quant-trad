@@ -35,8 +35,7 @@ class IndicatorRecord(Base):
     type = Column(String(128), nullable=False)
     params = Column(JSON, nullable=False, default=dict)
     color = Column(String(64), nullable=True)
-    datasource = Column(String(64), nullable=True)
-    exchange = Column(String(64), nullable=True)
+    # datasource and exchange removed; indicators are compute-only definitions
     enabled = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -50,8 +49,7 @@ class IndicatorRecord(Base):
             "type": self.type,
             "params": self.params or {},
             "color": self.color,
-            "datasource": self.datasource,
-            "exchange": self.exchange,
+            
             "enabled": bool(self.enabled),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
@@ -66,11 +64,10 @@ class StrategyRecord(Base):
     id = Column(String(64), primary_key=True)
     name = Column(String(255), nullable=False)
     description = Column(String(1024), nullable=True)
-    symbols = Column(JSON, nullable=False, default=list)
     timeframe = Column(String(32), nullable=False)
-    datasource = Column(String(64), nullable=True)
-    exchange = Column(String(64), nullable=True)
-    indicator_ids = Column(JSON, nullable=False, default=list)
+    datasource = Column(String(64), nullable=False)
+    exchange = Column(String(64), nullable=False)
+    # indicator_ids removed — attachments are stored in portal_strategy_indicators
     atm_template_id = Column(String(64), nullable=True)
     base_risk_per_trade = Column(Float, nullable=True)
     global_risk_multiplier = Column(Float, nullable=True)
@@ -94,12 +91,13 @@ class StrategyRecord(Base):
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": list(self.symbols or []),
-            "symbol_names": _symbol_names(self.symbols),
+            # legacy `symbols` column removed from DB; registry/service layer will derive slots
+            "symbols": [],
+            "symbol_names": [],
             "timeframe": self.timeframe,
             "datasource": self.datasource,
             "exchange": self.exchange,
-            "indicator_ids": list(self.indicator_ids or []),
+            "indicator_links": [],
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
             "global_risk_multiplier": self.global_risk_multiplier,
@@ -171,6 +169,33 @@ class StrategyIndicatorLink(Base):
         }
 
 
+class StrategyInstrumentLink(Base):
+    """Join table linking strategies to persisted instruments."""
+
+    __tablename__ = "portal_strategy_instruments"
+
+    id = Column(String(64), primary_key=True)
+    strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False)
+    instrument_id = Column(String(64), nullable=False)
+    instrument_snapshot = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "instrument_id", name="uq_strategy_instrument"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "strategy_id": self.strategy_id,
+            "instrument_id": self.instrument_id,
+            "instrument_snapshot": self.instrument_snapshot or {},
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
 class ATMTemplateRecord(Base):
     """Persisted ATM templates for reuse across strategies."""
 
@@ -178,12 +203,11 @@ class ATMTemplateRecord(Base):
 
     id = Column(String(64), primary_key=True)
     name = Column(String(255), nullable=False)
-    owner_id = Column(String(64), nullable=True)
     template = Column(JSON, nullable=False, default=dict)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    __table_args__ = (UniqueConstraint("name", "owner_id", name="uq_atm_template_owner_name"),)
+    __table_args__ = (UniqueConstraint("name", name="uq_atm_template_name"),)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the ATM template payload."""
@@ -191,37 +215,7 @@ class ATMTemplateRecord(Base):
         return {
             "id": self.id,
             "name": self.name,
-            "owner_id": self.owner_id,
             "template": self.template or {},
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
-            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
-
-class StrategyATMTemplateLink(Base):
-    """Join table linking strategies to their selected ATM templates."""
-
-    __tablename__ = "portal_strategy_atm_templates"
-
-    id = Column(String(64), primary_key=True)
-    strategy_id = Column(
-        String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False
-    )
-    template_id = Column(
-        String(64), ForeignKey("portal_atm_templates.id", ondelete="CASCADE"), nullable=False
-    )
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    __table_args__ = (UniqueConstraint("strategy_id", name="uq_strategy_template_link"),)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a serialisable mapping."""
-
-        return {
-            "id": self.id,
-            "strategy_id": self.strategy_id,
-            "template_id": self.template_id,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -320,9 +314,6 @@ class BotRecord(Base):
     id = Column(String(64), primary_key=True)
     name = Column(String(255), nullable=False)
     strategy_id = Column(String(64), nullable=True)
-    datasource = Column(String(64), nullable=True)
-    exchange = Column(String(64), nullable=True)
-    timeframe = Column(String(32), nullable=False, default="15m")
     mode = Column(String(32), nullable=False, default="instant")
     run_type = Column(String(32), nullable=False, default="backtest")
     playback_speed = Column("fetch_seconds", Float, nullable=False, default=10.0)
@@ -342,9 +333,7 @@ class BotRecord(Base):
             "id": self.id,
             "name": self.name,
             "strategy_id": self.strategy_id,
-            "datasource": self.datasource,
-            "exchange": self.exchange,
-            "timeframe": self.timeframe,
+            
             "mode": self.mode,
             "run_type": self.run_type,
             "playback_speed": float(self.playback_speed if self.playback_speed is not None else 10.0),
@@ -357,40 +346,6 @@ class BotRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
-
-
-class BotStrategyLink(Base):
-    """Join table linking bots to one or more strategies."""
-
-    __tablename__ = "portal_bot_strategies"
-
-    id = Column(String(64), primary_key=True)
-    bot_id = Column(
-        String(64),
-        ForeignKey("portal_bots.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    strategy_id = Column(
-        String(64),
-        ForeignKey("portal_strategies.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    __table_args__ = (
-        UniqueConstraint("bot_id", "strategy_id", name="uq_bot_strategy"),
-    )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Return a serialisable mapping for the bot-strategy pair."""
-
-        return {
-            "id": self.id,
-            "bot_id": self.bot_id,
-            "strategy_id": self.strategy_id,
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
 
 class BotTradeRecord(Base):
     """Database row representing a laddered trade generated by a bot."""
@@ -411,7 +366,6 @@ class BotTradeRecord(Base):
     gross_pnl = Column(Float, nullable=True)
     fees_paid = Column(Float, nullable=True)
     net_pnl = Column(Float, nullable=True)
-    quote_currency = Column(String(16), nullable=True)
     metrics = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -434,7 +388,6 @@ class BotTradeRecord(Base):
             "gross_pnl": self.gross_pnl,
             "fees_paid": self.fees_paid,
             "net_pnl": self.net_pnl,
-            "quote_currency": self.quote_currency,
             "metrics": dict(self.metrics or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
@@ -459,9 +412,7 @@ class BotTradeEventRecord(Base):
     leg = Column(String(64), nullable=True)
     contracts = Column(Integer, nullable=True)
     price = Column(Float, nullable=True)
-    ticks = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
-    quote_currency = Column(String(16), nullable=True)
     event_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -478,9 +429,7 @@ class BotTradeEventRecord(Base):
             "leg": self.leg,
             "contracts": self.contracts,
             "price": self.price,
-            "ticks": self.ticks,
             "pnl": self.pnl,
-            "quote_currency": self.quote_currency,
             "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }

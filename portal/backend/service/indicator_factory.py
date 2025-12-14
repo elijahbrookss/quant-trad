@@ -65,7 +65,7 @@ class IndicatorFactory:
     def ensure_color(self, meta: Dict[str, Any]) -> Dict[str, Any]:
         return self._ensure_color(meta)
 
-    def build_indicator_instance(self, meta: Mapping[str, Any]):
+    def build_indicator_instance(self, meta: Mapping[str, Any], *, datasource: Optional[str] = None, exchange: Optional[str] = None):
         inst_id = str(meta.get("id") or "").strip()
         type_str = str(meta.get("type") or "").strip()
         Cls = INDICATOR_MAP.get(type_str)
@@ -85,8 +85,17 @@ class IndicatorFactory:
                 f"Indicator {inst_id} missing required context: {', '.join(missing)}"
             )
 
-        datasource = self._resolver.normalize_datasource(meta.get("datasource"))
-        exchange = self._resolver.normalize_exchange(meta.get("exchange"))
+        # Allow caller to override provider selection with explicit datasource/exchange
+        if datasource is None:
+            datasource = self._resolver.normalize_datasource(meta.get("datasource"))
+        else:
+            datasource = self._resolver.normalize_datasource(datasource)
+
+        if exchange is None:
+            exchange = self._resolver.normalize_exchange(meta.get("exchange"))
+        else:
+            exchange = self._resolver.normalize_exchange(exchange)
+
         if exchange and not datasource:
             datasource = "CCXT"
 

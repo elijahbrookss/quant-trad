@@ -83,8 +83,8 @@ class StrategyOut(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    symbols: List[str]
     instrument_slots: List[Dict[str, Any]] = Field(default_factory=list)
+    symbols: List[str] = Field(default_factory=list)
     timeframe: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -109,7 +109,6 @@ class StrategyCreateRequest(BaseModel):
     """Payload for creating a new strategy."""
 
     name: str
-    symbols: List[Any] = Field(default_factory=list)
     instrument_slots: List[InstrumentSlotIn] = Field(default_factory=list)
     timeframe: str
     description: Optional[str] = None
@@ -129,7 +128,6 @@ class StrategyUpdateRequest(BaseModel):
     """Payload for updating a strategy."""
 
     name: Optional[str] = None
-    symbols: Optional[List[Any]] = None
     instrument_slots: Optional[List[InstrumentSlotIn]] = None
     timeframe: Optional[str] = None
     description: Optional[str] = None
@@ -191,7 +189,6 @@ class ATMTemplateRequest(BaseModel):
     id: Optional[str] = None
     name: str
     template: Dict[str, Any]
-    owner_id: Optional[str] = None
 
 
 class ATMTemplateOut(ATMTemplateRequest):
@@ -251,15 +248,61 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
 
     try:
         payload = _apply_market_aliases(body.dict())
-        symbols_payload = (
-            payload.get("instrument_slots")
-            or body.instrument_slots
-            or payload.get("symbols")
-            or body.symbols
-        )
+        slots = payload.get("instrument_slots") or body.instrument_slots or []
+
+        # Resolve or create instruments for each provided slot and embed instrument_id in metadata
+        resolved_slots = []
+        for raw in slots:
+            symbol = (raw.get("symbol") if isinstance(raw, dict) else getattr(raw, "symbol", None))
+            if not symbol:
+                continue
+            symbol = str(symbol).strip()
+            inst_rec = None
+            try:
+                inst_rec = instrument_service.resolve_instrument(payload.get("datasource"), payload.get("exchange"), symbol)
+            except Exception:
+                inst_rec = None
+            if not inst_rec:
+                try:
+                    inst_rec, err = instrument_service.validate_instrument(payload.get("datasource"), payload.get("exchange"), symbol)
+                except Exception:
+                    inst_rec = None
+            if not inst_rec:
+                # Persist a minimal instrument record so frontend can reference it later.
+                # Include any provided datasource/exchange so subsequent lookups can match.
+                try:
+                    from ..service.storage import upsert_instrument as _upsert_instrument
+
+                    inst_rec = _upsert_instrument({
+                        "symbol": symbol,
+                        "datasource": payload.get("datasource"),
+                        "exchange": payload.get("exchange"),
+                    })
+                except Exception:
+                    inst_rec = None
+
+            # If we persisted a minimal instrument (or found one without tick metadata),
+            # attempt to enrich it immediately so the UI can display tick/contract data
+            # on the next page. This is non-blocking: if enrichment fails, we continue.
+            if inst_rec:
+                try:
+                    enriched, err = instrument_service.validate_instrument(
+                        payload.get("datasource"), payload.get("exchange"), symbol
+                    )
+                    if enriched and enriched.get("id") == inst_rec.get("id"):
+                        inst_rec = enriched
+                except Exception:
+                    # don't block strategy creation on enrichment failures
+                    pass
+
+            slot_payload = dict(raw) if isinstance(raw, dict) else {"symbol": symbol}
+            if inst_rec and isinstance(slot_payload, dict):
+                slot_payload.setdefault("metadata", {})["instrument_id"] = inst_rec.get("id")
+            resolved_slots.append(slot_payload)
+
         record = strategy_service.create_strategy(
             payload.get("name") or body.name,
-            symbols=symbols_payload,
+            symbols=resolved_slots,
             timeframe=payload.get("timeframe") or body.timeframe,
             description=payload.get("description"),
             datasource=payload.get("datasource"),
@@ -275,6 +318,64 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_create_failed")
         raise HTTPException(400, str(exc)) from exc
+
+
+# Static endpoints (place before parameterised routes to avoid path collisions)
+@router.get("/atm-templates", response_model=List[ATMTemplateOut])
+async def list_atm_templates() -> List[Dict[str, Any]]:
+    """Return all saved ATM templates."""
+
+    return strategy_service.list_atm_templates()
+
+
+@router.post("/atm-templates", response_model=ATMTemplateOut, status_code=201)
+async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
+    """Create or update an ATM template."""
+
+    try:
+        # `owner_id` was removed from the schema; do not pass it through.
+        payload = body.dict()
+        payload.pop("owner_id", None)
+        return strategy_service.save_atm_template(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("atm_template_save_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/presets/symbols", response_model=List[SymbolPresetOut])
+async def list_symbol_presets() -> List[Dict[str, Any]]:
+    """Return saved symbol presets."""
+
+    presets = strategy_service.list_symbol_presets_service()
+    return [_attach_market_aliases(preset) for preset in presets]
+
+
+@router.post("/presets/symbols", response_model=SymbolPresetOut, status_code=201)
+async def save_symbol_preset(body: SymbolPresetRequest) -> Dict[str, Any]:
+    """Create or update a symbol preset."""
+
+    try:
+        payload = _apply_market_aliases(body.dict())
+        record = strategy_service.save_symbol_preset_service(
+            preset_id=payload.get("id"),
+            label=payload.get("label"),
+            datasource=payload.get("datasource"),
+            exchange=payload.get("exchange"),
+            timeframe=payload.get("timeframe"),
+            symbol=payload.get("symbol"),
+        )
+        return _attach_market_aliases(record)
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@router.delete("/presets/symbols/{preset_id}", status_code=204, response_class=Response)
+async def delete_symbol_preset(preset_id: str) -> Response:
+    """Delete a stored symbol preset."""
+
+    strategy_service.delete_symbol_preset_service(preset_id)
+
+    return Response(status_code=204)
 
 
 @router.get("/{strategy_id}", response_model=StrategyOut)
@@ -327,7 +428,10 @@ async def save_atm_template(body: ATMTemplateRequest) -> Dict[str, Any]:
     """Create or update an ATM template."""
 
     try:
-        return strategy_service.save_atm_template(body.dict())
+        # `owner_id` was removed from the schema; do not pass it through.
+        payload = body.dict()
+        payload.pop("owner_id", None)
+        return strategy_service.save_atm_template(payload)
     except Exception as exc:  # noqa: BLE001
         logger.exception("atm_template_save_failed")
         raise HTTPException(400, str(exc)) from exc

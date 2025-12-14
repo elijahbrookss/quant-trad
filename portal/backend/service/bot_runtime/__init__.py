@@ -24,4 +24,20 @@ def __getattr__(name: str):
         from .runtime import BotRuntime
 
         return BotRuntime
+    if name == "_timeframe_to_seconds":
+        from .runtime import _timeframe_to_seconds
+
+        return _timeframe_to_seconds
+    if name == "fetch_ohlcv":
+        from ..candle_service import fetch_ohlcv
+
+        return fetch_ohlcv
+    if name == "pd":
+        import pandas as _pd
+
+        return _pd
+    if name == "strategy_service":
+        from .. import strategy_service
+
+        return strategy_service
     raise AttributeError(name)

@@ -31,7 +31,6 @@ class BotStreamManager:
             channels = list(self._subscribers.values())
         if not channels:
             return
-        logger.debug("[BotStream] broadcasting", extra={"event": event, "subscriber_count": len(channels)})
         for channel in channels:
             if not self._offer(channel, message):
                 logger.warning("[BotStream] dropping subscriber after repeated enqueue failure")

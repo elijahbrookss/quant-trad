@@ -26,7 +26,6 @@ from .storage import (
     upsert_strategy_indicator as storage_upsert_strategy_indicator,
     upsert_strategy_rule as storage_upsert_strategy_rule,
     upsert_atm_template,
-    link_strategy_template,
     upsert_symbol_preset,
 )
 
@@ -769,7 +768,7 @@ class StrategyDefinition:
     id: str
     name: str
     instruments: List[InstrumentSlot]
-    timeframe: str
+    timeframe: str = "15m"
     description: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
@@ -855,7 +854,7 @@ class StrategyDefinition:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": list(self.symbols),
+            # legacy `symbols` removed from storage; prefer `instrument_slots`
             "instrument_slots": [slot.to_dict() for slot in self.instruments],
             "timeframe": self.timeframe,
             "datasource": self.datasource,
@@ -882,11 +881,7 @@ class StrategyDefinition:
             "id": self.id,
             "name": self.name,
             "description": self.description,
-            "symbols": [slot.to_dict() for slot in self.instruments],
-            "timeframe": self.timeframe,
-            "datasource": self.datasource,
-            "exchange": self.exchange,
-            "indicator_ids": list(self.indicator_ids),
+            # legacy `symbols` removed from storage; instrument links persisted separately
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
             "global_risk_multiplier": self.global_risk_multiplier,
@@ -901,14 +896,7 @@ class StrategyDefinition:
         if "description" in fields:
             description = fields["description"]
             self.description = str(description).strip() if description else None
-        if "symbols" in fields and fields["symbols"] is not None:
-            slots: List[InstrumentSlot] = []
-            for raw_symbol in fields["symbols"]:
-                slot = InstrumentSlot.from_any(raw_symbol)
-                if slot.symbol:
-                    slots.append(slot)
-            if slots:
-                self.instruments = slots
+        # legacy `symbols` field removed; prefer `instrument_slots`
         if "instrument_slots" in fields and fields["instrument_slots"] is not None:
             slots: List[InstrumentSlot] = []
             for raw_slot in fields["instrument_slots"]:
@@ -1075,10 +1063,7 @@ class StrategyRegistry:
         name: str,
         *,
         symbols: Iterable[str],
-        timeframe: str,
         description: Optional[str] = None,
-        datasource: Optional[str] = None,
-        exchange: Optional[str] = None,
         indicator_ids: Optional[Iterable[str]] = None,
         atm_template: Optional[Mapping[str, Any]] = None,
         atm_template_id: Optional[str] = None,
@@ -1126,9 +1111,6 @@ class StrategyRegistry:
             name=clean_name,
             description=str(description).strip() if description else None,
             instruments=clean_slots or [InstrumentSlot(symbol="Unknown")],
-            timeframe=str(timeframe).strip(),
-            datasource=str(datasource).strip() if datasource else None,
-            exchange=str(exchange).strip() if exchange else None,
             indicator_ids=list(dict.fromkeys(indicators)),
             atm_template_id=final_template_id,
             base_risk_per_trade=base_risk_per_trade if base_risk_per_trade is not None else risk_fields.get("base_risk_per_trade"),
@@ -1147,8 +1129,6 @@ class StrategyRegistry:
         self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
-        if record.atm_template_id:
-            link_strategy_template(strategy_id, record.atm_template_id)
         for inst_id in record.indicator_ids:
             storage_upsert_strategy_indicator(
                 strategy_id=strategy_id,
@@ -1177,8 +1157,6 @@ class StrategyRegistry:
             )
             record.atm_template_id = saved_template.get("id")
         record.update(**fields)
-        if record.atm_template_id:
-            link_strategy_template(strategy_id, record.atm_template_id)
         if record.instruments:
             record.risk_overrides = {
                 slot.symbol: slot.risk_multiplier
@@ -1748,7 +1726,6 @@ def save_atm_template(template: Mapping[str, Any]) -> Dict[str, Any]:
     request_payload = {
         "id": template.get("id"),
         "name": name,
-        "owner_id": template.get("owner_id"),
         "template": normalized,
     }
     return upsert_atm_template(request_payload)
@@ -1867,4 +1844,3 @@ def delete_symbol_preset_service(preset_id: str) -> None:
     """Delete a stored preset."""
 
     delete_symbol_preset(preset_id)
-

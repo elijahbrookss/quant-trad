@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -104,6 +105,9 @@ class Candle:
         if self.volume is not None:
             payload["volume"] = round(self.volume, 6)
         return payload
+
+    def to_dict(self) -> Dict[str, Optional[float]]:
+        return self.serialize()
 
     @property
     def start_time(self) -> datetime:
@@ -497,9 +501,7 @@ class LadderRiskEngine:
         else:
             raise ValueError("tick_size required from either template or instrument configuration")
 
-        self.stop_ticks = int(self.template.get("stop_ticks") or 0)
-        if self.stop_ticks <= 0:
-            raise ValueError("stop_ticks must be a positive integer")
+        self.stop_ticks = max(int(self.template.get("stop_ticks") or 0), 0)
 
         initial_stop_config = self.template.get("initial_stop")
         if not isinstance(initial_stop_config, dict):
@@ -538,7 +540,7 @@ class LadderRiskEngine:
         self.ticks_stop = int(
             self.template.get("ticks_stop")
             or self.template.get("stop_ticks")
-            or self.stop_ticks  # Already validated above
+            or self.stop_ticks
         )
         self.global_risk_multiplier = coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
         self.instrument_risk_multiplier = coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
@@ -640,6 +642,16 @@ class LadderRiskEngine:
             )
         return orders
 
+    @staticmethod
+    def _has_valid_atr(value: Optional[float]) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, float) and math.isnan(value):
+            return False
+        if value == 0:
+            return False
+        return True
+
     def _breakeven_threshold(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> float:
         if self.stop_adjustments_config:
             return 0.0
@@ -673,7 +685,7 @@ class LadderRiskEngine:
         trailing_ticks = coerce_float(trailing.get("ticks"))
         trailing_atr_multiple = coerce_float(trailing.get("atr_multiplier"))
         trailing_distance_ticks = None
-        if trailing_atr_multiple not in (None, 0) and atr_at_entry not in (None, 0):
+        if trailing_atr_multiple not in (None, 0) and self._has_valid_atr(atr_at_entry):
             trailing_distance_ticks = float(trailing_atr_multiple) * float(atr_at_entry) / float(self.tick_size or 1)
         elif trailing_ticks not in (None, 0):
             trailing_distance_ticks = float(trailing_ticks)
@@ -682,7 +694,7 @@ class LadderRiskEngine:
     def _compute_r_ticks(self, candle: Candle) -> Optional[float]:
         tick_stop = self.ticks_stop
         if self.risk_unit_mode == "atr":
-            if candle.atr in (None, 0) or self.tick_size in (None, 0):
+            if not self._has_valid_atr(candle.atr) or self.tick_size in (None, 0):
                 return None
             tick_stop = int(round((candle.atr * self.r_multiple) / self.tick_size))
         return float(tick_stop or 0)
@@ -715,14 +727,14 @@ class LadderRiskEngine:
     def _r_value(self, candle: Candle) -> Optional[float]:
         if self.risk_unit_mode == "ticks":
             return self.tick_value * self.ticks_stop
-        if candle.atr in (None, 0):
+        if not self._has_valid_atr(candle.atr):
             return None
         return self.tick_value * candle.atr * self.r_multiple
 
     def _r_ticks(self, candle: Candle) -> Optional[float]:
         if self.risk_unit_mode == "ticks":
             return float(self.ticks_stop)
-        if candle.atr in (None, 0) or self.tick_size in (None, 0):
+        if not self._has_valid_atr(candle.atr) or self.tick_size in (None, 0):
             return None
         return float((candle.atr * self.r_multiple) / self.tick_size)
 

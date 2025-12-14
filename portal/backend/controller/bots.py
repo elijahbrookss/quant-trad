@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+from collections.abc import Mapping as AbcMapping
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Response
+from datetime import datetime
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -16,25 +19,31 @@ from ..service import bot_service
 router = APIRouter()
 
 
+def _sanitize_json(value: Any) -> Any:
+    """Recursively make the payload JSON-friendly."""
+
+    if isinstance(value, AbcMapping):
+        return {key: _sanitize_json(payload_value) for key, payload_value in value.items()}
+    if isinstance(value, datetime):
+        # ISO8601 Z-suffixed UTC string
+        try:
+            return value.replace(tzinfo=None).isoformat() + "Z"
+        except Exception:
+            return str(value)
+    if isinstance(value, list):
+        return [_sanitize_json(entry) for entry in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_json(entry) for entry in value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
 def _format_sse(event: str, payload: Mapping[str, Any]) -> str:
     """Return a formatted server-sent event chunk."""
 
-    body = json.dumps(payload)
+    body = json.dumps(_sanitize_json(payload))
     return f"event: {event}\ndata: {body}\n\n"
-
-
-class RiskSettings(BaseModel):
-    """Risk template for ladder exits."""
-
-    contracts: Optional[int] = Field(default=3, ge=1)
-    targets: Optional[List[int]] = Field(default_factory=lambda: [20, 40, 60])
-    stop_ticks: Optional[int] = Field(default=30, ge=1)
-    breakeven_trigger_ticks: Optional[int] = Field(default=20, ge=1)
-    tick_size: Optional[float] = Field(default=0.01, gt=0)
-    base_risk_per_trade: Optional[float] = Field(default=None, ge=0)
-    risk_unit_mode: Optional[str] = Field(default="atr")
-    ticks_stop: Optional[int] = Field(default=None, ge=1)
-    global_risk_multiplier: Optional[float] = Field(default=1.0, ge=0)
 
 
 class BotBase(BaseModel):
@@ -48,13 +57,11 @@ class BotBase(BaseModel):
     )
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    timeframe: str = "15m"
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
     run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade)$")
     playback_speed: float = Field(default=10.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
-    risk: RiskSettings = Field(default_factory=RiskSettings)
 
 
 class BotCreateRequest(BotBase):
@@ -71,10 +78,9 @@ class BotUpdateRequest(BaseModel):
     strategy_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    timeframe: Optional[str] = None
+    # timeframe is intentionally managed by strategies; bots don't own it
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
-    risk: Optional[RiskSettings] = None
 
 
 class BotResponse(BotBase):

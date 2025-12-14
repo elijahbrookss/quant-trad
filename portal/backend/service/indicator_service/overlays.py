@@ -36,7 +36,7 @@ class IndicatorOverlayBuilder:
         exchange: Optional[str] = None,
         overlay_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        entry = self._load_entry(inst_id, start, end, interval, symbol)
+        entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
         sym = self._resolve_symbol(entry, symbol)
         provider, data_ctx = self._prepare_provider(
             entry.meta, sym, start, end, interval, datasource, exchange
@@ -51,16 +51,29 @@ class IndicatorOverlayBuilder:
         return payload
 
     def _load_entry(
-        self, inst_id: str, start: str, end: str, interval: str, symbol: Optional[str]
+        self,
+        inst_id: str,
+        start: str,
+        end: str,
+        interval: str,
+        symbol: Optional[str],
+        datasource: Optional[str] = None,
+        exchange: Optional[str] = None,
     ):
+        fb = {
+            "symbol": symbol,
+            "start": start,
+            "end": end,
+            "interval": interval,
+        }
+        if datasource is not None:
+            fb["datasource"] = datasource
+        if exchange is not None:
+            fb["exchange"] = exchange
+
         return get_indicator_entry(
             inst_id,
-            fallback_context={
-                "symbol": symbol,
-                "start": start,
-                "end": end,
-                "interval": interval,
-            },
+            fallback_context=fb,
             persist_backfill=True,
             ctx=self._ctx,
         )

@@ -4,23 +4,21 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..db import (
     ATMTemplateRecord,
     BotRecord,
-    BotStrategyLink,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,
     InstrumentRecord,
-    StrategyATMTemplateLink,
     StrategyIndicatorLink,
+    StrategyInstrumentLink,
     StrategyRecord,
     StrategyRuleRecord,
     SymbolPresetRecord,
@@ -114,6 +112,44 @@ def load_instruments() -> List[Dict[str, Any]]:
         return [row.to_dict() for row in rows]
 
 
+def list_strategy_instrument_symbols(strategy_id: str) -> List[str]:
+    """Return symbols for all instruments attached to *strategy_id*.
+
+    This queries the instrument table directly using the strategy->instrument links
+    so we always derive authoritative symbol values from the persisted instrument rows.
+    """
+
+    if not db.available:
+        return []
+    if not strategy_id:
+        return []
+    with db.session() as session:
+        # Join StrategyInstrumentLink -> InstrumentRecord and return symbol list
+        rows = (
+            session.execute(
+                select(InstrumentRecord.symbol)
+                .join(StrategyInstrumentLink, StrategyInstrumentLink.instrument_id == InstrumentRecord.id)
+                .where(StrategyInstrumentLink.strategy_id == strategy_id)
+            )
+            .scalars()
+            .all()
+        )
+        # Normalise and dedupe while preserving order
+        seen: set[str] = set()
+        symbols: List[str] = []
+        for s in rows:
+            if s is None:
+                continue
+            key = str(s).strip()
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            symbols.append(key)
+        return symbols
+
+
 def get_instrument(instrument_id: str) -> Optional[Dict[str, Any]]:
     """Return a single instrument by identifier."""
 
@@ -135,21 +171,16 @@ def find_instrument(datasource: Optional[str], exchange: Optional[str], symbol: 
     datasource_key = (datasource or "").lower() or None
     exchange_key = (exchange or "").lower() or None
     with db.session() as session:
-        candidates = session.execute(
-            select(InstrumentRecord).where(InstrumentRecord.symbol == symbol_key)
-        ).scalars().all()
-        if not candidates:
-            return None
-        def _score(record: InstrumentRecord) -> int:
-            score = 0
-            if datasource_key and (record.datasource or "").lower() == datasource_key:
-                score += 2
-            if exchange_key and (record.exchange or "").lower() == exchange_key:
-                score += 1
-            return score
+        # Require exact symbol match. If datasource and/or exchange are provided,
+        # require those fields to match as well so we do not conflate distinct venue symbols.
+        query = select(InstrumentRecord).where(InstrumentRecord.symbol == symbol_key)
+        if datasource_key:
+            query = query.where((InstrumentRecord.datasource or '').ilike(datasource_key))
+        if exchange_key:
+            query = query.where((InstrumentRecord.exchange or '').ilike(exchange_key))
 
-        ranked = sorted(candidates, key=_score, reverse=True)
-        return ranked[0].to_dict() if ranked else None
+        record = session.execute(query).scalars().first()
+        return record.to_dict() if record else None
 
 
 def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,17 +188,45 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
 
     if not db.available:
         return meta
-    instrument_id = meta.get("id") or str(uuid.uuid4())
+    # Ignore any caller-provided `id`. Always dedupe by the canonical unique key
+    # (datasource, exchange, symbol). This prevents clients from bypassing the
+    # uniqueness constraint by inventing IDs.
+    symbol = (meta.get("symbol") or "").upper()
+    datasource = meta.get("datasource")
+    exchange = meta.get("exchange")
+
+    if not symbol:
+        raise ValueError("Instrument symbol is required")
+
     try:
         with db.session() as session:
-            record = session.get(InstrumentRecord, instrument_id)
             now = _utcnow()
-            if record is None:
+
+            # Look for existing instrument by composite key regardless of any id.
+            existing = None
+            if datasource and exchange:
+                existing = session.execute(
+                    select(InstrumentRecord).where(
+                        InstrumentRecord.symbol == symbol,
+                        InstrumentRecord.datasource == datasource,
+                        InstrumentRecord.exchange == exchange,
+                    )
+                ).scalars().first()
+
+            if existing is not None:
+                record = existing
+            else:
+                # Creating a new instrument requires datasource and exchange.
+                if not datasource or not exchange:
+                    raise ValueError("Instrument creation requires 'datasource' and 'exchange'")
+                instrument_id = str(uuid.uuid4())
                 record = InstrumentRecord(id=instrument_id)
                 session.add(record)
-            record.datasource = meta.get("datasource")
-            record.exchange = meta.get("exchange")
-            record.symbol = (meta.get("symbol") or "").upper()
+
+            # Update fields on the found-or-created record
+            record.datasource = datasource
+            record.exchange = exchange
+            record.symbol = symbol
             record.instrument_type = meta.get("instrument_type")
             record.tick_size = meta.get("tick_size")
             record.tick_value = meta.get("tick_value")
@@ -183,6 +242,7 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
             meta = record.to_dict()
     except SQLAlchemyError as exc:
         logger.warning("instrument_persist_failed | id=%s | error=%s", instrument_id, exc)
+        raise
     return meta
 
 
@@ -217,10 +277,18 @@ def upsert_atm_template(payload: Dict[str, Any]) -> Dict[str, Any]:
             record = session.get(ATMTemplateRecord, template_id)
             now = _utcnow()
             if record is None:
-                record = ATMTemplateRecord(id=template_id)
-                session.add(record)
+                # If an ID wasn't provided, prefer an existing template with the same
+                # name (templates are globally unique by name after normalization).
+                name = payload.get("name") or payload.get("label") or template_id
+                existing = session.execute(
+                    select(ATMTemplateRecord).where(ATMTemplateRecord.name == name)
+                ).scalars().first()
+                if existing is not None:
+                    record = existing
+                else:
+                    record = ATMTemplateRecord(id=template_id)
+                    session.add(record)
             record.name = payload.get("name") or payload.get("label") or template_id
-            record.owner_id = payload.get("owner_id")
             record.template = dict(payload.get("template") or {})
             record.updated_at = now
             if record.created_at is None:
@@ -229,29 +297,6 @@ def upsert_atm_template(payload: Dict[str, Any]) -> Dict[str, Any]:
     except SQLAlchemyError as exc:
         logger.warning("atm_template_persist_failed | id=%s | error=%s", template_id, exc)
     return payload
-
-
-def link_strategy_template(strategy_id: str, template_id: str) -> None:
-    """Ensure a single template link exists for the strategy."""
-
-    if not db.available:
-        return
-    try:
-        with db.session() as session:
-            link = session.execute(
-                select(StrategyATMTemplateLink).where(StrategyATMTemplateLink.strategy_id == strategy_id)
-            ).scalar_one_or_none()
-            now = _utcnow()
-            if link is None:
-                link = StrategyATMTemplateLink(id=str(uuid.uuid4()), strategy_id=strategy_id, template_id=template_id)
-                session.add(link)
-            else:
-                link.template_id = template_id
-            link.updated_at = now
-            if link.created_at is None:
-                link.created_at = now
-    except SQLAlchemyError as exc:
-        logger.warning("strategy_template_link_failed | strategy=%s | template=%s | error=%s", strategy_id, template_id, exc)
 
 
 def delete_instrument(instrument_id: str) -> None:
@@ -277,20 +322,10 @@ def load_bots() -> List[Dict[str, Any]]:
         rows = session.execute(select(BotRecord)).scalars().all()
         if not rows:
             return []
-        bot_ids = [row.id for row in rows]
-        link_map: Dict[str, List[str]] = defaultdict(list)
-        links = session.execute(
-            select(BotStrategyLink).where(BotStrategyLink.bot_id.in_(bot_ids))
-        ).scalars().all()
-        for link in links:
-            link_map[link.bot_id].append(link.strategy_id)
         payload: List[Dict[str, Any]] = []
         for row in rows:
             record = row.to_dict()
-            strategies = link_map.get(row.id, [])
-            if not strategies and row.strategy_id:
-                strategies = [row.strategy_id]
-            record["strategy_ids"] = strategies
+            record["strategy_ids"] = [row.strategy_id] if row.strategy_id else []
             payload.append(record)
         return payload
 
@@ -315,27 +350,13 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
             record.type = meta.get("type") or record.type
             record.params = dict(meta.get("params") or {})
             record.color = meta.get("color")
-            record.datasource = meta.get("datasource")
-            record.exchange = meta.get("exchange")
+            # datasource/exchange removed from persisted indicators
             record.enabled = bool(meta.get("enabled", True))
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("indicator_persist_failed | id=%s | error=%s", meta.get("id"), exc)
-
-
-def _sync_bot_strategies(session, bot_id: str, strategy_ids: Iterable[str]) -> None:
-    """Replace bot strategy links with *strategy_ids*."""
-
-    session.execute(delete(BotStrategyLink).where(BotStrategyLink.bot_id == bot_id))
-    for strategy_id in strategy_ids:
-        link = BotStrategyLink(
-            id=str(uuid.uuid4()),
-            bot_id=bot_id,
-            strategy_id=strategy_id,
-        )
-        session.add(link)
 
 
 def upsert_bot(payload: Dict[str, Any]) -> None:
@@ -353,16 +374,22 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 session.add(record)
             record.name = payload.get("name") or record.name
             strategy_ids: Optional[Iterable[str]] = payload.get("strategy_ids")
-            if strategy_ids is not None:
-                strategy_list = [sid for sid in strategy_ids]
-                _sync_bot_strategies(session, bot_id, strategy_list)
-                first_strategy = strategy_list[0] if strategy_list else None
-            else:
-                first_strategy = payload.get("strategy_id")
+            first_strategy = None
+            if strategy_ids:
+                for strategy_id in strategy_ids:
+                    if strategy_id:
+                        candidate = str(strategy_id).strip()
+                        if candidate:
+                            first_strategy = candidate
+                            break
+            if not first_strategy:
+                fallback = payload.get("strategy_id")
+                if fallback:
+                    candidate = str(fallback).strip()
+                    if candidate:
+                        first_strategy = candidate
             record.strategy_id = first_strategy
-            record.datasource = payload.get("datasource")
-            record.exchange = payload.get("exchange")
-            record.timeframe = payload.get("timeframe") or record.timeframe
+            # datasource/exchange/timeframe are no longer stored on bots; derive from strategy at runtime
             record.mode = payload.get("mode") or record.mode
             record.run_type = payload.get("run_type") or record.run_type
             playback_speed = payload.get("playback_speed")
@@ -398,7 +425,6 @@ def delete_bot(bot_id: str) -> None:
         return
     try:
         with db.session() as session:
-            session.execute(delete(BotStrategyLink).where(BotStrategyLink.bot_id == bot_id))
             record = session.get(BotRecord, bot_id)
             if record:
                 session.delete(record)
@@ -433,32 +459,39 @@ def load_strategies() -> List[Dict[str, Any]]:
     if not db.available:
         return []
     with db.session() as session:
-        strategies = session.execute(select(StrategyRecord)).scalars().all()
-        template_links = session.execute(select(StrategyATMTemplateLink)).scalars().all()
+        # Use a raw select to avoid depending on ORM model columns that may have been removed
+        rows = session.execute(text("SELECT * FROM portal_strategies")).mappings().all()
         templates = {row.id: row for row in session.execute(select(ATMTemplateRecord)).scalars().all()}
-        link_map = {link.strategy_id: link.template_id for link in template_links}
         payload: List[Dict[str, Any]] = []
-        for strategy in strategies:
-            record = strategy.to_dict()
-            template_id = link_map.get(strategy.id) or strategy.atm_template_id
+        for row in rows:
+            # Start from the raw DB mapping
+            record: Dict[str, Any] = dict(row)
+            template_id = record.get("atm_template_id")
             if template_id and template_id in templates:
                 record["atm_template_id"] = template_id
                 record["atm_template"] = normalise_template(templates[template_id].template)
                 record.setdefault("atm_template_name", templates[template_id].name)
             else:
-                # No template found - use default
                 record["atm_template"] = None
+
+            strategy_id = record.get("id")
             links = session.execute(
                 select(StrategyIndicatorLink).where(
-                    StrategyIndicatorLink.strategy_id == strategy.id
+                    StrategyIndicatorLink.strategy_id == strategy_id
+                )
+            ).scalars().all()
+            inst_links = session.execute(
+                select(StrategyInstrumentLink).where(
+                    StrategyInstrumentLink.strategy_id == strategy_id
                 )
             ).scalars().all()
             rules = session.execute(
                 select(StrategyRuleRecord).where(
-                    StrategyRuleRecord.strategy_id == strategy.id
+                    StrategyRuleRecord.strategy_id == strategy_id
                 )
             ).scalars().all()
             record["indicator_links"] = [link.to_dict() for link in links]
+            record["instrument_links"] = [link.to_dict() for link in inst_links]
             record["rules_raw"] = [rule.to_dict() for rule in rules]
             payload.append(record)
         return payload
@@ -483,11 +516,10 @@ def upsert_strategy(payload: Dict[str, Any]) -> None:
                 session.add(record)
             record.name = payload.get("name") or record.name
             record.description = payload.get("description")
-            record.symbols = list(payload.get("symbols") or [])
             record.timeframe = payload.get("timeframe") or record.timeframe
             record.datasource = payload.get("datasource")
             record.exchange = payload.get("exchange")
-            record.indicator_ids = list(payload.get("indicator_ids") or [])
+            # indicator attachments are persisted in portal_strategy_indicators
             record.atm_template_id = payload.get("atm_template_id")
             record.base_risk_per_trade = payload.get("base_risk_per_trade")
             record.global_risk_multiplier = payload.get("global_risk_multiplier")
@@ -511,6 +543,9 @@ def delete_strategy(strategy_id: str) -> None:
                 session.delete(record)
             session.query(StrategyIndicatorLink).filter(
                 StrategyIndicatorLink.strategy_id == strategy_id
+            ).delete(synchronize_session=False)
+            session.query(StrategyInstrumentLink).filter(
+                StrategyInstrumentLink.strategy_id == strategy_id
             ).delete(synchronize_session=False)
             session.query(StrategyRuleRecord).filter(
                 StrategyRuleRecord.strategy_id == strategy_id
@@ -556,6 +591,65 @@ def upsert_strategy_indicator(
             "strategy_indicator_persist_failed | strategy=%s | indicator=%s | error=%s",
             strategy_id,
             indicator_id,
+            exc,
+        )
+
+
+def upsert_strategy_instrument(*, strategy_id: str, instrument_id: str, snapshot: Dict[str, Any]) -> None:
+    """Persist association between a strategy and an instrument."""
+
+    if not db.available:
+        return
+    try:
+        with db.session() as session:
+            link = session.execute(
+                select(StrategyInstrumentLink).where(
+                    StrategyInstrumentLink.strategy_id == strategy_id,
+                    StrategyInstrumentLink.instrument_id == instrument_id,
+                )
+            ).scalars().first()
+            now = _utcnow()
+            if link is None:
+                # Use a deterministic uuid5 for the link id so the composite key
+                # (strategy_id:instrument_id) cannot exceed the column length.
+                link_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{strategy_id}:{instrument_id}"))
+                link = StrategyInstrumentLink(
+                    id=link_id,
+                    strategy_id=strategy_id,
+                    instrument_id=instrument_id,
+                    instrument_snapshot=dict(snapshot or {}),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(link)
+            else:
+                link.instrument_snapshot = dict(snapshot or {})
+                link.updated_at = now
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "strategy_instrument_persist_failed | strategy=%s | instrument=%s | error=%s",
+            strategy_id,
+            instrument_id,
+            exc,
+        )
+
+
+def delete_strategy_instrument(strategy_id: str, instrument_id: str) -> None:
+    """Remove a strategy <-> instrument link."""
+
+    if not db.available:
+        return
+    try:
+        with db.session() as session:
+            session.query(StrategyInstrumentLink).filter(
+                StrategyInstrumentLink.strategy_id == strategy_id,
+                StrategyInstrumentLink.instrument_id == instrument_id,
+            ).delete(synchronize_session=False)
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "strategy_instrument_delete_failed | strategy=%s | instrument=%s | error=%s",
+            strategy_id,
+            instrument_id,
             exc,
         )
 
@@ -680,9 +774,8 @@ def upsert_symbol_preset(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 )
                 session.add(record)
             record.label = payload.get("label") or record.label
-            record.datasource = payload.get("datasource")
-            record.exchange = payload.get("exchange")
-            record.timeframe = payload.get("timeframe") or record.timeframe
+            # Bot rows no longer persist datasource/exchange/timeframe; these are
+            # owned by strategies. Ignore any payload values for these fields.
             record.symbol = payload.get("symbol") or record.symbol
             record.updated_at = now
             session.flush()
@@ -767,9 +860,7 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
             net = _coerce_float(snapshot.get("net_pnl"))
             if net is not None:
                 record.net_pnl = net
-            quote = snapshot.get("quote_currency")
-            if quote:
-                record.quote_currency = str(quote).upper()
+            # quote_currency is no longer stored on trades; resolve via instrument service when needed
             if snapshot.get("metrics") is not None:
                 record.metrics = dict(snapshot.get("metrics") or {})
             record.updated_at = now
@@ -802,9 +893,7 @@ def record_bot_trade_event(event: Dict[str, Any]) -> None:
                 leg=event.get("leg"),
                 contracts=_coerce_int(event.get("contracts")),
                 price=_coerce_float(event.get("price")),
-                ticks=_coerce_float(event.get("ticks")),
                 pnl=_coerce_float(event.get("pnl")),
-                quote_currency=(event.get("currency") or event.get("quote_currency")),
                 event_time=event_time,
             )
             session.add(record)

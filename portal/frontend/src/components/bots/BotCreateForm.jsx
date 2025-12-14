@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
 import { Bot, CheckSquare, PlusCircle, Search, X } from 'lucide-react'
-import ATMConfigForm, { DEFAULT_ATM_TEMPLATE, cloneATMTemplate } from '../atm/ATMConfigForm.jsx'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
 
@@ -100,86 +99,59 @@ export function BotCreateForm({
   onChange,
   onBacktestRangeChange,
   onStrategyToggle,
-  onATMTemplateChange,
-  onToggleCustomATM,
   submitDisabled,
   error,
 }) {
   return (
     <form onSubmit={onSubmit} className="space-y-6">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-          <div className="space-y-2">
-            <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
-            <input
-              type="text"
-              name="name"
-              value={form.name}
-              onChange={onChange}
-              className="w-full rounded-xl border border-white/10 bg-[#0f1524] px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              placeholder="My walk-forward bot"
-            />
-          </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <RunTypeField value={form.run_type} onChange={(value) => onChange({ target: { name: 'run_type', value } })} />
-            {form.run_type === 'backtest' ? (
-              <div className="flex flex-col gap-2">
-                <span className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Backtest range</span>
-                <DateRangePickerComponent
-                  className="rounded-xl border border-white/10 bg-[#0f1524]"
-                  startValue={form.backtest_start}
-                  endValue={form.backtest_end}
-                  onChange={onBacktestRangeChange}
-                  setDateRange={onBacktestRangeChange}
-                />
-                <p className="text-[11px] text-slate-500">Provide start/end dates to walk through history.</p>
-              </div>
-            ) : null}
-          </div>
-          <StrategySelector
-            strategies={strategies}
-            selectedIds={form.strategy_ids}
-            onToggle={onStrategyToggle}
-            loading={strategiesLoading}
-            error={strategyError}
+      <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+        <div className="space-y-2">
+          <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Name</label>
+          <input
+            type="text"
+            name="name"
+            value={form.name}
+            onChange={onChange}
+            className="w-full rounded-xl border border-white/10 bg-[#0f1524] px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+            placeholder="My walk-forward bot"
           />
         </div>
-
-        <div className="space-y-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">ATM override</p>
-              <p className="text-xs text-slate-400">Optional custom contracts/targets for this bot run.</p>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <RunTypeField value={form.run_type} onChange={(value) => onChange({ target: { name: 'run_type', value } })} />
+          {form.run_type === 'backtest' ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Backtest range</span>
+              <DateRangePickerComponent
+                className="rounded-xl border border-white/10 bg-[#0f1524]"
+                dateRange={[
+                  form.backtest_start ? new Date(form.backtest_start) : undefined,
+                  form.backtest_end ? new Date(form.backtest_end) : undefined,
+                ]}
+                setDateRange={onBacktestRangeChange}
+              />
+              <p className="text-[11px] text-slate-500">Provide start/end dates to walk through history.</p>
             </div>
-            <button
-              type="button"
-              onClick={onToggleCustomATM}
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${
-                form.use_custom_atm ? 'border-emerald-400/40 text-emerald-200' : 'border-white/20 text-slate-300'
-              }`}
-            >
-              {form.use_custom_atm ? 'Disable override' : 'Use override'}
-            </button>
-          </div>
-          {form.use_custom_atm ? (
-            <div className="rounded-xl border border-white/10 bg-[#0f1524] p-3">
-              <ATMConfigForm value={form.atm_template} onChange={onATMTemplateChange} />
-            </div>
-          ) : (
-            <p className="text-xs text-slate-400">Bots reuse each strategy's ATM template unless you enable an override.</p>
-          )}
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-alpha-50)] disabled:opacity-40"
-              disabled={submitDisabled}
-            >
-              <PlusCircle className="size-4" /> Create bot
-            </button>
-          </div>
-          {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+          ) : null}
         </div>
+        <StrategySelector
+          strategies={strategies}
+          selectedIds={form.strategy_ids}
+          onToggle={onStrategyToggle}
+          loading={strategiesLoading}
+          error={strategyError}
+        />
       </div>
+
+      <div className="flex justify-end">
+        <button
+          type="submit"
+          className="inline-flex items-center justify-center gap-2 rounded-xl bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-alpha-50)] disabled:opacity-40"
+          disabled={submitDisabled}
+        >
+          <PlusCircle className="size-4" /> Create bot
+        </button>
+      </div>
+      {error ? <p className="text-sm text-rose-300">{error}</p> : null}
     </form>
   )
 }
@@ -195,8 +167,6 @@ export function BotCreateModal({
   onChange,
   onBacktestRangeChange,
   onStrategyToggle,
-  onATMTemplateChange,
-  onToggleCustomATM,
   error,
 }) {
   const submitDisabled =
@@ -215,7 +185,7 @@ export function BotCreateModal({
               <DialogTitle className="flex items-center gap-2 text-lg font-semibold text-white">
                 <Bot className="size-5 text-[color:var(--accent-text-strong)]" /> Create bot
               </DialogTitle>
-              <p className="text-sm text-slate-400">Attach strategies, pick a run type, and optionally override ATM.</p>
+              <p className="text-sm text-slate-400">Attach strategies and pick a run type to launch your backtest.</p>
             </div>
             <button
               type="button"
@@ -242,8 +212,6 @@ export function BotCreateModal({
               onChange={onChange}
               onBacktestRangeChange={onBacktestRangeChange}
               onStrategyToggle={onStrategyToggle}
-              onATMTemplateChange={onATMTemplateChange}
-              onToggleCustomATM={onToggleCustomATM}
               submitDisabled={submitDisabled}
               error={error}
             />
@@ -262,8 +230,5 @@ export function buildDefaultForm() {
     backtest_start: '',
     backtest_end: '',
     strategy_ids: [],
-    use_custom_atm: false,
-    atm_template: cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
   }
 }
-

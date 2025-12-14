@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ..atm import DEFAULT_ATM_TEMPLATE, merge_templates
+from ..atm import merge_templates
 from .domain import (
     Candle,
     LadderRiskEngine,
@@ -139,7 +139,7 @@ class SeriesBuilder:
 
         symbol = self._resolve_symbol(strategy)
         if not symbol:
-            message = "Strategy missing symbol"
+            message = "Strategy missing instrument"
             raise RuntimeError(message)
         timeframe = self._resolve_timeframe(strategy)
         datasource = self._resolve_datasource(strategy)
@@ -218,12 +218,14 @@ class SeriesBuilder:
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
         instrument = self._instrument_for(datasource, exchange, symbol)
-        bot_override = self.config.get("risk") or {}
-        override_payload = bot_override if bot_override and bot_override != DEFAULT_ATM_TEMPLATE else None
-        atm_template = merge_templates(
-            strategy.get("atm_template"),
-            override_payload,
-        )
+        
+        if instrument and instrument.get("instrument_snapshot"):
+            instrument = instrument.get("instrument_snapshot")
+
+        #log instrument
+        logger.debug("[BUILD SERIES] Resolved instrument for strategy %s: %s", strategy.get("id"), instrument)
+
+        atm_template = merge_templates(strategy.get("atm_template"))
         template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
 
         def _apply_instrument_field(field: str) -> None:
@@ -287,13 +289,72 @@ class SeriesBuilder:
 
     @staticmethod
     def _resolve_symbol(strategy: Mapping[str, Any]) -> Optional[str]:
-        symbols = strategy.get("symbols") or []
-        if symbols:
-            return str(symbols[0])
-        return strategy.get("symbol") or None
+        # Prefer strategy-owned instrument records (may be full dicts)
+        from .. import instrument_service
+
+        # Log strategy and strategy's instruments for debugging
+
+        logger.debug(
+            "[RESOLVE SYMBOL] Resolving symbol for strategy %s with instruments: %s",
+            strategy.get("id"),
+            strategy.get("instrument_links"),
+        )
+
+        instruments = strategy.get("instrument_links") or []
+        if instruments:
+            first = instruments[0]
+            cand = first.get("instrument_id")
+            logger.debug(
+                "[RESOLVE SYMBOL] Found instrument link for strategy %s: %s",
+                strategy.get("id"),
+                cand,
+            )
+            if cand:
+                try:
+                    rec = instrument_service.get_instrument_record(str(cand))
+                    cand = rec.get("symbol")
+                    logger.debug(
+                        "[RESOLVE SYMBOL] Fetched instrument record for symbol=%s",
+                        cand,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[RESOLVE SYMBOL] Failed to fetch instrument record for id %s",
+                        cand,
+                    )
+                    pass
+            if cand:
+                normalized = str(cand).strip()
+                # normalized 
+                logger.debug(
+                    "[RESOLVE SYMBOL] Normalized symbol for strategy %s: %s",
+                    strategy.get("id"),
+                    normalized,
+                )
+                if normalized:
+                    logger.debug(
+                        "[RESOLVE SYMBOL] Resolved symbol for strategy %s: %s",
+                        strategy.get("id"),
+                        normalized,
+                    )
+                    return normalized
+
+    @staticmethod
+    def _coerce_symbol_entry(entry: Any) -> Optional[str]:
+        if isinstance(entry, Mapping):
+            candidate = entry.get("symbol")
+        else:
+            candidate = entry
+        if candidate is None:
+            return None
+        normalized = str(candidate).strip()
+        return normalized or None
 
     def _resolve_timeframe(self, strategy: Mapping[str, Any]) -> str:
-        return str(strategy.get("timeframe") or self.config.get("timeframe") or "15m")
+        tf = strategy.get("timeframe")
+        if not tf:
+            raise RuntimeError("Strategy missing timeframe")
+        return str(tf)
 
     def _resolve_datasource(self, strategy: Mapping[str, Any]) -> Optional[str]:
         return self.config.get("datasource") or strategy.get("datasource")
@@ -307,19 +368,16 @@ class SeriesBuilder:
         exchange: Optional[str],
         symbol: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        index = self.config.get("instrument_index") or {}
+        # Look up canonical instrument record in storage by datasource/exchange/symbol.
         if not symbol:
             return None
-        keys = [
-            instrument_key(datasource, exchange, symbol),
-            instrument_key(datasource, None, symbol),
-            instrument_key(None, exchange, symbol),
-            instrument_key(None, None, symbol),
-        ]
-        for key in keys:
-            if key in index:
-                return index[key]
-        return None
+        from .. import instrument_service
+
+        try:
+            record = instrument_service.resolve_instrument(datasource, exchange, symbol)
+        except Exception:
+            record = None
+        return record
 
     def _resolve_live_window(self) -> Tuple[str, str]:
         lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
@@ -360,9 +418,24 @@ class SeriesBuilder:
             indicator_type = snapshot.get("type") or link.get("indicator_type") or "indicator"
             color = snapshot.get("color") or link.get("color")
             window_symbol = symbol or params.get("symbol")
-            interval = params.get("interval") or timeframe or self.config.get("timeframe") or "15m"
-            ds = link.get("datasource") or snapshot.get("datasource") or params.get("datasource") or datasource
-            ex = link.get("exchange") or snapshot.get("exchange") or params.get("exchange") or exchange
+            interval = params.get("interval") or timeframe
+            if not interval:
+                raise RuntimeError("Indicator overlay requires an interval; set strategy 'timeframe' or indicator params")
+            # Prefer explicit link-level datasource, then params, then
+            # strategy-level datasource/exchange. Fall back to any stored
+            # snapshot values only if no runtime context is available.
+            ds = (
+                link.get("datasource")
+                or params.get("datasource")
+                or datasource
+                or snapshot.get("datasource")
+            )
+            ex = (
+                link.get("exchange")
+                or params.get("exchange")
+                or exchange
+                or snapshot.get("exchange")
+            )
             cache_key = self._indicator_overlay_cache_key(indicator_id, start_iso, end_iso, interval, window_symbol, ds, ex)
             cached = self._indicator_overlay_cache.get(cache_key)
             if cached:
@@ -535,6 +608,4 @@ class SeriesBuilder:
         return candles
 
     def _resolve_risk_template(self, strategy: Mapping[str, Any]) -> Dict[str, Any]:
-        bot_risk = self.config.get("risk") or {}
-        strategy_risk = strategy.get("risk") or {}
-        return merge_templates(DEFAULT_ATM_TEMPLATE, bot_risk, strategy_risk)
+        return merge_templates(strategy.get("atm_template"))

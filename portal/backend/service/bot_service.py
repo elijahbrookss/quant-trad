@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 import logging
 
 from . import instrument_service
-from .atm import DEFAULT_ATM_TEMPLATE, merge_templates, template_metrics
+from .atm import merge_templates, template_metrics
 from .bot_runtime import BotRuntime
 from .bot_stream import BotStreamManager
 from .storage import delete_bot, load_bots, load_strategies, upsert_bot
@@ -61,13 +61,6 @@ def _now_iso() -> str:
 
     return datetime.utcnow().isoformat() + "Z"
 
-
-def _normalise_risk(risk: Optional[Dict[str, object]]) -> Dict[str, object]:
-    """Merge user overrides with the default ladder template."""
-
-    if not risk:
-        return {}
-    return merge_templates(risk)
 
 
 def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -168,10 +161,11 @@ def _attach_instrument_meta(bot: Dict[str, object]) -> None:
     strategies: List[Dict[str, Any]] = bot.get("strategies_meta") or []  # type: ignore[assignment]
     instrument_map: Dict[str, Dict[str, Any]] = {}
     for strategy in strategies:
-        datasource = strategy.get("datasource") or bot.get("datasource")
-        exchange = strategy.get("exchange") or bot.get("exchange")
+        # Runtime context (datasource/exchange) is owned by the strategy.
+        datasource = strategy.get("datasource")
+        exchange = strategy.get("exchange")
         instruments: List[Dict[str, Any]] = []
-        for slot in strategy.get("symbols") or []:
+        for slot in strategy.get("instrument_slots") or []:
             symbol = slot.get("symbol") if isinstance(slot, Mapping) else slot
             risk_multiplier = slot.get("risk_multiplier") if isinstance(slot, Mapping) else None
             record = instrument_service.resolve_instrument(datasource, exchange, symbol)
@@ -241,15 +235,14 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "name": name,
         "strategy_id": strategy_ids[0],
         "strategy_ids": strategy_ids,
-        "datasource": payload.get("datasource"),
-        "exchange": payload.get("exchange"),
-        "timeframe": payload.get("timeframe") or "15m",
+        # runtime context should come from strategies, not the bot row
+        "timeframe": None,
         "mode": (payload.get("mode") or "instant").lower(),
         "run_type": run_type,
         "playback_speed": _coerce_playback_speed(playback_input),
         "backtest_start": _coerce_isoformat(payload.get("backtest_start")),
         "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
-        "risk": _normalise_risk(payload.get("risk")),
+        "risk": {},
         "status": "idle",
         "last_stats": {},
     }
@@ -284,17 +277,12 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     elif "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
         record["playback_speed"] = _coerce_playback_speed(payload["fetch_seconds"])
     if "datasource" in payload and payload["datasource"] is not None:
-        record["datasource"] = payload["datasource"]
-    if "exchange" in payload and payload["exchange"] is not None:
-        record["exchange"] = payload["exchange"]
-    if "timeframe" in payload and payload["timeframe"] is not None:
-        record["timeframe"] = payload["timeframe"]
+        # Ignore attempts to set peripheral runtime context on bots; derive from strategies
+        pass
     if "backtest_start" in payload:
         record["backtest_start"] = _coerce_isoformat(payload.get("backtest_start"))
     if "backtest_end" in payload:
         record["backtest_end"] = _coerce_isoformat(payload.get("backtest_end"))
-    if "risk" in payload:
-        record["risk"] = _normalise_risk(payload.get("risk"))
     _validate_backtest_window(record)
     upsert_bot(record)
     runtime = _RUNTIME.get(bot_id)
@@ -328,7 +316,31 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["strategy_id"] = bot["strategy_ids"][0]
     _validate_backtest_window(bot)
     _attach_strategy_meta(bot)
-    _attach_instrument_meta(bot)
+    # Do not attach instruments or build bot-level indexes here —
+    # instrument/index ownership belongs to strategies. Log attached
+    # strategies and their instrument ids for debugging when starting.
+    strategies: List[Dict[str, Any]] = bot.get("strategies_meta") or []
+    for strategy in strategies:
+        strategy_id = strategy.get("id")
+        # collect instrument ids from multiple possible places on the strategy
+        ids: List[str] = []
+        for link in strategy.get("instrument_links") or []:
+            iid = link.get("instrument_id") or link.get("instrument")
+            if iid:
+                ids.append(str(iid))
+        for inst in strategy.get("instruments") or []:
+            if isinstance(inst, Mapping) and inst.get("id"):
+                ids.append(str(inst.get("id")))
+        for slot in strategy.get("instrument_slots") or []:
+            if isinstance(slot, Mapping):
+                iid = slot.get("instrument_id") or slot.get("instrument")
+                if iid:
+                    ids.append(str(iid))
+        unique_ids = sorted(set(ids))
+        logger.info(
+            "[BotService] starting bot with strategy and instruments",
+            extra={"bot_id": bot_id, "strategy_id": strategy_id, "instrument_ids": unique_ids, "strategy": strategy},
+        )
     runtime = _runtime_for(bot_id, bot)
     runtime.reset_if_finished()
     runtime.start()
@@ -502,12 +514,7 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             continue
         merged = dict(stored)
         merged.update(runtime_entry)
-        bot_override = bot.get("risk") or {}
-        override_payload = bot_override if bot_override and bot_override != DEFAULT_ATM_TEMPLATE else None
-        atm_template = merge_templates(
-            merged.get("atm_template"),
-            override_payload,
-        )
+        atm_template = merge_templates(merged.get("atm_template"))
         instruments = (
             runtime_entry.get("instruments")
             or stored.get("instruments")
@@ -519,8 +526,8 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
                 "name": merged.get("name"),
                 "symbols": list(merged.get("symbols") or []),
                 "timeframe": merged.get("timeframe"),
-                "datasource": merged.get("datasource") or bot.get("datasource"),
-                "exchange": merged.get("exchange") or bot.get("exchange"),
+                    "datasource": merged.get("datasource"),
+                    "exchange": merged.get("exchange"),
                 "indicators": _indicator_meta(merged),
                 "instruments": instruments,
                 "atm_template": atm_template,
@@ -532,9 +539,10 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             "id": bot.get("id"),
             "name": bot.get("name"),
             "mode": bot.get("mode"),
-            "timeframe": bot.get("timeframe"),
-            "datasource": bot.get("datasource"),
-            "exchange": bot.get("exchange"),
+            # Bot-level runtime context is derived from its primary strategy.
+            "timeframe": (selected[0]["timeframe"] if selected else None),
+            "datasource": (selected[0]["datasource"] if selected else None),
+            "exchange": (selected[0]["exchange"] if selected else None),
             "risk": bot.get("risk"),
         },
         "strategies": selected,

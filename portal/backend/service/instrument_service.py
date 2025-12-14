@@ -365,8 +365,12 @@ def auto_sync_instrument(
         return None, "Symbol is required for instrument metadata"
 
     existing = resolve_instrument(datasource, exchange, normalized_symbol)
+    # If an existing instrument is present and already has tick metadata, reuse it.
+    # Otherwise continue to auto-fetch market metadata to enrich the record.
     if existing:
-        return existing, None
+        has_tick = (existing.get("tick_size") not in (None, 0)) or (existing.get("tick_value") not in (None, 0))
+        if has_tick:
+            return existing, None
 
     exchange_id = _normalize_exchange(exchange)
     datasource_id = (datasource or "").strip().upper()

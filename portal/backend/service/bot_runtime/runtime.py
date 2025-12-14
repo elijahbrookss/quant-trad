@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import uuid
 import time
 from collections import deque
 from copy import deepcopy
@@ -31,6 +32,8 @@ from .reporting import (
     TRADE_RAY_SPAN_MULTIPLIER,
     instrument_key,
 )
+from .chart_state import ChartStateBuilder
+from .intrabar import IntrabarManager
 from .series_builder import SeriesBuilder, StrategySeries
 
 logger = logging.getLogger(__name__)
@@ -90,12 +93,21 @@ class BotRuntime:
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._subscribers: Dict[str, Queue] = {}
         self._state_callback = state_callback
-        self._intrabar_cache: Dict[str, List[Candle]] = {}
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
-        self._intrabar_snapshots: Dict[str, Dict[str, Any]] = {}
         self._prepare_error: Optional[Dict[str, Any]] = None
         self._series_builder = SeriesBuilder(self.bot_id, self.config, self.run_type, self._log_candle_sequence)
+        self._intrabar_manager = IntrabarManager(
+            self.bot_id,
+            build_candles=SeriesBuilder._build_candles,
+            timeframe_seconds=_timeframe_to_seconds,
+            strategy_key_fn=self._strategy_key,
+        )
+        self._chart_state_builder = ChartStateBuilder(
+            normalise_epoch_fn=self._normalise_epoch,
+            log_sequence_fn=self._log_candle_sequence,
+            strategy_key_fn=self._strategy_key,
+        )
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -146,6 +158,7 @@ class BotRuntime:
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
         meta = self.config.get("strategies_meta")
+        logger.debug("[BotRuntime] Preparing bot runtime %s with strategies_meta: %s", self.bot_id, meta)
         if not meta:
             raise ValueError("Runtime requires strategy metadata to initialise")
         self._prepare_error = None
@@ -327,117 +340,8 @@ class BotRuntime:
         return SeriesBuilder._build_signals_from_markers(markers)
 
     @staticmethod
-    def _intrabar_interval_for(timeframe: Optional[str]) -> Optional[str]:
-        base_seconds = _timeframe_to_seconds(timeframe)
-        if not base_seconds or base_seconds <= 60:
-            return None
-        return "1m"
-
-    def _intrabar_cache_key(self, series: StrategySeries, start: datetime, interval: str) -> str:
-        epoch = int(start.timestamp())
-        strategy_key = self._strategy_key(series)
-        return f"{strategy_key}:{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{epoch}"
-
-    @staticmethod
     def _strategy_key(series: StrategySeries) -> str:
         return str(getattr(series, "strategy_id", getattr(series, "id", id(series))))
-
-    def _fetch_intrabar_candles(
-        self,
-        series: StrategySeries,
-        start: datetime,
-        end: datetime,
-        interval: str,
-    ) -> List[Candle]:
-        start_iso = _isoformat(start)
-        end_iso = _isoformat(end)
-        try:
-            df = fetch_ohlcv(
-                series.symbol,
-                start_iso,
-                end_iso,
-                interval,
-                datasource=series.datasource,
-                exchange=series.exchange,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.debug(
-                "bot_runtime_intrabar_fetch_failed | bot=%s | strategy=%s | symbol=%s | interval=%s | error=%s",
-                self.bot_id,
-                series.strategy_id,
-                series.symbol,
-                interval,
-                exc,
-            )
-            return []
-        if df is None or getattr(df, "empty", False):
-            return []
-        candles = self._build_candles(df, interval)
-        filtered: List[Candle] = []
-        for candle in candles:
-            start_ts = candle.start_time
-            end_ts = candle.end_time
-            if end_ts <= start:
-                continue
-            if start_ts >= end:
-                break
-            filtered.append(candle)
-        return filtered
-
-    def _intrabar_candles(self, series: StrategySeries, candle: Candle) -> List[Candle]:
-        engine = series.risk_engine
-        if engine is None or engine.active_trade is None:
-            return []
-        interval = self._intrabar_interval_for(series.timeframe)
-        if not interval:
-            return []
-        start = candle.start_time
-        end = candle.end or (start + (_timeframe_duration(series.timeframe) or timedelta(0)))
-        if start is None or end is None or end <= start:
-            return []
-        key = self._intrabar_cache_key(series, start, interval)
-        if key in self._intrabar_cache:
-            return self._intrabar_cache[key]
-        sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
-        self._intrabar_cache[key] = sub_candles
-        return sub_candles
-
-    def _ensure_intrabar_snapshot(self, series: StrategySeries, candle: Candle) -> Dict[str, Any]:
-        strategy_key = self._strategy_key(series)
-        snapshot = self._intrabar_snapshots.get(strategy_key)
-        if snapshot:
-            return snapshot
-        open_price = _coerce_float(candle.open, 0.0) or 0.0
-        entry = {
-            "strategy_id": getattr(series, "strategy_id", None) or strategy_key,
-            "time": candle.time,
-            "open": open_price,
-            "high": open_price,
-            "low": open_price,
-            "close": open_price,
-            "end": candle.end or candle.time,
-        }
-        self._intrabar_snapshots[strategy_key] = entry
-        return entry
-
-    def _update_intrabar_snapshot(
-        self,
-        series: StrategySeries,
-        candle: Candle,
-        minute_bar: Candle,
-    ) -> Dict[str, Any]:
-        snapshot = self._ensure_intrabar_snapshot(series, candle)
-        close_price = _coerce_float(minute_bar.close, snapshot["close"])
-        high_price = _coerce_float(minute_bar.high, snapshot["high"])
-        low_price = _coerce_float(minute_bar.low, snapshot["low"])
-        if close_price is not None:
-            snapshot["close"] = close_price
-        if high_price is not None:
-            snapshot["high"] = max(snapshot["high"], high_price)
-        if low_price is not None:
-            snapshot["low"] = min(snapshot["low"], low_price)
-        snapshot["end"] = minute_bar.end or minute_bar.time
-        return snapshot
 
     def _snapshot_candle_for_state(self, base: Candle, snapshot: Mapping[str, Any]) -> Candle:
         open_price = _coerce_float(snapshot.get("open"), base.open) or base.open
@@ -453,37 +357,18 @@ class BotRuntime:
             end=snapshot.get("end") or base.end,
         )
 
-    def _merge_intrabar_snapshot_payload(
-        self,
-        existing: Mapping[str, Any],
-        snapshot: Mapping[str, Any],
-    ) -> Dict[str, Any]:
-        payload = dict(existing)
-        open_price = _coerce_float(snapshot.get("open"), payload.get("open", 0.0)) or 0.0
-        high_price = _coerce_float(snapshot.get("high"), payload.get("high", open_price)) or open_price
-        low_price = _coerce_float(snapshot.get("low"), payload.get("low", open_price)) or open_price
-        close_price = _coerce_float(snapshot.get("close"), payload.get("close", open_price)) or open_price
-        payload["open"] = round(open_price, 4)
-        payload["high"] = round(high_price, 4)
-        payload["low"] = round(low_price, 4)
-        payload["close"] = round(close_price, 4)
-        end_ts = snapshot.get("end")
-        if isinstance(end_ts, datetime):
-            payload["end"] = _isoformat(end_ts)
-        return payload
-
     def _step_series_with_intrabar(self, series: StrategySeries, candle: Candle) -> List[Dict[str, Any]]:
         engine = series.risk_engine
         if engine is None:
             return []
-        intrabar = self._intrabar_candles(series, candle)
+        intrabar = self._intrabar_manager.intrabar_candles(series, candle)
         if not intrabar:
             return engine.step(candle)
         events: List[Dict[str, Any]] = []
         snapshot_used = False
         for minute_bar in intrabar:
             events.extend(engine.step(minute_bar))
-            snapshot = self._update_intrabar_snapshot(series, candle, minute_bar)
+            snapshot = self._intrabar_manager.update_snapshot(series, candle, minute_bar)
             snapshot_used = True
             temp_candle = self._snapshot_candle_for_state(candle, snapshot)
             self._update_state(temp_candle)
@@ -492,7 +377,7 @@ class BotRuntime:
                 break
             self._pace_intrabar_step()
         if snapshot_used:
-            self._intrabar_snapshots.pop(self._strategy_key(series), None)
+            self._intrabar_manager.snapshots.pop(self._strategy_key(series), None)
         return events
 
     @staticmethod
@@ -540,8 +425,7 @@ class BotRuntime:
             self._last_stats = {}
             self._next_bar_at = None
             self._logs.clear()
-            self._intrabar_cache.clear()
-            self._intrabar_snapshots.clear()
+            self._intrabar_manager.clear_cache()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -1036,30 +920,12 @@ class BotRuntime:
                     continue
 
     def _visible_candles(self) -> List[Dict[str, Any]]:
-        primary = self._primary_series
-        candles: List[Dict[str, Any]] = []
-        if not primary or not primary.candles:
-            return candles
-        status = self.state.get("status")
-        if status in {"idle", "initialising"}:
-            visible = len(primary.candles)
-        elif status in {"completed", "stopped"}:
-            visible = len(primary.candles)
-        else:
-            visible = min(self._bar_index, len(primary.candles))
-        visible = max(1, visible)
-        slice_candidates = list(primary.candles[:visible])
-        ordered = sorted(slice_candidates, key=lambda candle: candle.time.timestamp())
-        candles = [candle.to_dict() for candle in ordered]
-        snapshot = self._intrabar_snapshots.get(self._strategy_key(primary))
-        if snapshot and candles:
-            candles[-1] = self._merge_intrabar_snapshot_payload(candles[-1], snapshot)
-        self._log_candle_sequence(
-            "visible_payload",
-            getattr(primary, "strategy_id", None),
-            candles,
+        return self._chart_state_builder.visible_candles(
+            self._primary_series,
+            self.state.get("status"),
+            self._bar_index,
+            self._intrabar_manager,
         )
-        return candles
 
     def _log_candle_sequence(
         self,
@@ -1152,226 +1018,23 @@ class BotRuntime:
         return int(candle.time.timestamp())
 
     def _visible_overlays(self) -> List[Dict[str, Any]]:
-        overlays = list(self._chart_overlays)
-        if not overlays:
-            return []
-        current_epoch = self._current_epoch()
         status = str(self.state.get("status") or "").lower()
-        if current_epoch is None:
-            # Hide overlays until the bot has advanced at least one bar.
-            if status in {"idle", "initialising"}:
-                return []
-            return overlays
-
-        visible: List[Dict[str, Any]] = []
-        for overlay in overlays:
-            trimmed = self._trim_overlay_to_epoch(overlay, current_epoch)
-            if trimmed and self._overlay_is_ready(trimmed, current_epoch):
-                visible.append(trimmed)
-        return visible
-
-    @staticmethod
-    def _overlay_is_ready(overlay: Mapping[str, Any], current_epoch: int) -> bool:
-        if not isinstance(overlay, Mapping):
-            return False
-        overlay_type = str(overlay.get("type") or "").lower()
-        if overlay_type not in {"market_profile", "mpf"}:
-            return True
-        payload = overlay.get("payload") if isinstance(overlay.get("payload"), Mapping) else {}
-        boxes = payload.get("boxes") if isinstance(payload, Mapping) else None
-        if not boxes:
-            return True
-        latest_needed: Optional[int] = None
-        for box in boxes:
-            if not isinstance(box, Mapping):
-                continue
-            end_epoch = BotRuntime._normalise_epoch(
-                box.get("end") or box.get("end_date") or box.get("endDate")
-            )
-            if end_epoch is None:
-                end_epoch = BotRuntime._normalise_epoch(box.get("x2"))
-            if end_epoch is None:
-                end_epoch = BotRuntime._normalise_epoch(box.get("x1"))
-            if end_epoch is None:
-                continue
-            if latest_needed is None or end_epoch > latest_needed:
-                latest_needed = end_epoch
-        if latest_needed is None:
-            return True
-        return current_epoch >= latest_needed
-
-    @staticmethod
-    def _trim_overlay_to_epoch(overlay: Mapping[str, Any], current_epoch: int) -> Optional[Dict[str, Any]]:
-        if not isinstance(overlay, Mapping):
-            return None
-        payload = overlay.get("payload")
-        if not isinstance(payload, Mapping):
-            return dict(overlay)
-        trimmed_payload, has_content = BotRuntime._trim_overlay_payload(payload, current_epoch)
-        if not has_content:
-            return None
-        if trimmed_payload is payload:
-            return dict(overlay)
-        trimmed = dict(overlay)
-        trimmed["payload"] = trimmed_payload
-        return trimmed
-
-    @staticmethod
-    def _trim_overlay_payload(payload: Mapping[str, Any], current_epoch: int) -> Tuple[Mapping[str, Any], bool]:
-        if not isinstance(payload, Mapping):
-            return payload, True
-        trimmed: Dict[str, Any] = dict(payload)
-        changed = False
-
-        def process_list(key: str, filter_fn: Callable[[Any], Optional[Any]]) -> None:
-            nonlocal changed
-            entries = payload.get(key)
-            if not isinstance(entries, list):
-                return
-            new_entries: List[Any] = []
-            entry_changed = False
-            for entry in entries:
-                filtered = filter_fn(entry)
-                if filtered is None:
-                    entry_changed = True
-                    continue
-                new_entries.append(filtered)
-                if filtered is not entry:
-                    entry_changed = True
-            if entry_changed or len(new_entries) != len(entries):
-                trimmed[key] = new_entries
-                changed = True
-            else:
-                trimmed[key] = entries
-
-        process_list("price_lines", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
-        process_list("markers", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
-        process_list("touchPoints", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
-        process_list("touch_points", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
-        process_list("bubbles", lambda entry: BotRuntime._trim_time_entry(entry, current_epoch, ("time",)))
-        process_list("segments", lambda entry: BotRuntime._trim_segment_entry(entry, current_epoch))
-        process_list("polylines", lambda entry: BotRuntime._trim_polyline_entry(entry, current_epoch))
-        process_list("boxes", lambda entry: BotRuntime._trim_box_entry(entry, current_epoch))
-
-        has_content = BotRuntime._payload_has_content(trimmed)
-        return (trimmed if changed else payload, has_content)
-
-    @staticmethod
-    def _payload_has_content(payload: Mapping[str, Any]) -> bool:
-        if not isinstance(payload, Mapping):
-            return False
-        list_keys = {
-            "price_lines",
-            "markers",
-            "touchPoints",
-            "touch_points",
-            "boxes",
-            "segments",
-            "polylines",
-            "bubbles",
-        }
-        for key in list_keys:
-            entries = payload.get(key)
-            if isinstance(entries, list) and entries:
-                return True
-        for key, value in payload.items():
-            if key in list_keys:
-                continue
-            if isinstance(value, list) and value:
-                return True
-            if isinstance(value, Mapping) and value:
-                return True
-            if isinstance(value, (int, float)) and value != 0:
-                return True
-            if isinstance(value, str) and value.strip():
-                return True
-        return False
-
-    @staticmethod
-    def _trim_time_entry(entry: Any, current_epoch: int, keys: Tuple[str, ...]) -> Optional[Any]:
-        if not isinstance(entry, Mapping):
-            return None
-        epoch = BotRuntime._first_epoch_from(entry, keys)
-        if epoch is not None and epoch > current_epoch:
-            return None
-        return entry
-
-    @staticmethod
-    def _trim_box_entry(entry: Any, current_epoch: int) -> Optional[Any]:
-        if not isinstance(entry, Mapping):
-            return None
-        start_epoch = BotRuntime._first_epoch_from(
-            entry,
-            ("start", "start_date", "startDate", "x1"),
+        return self._chart_state_builder.visible_overlays(
+            self._chart_overlays,
+            status,
+            self._current_epoch(),
         )
-        if start_epoch is not None and start_epoch > current_epoch:
-            return None
-        end_epoch = BotRuntime._first_epoch_from(entry, ("end", "end_date", "endDate"))
-        extend_flag = bool(entry.get("extend")) if "extend" in entry else False
-        if end_epoch is None and not extend_flag:
-            end_epoch = BotRuntime._first_epoch_from(entry, ("x2",))
-        if end_epoch is not None and end_epoch > current_epoch:
-            return None
-        return entry
-
-    @staticmethod
-    def _trim_segment_entry(entry: Any, current_epoch: int) -> Optional[Any]:
-        if not isinstance(entry, Mapping):
-            return None
-        start_epoch = BotRuntime._first_epoch_from(entry, ("x1", "start", "start_date", "startDate"))
-        if start_epoch is not None and start_epoch > current_epoch:
-            return None
-        end_epoch = BotRuntime._first_epoch_from(entry, ("x2", "end", "end_date", "endDate"))
-        if end_epoch is not None and end_epoch > current_epoch:
-            trimmed = dict(entry)
-            trimmed["x2"] = current_epoch
-            return trimmed
-        return entry
-
-    @staticmethod
-    def _trim_polyline_entry(entry: Any, current_epoch: int) -> Optional[Any]:
-        if not isinstance(entry, Mapping):
-            return None
-        points = entry.get("points")
-        if not isinstance(points, list):
-            return entry
-        new_points: List[Any] = []
-        changed = False
-        for point in points:
-            if not isinstance(point, Mapping):
-                continue
-            epoch = BotRuntime._normalise_epoch(point.get("time"))
-            if epoch is not None and epoch > current_epoch:
-                changed = True
-                continue
-            new_points.append(point)
-        if not new_points:
-            return None
-        if changed or len(new_points) != len(points):
-            trimmed = dict(entry)
-            trimmed["points"] = new_points
-            return trimmed
-        return entry
-
-    @staticmethod
-    def _first_epoch_from(entry: Mapping[str, Any], keys: Tuple[str, ...]) -> Optional[int]:
-        for key in keys:
-            if key not in entry:
-                continue
-            epoch = BotRuntime._normalise_epoch(entry.get(key))
-            if epoch is not None:
-                return epoch
-        return None
 
     def _chart_state(self) -> Dict[str, Any]:
         candles = self._visible_candles()
-        return {
-            "candles": candles,
-            "trades": self._aggregate_trades(),
-            "stats": self._last_stats or self._aggregate_stats(),
-            "overlays": self._visible_overlays(),
-            "logs": self.logs(),
-        }
+        overlays = self._visible_overlays()
+        return self._chart_state_builder.chart_state(
+            candles,
+            self._aggregate_trades(),
+            self._last_stats or self._aggregate_stats(),
+            overlays,
+            self.logs(),
+        )
 
     def _push_update(self, event: str) -> None:
         payload = self._chart_state()

@@ -58,7 +58,13 @@ class IndicatorCacheManager:
             return cached
 
         meta = self._factory.build_meta_from_record(record)
-        inst = self._factory.build_indicator_instance(meta)
+        # Allow fallback context to supply runtime provider overrides so
+        # indicator instances created for ad-hoc overlays use the UI-selected
+        # datasource/exchange instead of any persisted snapshot values.
+        fb = fallback_context or {}
+        fb_ds = fb.get("datasource")
+        fb_ex = fb.get("exchange")
+        inst = self._factory.build_indicator_instance(meta, datasource=fb_ds, exchange=fb_ex)
         entry = IndicatorCacheEntry(meta=meta, instance=inst, updated_at=record_version)
         self._cache[inst_id] = entry
         return entry
