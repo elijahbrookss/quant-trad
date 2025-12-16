@@ -32,6 +32,13 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
       const handlePayload = (event) => {
         try {
           const data = JSON.parse(event.data)
+          console.log('[useBotStream] event=payload_received', {
+            type: event.type,
+            dataType: Array.isArray(data) ? 'array' : typeof data,
+            hasBot: !!data?.bot,
+            hasBotId: !!data?.id,
+            hasRuntime: !!data?.runtime,
+          })
           if (Array.isArray(data)) {
             mergeBots(data)
           } else if (Array.isArray(data?.bots)) {
@@ -39,14 +46,29 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
           } else if (data?.bot) {
             upsertBot(data.bot)
             if (data.bot?.id && data.bot?.runtime) {
+              console.log('[useBotStream] event=applying_runtime', {
+                botId: data.bot.id,
+                hasOverlays: !!data.bot.runtime?.overlays,
+                overlayCount: data.bot.runtime?.overlays?.length || 0,
+              })
               applyRuntime(data.bot.id, data.bot.runtime)
             }
           } else if (data?.id) {
             upsertBot(data)
             if (data?.id && data?.runtime) {
+              console.log('[useBotStream] event=applying_runtime', {
+                botId: data.id,
+                hasOverlays: !!data.runtime?.overlays,
+                overlayCount: data.runtime?.overlays?.length || 0,
+              })
               applyRuntime(data.id, data.runtime)
             }
           } else if (data?.bot_id && data?.runtime) {
+            console.log('[useBotStream] event=applying_runtime', {
+              botId: data.bot_id,
+              hasOverlays: !!data.runtime?.overlays,
+              overlayCount: data.runtime?.overlays?.length || 0,
+            })
             applyRuntime(data.bot_id, data.runtime)
           }
           setBotStreamState('open')
@@ -60,6 +82,11 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
           const data = JSON.parse(event.data)
           const botId = data?.bot_id || data?.bot?.id
           const runtime = data?.runtime || data?.bot?.runtime
+          console.log('[useBotStream] event=runtime_received', {
+            botId,
+            hasOverlays: !!runtime?.overlays,
+            overlayCount: runtime?.overlays?.length || 0,
+          })
           if (botId && runtime) {
             applyRuntime(botId, runtime)
             setBotStreamState('open')

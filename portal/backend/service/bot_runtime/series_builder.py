@@ -15,9 +15,12 @@ from .domain import (
     LadderRiskEngine,
     StrategySignal,
     isoformat,
+    normalize_epoch,
     timeframe_duration,
 )
+from .models import Strategy
 from .reporting import instrument_key
+from .strategy_loader import StrategyLoader
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +69,25 @@ class SeriesBuilder:
     def reset(self) -> None:
         self._indicator_overlay_cache.clear()
 
-    def build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
+    def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
+        """Build series from strategy IDs (clean DB-based approach).
+
+        Loads strategies fresh from the database with proper typing,
+        avoiding config drift and confusion.
+
+        Args:
+            strategy_ids: List of strategy IDs to build series for
+
+        Returns:
+            List of StrategySeries ready for runtime execution
+
+        Raises:
+            ValueError: If any strategy not found
+        """
         series_list: List[StrategySeries] = []
-        for strategy in strategies:
+        for strategy_id in strategy_ids:
+            # Load strategy fresh from DB with proper typing
+            strategy = StrategyLoader.fetch_strategy(strategy_id)
             stream = self._build_series_for_strategy(strategy)
             series_list.append(stream)
         return series_list
@@ -133,24 +152,18 @@ class SeriesBuilder:
             )
         return True
 
-    def _build_series_for_strategy(self, strategy: Mapping[str, Any]) -> StrategySeries:
-        from .. import strategy_service
+    def _fetch_ohlcv_data(
+        self,
+        symbol: str,
+        start_iso: str,
+        end_iso: str,
+        timeframe: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        strategy_id: Optional[str] = None,
+    ):
+        """Fetch and validate OHLCV dataframe for strategy."""
         from ..candle_service import fetch_ohlcv
-
-        symbol = self._resolve_symbol(strategy)
-        if not symbol:
-            message = "Strategy missing instrument"
-            raise RuntimeError(message)
-        timeframe = self._resolve_timeframe(strategy)
-        datasource = self._resolve_datasource(strategy)
-        exchange = self._resolve_exchange(strategy)
-        if self.run_type == "backtest":
-            start_iso = self.config.get("backtest_start")
-            end_iso = self.config.get("backtest_end")
-            if not start_iso or not end_iso:
-                start_iso, end_iso = self._resolve_live_window()
-        else:
-            start_iso, end_iso = self._resolve_live_window()
 
         try:
             df = fetch_ohlcv(
@@ -164,23 +177,26 @@ class SeriesBuilder:
         except Exception as exc:
             message = f"Failed to fetch OHLCV data: {exc}"
             raise RuntimeError(message) from exc
+
         if df is None or getattr(df, "empty", False):
             message = "No OHLCV data returned for strategy"
             logger.error(
                 "bot_runtime_no_candles | bot=%s | strategy=%s | symbol=%s | timeframe=%s",
                 self.bot_id,
-                strategy.get("id"),
+                strategy_id,
                 symbol,
                 timeframe,
             )
             raise RuntimeError(message)
+
+        # Warn if dataframe is not sorted
         if not df.index.is_monotonic_increasing:
             first_idx = df.index[0] if len(df.index) else None
             second_idx = df.index[1] if len(df.index) > 1 else None
             logger.warning(
                 "bot_runtime_unsorted_dataframe | bot=%s | strategy=%s | symbol=%s | timeframe=%s | first=%s | second=%s | rows=%s",
                 self.bot_id,
-                strategy.get("id"),
+                strategy_id,
                 symbol,
                 timeframe,
                 first_idx,
@@ -188,15 +204,24 @@ class SeriesBuilder:
                 len(df.index),
             )
 
-        candles = self._build_candles(df, timeframe)
-        if not candles:
-            raise RuntimeError("No valid candles could be built for strategy")
-        if self._log_candle_sequence:
-            self._log_candle_sequence("build_series", strategy.get("id"), candles)
+        return df
+
+    def _evaluate_strategy(
+        self,
+        strategy_id: Optional[str],
+        start_iso: str,
+        end_iso: str,
+        timeframe: str,
+        symbol: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+    ) -> Dict[str, Any]:
+        """Evaluate strategy and generate signals."""
+        from .. import strategy_service
 
         try:
             evaluation = strategy_service.generate_strategy_signals(
-                strategy_id=strategy.get("id"),
+                strategy_id=strategy_id,
                 start=start_iso,
                 end=end_iso,
                 interval=timeframe,
@@ -210,25 +235,24 @@ class SeriesBuilder:
             logger.exception(
                 "bot_runtime_strategy_eval_failed | bot=%s | strategy=%s | error=%s",
                 self.bot_id,
-                strategy.get("id"),
+                strategy_id,
                 exc,
             )
-            raise RuntimeError(message)
+            raise RuntimeError(message) from exc
 
-        overlays = self._extract_indicator_overlays(evaluation)
-        signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
-        instrument = self._instrument_for(datasource, exchange, symbol)
-        
-        if instrument and instrument.get("instrument_snapshot"):
-            instrument = instrument.get("instrument_snapshot")
+        return evaluation
 
-        #log instrument
-        logger.debug("[BUILD SERIES] Resolved instrument for strategy %s: %s", strategy.get("id"), instrument)
-
-        atm_template = merge_templates(strategy.get("atm_template"))
+    def _build_atm_template_with_instrument(
+        self,
+        strategy: Strategy,
+        instrument: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Merge ATM template with instrument fields (if not overridden)."""
+        atm_template = merge_templates(strategy.atm_template)
         template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
 
         def _apply_instrument_field(field: str) -> None:
+            """Apply instrument field to template if not overridden."""
             if template_meta.get(f"{field}_override"):
                 return
             if not instrument:
@@ -238,6 +262,7 @@ class SeriesBuilder:
                 return
             atm_template[field] = value
 
+        # Apply instrument fields to template
         for field_name in (
             "tick_size",
             "tick_value",
@@ -247,22 +272,89 @@ class SeriesBuilder:
             "quote_currency",
         ):
             _apply_instrument_field(field_name)
+
+        return atm_template
+
+    def _build_series_for_strategy(self, strategy: Strategy) -> StrategySeries:
+        """Build complete series for a single strategy (orchestrator method).
+
+        This method coordinates:
+        1. Metadata resolution (symbol, timeframe, window)
+        2. Data fetching (OHLCV candles)
+        3. Strategy evaluation (signals, overlays)
+        4. Instrument resolution and ATM template merging
+        5. Risk engine creation
+
+        Args:
+            strategy: Strategy domain model loaded from database
+
+        Returns:
+            StrategySeries ready for runtime execution
+        """
+        # Step 1: Resolve strategy metadata
+        symbol = strategy.symbol
+        if not symbol:
+            raise RuntimeError(f"Strategy {strategy.id} missing instrument")
+
+        timeframe = strategy.timeframe
+        datasource = self.config.get("datasource") or strategy.datasource
+        exchange = self.config.get("exchange") or strategy.exchange
+
+        # Determine time window
+        if self.run_type == "backtest":
+            start_iso = self.config.get("backtest_start")
+            end_iso = self.config.get("backtest_end")
+            if not start_iso or not end_iso:
+                start_iso, end_iso = self._resolve_live_window()
+        else:
+            start_iso, end_iso = self._resolve_live_window()
+
+        # Step 2: Fetch and build candles
+        df = self._fetch_ohlcv_data(
+            symbol, start_iso, end_iso, timeframe, datasource, exchange, strategy.id
+        )
+        candles = self._build_candles(df, timeframe)
+        if not candles:
+            raise RuntimeError(f"No valid candles could be built for strategy {strategy.id}")
+        if self._log_candle_sequence:
+            self._log_candle_sequence("build_series", strategy.id, candles)
+
+        # Step 3: Evaluate strategy for signals and overlays
+        evaluation = self._evaluate_strategy(
+            strategy.id, start_iso, end_iso, timeframe, symbol, datasource, exchange
+        )
+        overlays = self._extract_indicator_overlays(evaluation)
+        signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
+
+        # Step 4: Resolve instrument and build ATM template
+        instrument = self._instrument_for(datasource, exchange, symbol)
+        if instrument and instrument.get("instrument_snapshot"):
+            instrument = instrument.get("instrument_snapshot")
+
+        logger.debug("[BUILD SERIES] Resolved instrument for strategy %s: %s", strategy.id, instrument)
+
+        atm_template = self._build_atm_template_with_instrument(strategy, instrument)
+
+        # Step 5: Create risk engine and assemble series
         risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
-        series_meta = dict(strategy)
+
+        # Convert strategy to dict for backward compatibility with meta field
+        series_meta = strategy.to_dict()
         if instrument:
             series_meta["instrument"] = instrument
         series_meta["atm_template"] = atm_template
+
         logger.info(
             "bot_runtime_series_ready | bot=%s | strategy=%s | contracts=%s | targets=%s",
             self.bot_id,
-            strategy.get("id"),
+            strategy.id,
             atm_template.get("contracts"),
             ",".join(str(order.get("ticks")) for order in atm_template.get("take_profit_orders", [])),
         )
 
         return StrategySeries(
-            strategy_id=str(strategy.get("id")),
-            name=strategy.get("name") or str(strategy.get("id")) or "strategy",
+            strategy_id=strategy.id,
+            name=strategy.name,
             symbol=symbol,
             timeframe=timeframe,
             datasource=datasource,
@@ -271,7 +363,7 @@ class SeriesBuilder:
             signals=signals,
             overlays=overlays
             + self._indicator_overlay_entries(
-                strategy,
+                series_meta,  # Use dict for backward compatibility
                 start_iso,
                 end_iso,
                 timeframe,
@@ -286,81 +378,6 @@ class SeriesBuilder:
             instrument=instrument,
             atm_template=atm_template,
         )
-
-    @staticmethod
-    def _resolve_symbol(strategy: Mapping[str, Any]) -> Optional[str]:
-        # Prefer strategy-owned instrument records (may be full dicts)
-        from .. import instrument_service
-
-        # Log strategy and strategy's instruments for debugging
-
-        logger.debug(
-            "[RESOLVE SYMBOL] Resolving symbol for strategy %s with instruments: %s",
-            strategy.get("id"),
-            strategy.get("instrument_links"),
-        )
-
-        instruments = strategy.get("instrument_links") or []
-        if instruments:
-            first = instruments[0]
-            cand = first.get("instrument_id")
-            logger.debug(
-                "[RESOLVE SYMBOL] Found instrument link for strategy %s: %s",
-                strategy.get("id"),
-                cand,
-            )
-            if cand:
-                try:
-                    rec = instrument_service.get_instrument_record(str(cand))
-                    cand = rec.get("symbol")
-                    logger.debug(
-                        "[RESOLVE SYMBOL] Fetched instrument record for symbol=%s",
-                        cand,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[RESOLVE SYMBOL] Failed to fetch instrument record for id %s",
-                        cand,
-                    )
-                    pass
-            if cand:
-                normalized = str(cand).strip()
-                # normalized 
-                logger.debug(
-                    "[RESOLVE SYMBOL] Normalized symbol for strategy %s: %s",
-                    strategy.get("id"),
-                    normalized,
-                )
-                if normalized:
-                    logger.debug(
-                        "[RESOLVE SYMBOL] Resolved symbol for strategy %s: %s",
-                        strategy.get("id"),
-                        normalized,
-                    )
-                    return normalized
-
-    @staticmethod
-    def _coerce_symbol_entry(entry: Any) -> Optional[str]:
-        if isinstance(entry, Mapping):
-            candidate = entry.get("symbol")
-        else:
-            candidate = entry
-        if candidate is None:
-            return None
-        normalized = str(candidate).strip()
-        return normalized or None
-
-    def _resolve_timeframe(self, strategy: Mapping[str, Any]) -> str:
-        tf = strategy.get("timeframe")
-        if not tf:
-            raise RuntimeError("Strategy missing timeframe")
-        return str(tf)
-
-    def _resolve_datasource(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self.config.get("datasource") or strategy.get("datasource")
-
-    def _resolve_exchange(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self.config.get("exchange") or strategy.get("exchange")
 
     def _instrument_for(
         self,
@@ -439,8 +456,24 @@ class SeriesBuilder:
             cache_key = self._indicator_overlay_cache_key(indicator_id, start_iso, end_iso, interval, window_symbol, ds, ex)
             cached = self._indicator_overlay_cache.get(cache_key)
             if cached:
+                logger.info(
+                    "event=bot_overlay_cache_hit bot_id=%s indicator_id=%s indicator_type=%s",
+                    self.bot_id,
+                    indicator_id,
+                    indicator_type,
+                )
                 overlays.append(deepcopy(cached))
                 continue
+            logger.info(
+                "event=bot_overlay_request bot_id=%s indicator_id=%s indicator_type=%s start=%s end=%s interval=%s symbol=%s",
+                self.bot_id,
+                indicator_id,
+                indicator_type,
+                start_iso,
+                end_iso,
+                interval,
+                window_symbol,
+            )
             try:
                 payload = indicator_service.overlays_for_instance(
                     indicator_id,
@@ -451,9 +484,17 @@ class SeriesBuilder:
                     datasource=ds,
                     exchange=ex,
                 )
+                logger.info(
+                    "event=bot_overlay_received bot_id=%s indicator_id=%s boxes=%d markers=%d price_lines=%d",
+                    self.bot_id,
+                    indicator_id,
+                    len(payload.get("boxes", [])),
+                    len(payload.get("markers", [])),
+                    len(payload.get("price_lines", [])),
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
-                logger.debug(
-                    "bot_indicator_overlay_failed | bot=%s | strategy=%s | indicator=%s | error=%s",
+                logger.error(
+                    "event=bot_indicator_overlay_failed bot_id=%s strategy_id=%s indicator_id=%s error=%s",
                     self.bot_id,
                     strategy_meta.get("id"),
                     indicator_id,
@@ -468,6 +509,12 @@ class SeriesBuilder:
                     "color": color,
                     "source": "indicator",
                 }
+            )
+            logger.info(
+                "event=bot_overlay_appended bot_id=%s indicator_id=%s total_overlays=%d",
+                self.bot_id,
+                indicator_id,
+                len(overlays),
             )
             self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
         return overlays
@@ -516,26 +563,8 @@ class SeriesBuilder:
 
     @staticmethod
     def _normalise_epoch(value: Any) -> Optional[int]:
-        if value in (None, ""):
-            return None
-        if isinstance(value, (int, float)):
-            return int(value)
-        text = str(value).strip()
-        if not text:
-            return None
-        if text.isdigit():
-            return int(text)
-        try:
-            return int(float(text))
-        except (TypeError, ValueError):
-            pass
-        try:
-            if text.endswith("Z"):
-                text = text[:-1]
-            parsed = datetime.fromisoformat(text)
-            return int(parsed.timestamp())
-        except ValueError:
-            return None
+        """Deprecated: Use normalize_epoch from domain module instead."""
+        return normalize_epoch(value)
 
     @staticmethod
     def _build_candles(df: pd.DataFrame, timeframe: Optional[str] = None) -> List[Candle]:

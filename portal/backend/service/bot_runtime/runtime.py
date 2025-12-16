@@ -21,6 +21,7 @@ from .domain import (
     StrategySignal,
     coerce_float,
     isoformat,
+    normalize_epoch,
     timeframe_duration,
     timeframe_to_seconds,
 )
@@ -157,13 +158,16 @@ class BotRuntime:
             raise RuntimeError(message)
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
-        meta = self.config.get("strategies_meta")
-        logger.debug("[BotRuntime] Preparing bot runtime %s with strategies_meta: %s", self.bot_id, meta)
-        if not meta:
-            raise ValueError("Runtime requires strategy metadata to initialise")
+
+        # Load strategies fresh from DB by ID
+        strategy_ids = self.config.get("strategy_ids")
         self._prepare_error = None
+
         try:
-            streams = self._series_builder.build_series(meta)
+            if not strategy_ids:
+                raise ValueError("Runtime requires 'strategy_ids' to initialise")
+            logger.debug("[BotRuntime] Preparing bot runtime %s with strategy_ids: %s", self.bot_id, strategy_ids)
+            streams = self._series_builder.build_series_by_ids(strategy_ids)
         except Exception as exc:
             details = self._prepare_error or {"message": str(exc)}
             self._prepare_error = details
@@ -191,25 +195,6 @@ class BotRuntime:
             if series.trade_overlay:
                 overlays.append(series.trade_overlay)
         self._chart_overlays = overlays
-
-    def _build_series(self, strategies: Sequence[Mapping[str, Any]]) -> List[StrategySeries]:
-        return self._series_builder.build_series(strategies)
-
-    def _build_series_for_strategy(self, strategy: Mapping[str, Any]) -> Optional[StrategySeries]:
-        return self._series_builder._build_series_for_strategy(strategy)
-
-    @staticmethod
-    def _resolve_symbol(strategy: Mapping[str, Any]) -> Optional[str]:
-        return SeriesBuilder._resolve_symbol(strategy)
-
-    def _resolve_timeframe(self, strategy: Mapping[str, Any]) -> str:
-        return self._series_builder._resolve_timeframe(strategy)
-
-    def _resolve_datasource(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self._series_builder._resolve_datasource(strategy)
-
-    def _resolve_exchange(self, strategy: Mapping[str, Any]) -> Optional[str]:
-        return self._series_builder._resolve_exchange(strategy)
 
     def _instrument_for(
         self,
@@ -382,26 +367,8 @@ class BotRuntime:
 
     @staticmethod
     def _normalise_epoch(value: Any) -> Optional[int]:
-        if value in (None, ""):
-            return None
-        if isinstance(value, (int, float)):
-            return int(value)
-        text = str(value).strip()
-        if not text:
-            return None
-        if text.isdigit():
-            return int(text)
-        try:
-            return int(float(text))
-        except (TypeError, ValueError):
-            pass
-        try:
-            if text.endswith("Z"):
-                text = text[:-1]
-            parsed = datetime.fromisoformat(text)
-            return int(parsed.timestamp())
-        except ValueError:
-            return None
+        """Deprecated: Use normalize_epoch from domain module instead."""
+        return normalize_epoch(value)
 
     @staticmethod
     def _extract_indicator_overlays(result: Mapping[str, Any]) -> List[Dict[str, Any]]:

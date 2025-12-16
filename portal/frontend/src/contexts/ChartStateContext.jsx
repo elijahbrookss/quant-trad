@@ -48,6 +48,12 @@ export function ChartStateProvider({ children }) {
   }, [info]);
 
   const updateChart = useCallback((id, patch) => {
+    console.log('[ChartStateContext] event=chart_update', {
+      chartId: id,
+      keys: Object.keys(patch),
+      hasOverlays: !!patch?.overlays,
+      overlayCount: patch?.overlays?.length || 0,
+    });
     debug('chart_update', { chartId: id, keys: Object.keys(patch) });
     dispatch({ type: 'UPDATE', id, patch });
   }, [debug]);

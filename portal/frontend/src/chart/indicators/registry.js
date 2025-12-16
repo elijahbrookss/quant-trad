@@ -39,7 +39,7 @@ export function adaptPayload(type, payload, colorHex) {
     .filter((line) => line.price !== null);
 
   const markersAll = Array.isArray(payload?.markers) ? payload.markers : [];
-  const boxes      = Array.isArray(payload?.boxes) ? payload.boxes : [];
+  const boxesRaw   = Array.isArray(payload?.boxes) ? payload.boxes : [];
   const segments   = Array.isArray(payload?.segments) ? payload.segments : [];
   const polylines  = Array.isArray(payload?.polylines) ? payload.polylines : [];
   const bubbles    = Array.isArray(payload?.bubbles) ? payload.bubbles : [];
@@ -91,11 +91,22 @@ export function adaptPayload(type, payload, colorHex) {
     }))
     .filter((line) => line.points.length > 0);
 
+  const normBoxes = boxesRaw
+    .map((box) => ({
+      ...box,
+      x1: toSec(box.x1 ?? box.start ?? box.start_date ?? box.startDate),
+      x2: toSec(box.x2 ?? box.end ?? box.end_date ?? box.endDate),
+      y1: toFiniteNumber(box.y1 ?? box.val ?? box.VAL),
+      y2: toFiniteNumber(box.y2 ?? box.vah ?? box.VAH),
+      color: colorHex || box.color,
+    }))
+    .filter((box) => Number.isFinite(box.x1) && Number.isFinite(box.y1) && Number.isFinite(box.y2));
+
   return {
     priceLines,
     markers,
     touchPoints,
-    boxes,
+    boxes: normBoxes,
     segments: normSegments,
     polylines: normPolylines,
     bubbles: signalBubbles,

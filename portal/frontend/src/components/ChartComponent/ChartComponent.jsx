@@ -1273,8 +1273,8 @@ export const ChartComponent = ({ chartId }) => {
         const baseIndex = boxes.length;
         const summaryEntries = [];
         const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
-          const x1 = toSec(box.x1);
-          const requestedX2 = toSec(box.x2);
+          const x1 = box.x1;
+          const requestedX2 = box.x2;
           const extendBox = box.extend !== undefined ? Boolean(box.extend) : false;
           let x2 = requestedX2;
 
@@ -1326,8 +1326,8 @@ export const ChartComponent = ({ chartId }) => {
           const sourceStart = coalesce(box.start, box.start_date, box.startDate);
           const sourceEnd = coalesce(box.end, box.end_date, box.endDate);
 
-          const y1 = Number(box.y1);
-          const y2 = Number(box.y2);
+          const y1 = box.y1;
+          const y2 = box.y2;
           const precision = Number.isFinite(Number(box.precision))
             ? Math.min(Math.max(Number(box.precision), 2), 8)
             : undefined;

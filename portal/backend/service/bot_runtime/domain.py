@@ -47,6 +47,26 @@ def coerce_float(value: Optional[object], default: Optional[float] = None) -> Op
     return numeric
 
 
+def coalesce_numeric(*values: Optional[float], default: float = 0.0, allow_zero: bool = False) -> float:
+    """Return the first non-None, non-zero value, or default.
+
+    Args:
+        *values: Values to check in order of precedence
+        default: Value to return if all inputs are None or zero
+        allow_zero: If True, treat 0 as a valid value (don't skip it)
+
+    Returns:
+        First valid value or default
+    """
+    for value in values:
+        if value is None:
+            continue
+        if not allow_zero and value == 0:
+            continue
+        return float(value)
+    return default
+
+
 def timeframe_to_seconds(label: Optional[str]) -> Optional[int]:
     """Convert timeframe strings like '15m' or '4h' into seconds."""
 
@@ -72,6 +92,43 @@ def timeframe_duration(label: Optional[str]) -> Optional[timedelta]:
     if not seconds:
         return None
     return timedelta(seconds=seconds)
+
+
+def normalize_epoch(value: Any) -> Optional[int]:
+    """Convert various timestamp formats to Unix epoch (seconds since 1970-01-01 UTC).
+
+    Handles:
+    - None or empty string -> None
+    - int/float -> int (already epoch)
+    - numeric string -> int
+    - ISO 8601 string -> epoch via parsing
+
+    Args:
+        value: Timestamp in various formats
+
+    Returns:
+        Unix epoch timestamp in seconds, or None if invalid
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if text.endswith("Z"):
+            text = text[:-1]
+        parsed = datetime.fromisoformat(text)
+        return int(parsed.timestamp())
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -212,67 +269,51 @@ class LadderPosition:
         self.bars_held += 1
 
     def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
+        """Check if candle price hits any target levels and process fills."""
         events: List[Dict[str, str]] = []
         ordered = sorted(self.legs, key=lambda leg: leg.ticks)
-        if self.direction == "long":
-            for leg in ordered:
-                if leg.status != "open":
-                    continue
-                if candle.high >= leg.target_price:
-                    leg.status = "target"
-                    leg.exit_price = leg.target_price
-                    leg.exit_time = isoformat(candle.time)
-                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(leg.target_price, leg.contracts)
-                    events.append(
-                        {
-                            "type": "target",
-                            "leg": leg.name,
-                            "leg_id": leg.leg_id,
-                            "trade_id": self.trade_id,
-                            "price": round(leg.target_price, 4),
-                            "time": leg.exit_time,
-                            "pnl": round(pnl, 4),
-                            "currency": self.quote_currency,
-                            "contracts": leg.contracts,
-                            "ticks": leg.ticks,
-                            "direction": self.direction,
-                        }
-                    )
-                    if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
-                        self.stop_price = self.entry_price
-                        self.moved_to_breakeven = True
-        else:
-            for leg in ordered:
-                if leg.status != "open":
-                    continue
-                if candle.low <= leg.target_price:
-                    leg.status = "target"
-                    leg.exit_price = leg.target_price
-                    leg.exit_time = isoformat(candle.time)
-                    pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
-                    leg.pnl = pnl
-                    self._record_pnl(pnl)
-                    self._apply_fee(leg.target_price, leg.contracts)
-                    events.append(
-                        {
-                            "type": "target",
-                            "leg": leg.name,
-                            "trade_id": self.trade_id,
-                            "price": round(leg.target_price, 4),
-                            "time": leg.exit_time,
-                            "pnl": round(pnl, 4),
-                            "currency": self.quote_currency,
-                            "contracts": leg.contracts,
-                            "ticks": leg.ticks,
-                            "direction": self.direction,
-                        }
-                    )
-                    if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
-                        self.stop_price = self.entry_price
-                        self.moved_to_breakeven = True
+
+        for leg in ordered:
+            if leg.status != "open":
+                continue
+
+            # Check if target was hit based on direction
+            is_filled = (
+                candle.high >= leg.target_price if self.direction == "long"
+                else candle.low <= leg.target_price
+            )
+
+            if not is_filled:
+                continue
+
+            # Process the fill
+            leg.status = "target"
+            leg.exit_price = leg.target_price
+            leg.exit_time = isoformat(candle.time)
+            pnl = self._pnl_for_exit(leg.target_price, leg.contracts)
+            leg.pnl = pnl
+            self._record_pnl(pnl)
+            self._apply_fee(leg.target_price, leg.contracts)
+
+            events.append({
+                "type": "target",
+                "leg": leg.name,
+                "leg_id": leg.leg_id,
+                "trade_id": self.trade_id,
+                "price": round(leg.target_price, 4),
+                "time": leg.exit_time,
+                "pnl": round(pnl, 4),
+                "currency": self.quote_currency,
+                "contracts": leg.contracts,
+                "ticks": leg.ticks,
+                "direction": self.direction,
+            })
+
+            # Move to breakeven if threshold reached
+            if not self.moved_to_breakeven and leg.ticks >= self.breakeven_trigger_ticks:
+                self.stop_price = self.entry_price
+                self.moved_to_breakeven = True
+
         return events
 
     def _maybe_move_breakeven(self) -> None:
@@ -492,14 +533,13 @@ class LadderRiskEngine:
         self._validate_template(self.template)
         self._validate_instrument(self.instrument)
 
+        # Resolve tick_size (required)
         config_tick = coerce_float(provided_template.get("tick_size"))
         instrument_tick = coerce_float(self.instrument.get("tick_size"))
-        if config_tick not in (None, 0):
-            self.tick_size = float(config_tick)
-        elif instrument_tick not in (None, 0):
-            self.tick_size = float(instrument_tick)
-        else:
+        tick_size = coalesce_numeric(config_tick, instrument_tick, default=0.0)
+        if tick_size == 0:
             raise ValueError("tick_size required from either template or instrument configuration")
+        self.tick_size = tick_size
 
         self.stop_ticks = max(int(self.template.get("stop_ticks") or 0), 0)
 
@@ -516,24 +556,15 @@ class LadderRiskEngine:
 
         self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
 
+        # Resolve contract_size (config > instrument > 1.0)
         config_contract = coerce_float(self.template.get("contract_size"))
         instrument_contract = coerce_float(self.instrument.get("contract_size"))
-        self.contract_size = (
-            float(config_contract)
-            if config_contract not in (None, 0)
-            else float(instrument_contract)
-            if instrument_contract not in (None, 0)
-            else 1.0
-        )
+        self.contract_size = coalesce_numeric(config_contract, instrument_contract, default=1.0)
+        # Resolve tick_value (config > instrument > calculated from tick_size * contract_size)
         config_tick_value = coerce_float(self.template.get("tick_value"))
         instrument_tick_value = coerce_float(self.instrument.get("tick_value"))
-        if config_tick_value not in (None, 0):
-            tick_value = float(config_tick_value)
-        elif instrument_tick_value not in (None, 0):
-            tick_value = float(instrument_tick_value)
-        else:
-            tick_value = self.tick_size * self.contract_size
-        self.tick_value = float(tick_value or self.tick_size)
+        calculated_tick_value = self.tick_size * self.contract_size
+        self.tick_value = coalesce_numeric(config_tick_value, instrument_tick_value, calculated_tick_value, default=self.tick_size)
 
         risk_mode = str(initial_stop_config.get("mode") or "atr").lower()
         self.risk_unit_mode = risk_mode if risk_mode in {"atr", "ticks"} else "atr"
@@ -547,22 +578,18 @@ class LadderRiskEngine:
 
         self.orders = self._orders_from_template()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
+        # Resolve quote currency
         quote_value = self.template.get("quote_currency") or self.instrument.get("quote_currency") or "USD"
         self.quote_currency = str(quote_value).upper()
+
+        # Resolve fee rates (config > instrument > 0.0, allow_zero since 0% fees are valid)
         config_maker = coerce_float(self.template.get("maker_fee_rate"))
-        instrument_maker = coerce_float(self.instrument.get("maker_fee_rate"), 0.0)
+        instrument_maker = coerce_float(self.instrument.get("maker_fee_rate"))
+        self.maker_fee = coalesce_numeric(config_maker, instrument_maker, default=0.0, allow_zero=True)
+
         config_taker = coerce_float(self.template.get("taker_fee_rate"))
-        instrument_taker = coerce_float(self.instrument.get("taker_fee_rate"), 0.0)
-        self.maker_fee = (
-            float(config_maker)
-            if config_maker is not None
-            else float(instrument_maker or 0.0)
-        )
-        self.taker_fee = (
-            float(config_taker)
-            if config_taker is not None
-            else float(instrument_taker or 0.0)
-        )
+        instrument_taker = coerce_float(self.instrument.get("taker_fee_rate"))
+        self.taker_fee = coalesce_numeric(config_taker, instrument_taker, default=0.0, allow_zero=True)
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         logger.info(
@@ -738,29 +765,31 @@ class LadderRiskEngine:
             return None
         return float((candle.atr * self.r_multiple) / self.tick_size)
 
-    def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
+    def _calculate_stop_price(self, candle: Candle, direction: str, r_ticks: Optional[float]) -> float:
+        """Calculate initial stop loss price for position."""
         stop_ticks = self.stop_ticks
-        atr_at_entry = candle.atr if candle.atr not in (None, 0) else None
-        r_ticks = self._compute_r_ticks(candle)
-        if r_ticks in (None, 0):
-            r_ticks = float(stop_ticks)
-        r_value = self._r_value(candle)
-        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
-            r_value = float(self.stop_r_multiple) * float(r_value)
-        if r_ticks not in (None, 0) and direction == "short":
-            stop_ticks = -abs(int(r_ticks))
-        elif r_ticks not in (None, 0):
+        if r_ticks not in (None, 0):
             stop_ticks = abs(int(r_ticks))
+            if direction == "short":
+                stop_ticks = -abs(stop_ticks)
+
         stop_distance = stop_ticks * self.tick_size
-        stop_price = candle.close - stop_distance if direction == "long" else candle.close + stop_distance
+        if direction == "long":
+            return candle.close - stop_distance
+        return candle.close + stop_distance
+
+    def _build_legs(self, candle: Candle, direction: str, r_ticks: Optional[float]) -> List[Leg]:
+        """Build take-profit legs from template configuration."""
         legs: List[Leg] = []
-        self.trailing_config = self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), Mapping) else {}
+
         for idx, order in enumerate(self.orders):
             ticks = order.get("ticks")
             r_multiple = order.get("r_multiple")
             price = order.get("price")
             target_ticks = ticks
             target_price = None
+
+            # Calculate target price based on configuration type
             if r_multiple not in (None, 0) and r_ticks not in (None, 0):
                 computed_ticks = float(r_multiple) * float(r_ticks)
                 target_price = risk_math.price_from_ticks(candle.close, computed_ticks, direction, self.tick_size)
@@ -772,8 +801,10 @@ class LadderRiskEngine:
                 target_price = float(price)
                 computed_ticks = risk_math.ticks_from_entry(candle.close, target_price, direction, self.tick_size)
                 target_ticks = int(round(computed_ticks))
+
             if target_price is None:
                 continue
+
             legs.append(
                 Leg(
                     name=order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
@@ -783,10 +814,35 @@ class LadderRiskEngine:
                     leg_id=order.get("id") or order.get("label") or f"tp-{idx + 1}",
                 )
             )
+
+        return legs
+
+    def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
+        """Create a new ladder position from current candle and signal direction."""
+        # Calculate risk metrics
+        atr_at_entry = candle.atr if candle.atr not in (None, 0) else None
+        r_ticks = self._compute_r_ticks(candle)
+        if r_ticks in (None, 0):
+            r_ticks = float(self.stop_ticks)
+
+        r_value = self._r_value(candle)
+        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
+            r_value = float(self.stop_r_multiple) * float(r_value)
+
+        # Build position components
+        stop_price = self._calculate_stop_price(candle, direction, r_ticks)
+        legs = self._build_legs(candle, direction, r_ticks)
+
+        # Configure stop management
         runtime_stop_adjustments = self._build_stop_adjustments(legs, r_ticks)
         breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, r_ticks)
         trailing_activation_ticks = self._trailing_activation_ticks(legs, r_ticks)
         trailing_distance_ticks = self._trailing_distance_ticks(atr_at_entry)
+
+        # Get trailing config
+        self.trailing_config = self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), Mapping) else {}
+
+        # Create position
         position = LadderPosition(
             entry_time=candle.time,
             entry_price=candle.close,

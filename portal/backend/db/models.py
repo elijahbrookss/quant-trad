@@ -145,7 +145,7 @@ class StrategyIndicatorLink(Base):
 
     __tablename__ = "portal_strategy_indicators"
 
-    id = Column(String(64), primary_key=True)
+    id = Column(String(128), primary_key=True)
     strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False)
     indicator_id = Column(String(64), nullable=False)
     indicator_snapshot = Column(JSON, nullable=False, default=dict)
@@ -174,7 +174,7 @@ class StrategyInstrumentLink(Base):
 
     __tablename__ = "portal_strategy_instruments"
 
-    id = Column(String(64), primary_key=True)
+    id = Column(String(128), primary_key=True)
     strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False)
     instrument_id = Column(String(64), nullable=False)
     instrument_snapshot = Column(JSON, nullable=False, default=dict)

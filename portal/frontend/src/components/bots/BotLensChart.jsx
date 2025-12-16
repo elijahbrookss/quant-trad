@@ -384,6 +384,12 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   const syncOverlays = useCallback(
     (overlayPayloads = [], tradeMarkerPayload = [], markerDetails = []) => {
+      console.log('[BotLensChart] event=sync_overlays_start', {
+        chartId,
+        overlayCount: overlayPayloads?.length || 0,
+        overlays: overlayPayloads?.map(o => ({ ind_id: o.ind_id, type: o.type, boxes: o.payload?.boxes?.length || 0 })),
+      })
+
       if (!seriesRef.current || !paneMgrRef.current) return
       if (!markersApiRef.current) {
         markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
@@ -430,11 +436,25 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       }
 
       for (const overlay of overlayPayloads || []) {
-        const { type, payload, color } = overlay || {}
+        const { type, payload, color, ind_id } = overlay || {}
+        console.log('[BotLensChart] event=processing_overlay', {
+          chartId,
+          ind_id,
+          type,
+          hasPayload: !!payload,
+          rawBoxes: payload?.boxes?.length || 0,
+        })
         if (!payload) continue
         const paneViews = getPaneViewsFor(type)
         const paneSet = new Set(paneViews || [])
         const norm = adaptPayload(type, payload, color)
+        console.log('[BotLensChart] event=overlay_adapted', {
+          chartId,
+          ind_id,
+          type,
+          normBoxes: norm?.boxes?.length || 0,
+          boxes: norm?.boxes,
+        })
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
             const price = toFiniteNumber(pl?.price)
@@ -465,8 +485,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         if (wantsBoxes && Array.isArray(norm.boxes) && norm.boxes.length) {
           const normalizedBoxes = norm.boxes
             .map((box) => {
-              const x1 = toSec(coalesce(box.x1, box.start, box.start_date, box.startDate))
-              const requestedX2 = toSec(coalesce(box.x2, box.end, box.end_date, box.endDate))
+              const x1 = box.x1
+              const requestedX2 = box.x2
               const extend = box.extend !== undefined ? Boolean(box.extend) : false
               let x2 = requestedX2
               if (!Number.isFinite(x2)) {
@@ -474,8 +494,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
               } else if (extend && Number.isFinite(lastSeriesTime) && lastSeriesTime > x2) {
                 x2 = lastSeriesTime
               }
-              const y1 = toFiniteNumber(coalesce(box.y1, box.val, box.VAL))
-              const y2 = toFiniteNumber(coalesce(box.y2, box.vah, box.VAH))
+              const y1 = box.y1
+              const y2 = box.y2
               return {
                 x1,
                 x2,
@@ -682,6 +702,14 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
       applyMarkers([...baseMarkers, ...overlayMarkers], true)
       applyPriceLines()
+
+      console.log('[BotLensChart] event=setting_va_blocks', {
+        chartId,
+        totalBoxes: boxes.length,
+        sampleBoxes: boxes.slice(0, 3),
+        lastSeriesTime,
+        barSpacing: barSpacingRef.current,
+      })
 
       paneMgrRef.current.setTouchPoints(touchPoints)
       paneMgrRef.current.setVABlocks(boxes, {

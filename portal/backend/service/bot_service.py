@@ -134,60 +134,25 @@ def _validate_strategy_ids(
     return deduped
 
 
-def _strategy_index() -> Dict[str, Dict[str, object]]:
-    """Return strategies keyed by id for quick lookup."""
+def _validate_strategy_existence(bot: Dict[str, object]) -> None:
+    """Validate that all strategy IDs exist in the database.
 
-    return {entry["id"]: entry for entry in load_strategies() if entry.get("id")}
+    Args:
+        bot: Bot configuration dict with strategy_ids
 
+    Raises:
+        ValueError: If any strategy doesn't exist
 
-def _attach_strategy_meta(bot: Dict[str, object]) -> None:
-    """Populate strategy metadata on the bot config for runtime prep."""
+    The runtime will load strategies fresh from DB using strategy_ids.
+    """
+    from .bot_runtime.strategy_loader import StrategyLoader
 
     ids = bot.get("strategy_ids") or []
-    index = _strategy_index()
-    meta: List[Dict[str, object]] = []
     for strategy_id in ids:
-        strategy = index.get(strategy_id)
-        if strategy:
-            meta.append(strategy)
-    if not meta:
-        raise ValueError("Bots require at least one valid strategy before starting.")
-    bot["strategies_meta"] = meta
+        if not StrategyLoader.strategy_exists(strategy_id):
+            raise ValueError(f"Strategy not found: {strategy_id}")
 
-
-def _attach_instrument_meta(bot: Dict[str, object]) -> None:
-    """Populate instrument metadata for the bot's strategy symbols."""
-
-    strategies: List[Dict[str, Any]] = bot.get("strategies_meta") or []  # type: ignore[assignment]
-    instrument_map: Dict[str, Dict[str, Any]] = {}
-    for strategy in strategies:
-        # Runtime context (datasource/exchange) is owned by the strategy.
-        datasource = strategy.get("datasource")
-        exchange = strategy.get("exchange")
-        instruments: List[Dict[str, Any]] = []
-        for slot in strategy.get("instrument_slots") or []:
-            symbol = slot.get("symbol") if isinstance(slot, Mapping) else slot
-            risk_multiplier = slot.get("risk_multiplier") if isinstance(slot, Mapping) else None
-            record = instrument_service.resolve_instrument(datasource, exchange, symbol)
-            if not record:
-                continue
-            keys = {
-                instrument_service.instrument_key(datasource, exchange, symbol),
-                instrument_service.instrument_key(datasource, None, symbol),
-                instrument_service.instrument_key(None, exchange, symbol),
-                instrument_service.instrument_key(None, None, symbol),
-            }
-            for key in keys:
-                instrument_map[key] = {**record, "risk_multiplier": risk_multiplier}
-            enriched = dict(record)
-            enriched.setdefault("symbol", symbol)
-            if risk_multiplier is not None:
-                enriched["risk_multiplier"] = risk_multiplier
-            instruments.append(enriched)
-        if instruments:
-            strategy["instruments"] = instruments
-    if instrument_map:
-        bot["instrument_index"] = instrument_map
+    logger.debug("[BotService] Validated %d strategy IDs (DB-based loading)", len(ids))
 
 
 def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
@@ -315,32 +280,12 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["strategy_ids"] = _validate_strategy_ids(strategy_ids)
     bot["strategy_id"] = bot["strategy_ids"][0]
     _validate_backtest_window(bot)
-    _attach_strategy_meta(bot)
-    # Do not attach instruments or build bot-level indexes here —
-    # instrument/index ownership belongs to strategies. Log attached
-    # strategies and their instrument ids for debugging when starting.
-    strategies: List[Dict[str, Any]] = bot.get("strategies_meta") or []
-    for strategy in strategies:
-        strategy_id = strategy.get("id")
-        # collect instrument ids from multiple possible places on the strategy
-        ids: List[str] = []
-        for link in strategy.get("instrument_links") or []:
-            iid = link.get("instrument_id") or link.get("instrument")
-            if iid:
-                ids.append(str(iid))
-        for inst in strategy.get("instruments") or []:
-            if isinstance(inst, Mapping) and inst.get("id"):
-                ids.append(str(inst.get("id")))
-        for slot in strategy.get("instrument_slots") or []:
-            if isinstance(slot, Mapping):
-                iid = slot.get("instrument_id") or slot.get("instrument")
-                if iid:
-                    ids.append(str(iid))
-        unique_ids = sorted(set(ids))
-        logger.info(
-            "[BotService] starting bot with strategy and instruments",
-            extra={"bot_id": bot_id, "strategy_id": strategy_id, "instrument_ids": unique_ids, "strategy": strategy},
-        )
+    _validate_strategy_existence(bot)
+
+    logger.info(
+        "[BotService] starting bot with strategies",
+        extra={"bot_id": bot_id, "strategy_ids": bot["strategy_ids"]},
+    )
     runtime = _runtime_for(bot_id, bot)
     runtime.reset_if_finished()
     runtime.start()
@@ -431,8 +376,6 @@ def runtime_logs(bot_id: str, limit: int = 200) -> List[Dict[str, Any]]:
     """Return recent runtime log entries for a bot."""
 
     bot = get_bot(bot_id)
-    _attach_strategy_meta(bot)
-    _attach_instrument_meta(bot)
     runtime = _runtime_for(bot_id, bot)
     runtime.warm_up()
     return runtime.logs(limit)
@@ -442,8 +385,6 @@ def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
     """Return a release callback, queue, and initial payload for SSE streaming."""
 
     bot = get_bot(bot_id)
-    _attach_strategy_meta(bot)
-    _attach_instrument_meta(bot)
     status = str(bot.get("status") or "idle").lower()
     runtime = _RUNTIME.get(bot_id)
     if runtime is None:
@@ -500,35 +441,44 @@ def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
 
 
 def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
-    """Assemble descriptive metadata for bot strategies and symbols."""
+    """Assemble descriptive metadata for bot strategies and symbols.
 
-    strategy_index = {strategy["id"]: strategy for strategy in load_strategies()}
-    runtime_meta = {
-        entry.get("id"): entry for entry in bot.get("strategies_meta") or [] if entry.get("id")
-    }
+    Loads strategy data fresh from the database to avoid config drift.
+    """
+    from .bot_runtime.strategy_loader import StrategyLoader
+
     selected: List[Dict[str, object]] = []
     for strategy_id in bot.get("strategy_ids", []) or []:
-        stored = strategy_index.get(strategy_id) or {}
-        runtime_entry = runtime_meta.get(strategy_id) or {}
-        if not stored and not runtime_entry:
+        try:
+            strategy = StrategyLoader.fetch_strategy(strategy_id)
+        except ValueError:
+            # Strategy doesn't exist, skip it
             continue
-        merged = dict(stored)
-        merged.update(runtime_entry)
-        atm_template = merge_templates(merged.get("atm_template"))
-        instruments = (
-            runtime_entry.get("instruments")
-            or stored.get("instruments")
-            or []
-        )
+
+        # Convert to dict for backward compatibility with UI
+        strategy_dict = strategy.to_dict()
+        atm_template = merge_templates(strategy_dict.get("atm_template"))
+
+        # Extract instruments from instrument_links
+        instruments = [
+            {
+                "id": link.instrument_id,
+                "symbol": link.symbol,
+                "risk_multiplier": link.risk_multiplier,
+                **link.instrument_snapshot,
+            }
+            for link in strategy.instrument_links
+        ]
+
         selected.append(
             {
-                "id": merged.get("id"),
-                "name": merged.get("name"),
-                "symbols": list(merged.get("symbols") or []),
-                "timeframe": merged.get("timeframe"),
-                    "datasource": merged.get("datasource"),
-                    "exchange": merged.get("exchange"),
-                "indicators": _indicator_meta(merged),
+                "id": strategy.id,
+                "name": strategy.name,
+                "symbols": [link.symbol for link in strategy.instrument_links if link.symbol],
+                "timeframe": strategy.timeframe,
+                "datasource": strategy.datasource,
+                "exchange": strategy.exchange,
+                "indicators": _indicator_meta(strategy_dict),
                 "instruments": instruments,
                 "atm_template": atm_template,
                 "atm_metrics": template_metrics(atm_template),
@@ -546,7 +496,6 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
             "risk": bot.get("risk"),
         },
         "strategies": selected,
-        "instrument_index": bot.get("instrument_index") or {},
     }
 
 
@@ -554,8 +503,6 @@ def performance(bot_id: str) -> Dict[str, object]:
     """Return candle, trade, stat, and metadata payloads for the lens chart."""
 
     bot = get_bot(bot_id)
-    _attach_strategy_meta(bot)
-    _attach_instrument_meta(bot)
     runtime = _RUNTIME.get(bot_id)
     status = str(bot.get("status") or "idle").lower()
     payload: Dict[str, Any]

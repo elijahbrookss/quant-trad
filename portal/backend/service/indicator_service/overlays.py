@@ -36,18 +36,58 @@ class IndicatorOverlayBuilder:
         exchange: Optional[str] = None,
         overlay_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
+        logger.info(
+            "event=overlay_build_start indicator_id=%s symbol=%s interval=%s start=%s end=%s",
+            inst_id,
+            symbol,
+            interval,
+            start,
+            end,
+        )
         entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
+        logger.info(
+            "event=overlay_entry_loaded indicator_id=%s indicator_type=%s",
+            inst_id,
+            entry.meta.get("type"),
+        )
         sym = self._resolve_symbol(entry, symbol)
         provider, data_ctx = self._prepare_provider(
             entry.meta, sym, start, end, interval, datasource, exchange
         )
+        logger.info(
+            "event=overlay_provider_prepared indicator_id=%s data_start=%s data_end=%s",
+            inst_id,
+            data_ctx.start,
+            data_ctx.end,
+        )
         df = self._load_candles(provider, data_ctx, inst_id, sym, interval)
+        logger.info(
+            "event=overlay_candles_loaded indicator_id=%s candles=%d",
+            inst_id,
+            len(df),
+        )
         overlay_indicator = self._build_overlay_indicator(
             entry.instance, df, inst_id, sym, interval, overlay_options
         )
+        logger.info(
+            "event=overlay_indicator_built indicator_id=%s indicator_type=%s",
+            inst_id,
+            type(overlay_indicator).__name__,
+        )
         payload, raw_payload = self._serialize_payload(overlay_indicator, df)
+        logger.info(
+            "event=overlay_payload_serialized indicator_id=%s boxes=%d markers=%d price_lines=%d",
+            inst_id,
+            len(payload.get("boxes", [])),
+            len(payload.get("markers", [])),
+            len(payload.get("price_lines", [])),
+        )
         self._validate_payload(payload)
         self._log_counts(inst_id, payload, raw_payload)
+        logger.info(
+            "event=overlay_build_complete indicator_id=%s",
+            inst_id,
+        )
         return payload
 
     def _load_entry(
@@ -95,6 +135,8 @@ class IndicatorOverlayBuilder:
         datasource: Optional[str],
         exchange: Optional[str],
     ):
+        from datetime import datetime, timedelta
+
         stored_params = meta.get("params", {})
         stored_datasource = normalize_datasource(
             meta.get("datasource") or stored_params.get("datasource"), ctx=self._ctx
@@ -116,7 +158,30 @@ class IndicatorOverlayBuilder:
             exchange=effective_exchange,
             ctx=self._ctx,
         )
-        data_ctx = DataContext(symbol=symbol, start=start, end=end, interval=interval)
+
+        # Extend time window for Market Profile indicators that need historical data
+        effective_start = start
+        if meta.get("type") == "market_profile":
+            days_back = stored_params.get("days_back", 180)
+            try:
+                start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+                extended_start_dt = start_dt - timedelta(days=days_back)
+                effective_start = extended_start_dt.isoformat()
+                logger.info(
+                    "event=market_profile_extended_window original_start=%s extended_start=%s days_back=%d",
+                    start,
+                    effective_start,
+                    days_back,
+                )
+            except (ValueError, TypeError) as e:
+                logger.warning(
+                    "event=market_profile_extend_failed start=%s days_back=%s error=%s",
+                    start,
+                    days_back,
+                    e,
+                )
+
+        data_ctx = DataContext(symbol=symbol, start=effective_start, end=end, interval=interval)
         return provider, data_ctx
 
     def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):
