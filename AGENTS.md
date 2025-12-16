@@ -1,5 +1,17 @@
 # Agent Guidelines (Hub)
 
+## Agent TL;DR (Do Not Skip)
+
+- QuantLab = research only
+- Strategy = decision logic only
+- Bot = execution + realism only
+- All backtests are walk-forward
+- Indicators and overlays must respect known_at timing
+- Market Profile must NEVER appear in front of price
+- Logs must tell the story of the userflow
+- Duplicate logic = refactor signal
+
+
 This repository uses a distributed agent-context model.
 Agents MUST read the documents listed below before making architectural or behavioral changes.
 
