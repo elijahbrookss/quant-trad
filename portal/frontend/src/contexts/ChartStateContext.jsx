@@ -1,5 +1,5 @@
 // src/contexts/ChartStateContext.jsx
-import { createContext, useContext, useReducer, useMemo, useCallback } from 'react';
+import { createContext, useContext, useReducer, useMemo, useCallback, useEffect, useRef } from 'react';
 import { createLogger } from '../utils/logger.js';
 
 const LOG_NS = 'ChartStateContext'; // file namespace
@@ -40,10 +40,40 @@ const ChartCtx = createContext(null);
 export function ChartStateProvider({ children }) {
   const { debug, info } = useMemo(() => createLogger(LOG_NS), []);
   const [charts, dispatch] = useReducer(reducer, {});
+  const chartsRef = useRef(charts);
+  const registerSeqRef = useRef(0);
+  const handleIdsRef = useRef(new WeakMap());
+
+  useEffect(() => {
+    chartsRef.current = charts;
+  }, [charts]);
 
   // actions are stable; no effects that set state here
-  const registerChart = useCallback((id, handles) => {
-    info('chart_register', { chartId: id });
+  const registerChart = useCallback((id, handles, meta = {}) => {
+    const existingHandles = chartsRef.current?.[id]?.handles;
+    if (existingHandles === handles) return; // avoid duplicate logs/dispatches
+
+    registerSeqRef.current += 1;
+    const nextSeq = registerSeqRef.current;
+    const getHandleId = (handle) => {
+      if (!handle) return 'null';
+      const map = handleIdsRef.current;
+      if (map.has(handle)) return map.get(handle);
+      const nextId = `h${map.size + 1}`;
+      map.set(handle, nextId);
+      return nextId;
+    };
+
+    info('chart_register', {
+      chartId: id,
+      changed: Boolean(existingHandles),
+      registerSeq: nextSeq,
+      previousHandleId: getHandleId(existingHandles),
+      nextHandleId: getHandleId(handles),
+      caller: meta?.caller || 'unknown',
+      lifecycleSeq: meta?.lifecycleSeq ?? null,
+      mountId: meta?.mountId ?? null,
+    });
     dispatch({ type: 'REGISTER', id, handles });
   }, [info]);
 

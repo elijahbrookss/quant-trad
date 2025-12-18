@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { toFiniteNumber, toSec } from '../chartDataUtils.js'
 
-export const usePulseMarkers = ({ seriesRef, markerCacheRef, markersApiRef }) => {
+export const usePulseMarkers = ({ seriesRef, markerManager }) => {
   const pulseLineHandlesRef = useRef([])
   const pulseTimeoutRef = useRef(null)
 
@@ -14,10 +14,9 @@ export const usePulseMarkers = ({ seriesRef, markerCacheRef, markersApiRef }) =>
       }
     })
     pulseLineHandlesRef.current = []
-    if (markersApiRef.current) {
-      markersApiRef.current.setMarkers(markerCacheRef.current)
-    }
-  }, [markerCacheRef, markersApiRef, seriesRef])
+    markerManager?.clearLayer('pulse')
+    markerManager?.flush()
+  }, [markerManager, seriesRef])
 
   const pulseTradeElements = useCallback(
     (trade) => {
@@ -50,10 +49,12 @@ export const usePulseMarkers = ({ seriesRef, markerCacheRef, markersApiRef }) =>
         if (!Number.isFinite(price)) return null
         return seriesRef.current.createPriceLine({
           price,
-          color: isTarget ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)',
-          lineWidth: 2,
-          lineStyle: 0,
-          axisLabelVisible: false,
+          color: isTarget ? 'rgba(16,185,129,0.85)' : 'rgba(239,68,68,0.85)',
+          lineWidth: isTarget ? 2 : 2.5,
+          lineStyle: isTarget ? 0 : 2,
+          axisLabelVisible: true,
+          axisLabelColor: isTarget ? 'rgba(16,185,129,0.95)' : 'rgba(239,68,68,0.95)',
+          axisLabelTextColor: '#0b1620',
         })
       }
       if (Number.isFinite(stopPrice)) {
@@ -64,17 +65,16 @@ export const usePulseMarkers = ({ seriesRef, markerCacheRef, markersApiRef }) =>
         const handle = lineFor(price, true)
         if (handle) pulseLineHandlesRef.current.push(handle)
       })
-      if (pulseMarkers.length && markersApiRef.current) {
-        markersApiRef.current.setMarkers(
-          [...markerCacheRef.current, ...pulseMarkers].sort((a, b) => (a.time ?? 0) - (b.time ?? 0)),
-        )
+      if (pulseMarkers.length) {
+        markerManager?.setLayer('pulse', pulseMarkers, { ttlMs: 450 })
+        markerManager?.flush()
       }
       pulseTimeoutRef.current = setTimeout(() => {
         clearPulseArtifacts()
         pulseTimeoutRef.current = null
       }, 450)
     },
-    [clearPulseArtifacts, markerCacheRef, markersApiRef, seriesRef],
+    [clearPulseArtifacts, markerManager, seriesRef],
   )
 
   useEffect(() => {
@@ -89,4 +89,3 @@ export const usePulseMarkers = ({ seriesRef, markerCacheRef, markersApiRef }) =>
 
   return { pulseTradeElements, clearPulseArtifacts }
 }
-

@@ -446,7 +446,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             speedSaving={speedSaving}
           />
 
-        <div className="flex flex-wrap items-center justify-center">
+        <div className="flex flex-wrap items-center justify-center mb-2">
           <ActiveTradeChip chip={renderedChip} visible={chipVisible} onHover={handleChipHover} />
         </div>
 

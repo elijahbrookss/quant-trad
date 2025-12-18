@@ -8,7 +8,7 @@ export const useBotLensChartCore = ({
   chartOptions,
   seriesOptions,
   registerChart,
-  candleLookup,
+  candleLookupRef,
   focusAtTime,
   pulseTrade,
   clearPulse,
@@ -16,6 +16,7 @@ export const useBotLensChartCore = ({
   attachRangeGuards,
   markerCacheRef,
   markerDetailsRef,
+  markerManager,
   chartRef: extChartRef,
   seriesRef: extSeriesRef,
   levelSeriesRef: extLevelSeriesRef,
@@ -33,11 +34,62 @@ export const useBotLensChartCore = ({
   const barSpacingRef = extBarSpacingRef ?? useRef(null)
   const resizeObserverRef = useRef(null)
   const focusTimeoutRef = useRef(null)
+  const creationSeqRef = useRef(0)
+  const effectRunSeqRef = useRef(0)
+  const lastDepsRef = useRef(null)
 
   useEffect(() => {
-    const el = containerRef.current
-    if (!el || chartRef.current) return undefined
+    effectRunSeqRef.current += 1
+    const depSnapshot = {
+      chartId,
+      chartOptions,
+      seriesOptions,
+      registerChart,
+      attachRangeGuards,
+      recenter,
+      clearPulse,
+      containerRef,
+      hasContainer: Boolean(containerRef?.current),
+    }
 
+    const prevSnapshot = lastDepsRef.current
+    const changed = prevSnapshot
+      ? Object.entries(depSnapshot)
+          .filter(([key, value]) => prevSnapshot[key] !== value)
+          .map(([key]) => key)
+      : []
+    const containerChanged = prevSnapshot?.hasContainer !== depSnapshot.hasContainer
+    const reason = !prevSnapshot
+      ? 'initial'
+      : changed.length
+        ? containerChanged && changed.length === 1
+          ? 'container-changed'
+          : 'deps-changed'
+        : 'strict-reinvoke'
+
+    console.info('[BotLensChartCore] effect run', {
+      chartId,
+      runId: effectRunSeqRef.current,
+      reason,
+      changed,
+      hasContainer: depSnapshot.hasContainer,
+      hasChart: Boolean(chartRef.current),
+    })
+
+    lastDepsRef.current = depSnapshot
+
+    const el = containerRef.current
+    if (!el) {
+      console.warn('[BotLensChartCore] no container, skipping chart creation', {
+        chartId,
+        runId: effectRunSeqRef.current,
+      })
+      return undefined
+    }
+    if (chartRef.current) return undefined
+
+    creationSeqRef.current += 1
+    
     const chart = createChart(el, {
       ...chartOptions,
       width: el.clientWidth,
@@ -64,26 +116,22 @@ export const useBotLensChartCore = ({
       get series() {
         return seriesRef.current
       },
-      focusAtTime: (time, priceHint) => {
-        const highlight = focusAtTime(time, priceHint, candleLookup)
-        if (!highlight || !markersApiRef.current) return
-
-        const combined = [...markerCacheRef.current, highlight].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-        markersApiRef.current.setMarkers(combined)
-
-        if (focusTimeoutRef.current) {
-          clearTimeout(focusTimeoutRef.current)
-        }
-        focusTimeoutRef.current = setTimeout(() => {
-          markersApiRef.current?.setMarkers?.(markerCacheRef.current)
-          focusTimeoutRef.current = null
-        }, 600)
-      },
+      focusAtTime: (time, priceHint) => focusAtTime(time, priceHint, candleLookupRef?.current),
       pulseTrade,
       clearPulse,
       zoomIn: () => chartRef.current?.timeScale?.().zoomIn?.(),
       zoomOut: () => chartRef.current?.timeScale?.().zoomOut?.(),
       centerView: recenter,
+    }, {
+      caller: 'useBotLensChartCore',
+      lifecycleSeq: creationSeqRef.current,
+      mountId: effectRunSeqRef.current,
+    })
+
+    console.info('[BotLensChartCore] chart created', {
+      chartId,
+      seq: creationSeqRef.current,
+      runId: effectRunSeqRef.current,
     })
 
     const cleanupGuards = attachRangeGuards(el)
@@ -96,6 +144,15 @@ export const useBotLensChartCore = ({
     resizeObserverRef.current.observe(el)
 
     return () => {
+      console.info('[BotLensChartCore] chart cleanup', {
+        chartId,
+        seq: creationSeqRef.current,
+        runId: effectRunSeqRef.current,
+        hasContainer: Boolean(containerRef?.current),
+        lastDepHasContainer: depSnapshot.hasContainer,
+        lastRunReason: reason,
+        changed,
+      })
       cleanupGuards?.()
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
@@ -106,7 +163,10 @@ export const useBotLensChartCore = ({
       }
 
       clearPulse?.()
-      markersApiRef.current?.setMarkers?.([])
+      markerManager?.clearLayer('base')
+      markerManager?.clearLayer('focus')
+      markerManager?.clearLayer('pulse')
+      markerManager?.flush?.()
       markersApiRef.current = null
 
       paneMgrRef.current?.destroy()
@@ -128,20 +188,7 @@ export const useBotLensChartCore = ({
       chartRef.current?.remove()
       chartRef.current = null
     }
-  }, [
-    attachRangeGuards,
-    candleLookup,
-    chartId,
-    chartOptions,
-    clearPulse,
-    containerRef,
-    focusAtTime,
-    markerCacheRef,
-    markerDetailsRef,
-    recenter,
-    registerChart,
-    seriesOptions,
-  ])
+  }, [chartId])
 
   return {
     chartRef,

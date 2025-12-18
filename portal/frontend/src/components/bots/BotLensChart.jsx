@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 import { buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
@@ -7,6 +7,9 @@ import { useTradeMarkers } from './hooks/useTradeMarkers.js'
 import { useBotLensChartCore } from './hooks/useBotLensChartCore.js'
 import { usePulseMarkers } from './hooks/usePulseMarkers.js'
 import { useMarkerTooltip } from './hooks/useMarkerTooltip.js'
+import { useIntrabarCandleAnimator, AnimatorStates } from './hooks/useIntrabarCandleAnimator.js'
+import { useMarkerManager } from './hooks/useMarkerManager.js'
+import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 
 const chartOptions = {
@@ -19,7 +22,13 @@ const chartOptions = {
     horzLines: { color: 'rgba(150, 150, 150, 0.05)' },
   },
   timeScale: { borderVisible: false },
-  rightPriceScale: { borderVisible: false },
+  rightPriceScale: {
+    borderVisible: false,
+    scaleMargins: {
+      top: 0.1,
+      bottom: 0.1,
+    },
+  },
 }
 
 const seriesOptions = {
@@ -45,9 +54,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const prevPriceLinesRef = useRef([])
   const markerDetailsRef = useRef([])
   const prevCandleDataRef = useRef([])
-  const candleAnimationRef = useRef(null)
   const diagLoggedRef = useRef(false)
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
+  const pendingCameraIntentRef = useRef(null)
   const { registerChart } = useChartState()
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
@@ -57,10 +66,15 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
+  const candleLookupRef = useRef(candleLookup)
 
   useEffect(() => {
     latestCandlesRef.current = candleData
   }, [candleData])
+
+  useEffect(() => {
+    candleLookupRef.current = candleLookup
+  }, [candleLookup])
 
   const activeTradeAtLastCandle = useMemo(() => {
     const lastTime = candleData[candleData.length - 1]?.time
@@ -123,17 +137,19 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, priceLines: tradePriceLines } =
     useTradeMarkers(resolvedTrades, candleLookup, candleData)
 
-  const { lock, unlock, recenter, enforceViewport, attachRangeGuards, autoScroll, focusAtTime } = useCameraLock({
+  const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
+
+  const { lock, unlock, recenter, requestIntent, attachRangeGuards, setAnimationActive, focusAtTime } = useCameraLock({
     chartRef,
     levelSeriesRef,
     barSpacingRef,
     latestCandlesRef,
+    markerManager,
   })
 
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({
     seriesRef,
-    markerCacheRef,
-    markersApiRef,
+    markerManager,
   })
 
   useBotLensChartCore({
@@ -142,7 +158,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     chartOptions,
     seriesOptions,
     registerChart,
-    candleLookup,
+    candleLookupRef,
     focusAtTime,
     pulseTrade: pulseTradeElements,
     clearPulse: clearPulseArtifacts,
@@ -150,6 +166,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     attachRangeGuards,
     markerCacheRef,
     markerDetailsRef,
+    markerManager,
     chartRef,
     seriesRef,
     levelSeriesRef,
@@ -159,61 +176,33 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     barSpacingRef,
   })
 
-  const syncOverlays = useOverlaySync({
+  const { computeArtifacts, applyArtifacts } = useOverlaySync({
     seriesRef,
     paneMgrRef,
     barSpacingRef,
-    markersApiRef,
     overlayHandlesRef,
-    markerCacheRef,
     markerDetailsRef,
     prevPriceLinesRef,
-    applyViewport: enforceViewport,
+    markerManager,
   })
 
   const markerTooltip = useMarkerTooltip({ chartRef, markerDetailsRef })
 
-  const animateCandle = useCallback(
-    (from, to, speed) => {
-      if (!seriesRef.current || !to || !from) return
-      if (candleAnimationRef.current) {
-        cancelAnimationFrame(candleAnimationRef.current)
-        candleAnimationRef.current = null
-      }
-      const baseDuration = 380
-      const safeSpeed = Number.isFinite(speed) ? Math.max(speed, 0.25) : 1
-      const duration = Math.min(Math.max(baseDuration / safeSpeed, 80), 600)
-      const start = performance.now()
-      const frame = (now) => {
-        const progress = Math.min(1, (now - start) / duration)
-        const interp = (a, b) => a + (b - a) * progress
-        const current = {
-          time: to.time,
-          open: interp(from.open, to.open),
-          high: interp(from.high, to.high),
-          low: interp(from.low, to.low),
-          close: interp(from.close, to.close),
-        }
-        seriesRef.current.update(current)
-        if (progress < 1) {
-          candleAnimationRef.current = requestAnimationFrame(frame)
-        } else {
-          candleAnimationRef.current = null
-        }
-      }
-      candleAnimationRef.current = requestAnimationFrame(frame)
-    },
-    [seriesRef],
-  )
+  const { start: startAnimator, cancel: cancelAnimator, onLifecycleEvent, stateRef: animatorStateRef } =
+    useIntrabarCandleAnimator()
 
   useEffect(
-    () => () => {
-      if (candleAnimationRef.current) {
-        cancelAnimationFrame(candleAnimationRef.current)
-        candleAnimationRef.current = null
-      }
-    },
-    [],
+    () =>
+      onLifecycleEvent((event) => {
+        if (event.state === AnimatorStates.ANIMATING) {
+          setAnimationActive(true)
+        }
+        if (event.state === AnimatorStates.CANCELLED || event.state === AnimatorStates.COMMITTED) {
+          setAnimationActive(false)
+        }
+        console.debug('[BotLensChart] intrabar animator', event)
+      }),
+    [onLifecycleEvent, setAnimationActive],
   )
 
   useEffect(() => {
@@ -238,22 +227,27 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     const start = performance.now()
 
     if (requiresReset) {
+      cancelAnimator('reset')
       seriesRef.current.setData(next)
       frameSampleRef.current = { total: 0, count: 0, logged: false }
       if (!previous.length || timeAdvanced) {
-        autoScroll(next)
+        pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'reset' }
       }
     } else if (shouldAnimate) {
       const prevMatch = previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLastTime)
-      animateCandle(prevMatch, nextLast, playbackSpeed)
+      pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'intrabar-animate' }
+      startAnimator({ series: seriesRef.current, fromCandle: prevMatch, toCandle: nextLast, speed: playbackSpeed })
     } else if (isAppend) {
+      cancelAnimator('append')
       seriesRef.current.update(nextLast)
-      if (timeAdvanced) autoScroll(next)
+      if (timeAdvanced) pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'append' }
     } else if (isSameCandle) {
+      cancelAnimator('same-candle')
       seriesRef.current.update(nextLast)
     } else {
+      cancelAnimator('fallback')
       seriesRef.current.setData(next)
-      if (timeAdvanced) autoScroll(next)
+      if (timeAdvanced) pendingCameraIntentRef.current = { intent: CameraIntents.FOLLOW_LATEST, reason: 'fallback' }
     }
 
     const duration = performance.now() - start
@@ -266,7 +260,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
 
     prevCandleDataRef.current = next
-  }, [activeTradeAtLastCandle, animateCandle, autoScroll, candleData, instantPlayback, playbackSpeed, seriesRef])
+  }, [activeTradeAtLastCandle, cancelAnimator, candleData, instantPlayback, playbackSpeed, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -284,7 +278,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   }, [barSpacingRef, candleData])
 
   useEffect(() => {
-    syncOverlays({
+    const artifacts = computeArtifacts({
       overlayPayloads: resolvedOverlays,
       tradeMarkers,
       tradeTooltips: tradeMarkerTooltips,
@@ -292,18 +286,29 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       tradePriceLines,
       candleData,
     })
-  }, [candleData, resolvedOverlays, syncOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
-
-  useEffect(() => {
-    enforceViewport(candleData, [])
-  }, [candleData, enforceViewport])
+    const overlayResult = applyArtifacts(artifacts)
+    if (overlayResult.extentChanged && overlayResult.extents) {
+      requestIntent({
+        intent: CameraIntents.FIT_OVERLAY_EXTENTS,
+        payload: { extents: overlayResult.extents, signature: overlayResult.signature, segments: artifacts.tradeSegments },
+        reason: 'overlay-extents',
+      })
+    }
+    if (pendingCameraIntentRef.current) {
+      const pending = pendingCameraIntentRef.current
+      requestIntent({
+        ...pending,
+        payload: { ...(pending.payload || {}), segments: artifacts.tradeSegments },
+        reason: pending.reason,
+      })
+      pendingCameraIntentRef.current = null
+    }
+  }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
 
   return (
     <div
       ref={containerRef}
       className="relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]"
-      onMouseEnter={lock}
-      onMouseLeave={unlock}
     >
       <MarkerTooltip markerTooltip={markerTooltip} />
     </div>
