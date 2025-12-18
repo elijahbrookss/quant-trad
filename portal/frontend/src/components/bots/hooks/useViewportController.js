@@ -69,7 +69,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const lockedRef = useRef(true)
   const animationActiveRef = useRef(false)
   const userOverrideUntilRef = useRef(0)
-  const pendingFollowRef = useRef(false)
+  const pendingFollowRef = useRef(null)
   const lastOverlaySignatureRef = useRef(null)
   const preferredSpanBarsRef = useRef(24)
   const lastLogicalRangeRef = useRef(null)
@@ -100,27 +100,6 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       userOverrideUntilRef.current = 0
     }
   }, [])
-
-  const setAnimationActive = useCallback(
-    (active) => {
-      animationActiveRef.current = active
-      if (!active && pendingFollowRef.current) {
-        pendingFollowRef.current = false
-        const candles = latestCandlesRef?.current || []
-        const spacing = deriveSpacing(candles, barSpacingRef)
-        const follow = computeFollowRange(candles, spacing, {
-          lookbackBars: preferredSpanBarsRef.current,
-          forwardPadBars: 1.25,
-        })
-        applyRange(follow.range, follow.logicalRange)
-        if (levelSeriesRef?.current) {
-          levelSeriesRef.current.setData(buildGhostPoints(candles, []))
-        }
-        logIntent({ intent: CameraIntents.FOLLOW_LATEST, reason: 'animation-complete', range: follow.range })
-      }
-    },
-    [applyRange, barSpacingRef, latestCandlesRef, levelSeriesRef, logIntent],
-  )
 
   const notifyUserInteraction = useCallback((ttlMs = 2400) => {
     userOverrideUntilRef.current = performance.now() + ttlMs
@@ -156,7 +135,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       const tsRange = (() => {
         if (intent === CameraIntents.FOLLOW_LATEST) {
           if (animationActiveRef.current && !isUser) {
-            pendingFollowRef.current = true
+            pendingFollowRef.current = { intent, payload, reason }
             logIntent({ intent, reason: `${reason}-deferred` })
             return null
           }
@@ -200,6 +179,23 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       }
     },
     [applyGhostSeries, applyRange, barSpacingRef, latestCandlesRef, logIntent, notifyUserInteraction],
+  )
+
+  const setAnimationActive = useCallback(
+    (active) => {
+      animationActiveRef.current = active
+      if (!active && pendingFollowRef.current) {
+        const pending = pendingFollowRef.current
+        pendingFollowRef.current = null
+        requestIntent({
+          intent: pending.intent,
+          payload: pending.payload,
+          reason: `${pending.reason || 'follow'}-animation-complete`,
+          isUser: false,
+        })
+      }
+    },
+    [requestIntent],
   )
 
   const attachRangeGuards = useCallback(
@@ -259,7 +255,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
 
   useEffect(() => {
     return () => {
-      pendingFollowRef.current = false
+      pendingFollowRef.current = null
       lastOverlaySignatureRef.current = null
     }
   }, [])
