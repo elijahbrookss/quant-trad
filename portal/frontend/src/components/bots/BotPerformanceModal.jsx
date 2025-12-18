@@ -626,9 +626,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
     source.onopen = () => setStreamStatus('open')
     return () => {
-      if (rafId) {
-        cancelAnimationFrame(rafId)
-      }
       for (const evt of events) {
         source.removeEventListener(evt, handler)
       }
