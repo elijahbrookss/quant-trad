@@ -1,5 +1,5 @@
 // src/contexts/ChartStateContext.jsx
-import { createContext, useContext, useReducer, useMemo, useCallback } from 'react';
+import { createContext, useContext, useReducer, useMemo, useCallback, useEffect, useRef } from 'react';
 import { createLogger } from '../utils/logger.js';
 
 const LOG_NS = 'ChartStateContext'; // file namespace
@@ -40,15 +40,20 @@ const ChartCtx = createContext(null);
 export function ChartStateProvider({ children }) {
   const { debug, info } = useMemo(() => createLogger(LOG_NS), []);
   const [charts, dispatch] = useReducer(reducer, {});
+  const chartsRef = useRef(charts);
+
+  useEffect(() => {
+    chartsRef.current = charts;
+  }, [charts]);
 
   // actions are stable; no effects that set state here
   const registerChart = useCallback((id, handles) => {
-    const existingHandles = charts[id]?.handles;
+    const existingHandles = chartsRef.current?.[id]?.handles;
     if (existingHandles === handles) return; // avoid duplicate logs/dispatches
 
     info('chart_register', { chartId: id, changed: Boolean(existingHandles) });
     dispatch({ type: 'REGISTER', id, handles });
-  }, [charts, info]);
+  }, [info]);
 
   const updateChart = useCallback((id, patch) => {
     console.log('[ChartStateContext] event=chart_update', {
