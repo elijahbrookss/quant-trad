@@ -17,16 +17,29 @@ const toRgba = (hex, alpha = 0.16) => {
 
 const markerForTrade = (trade) => {
   const entryTime = trade?.entry_time ? Math.floor(new Date(trade.entry_time).getTime() / 1000) : null
+  const entryPrice = toFiniteNumber(trade?.entry_price)
   if (!entryTime) return []
   const isLong = trade.direction === 'long'
-  const entryMarker = {
-    time: entryTime,
-    position: isLong ? 'belowBar' : 'aboveBar',
-    shape: isLong ? 'arrowUp' : 'arrowDown',
-    color: isLong ? 'rgba(52,211,153,0.82)' : 'rgba(249,115,22,0.82)',
-    text: `${isLong ? 'Buy' : 'Sell'} ${trade.legs?.length || 0}x`,
-    kind: 'entry',
-  }
+
+  // Entry marker (square - yellow/gold)
+  const entryMarker = Number.isFinite(entryPrice)
+    ? {
+        time: entryTime,
+        position: 'atPriceMiddle',
+        price: entryPrice,
+        shape: 'square',
+        color: 'rgba(245,158,11,0.9)',
+        text: `Entry ${Number(trade.legs?.length || 0)}x`,
+        kind: 'entry',
+      }
+    : {
+        time: entryTime,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        shape: 'square',
+        color: 'rgba(245,158,11,0.9)',
+        text: `Entry ${Number(trade.legs?.length || 0)}x`,
+        kind: 'entry',
+      }
   const grouped = new Map()
   const targetSummary = []
   const stopSummary = []
@@ -56,16 +69,38 @@ const markerForTrade = (trade) => {
         })),
       )
     }
-    exitMarkers.push({
-      time,
-      position: isLong ? 'aboveBar' : 'belowBar',
-      shape: stops.length > 0 ? 'square' : 'circle',
-      color: stops.length > 0 ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
-      text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
-        stops.length ? `SL x${stops.length}` : ''
-      }`,
-      kind: stops.length ? 'stop' : 'target',
-    })
+
+    // Calculate average exit price for positioning
+    const exitPrices = [...targets, ...stops]
+      .map((leg) => toFiniteNumber(leg.exit_price || leg.target_price || leg.stop_price))
+      .filter(Number.isFinite)
+    const avgExitPrice = exitPrices.length > 0 ? exitPrices.reduce((a, b) => a + b, 0) / exitPrices.length : null
+
+    const isStop = stops.length > 0
+    const exitMarker = Number.isFinite(avgExitPrice)
+      ? {
+          time,
+          position: 'atPriceMiddle',
+          price: avgExitPrice,
+          shape: isStop ? 'square' : 'circle',
+          color: isStop ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
+          text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
+            stops.length ? `SL x${stops.length}` : ''
+          }`,
+          kind: isStop ? 'stop' : 'target',
+        }
+      : {
+          time,
+          position: isLong ? 'aboveBar' : 'belowBar',
+          shape: isStop ? 'square' : 'circle',
+          color: isStop ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
+          text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
+            stops.length ? `SL x${stops.length}` : ''
+          }`,
+          kind: isStop ? 'stop' : 'target',
+        }
+
+    exitMarkers.push(exitMarker)
   }
   const summaryLabel = []
   if (targetSummary.length) summaryLabel.push(`TP x${targetSummary.length}`)
@@ -151,7 +186,7 @@ const buildTradePriceLines = (trades, candleData) => {
     priceLines.push({
       price: entryPrice,
       title: 'Entry',
-      color: '#94a3b8',
+      color: '#f59e0b',
       source: 'active_trade_entry',
       precision: 2,
       pnl,

@@ -22,7 +22,13 @@ const chartOptions = {
     horzLines: { color: 'rgba(150, 150, 150, 0.05)' },
   },
   timeScale: { borderVisible: false },
-  rightPriceScale: { borderVisible: false },
+  rightPriceScale: {
+    borderVisible: false,
+    scaleMargins: {
+      top: 0.1,
+      bottom: 0.1,
+    },
+  },
 }
 
 const seriesOptions = {
@@ -303,8 +309,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     <div
       ref={containerRef}
       className="relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]"
-      onMouseEnter={lock}
-      onMouseLeave={unlock}
     >
       <MarkerTooltip markerTooltip={markerTooltip} />
     </div>

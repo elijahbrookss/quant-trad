@@ -294,10 +294,7 @@ export const useOverlaySync = ({
             const isTarget = line.role === 'tp'
             const isEntry = line.role === 'level' && (line.labels[0] === 'Entry' || line.source === 'active_trade_entry')
 
-            let baseColor = isStop ? '#ef4444' : isTarget ? '#10b981' : line.color || '#94a3b8'
-            if (isEntry && Number.isFinite(line.pnl)) {
-              baseColor = line.pnl >= 0 ? '#10b981' : '#ef4444'
-            }
+            let baseColor = isStop ? '#ef4444' : isTarget ? '#10b981' : line.color || '#f59e0b'
 
             const lineColor = toRgba(baseColor, 0.85) || 'rgba(148,163,184,0.85)'
             const labelBg = toRgba(baseColor, 0.95) || 'rgba(148,163,184,0.9)'

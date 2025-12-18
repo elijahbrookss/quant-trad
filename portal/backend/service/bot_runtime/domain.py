@@ -821,8 +821,64 @@ class LadderRiskEngine:
             return candle.close - stop_distance
         return candle.close + stop_distance
 
-    def _build_legs(self, candle: Candle, direction: str, r_ticks: Optional[float]) -> List[Leg]:
-        """Build take-profit legs from template configuration."""
+    def _calculate_total_contracts(self, r_ticks: float) -> int:
+        """Calculate total contracts based on base_risk_per_trade and R value.
+
+        Formula: contracts = base_risk_per_trade / (r_ticks * tick_value)
+
+        Returns:
+            Total number of contracts to trade, minimum 1
+
+        Raises:
+            ValueError: If base_risk_per_trade is not configured
+        """
+        if self.base_risk_per_trade is None or self.base_risk_per_trade <= 0:
+            raise ValueError(
+                f"base_risk_per_trade is required but got {self.base_risk_per_trade}. "
+                f"Configure risk.base_risk_per_trade in your strategy template. "
+                f"This is required for dynamic position sizing."
+            )
+
+        if r_ticks <= 0:
+            raise ValueError(
+                f"Cannot calculate position size: r_ticks must be > 0, got {r_ticks}"
+            )
+
+        if self.tick_value <= 0:
+            raise ValueError(
+                f"Cannot calculate position size: tick_value must be > 0, got {self.tick_value}"
+            )
+
+        # Calculate dollar value of 1R per contract
+        r_value_per_contract = r_ticks * self.tick_value
+
+        # Calculate how many contracts fit within base_risk_per_trade
+        contracts = self.base_risk_per_trade / r_value_per_contract
+
+        # Apply global and instrument risk multipliers
+        contracts = contracts * self.global_risk_multiplier * self.instrument_risk_multiplier
+
+        # Round to whole number and ensure at least 1
+        total_contracts = max(int(round(contracts)), 1)
+
+        logger.info(
+            "position_sizing | base_risk=$%.2f | r_value_per_contract=$%.2f | calculated_contracts=%d",
+            self.base_risk_per_trade,
+            r_value_per_contract,
+            total_contracts,
+        )
+
+        return total_contracts
+
+    def _build_legs(self, candle: Candle, direction: str, r_ticks: Optional[float], total_contracts: int) -> List[Leg]:
+        """Build take-profit legs from template configuration.
+
+        Args:
+            candle: Current candle data
+            direction: Trade direction ('long' or 'short')
+            r_ticks: Stop distance in ticks
+            total_contracts: Total number of contracts to distribute across legs
+        """
         legs: List[Leg] = []
 
         for idx, order in enumerate(self.orders):
@@ -849,12 +905,20 @@ class LadderRiskEngine:
             if target_price is None:
                 continue
 
+            # Calculate contracts for this leg based on size_fraction
+            size_fraction = coerce_float(order.get("size_fraction"))
+            if size_fraction is not None and 0 < size_fraction <= 1:
+                leg_contracts = max(int(round(total_contracts * size_fraction)), 1)
+            else:
+                # Equal distribution if no size_fraction specified
+                leg_contracts = max(int(round(total_contracts / len(self.orders))), 1)
+
             legs.append(
                 Leg(
                     name=order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
                     ticks=target_ticks or 0,
                     target_price=target_price,
-                    contracts=order.get("contracts", 1),
+                    contracts=leg_contracts,
                     leg_id=order.get("id") or order.get("label") or f"tp-{idx + 1}",
                 )
             )
@@ -871,9 +935,12 @@ class LadderRiskEngine:
         if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
             r_value = float(self.stop_r_multiple) * float(r_value)
 
+        # Calculate position size based on risk
+        total_contracts = self._calculate_total_contracts(r_ticks)
+
         # Build position components
         stop_price = self._calculate_stop_price(candle, direction, r_ticks)
-        legs = self._build_legs(candle, direction, r_ticks)
+        legs = self._build_legs(candle, direction, r_ticks, total_contracts)
 
         # Configure stop management
         runtime_stop_adjustments = self._build_stop_adjustments(legs, r_ticks)
