@@ -299,14 +299,15 @@ export const useOverlaySync = ({
               baseColor = line.pnl >= 0 ? '#10b981' : '#ef4444'
             }
 
-            const lineColor = toRgba(baseColor, 0.9) || 'rgba(148,163,184,0.85)'
-            const labelBg = toRgba(baseColor, 1.0) || 'rgba(148,163,184,0.9)'
+            const lineColor = toRgba(baseColor, 0.85) || 'rgba(148,163,184,0.85)'
+            const labelBg = toRgba(baseColor, 0.95) || 'rgba(148,163,184,0.9)'
             const precision = Number.isFinite(line.precision) ? line.precision : 2
             const priceLabel = Number(line.price).toFixed(precision)
-            const labelSource = line.labels[0] || (isTarget ? 'Target' : isStop ? 'Stop Loss' : isEntry ? 'Entry' : 'Level')
+            const labelSource = line.labels[0] || (isTarget ? 'TP' : isStop ? 'SL' : isEntry ? 'Entry' : 'Level')
             const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
+            const badge = `${labelSource}${labelCount}`.trim()
 
-            let title = `${labelSource}${labelCount ? labelCount : ''} ${priceLabel}`
+            let title = `${badge || labelSource} | ${priceLabel}`
             if (isEntry && Number.isFinite(line.pnl) && Number.isFinite(line.pnlPercent)) {
               const pnlSign = line.pnl >= 0 ? '+' : ''
               const pnlValue = line.pnl.toFixed(2)
@@ -316,11 +317,11 @@ export const useOverlaySync = ({
             const priceLineOptions = {
               price: line.price,
               color: lineColor,
-              lineWidth: 2,
-              lineStyle: 0,
+              lineWidth: isStop ? 2.5 : 2,
+              lineStyle: isStop ? 2 : 0,
               axisLabelVisible: true,
               axisLabelColor: labelBg,
-              axisLabelTextColor: '#ffffff',
+              axisLabelTextColor: '#0b1620',
               title,
             }
             try {

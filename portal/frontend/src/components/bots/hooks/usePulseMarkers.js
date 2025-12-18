@@ -49,10 +49,12 @@ export const usePulseMarkers = ({ seriesRef, markerManager }) => {
         if (!Number.isFinite(price)) return null
         return seriesRef.current.createPriceLine({
           price,
-          color: isTarget ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)',
-          lineWidth: 2,
-          lineStyle: 0,
-          axisLabelVisible: false,
+          color: isTarget ? 'rgba(16,185,129,0.85)' : 'rgba(239,68,68,0.85)',
+          lineWidth: isTarget ? 2 : 2.5,
+          lineStyle: isTarget ? 0 : 2,
+          axisLabelVisible: true,
+          axisLabelColor: isTarget ? 'rgba(16,185,129,0.95)' : 'rgba(239,68,68,0.95)',
+          axisLabelTextColor: '#0b1620',
         })
       }
       if (Number.isFinite(stopPrice)) {
