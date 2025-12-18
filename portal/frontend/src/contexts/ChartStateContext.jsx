@@ -43,9 +43,12 @@ export function ChartStateProvider({ children }) {
 
   // actions are stable; no effects that set state here
   const registerChart = useCallback((id, handles) => {
-    info('chart_register', { chartId: id });
+    const existingHandles = charts[id]?.handles;
+    if (existingHandles === handles) return; // avoid duplicate logs/dispatches
+
+    info('chart_register', { chartId: id, changed: Boolean(existingHandles) });
     dispatch({ type: 'REGISTER', id, handles });
-  }, [info]);
+  }, [charts, info]);
 
   const updateChart = useCallback((id, patch) => {
     console.log('[ChartStateContext] event=chart_update', {
