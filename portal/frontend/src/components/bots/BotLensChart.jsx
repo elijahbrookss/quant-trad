@@ -346,6 +346,24 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
   }, [])
 
+  const enforceCameraLock = useCallback(() => {
+    if (!cameraLockedRef.current || !chartRef.current) return
+    const ts = chartRef.current.timeScale()
+    const lastIndex = (latestCandlesRef.current?.length || 0) - 1
+    if (lastIndex < 0) return
+    const range = ts.getVisibleLogicalRange?.() || lastVisibleRangeRef.current
+    const needsRealign = !range?.to || range.to < lastIndex - 0.5
+    if (needsRealign) {
+      const barsToShow = Math.min(80, Math.max(30, lastIndex + 1))
+      const from = Math.max(0, lastIndex - barsToShow + 1)
+      const to = lastIndex + 5
+      runWithAutoScrollGuard(() => {
+        ts.setVisibleLogicalRange({ from, to })
+        ts.scrollToPosition?.(0, false)
+      })
+    }
+  }, [runWithAutoScrollGuard])
+
   const updateViewport = useCallback(
     (tradeSegments = []) => {
       if (!chartRef.current || candleData.length === 0) return
@@ -1032,6 +1050,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         userInteractedRef.current = false
         return
       }
+      if (cameraLockedRef.current) {
+        enforceCameraLock()
+      }
       const hasRangeDelta =
         range &&
         prevRange &&
@@ -1155,7 +1176,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         const barsToShow = Math.min(80, Math.max(30, next.length))
         const from = Math.max(0, lastIndex - barsToShow + 1)
         const to = lastIndex + 5
-        runWithAutoScrollGuard(() => timeScale.setVisibleLogicalRange({ from, to }))
+        runWithAutoScrollGuard(() => {
+          timeScale.setVisibleLogicalRange({ from, to })
+          timeScale.scrollToPosition?.(0, false)
+        })
       } else if (!cameraLockedRef.current) {
         // If camera is unlocked, just fit content once
         runWithAutoScrollGuard(() => chartRef.current?.timeScale().fitContent())
