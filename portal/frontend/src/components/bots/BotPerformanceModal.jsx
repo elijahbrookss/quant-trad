@@ -1,17 +1,17 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { X, Pause, RotateCw, ChevronDown, ZoomIn, ZoomOut, Crosshair } from 'lucide-react'
+import { X, ChevronDown } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
 import { useChartValue } from '../../contexts/ChartStateContext.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
-import {
-  fetchBotPerformance,
-  pauseBot,
-  resumeBot,
-  openBotStream,
-  updateBot,
-} from '../../adapters/bot.adapter.js'
 import LoadingOverlay from '../LoadingOverlay.jsx'
+import { BotStatusChips } from './BotStatusChips.jsx'
+import { PlaybackControls } from './PlaybackControls.jsx'
+import { PerformanceStats } from './PerformanceStats.jsx'
+import { TradeLogList } from './TradeLogList.jsx'
+import { ActiveTradeChip } from './ActiveTradeChip.jsx'
+import { describeLog, formatStatValue } from './botPerformanceFormatters.js'
+import { useBotPerformance } from './hooks/useBotPerformance.js'
 
 const BOOTLINE_POOL = {
   runtime: ['Spinning up bot runtime', 'Teaching the bot patience'],
@@ -26,111 +26,51 @@ const BOOTLINE_POOL = {
   ],
 }
 
-const logCandleDiagnostics = (label, candles, botId) => {
-  if (!Array.isArray(candles) || candles.length === 0) {
-    return
-  }
-  let previous = null
-  let violation = null
-  let first = null
-  let last = null
-  for (let idx = 0; idx < candles.length; idx += 1) {
-    const raw = candles[idx]?.time
-    const epoch = toSec(raw)
-    if (!Number.isFinite(epoch)) {
-      continue
-    }
-    if (first === null) first = epoch
-    last = epoch
-    if (previous !== null && epoch < previous) {
-      violation = { index: idx, prev: previous, current: epoch }
-      break
-    }
-    previous = epoch
-  }
-  const context = {
-    botId,
-    label,
-    count: candles.length,
-    first,
-    last,
-  }
-  if (violation) {
-    console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
-  } else {
-    console.debug('[BotPerformanceModal] Candle payload received', context)
-  }
-}
-
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
-  const [payload, setPayload] = useState(null)
-  const [action, setAction] = useState(null)
-  const [streamStatus, setStreamStatus] = useState('idle')
-  const streamRef = useRef(null)
   const [expandedStrategies, setExpandedStrategies] = useState(() => new Set())
-  const [playbackDraft, setPlaybackDraft] = useState(() => {
-    const initial = bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
-    const raw = Number(initial)
-    return Number.isFinite(raw) ? raw : 10
-  })
-  const [speedSaving, setSpeedSaving] = useState(false)
   const [logTab, setLogTab] = useState('trade')
-  const playbackDebounceRef = useRef(null)
   const chipHideTimeoutRef = useRef(null)
   const [chipVisible, setChipVisible] = useState(false)
   const [renderedChip, setRenderedChip] = useState(null)
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
+  const chartHandle = useChartValue(`bot-${bot?.id}`)
 
-  const strategies = payload?.meta?.strategies || []
-  const botMeta = payload?.meta?.bot || {}
-  const runtime = payload?.runtime || {}
+  const {
+    action,
+    error,
+    handlePause,
+    handlePlaybackInput,
+    handleResume,
+    loading,
+    payload,
+    playbackDraft,
+    playbackLabel,
+    runtimeStatus,
+    speedSaving,
+    streamEligible,
+    streamStatus,
+  } = useBotPerformance({ bot, open, onRefresh })
 
   useEffect(() => {
     setExpandedStrategies(new Set())
   }, [bot?.id])
 
-  useEffect(() => {
-    const candidate =
-      payload?.runtime?.playback_speed ??
-      bot?.runtime?.playback_speed ??
-      bot?.playback_speed ??
-      10
-    const numeric = Number(candidate)
-    if (Number.isFinite(numeric)) {
-      setPlaybackDraft(numeric)
-    } else {
-      setPlaybackDraft(10)
-    }
-  }, [payload?.runtime?.playback_speed, bot?.runtime?.playback_speed, bot?.playback_speed, bot?.id])
-
-  useEffect(() => () => {
-    if (playbackDebounceRef.current) {
-      clearTimeout(playbackDebounceRef.current)
-    }
-    if (chipHideTimeoutRef.current) {
-      clearTimeout(chipHideTimeoutRef.current)
-    }
-  }, [])
-
   const logs = payload?.logs || []
   const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
-  const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
-  const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
-  const streamEligible = useMemo(
-    () => ['running', 'starting', 'paused', 'booting', 'initialising'].includes(runtimeStatus),
-    [runtimeStatus]
-  )
+  const strategies = payload?.meta?.strategies || []
+  const botMeta = payload?.meta?.bot || {}
+  const runtime = payload?.runtime || {}
+
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
   const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
-  const isBooting = (isBootingStatus || loading || streamStatus === 'connecting')
+  const isBooting = isBootingStatus || loading || streamStatus === 'connecting'
   const showInactiveState = !isBooting && (Boolean(payload?.inactive) || (!streamEligible && !chartHasData))
   const idleMessage = payload?.message || 'Start this bot to stream performance data.'
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
   const runtimeInitialising = runtimeStatus === 'initialising'
+
   const bootStage = useMemo(() => {
     if (runtimeInitialising || isBootingStatus) return 'runtime'
     if (streamStatus === 'connecting') return 'datasource'
@@ -138,11 +78,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!atmReady) return 'strategy'
     return 'generic'
   }, [runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
-  const chartHandle = useChartValue(`bot-${bot?.id}`)
+
   const lastCandle = useMemo(() => {
     if (!Array.isArray(payload?.candles) || payload.candles.length === 0) return null
     return payload.candles[payload.candles.length - 1]
   }, [payload?.candles])
+
   const simTimeLabel = useMemo(() => {
     const epoch = toSec(lastCandle?.time)
     if (!Number.isFinite(epoch)) return null
@@ -161,6 +102,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     })
     return `Sim Time: ${dateLabel} — ${timeLabel} UTC`
   }, [lastCandle?.time])
+
+  const formatStatValueWithCurrency = useCallback(
+    (key, value) => formatStatValue(key, value, quoteCurrency),
+    [quoteCurrency],
+  )
+
   const activeTrade = useMemo(() => {
     const trades = Array.isArray(payload?.trades) ? payload.trades : []
     return (
@@ -170,9 +117,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       }) || null
     )
   }, [payload?.trades])
+
   const sumContracts = useCallback((legs = []) => {
     return legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
   }, [])
+
   const activeTradeChip = useMemo(() => {
     if (!activeTrade) return null
     const directionLabel = (activeTrade.direction || 'long').toLowerCase() === 'short' ? 'Short' : 'Long'
@@ -250,6 +199,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       }, 200)
     }
   }, [activeTradeChip, renderedChip])
+
   const tradeMetrics = useMemo(() => {
     const trades = Array.isArray(payload?.trades) ? payload.trades : []
     const toContracts = (legs = []) => legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
@@ -299,6 +249,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     const avgLoss = lossPnls.length ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null
     return { totalR, expectancyR, expectancyPnl, maxDrawdown, avgWin, avgLoss }
   }, [payload?.trades])
+
   const statEntries = useMemo(() => {
     const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
     const entries = Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
@@ -310,6 +261,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (Number.isFinite(tradeMetrics.totalR)) entries.push(['total_r', tradeMetrics.totalR])
     return entries
   }, [payload?.stats, tradeMetrics])
+
   const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
   const statusDisplay = isBooting ? 'booting' : runtimeStatus
   const bootOverlayVisible = isBooting && !error && !showInactiveState
@@ -348,83 +300,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return `${bootLine}${'.'.repeat(Math.max(1, bootDots))}`
   }, [bootDots, bootLine])
 
-  const formatTimestamp = useCallback((value) => {
-    if (!value) return '—'
-    const date = new Date(value)
-    if (Number.isNaN(date.getTime())) return value
-    return date.toLocaleTimeString([], { hour12: false })
-  }, [])
-
-  const formatStatValue = useCallback(
-    (key, value) => {
-      if (value === undefined || value === null) return '—'
-      const numeric = Number(value)
-      if (['expectancy_r', 'total_r'].includes(key)) {
-        if (!Number.isFinite(numeric)) return '—'
-        const formatted = numeric.toFixed(2)
-        return `${numeric >= 0 ? '+' : ''}${formatted} R`
-      }
-      if (['max_drawdown', 'expectancy_value', 'avg_win', 'avg_loss'].includes(key)) {
-        if (!Number.isFinite(numeric)) return '—'
-        const formatted = numeric.toFixed(2)
-        return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
-      }
-      const hasCurrency = ['gross_pnl', 'fees_paid', 'net_pnl'].includes(key)
-      if (hasCurrency && Number.isFinite(numeric)) {
-        const formatted = numeric.toFixed(2)
-        return quoteCurrency ? `${formatted} ${quoteCurrency}` : formatted
-      }
-      if (typeof value === 'number' && !Number.isInteger(value)) {
-        return value.toFixed(2)
-      }
-      if (Number.isFinite(numeric) && `${value}`.trim() !== '') {
-        return numeric
-      }
-      return value
-    },
-    [quoteCurrency],
-  )
-
-  const describeLog = useCallback((entry) => {
-    if (!entry) return '—'
-    if (entry.message) return entry.message
-    const parts = []
-    if (entry.symbol) parts.push(entry.symbol)
-    if (entry.direction) parts.push(entry.direction.toUpperCase())
-    if (entry.leg) parts.push(entry.leg)
-    if (entry.price !== undefined && entry.price !== null) {
-      const price = Number(entry.price)
-      parts.push(Number.isFinite(price) ? `@ ${price.toFixed(4)}` : `@ ${entry.price}`)
-    }
-    if (entry.targets && Array.isArray(entry.targets)) {
-      parts.push(`targets: ${entry.targets.map((t) => t.name).join(', ')}`)
-    }
-    return parts.length ? parts.join(' • ') : '—'
-  }, [])
-
-  const isTradeLog = useCallback((entry) => {
-    if (!entry) return false
-    if (entry.trade_id) return true
-    const type = (entry.event || entry.type || '').toLowerCase()
-    const keywords = ['entry', 'exit', 'close', 'target', 'stop', 'tp', 'sl', 'fill', 'order', 'open', 'trade']
-    return keywords.some((keyword) => type.includes(keyword))
-  }, [])
-
-  const tradeLogs = useMemo(() => logs.filter((entry) => isTradeLog(entry)), [logs, isTradeLog])
-  const systemLogs = useMemo(() => logs.filter((entry) => !isTradeLog(entry)), [logs, isTradeLog])
-  const displayedLogs = logTab === 'trade' ? tradeLogs : systemLogs
-
-  const focusChartOnLog = useCallback(
-    (entry) => {
-      const handles = chartHandle?.handles || chartHandle
-      if (!handles?.focusAtTime) return
-      const time = entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time
-      const price = entry?.price
-      handles.focusAtTime(time, price)
-    },
-    [chartHandle],
-  )
-
   const formatRiskReward = useCallback((metrics) => {
     if (!metrics || metrics.reward_to_risk === null || metrics.reward_to_risk === undefined) {
       return '—'
@@ -435,23 +310,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
     return `${numeric.toFixed(2)} R`
   }, [])
-
-  const playbackLabel = playbackDraft <= 0 ? 'Instant' : `${playbackDraft.toFixed(2)}x`
-
-  const handleZoomIn = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.zoomIn?.()
-  }, [chartHandle])
-
-  const handleZoomOut = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.zoomOut?.()
-  }, [chartHandle])
-
-  const handleCenterView = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.centerView?.()
-  }, [chartHandle])
 
   const toggleStrategyDetails = useCallback((strategyId) => {
     if (!strategyId) return
@@ -465,39 +323,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       return next
     })
   }, [])
-
-  const persistPlaybackSpeed = useCallback(
-    async (value) => {
-      if (!bot?.id) return
-      setSpeedSaving(true)
-      try {
-        await updateBot(bot.id, { playback_speed: Number.isFinite(value) ? value : 0 })
-        onRefresh?.()
-      } catch (err) {
-        console.error('bot playback update failed', err)
-        setError(err?.message || 'Unable to update playback speed')
-      } finally {
-        setSpeedSaving(false)
-      }
-    },
-    [bot?.id, onRefresh],
-  )
-
-  const handlePlaybackInput = useCallback(
-    (event) => {
-      const raw = Number(event?.target?.value)
-      const next = Number.isFinite(raw) ? raw : 0
-      setPlaybackDraft(next)
-      if (playbackDebounceRef.current) {
-        clearTimeout(playbackDebounceRef.current)
-      }
-      playbackDebounceRef.current = setTimeout(() => {
-        playbackDebounceRef.current = null
-        persistPlaybackSpeed(next)
-      }, 300)
-    },
-    [persistPlaybackSpeed],
-  )
 
   const headerDetails = useMemo(() => {
     const parts = []
@@ -534,111 +359,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return parts.filter(Boolean).join(' • ')
   }, [strategies, botMeta.timeframe, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.run_type])
 
-  const applyPayload = useCallback((incoming) => {
-    if (!incoming) return
-    setPayload((prev) => {
-      const next = { ...(prev || {}), ...incoming }
-      next.meta = incoming.meta || prev?.meta || next.meta || null
-      return next
-    })
-  }, [])
-
-  const loadPerformance = useCallback(async (withLoader = true) => {
-    if (!bot?.id) return
-    if (withLoader) setLoading(true)
-    setError(null)
-    try {
-      const data = await fetchBotPerformance(bot.id)
-      logCandleDiagnostics('initial_fetch', data?.candles, bot?.id)
-      applyPayload(data)
-    } catch (err) {
-      setError(err?.message || 'Unable to fetch performance')
-    } finally {
-      if (withLoader) setLoading(false)
-    }
-  }, [bot?.id, applyPayload])
-
-  useEffect(() => {
-    if (open) {
-      loadPerformance(true)
-    }
-  }, [open, loadPerformance])
-
-  useEffect(() => {
-    if (!open || !bot?.id || !streamEligible) {
-      streamRef.current?.close?.()
-      streamRef.current = null
-      setStreamStatus('idle')
-      return undefined
-    }
-    const source = openBotStream(bot.id)
-    if (!source) return undefined
-    streamRef.current = source
-    setStreamStatus('connecting')
-    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
-
-    let pendingUpdate = null
-    let throttleTimer = null
-    let lastIntrabarUpdate = 0
-    const INTRABAR_THROTTLE_MS = 150 // Only update every 150ms for intrabar events
-
-    const flushUpdate = () => {
-      if (pendingUpdate) {
-        applyPayload(pendingUpdate)
-        pendingUpdate = null
-        lastIntrabarUpdate = Date.now()
-      }
-      throttleTimer = null
-    }
-
-    const handler = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
-
-        // For intrabar events, throttle updates to reduce re-renders
-        if (event.type === 'intrabar') {
-          pendingUpdate = data
-          if (!throttleTimer) {
-            const timeSinceLastUpdate = Date.now() - lastIntrabarUpdate
-            const delay = Math.max(0, INTRABAR_THROTTLE_MS - timeSinceLastUpdate)
-            throttleTimer = setTimeout(flushUpdate, delay)
-          }
-        } else {
-          // For other events, apply immediately and cancel any pending intrabar
-          if (throttleTimer) {
-            clearTimeout(throttleTimer)
-            throttleTimer = null
-            pendingUpdate = null
-          }
-          applyPayload(data)
-        }
-        setStreamStatus('open')
-      } catch (err) {
-        console.error('bot stream parse failed', err)
-      }
-    }
-    source.onmessage = handler
-    for (const evt of events) {
-      source.addEventListener(evt, handler)
-    }
-    source.onerror = () => {
-      setStreamStatus('error')
-    }
-    source.onopen = () => setStreamStatus('open')
-    return () => {
-      if (rafId) {
-        cancelAnimationFrame(rafId)
-      }
-      for (const evt of events) {
-        source.removeEventListener(evt, handler)
-      }
-      source.close()
-      streamRef.current = null
-      setStreamStatus('closed')
-    }
-  }, [open, bot?.id, applyPayload, streamEligible])
-
   useEffect(() => {
     const handler = (event) => {
       if (event.key === 'Escape') {
@@ -651,41 +371,40 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return () => window.removeEventListener('keydown', handler)
   }, [open, onClose])
 
-  const handlePause = async () => {
-    if (!bot?.id) return
-    setAction('pause')
-    setError(null)
-    try {
-      await pauseBot(bot.id)
-      await loadPerformance(false)
-      onRefresh?.()
-    } catch (err) {
-      setError(err?.message || 'Unable to pause bot')
-    } finally {
-      setAction(null)
-    }
-  }
-
-  const handleResume = async () => {
-    if (!bot?.id) return
-    setAction('resume')
-    setError(null)
-    try {
-      await resumeBot(bot.id)
-      await loadPerformance(false)
-      onRefresh?.()
-    } catch (err) {
-      setError(err?.message || 'Unable to resume bot')
-    } finally {
-      setAction(null)
-    }
-  }
-
   const progressDisplay =
     typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
   const playbackDisabled = isBooting
   const canPause = runtimeStatus === 'running' && (bot?.mode || '').toLowerCase() === 'walk-forward'
   const canResume = runtimeStatus === 'paused'
+  const bootLineVisible = streamStatus === 'connecting' && streamEligible
+
+  const logsForDisplay = useMemo(() => logs.filter((entry) => describeLog(entry) !== '—'), [logs])
+
+  const focusChartOnLog = useCallback(
+    (entry) => {
+      const handles = chartHandle?.handles || chartHandle
+      if (!handles?.focusAtTime) return
+      const time = entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time
+      const price = entry?.price
+      handles.focusAtTime(time, price)
+    },
+    [chartHandle],
+  )
+
+  const handleZoomIn = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.zoomIn?.()
+  }, [chartHandle])
+
+  const handleZoomOut = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.zoomOut?.()
+  }, [chartHandle])
+
+  const handleCenterView = useCallback(() => {
+    const handles = chartHandle?.handles || chartHandle
+    handles?.centerView?.()
+  }, [chartHandle])
 
   if (!open) return null
 
@@ -708,181 +427,72 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
         </header>
 
         <div className="flex flex-1 flex-col gap-6 overflow-auto">
-          <div className="rounded-2xl border border-white/5 bg-black/20 px-3 py-2">
-            <div className="flex flex-wrap items-center gap-3 text-[10px] uppercase tracking-[0.25em] text-slate-400">
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
-                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Status</span>
-                <span className="font-semibold tracking-normal text-white">{statusDisplay}</span>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
-                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Progress</span>
-                <span className="font-semibold tracking-normal text-white">{progressDisplay}</span>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2 py-1 text-xs text-white">
-                <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">Feed</span>
-                <span className="font-semibold tracking-normal text-white">{streamStatus}</span>
-              </div>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {canPause ? (
-              <button
-                type="button"
-                onClick={handlePause}
-                disabled={action === 'pause' || playbackDisabled}
-                className="inline-flex items-center gap-2 rounded-full border border-amber-500/30 px-4 py-2 text-sm text-amber-200 hover:bg-amber-500/10 disabled:opacity-40"
-              >
-                <Pause className="size-4" /> Pause walk-forward
-              </button>
-            ) : null}
-            {canResume ? (
-              <button
-                type="button"
-                onClick={handleResume}
-                disabled={action === 'resume' || playbackDisabled}
-                className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40"
-              >
-                <RotateCw className="size-4" /> Resume
-              </button>
-            ) : null}
-          </div>
-          <div className="relative">
-            <div className="mb-3 flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                {simTimeLabel ? (
-                  <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
-                    {simTimeLabel}
-                  </div>
-                ) : (
-                  <span className="text-xs text-slate-500">&nbsp;</span>
-                )}
-              </div>
-              <div className="flex flex-1 justify-center">
-                {renderedChip ? (
-                  <div
-                    className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow-lg transition-all duration-300 ease-out ${
-                      chipVisible ? 'border-sky-400/40 bg-white/5 opacity-100 scale-100' : 'border-sky-400/10 bg-white/0 opacity-0 scale-95'
-                    } ${chipVisible ? 'translate-y-0' : '-translate-y-2'}`}
-                    onMouseEnter={() => handleChipHover(true)}
-                    onMouseLeave={() => handleChipHover(false)}
-                  >
-                    <span
-                      className={`relative h-2.5 w-2.5 rounded-full ${
-                        renderedChip.direction === 'short'
-                          ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20'
-                          : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
-                      }`}
-                    >
-                      {chipVisible && (
-                        <span
-                          className={`absolute inset-0 rounded-full animate-ping ${
-                            renderedChip.direction === 'short' ? 'bg-rose-400' : 'bg-emerald-400'
-                          }`}
-                          style={{ animationDuration: '2s' }}
-                        />
-                      )}
-                    </span>
-                    <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
-                    <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{renderedChip.r}</span>
-                    <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{renderedChip.pnl}</span>
-                    <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">SL {renderedChip.sl}</span>
-                    <span className="text-[11px] uppercase tracking-[0.2em] text-slate-300">TP {renderedChip.tp}</span>
-                  </div>
-                ) : null}
-              </div>
-              <div className="ml-auto flex items-center gap-3">
-                <div className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2 py-1 shadow">
-                  <button
-                    type="button"
-                    onClick={handleZoomOut}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
-                    aria-label="Zoom out"
-                  >
-                    <ZoomOut className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCenterView}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
-                    aria-label="Center view"
-                  >
-                    <Crosshair className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleZoomIn}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
-                    aria-label="Zoom in"
-                  >
-                    <ZoomIn className="size-4" />
-                  </button>
-                </div>
-                <div
-                  className={`inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white shadow transition ${
-                    playbackDisabled ? 'pointer-events-none opacity-60' : ''
-                  }`}
-                >
-                  <span className="text-[10px] uppercase tracking-[0.25em] text-slate-200">Speed</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="25"
-                    step="0.25"
-                    value={playbackDraft}
-                    onChange={handlePlaybackInput}
-                    disabled={playbackDisabled}
-                    className="w-28 appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-white/30 [&::-webkit-slider-thumb]:mt-[-4px] [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-white/30 [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-white"
-                  />
-                  <span className="text-xs font-semibold text-white">
-                    {playbackLabel}
-                    {speedSaving ? ' •' : ''}
-                  </span>
-                </div>
+          <BotStatusChips statusDisplay={statusDisplay} progressDisplay={progressDisplay} streamStatus={streamStatus} />
+
+          <PlaybackControls
+            canPause={canPause}
+            canResume={canResume}
+            onPause={handlePause}
+            onResume={handleResume}
+            action={action}
+            playbackDisabled={playbackDisabled}
+            simTimeLabel={simTimeLabel}
+            onZoomIn={handleZoomIn}
+            onZoomOut={handleZoomOut}
+            onCenter={handleCenterView}
+            playbackDraft={playbackDraft}
+            playbackLabel={playbackLabel}
+            onPlaybackChange={handlePlaybackInput}
+            speedSaving={speedSaving}
+          />
+
+        <div className="flex flex-wrap items-center justify-center">
+          <ActiveTradeChip chip={renderedChip} visible={chipVisible} onHover={handleChipHover} />
+        </div>
+
+        <div className="relative min-h-[360px]">
+            <div
+              className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
+                bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+              }`}
+            >
+              <div className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-base font-semibold text-slate-100 shadow-sm animate-pulse">
+                {bootLineDisplay}
               </div>
             </div>
-            <div className="relative min-h-[360px]">
-              <div
-                className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
-                  bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
-                }`}
-              >
-                <div className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-base font-semibold text-slate-100 shadow-sm animate-pulse">
-                  {bootLineDisplay}
+            <div
+              className={`transition-opacity duration-300 ${
+                bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
+              }`}
+            >
+              {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
+              {error ? (
+                <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
+              ) : showInactiveState ? (
+                <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                  {idleMessage}
                 </div>
-              </div>
-              <div
-                className={`transition-opacity duration-300 ${
-                  bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
-                }`}
-              >
-                {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
-                {error ? (
-                  <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-                ) : showInactiveState ? (
-                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                    {idleMessage}
-                  </div>
-                ) : chartHasData ? (
-                  <BotLensChart
-                    chartId={`bot-${bot?.id}`}
-                    candles={payload?.candles || []}
-                    trades={payload?.trades || []}
-                    overlays={payload?.overlays || []}
-                    playbackSpeed={playbackDraft}
-                  />
-                ) : (
-                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                    Awaiting the first candle…
-                  </div>
-                )}
-              </div>
+              ) : chartHasData ? (
+                <BotLensChart
+                  chartId={`bot-${bot?.id}`}
+                  candles={payload?.candles || []}
+                  trades={payload?.trades || []}
+                  overlays={payload?.overlays || []}
+                  playbackSpeed={playbackDraft}
+                />
+              ) : (
+                <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                  Awaiting the first candle…
+                </div>
+              )}
             </div>
-            {streamStatus === 'connecting' && streamEligible ? (
+            {bootLineVisible ? (
               <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-xs text-slate-200">
                 Establishing live feed…
               </div>
             ) : null}
           </div>
+
           {strategies.length ? (
             <div className="space-y-4 rounded-3xl border border-white/5 bg-black/30 p-4">
               <div className="flex items-center justify-between">
@@ -942,10 +552,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                             {strategy.indicators?.length ? (
                               <ul className="mt-2 divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
                                 {strategy.indicators.map((indicator, idx) => (
-                                  <li
-                                    key={`${indicator.id || idx}-${idx}`}
-                                    className="flex items-center justify-between gap-3 px-3 py-2"
-                                  >
+                                  <li key={`${indicator.id || idx}-${idx}`} className="flex items-center justify-between gap-3 px-3 py-2">
                                     <div className="flex flex-wrap items-center gap-2 text-sm text-white">
                                       <span
                                         className="h-2 w-2 rounded-full"
@@ -1029,70 +636,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             </div>
           ) : null}
 
-          <div className="grid gap-4 rounded-3xl border border-white/5 bg-white/5 p-4 text-sm text-slate-200 sm:grid-cols-3">
-            {statEntries.map(([key, value]) => (
-              <div key={key} className="rounded-2xl border border-white/10 bg-black/20 p-3">
-                <p className="text-xs uppercase tracking-[0.35em] text-slate-400">{key.replace(/_/g, ' ')}</p>
-                <p className="text-2xl font-semibold text-white">{formatStatValue(key, value)}</p>
-              </div>
-            ))}
-          </div>
+          <PerformanceStats statEntries={statEntries} formatStatValue={formatStatValueWithCurrency} />
 
-          <div className="space-y-3 rounded-3xl border border-white/5 bg-black/40 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Runtime log</p>
-                <div className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 text-xs text-white">
-                  <button
-                    type="button"
-                    onClick={() => setLogTab('trade')}
-                    className={`rounded-full px-3 py-1 ${logTab === 'trade' ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-white/10'}`}
-                  >
-                    Trade Events ({tradeLogs.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLogTab('system')}
-                    className={`rounded-full px-3 py-1 ${logTab === 'system' ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-white/10'}`}
-                  >
-                    System Logs ({systemLogs.length})
-                  </button>
-                </div>
-              </div>
-              <span className="text-xs text-slate-400">Showing last {displayedLogs.length} events</span>
-            </div>
-            <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
-              {displayedLogs.length ? (
-                displayedLogs
-                  .slice()
-                  .reverse()
-                  .map((entry, idx) => (
-                    <article
-                      key={entry.id || `${entry.timestamp || 'log'}-${idx}`}
-                      onClick={logTab === 'trade' ? () => focusChartOnLog(entry) : undefined}
-                      className={`rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-white ${
-                        logTab === 'trade' ? 'cursor-pointer transition hover:border-sky-400/40 hover:bg-sky-500/5' : ''
-                      }`}
-                    >
-                      <div className="flex items-center justify-between text-xs uppercase tracking-[0.3em] text-slate-400">
-                        <span>{entry.event || 'event'}</span>
-                        <span>{formatTimestamp(entry.event_time || entry.bar_time || entry.timestamp)}</span>
-                      </div>
-                      <p className="mt-1 text-base font-semibold text-white">{describeLog(entry)}</p>
-                      <div className="mt-1 flex flex-wrap gap-3 text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                        {entry.trade_id ? <span>Trade {entry.trade_id.slice(0, 8)}</span> : null}
-                        {entry.bar_time ? <span>Bar {formatTimestamp(entry.bar_time)}</span> : null}
-                        {entry.symbol ? <span>{entry.symbol}</span> : null}
-                      </div>
-                    </article>
-                  ))
-              ) : (
-                <div className="rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
-                  {logTab === 'trade' ? 'No trade events yet' : 'No system logs yet'}
-                </div>
-              )}
-            </div>
-          </div>
+          <TradeLogList logs={logsForDisplay} logTab={logTab} onTabChange={setLogTab} onFocusLog={focusChartOnLog} />
         </div>
       </div>
     </div>
