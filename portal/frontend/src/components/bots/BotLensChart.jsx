@@ -294,10 +294,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     })
   }, [candleData, resolvedOverlays, syncOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
 
-  useEffect(() => {
-    enforceViewport(candleData, [])
-  }, [candleData, enforceViewport])
-
   return (
     <div
       ref={containerRef}

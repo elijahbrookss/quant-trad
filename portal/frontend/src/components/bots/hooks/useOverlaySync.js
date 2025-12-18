@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import { createSeriesMarkers } from 'lightweight-charts'
 import { adaptPayload, getPaneViewsFor } from '../../../chart/indicators/registry.js'
 import { coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
@@ -28,6 +28,9 @@ export const useOverlaySync = ({
   prevPriceLinesRef,
   applyViewport,
 }) => {
+  const initialViewportAppliedRef = useRef(false)
+  const tradeViewportSignatureRef = useRef(null)
+
   return useCallback(
     ({
       overlayPayloads = [],
@@ -349,7 +352,30 @@ export const useOverlaySync = ({
       paneMgrRef.current.setSegments(segments)
       paneMgrRef.current.setPolylines(polylines)
       paneMgrRef.current.setSignalBubbles(bubbles)
-      applyViewport(candleData, tradeSegments)
+      const tradeExtentSignature = (() => {
+        if (!tradeSegments.length) return null
+        const candidateTimes = tradeSegments
+          .flatMap((segment) => [segment.x1, segment.x2])
+          .filter((value) => Number.isFinite(value))
+        if (!candidateTimes.length) return null
+        const min = Math.min(...candidateTimes)
+        const max = Math.max(...candidateTimes)
+        return `${min}-${max}-${lastSeriesTime}`
+      })()
+
+      if (tradeExtentSignature) {
+        if (tradeExtentSignature !== tradeViewportSignatureRef.current) {
+          applyViewport(candleData, tradeSegments)
+          tradeViewportSignatureRef.current = tradeExtentSignature
+          initialViewportAppliedRef.current = true
+        }
+      } else if (!initialViewportAppliedRef.current && candleData.length) {
+        applyViewport(candleData, [])
+        initialViewportAppliedRef.current = true
+        tradeViewportSignatureRef.current = null
+      } else {
+        tradeViewportSignatureRef.current = null
+      }
     },
     [applyViewport, barSpacingRef, markerCacheRef, markersApiRef, overlayHandlesRef, paneMgrRef, prevPriceLinesRef, seriesRef],
   )
