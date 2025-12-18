@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, Pause, RotateCw, ChevronDown, ZoomIn, ZoomOut, Crosshair } from 'lucide-react'
-import { BotLensChart, toSec } from './BotLensChart.jsx'
+import { BotLensChart } from './BotLensChart.jsx'
+import { toSec } from './chartDataUtils.js'
 import { useChartValue } from '../../contexts/ChartStateContext.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import {
