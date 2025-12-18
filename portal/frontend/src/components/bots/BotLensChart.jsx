@@ -776,14 +776,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
             const labelSource = line.labels[0] || (isTarget ? 'Target' : isStop ? 'Stop Loss' : isEntry ? 'Entry' : 'Level')
             const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
 
-            // Add P&L to entry line title
-            let title = `${labelSource}${labelCount ? labelCount : ''} ${priceLabel}`
-            if (isEntry && Number.isFinite(line.pnl) && Number.isFinite(line.pnlPercent)) {
-              const pnlSign = line.pnl >= 0 ? '+' : ''
-              const pnlValue = line.pnl.toFixed(2)
-              const pnlPct = line.pnlPercent.toFixed(2)
-              title = `Entry ${priceLabel} | ${pnlSign}${pnlValue} (${pnlSign}${pnlPct}%)`
-            }
+            // Keep axis labels compact to avoid covering the live price marker
+            const title = `${labelSource}${labelCount ? labelCount : ''} ${priceLabel}`
             const priceLineOptions = {
               price: line.price,
               color: lineColor,
