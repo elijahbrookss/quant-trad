@@ -35,9 +35,11 @@ export const useBotLensChartCore = ({
   const resizeObserverRef = useRef(null)
   const focusTimeoutRef = useRef(null)
   const creationSeqRef = useRef(0)
+  const effectRunSeqRef = useRef(0)
   const lastDepsRef = useRef(null)
 
   useEffect(() => {
+    effectRunSeqRef.current += 1
     const depSnapshot = {
       chartId,
       chartOptions,
@@ -47,23 +49,47 @@ export const useBotLensChartCore = ({
       recenter,
       clearPulse,
       containerRef,
+      hasContainer: Boolean(containerRef?.current),
     }
 
-    if (lastDepsRef.current) {
-      const changed = Object.entries(depSnapshot)
-        .filter(([key, value]) => lastDepsRef.current[key] !== value)
-        .map(([key]) => key)
-      if (changed.length) {
-        console.info('[BotLensChartCore] chart effect deps changed', { chartId, changed })
-      }
-    }
+    const prevSnapshot = lastDepsRef.current
+    const changed = prevSnapshot
+      ? Object.entries(depSnapshot)
+          .filter(([key, value]) => prevSnapshot[key] !== value)
+          .map(([key]) => key)
+      : []
+    const containerChanged = prevSnapshot?.hasContainer !== depSnapshot.hasContainer
+    const reason = !prevSnapshot
+      ? 'initial'
+      : changed.length
+        ? containerChanged && changed.length === 1
+          ? 'container-changed'
+          : 'deps-changed'
+        : 'strict-reinvoke'
+
+    console.info('[BotLensChartCore] effect run', {
+      chartId,
+      runId: effectRunSeqRef.current,
+      reason,
+      changed,
+      hasContainer: depSnapshot.hasContainer,
+      hasChart: Boolean(chartRef.current),
+    })
+
     lastDepsRef.current = depSnapshot
 
     const el = containerRef.current
-    if (!el || chartRef.current) return undefined
+    if (!el) {
+      console.warn('[BotLensChartCore] no container, skipping chart creation', {
+        chartId,
+        runId: effectRunSeqRef.current,
+      })
+      return undefined
+    }
+    if (chartRef.current) return undefined
 
     creationSeqRef.current += 1
-
+    
     const chart = createChart(el, {
       ...chartOptions,
       width: el.clientWidth,
@@ -96,9 +122,17 @@ export const useBotLensChartCore = ({
       zoomIn: () => chartRef.current?.timeScale?.().zoomIn?.(),
       zoomOut: () => chartRef.current?.timeScale?.().zoomOut?.(),
       centerView: recenter,
-    }, { caller: 'useBotLensChartCore' })
+    }, {
+      caller: 'useBotLensChartCore',
+      lifecycleSeq: creationSeqRef.current,
+      mountId: effectRunSeqRef.current,
+    })
 
-    console.info('[BotLensChartCore] chart created', { chartId, seq: creationSeqRef.current })
+    console.info('[BotLensChartCore] chart created', {
+      chartId,
+      seq: creationSeqRef.current,
+      runId: effectRunSeqRef.current,
+    })
 
     const cleanupGuards = attachRangeGuards(el)
 
@@ -110,7 +144,15 @@ export const useBotLensChartCore = ({
     resizeObserverRef.current.observe(el)
 
     return () => {
-      console.info('[BotLensChartCore] chart cleanup', { chartId, seq: creationSeqRef.current })
+      console.info('[BotLensChartCore] chart cleanup', {
+        chartId,
+        seq: creationSeqRef.current,
+        runId: effectRunSeqRef.current,
+        hasContainer: Boolean(containerRef?.current),
+        lastDepHasContainer: depSnapshot.hasContainer,
+        lastRunReason: reason,
+        changed,
+      })
       cleanupGuards?.()
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null

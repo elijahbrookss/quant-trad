@@ -71,6 +71,8 @@ export function ChartStateProvider({ children }) {
       previousHandleId: getHandleId(existingHandles),
       nextHandleId: getHandleId(handles),
       caller: meta?.caller || 'unknown',
+      lifecycleSeq: meta?.lifecycleSeq ?? null,
+      mountId: meta?.mountId ?? null,
     });
     dispatch({ type: 'REGISTER', id, handles });
   }, [info]);
