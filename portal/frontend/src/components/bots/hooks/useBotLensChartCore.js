@@ -34,10 +34,35 @@ export const useBotLensChartCore = ({
   const barSpacingRef = extBarSpacingRef ?? useRef(null)
   const resizeObserverRef = useRef(null)
   const focusTimeoutRef = useRef(null)
+  const creationSeqRef = useRef(0)
+  const lastDepsRef = useRef(null)
 
   useEffect(() => {
+    const depSnapshot = {
+      chartId,
+      chartOptions,
+      seriesOptions,
+      registerChart,
+      attachRangeGuards,
+      recenter,
+      clearPulse,
+      containerRef,
+    }
+
+    if (lastDepsRef.current) {
+      const changed = Object.entries(depSnapshot)
+        .filter(([key, value]) => lastDepsRef.current[key] !== value)
+        .map(([key]) => key)
+      if (changed.length) {
+        console.info('[BotLensChartCore] chart effect deps changed', { chartId, changed })
+      }
+    }
+    lastDepsRef.current = depSnapshot
+
     const el = containerRef.current
     if (!el || chartRef.current) return undefined
+
+    creationSeqRef.current += 1
 
     const chart = createChart(el, {
       ...chartOptions,
@@ -71,7 +96,9 @@ export const useBotLensChartCore = ({
       zoomIn: () => chartRef.current?.timeScale?.().zoomIn?.(),
       zoomOut: () => chartRef.current?.timeScale?.().zoomOut?.(),
       centerView: recenter,
-    })
+    }, { caller: 'useBotLensChartCore' })
+
+    console.info('[BotLensChartCore] chart created', { chartId, seq: creationSeqRef.current })
 
     const cleanupGuards = attachRangeGuards(el)
 
@@ -83,6 +110,7 @@ export const useBotLensChartCore = ({
     resizeObserverRef.current.observe(el)
 
     return () => {
+      console.info('[BotLensChartCore] chart cleanup', { chartId, seq: creationSeqRef.current })
       cleanupGuards?.()
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
@@ -118,18 +146,7 @@ export const useBotLensChartCore = ({
       chartRef.current?.remove()
       chartRef.current = null
     }
-  }, [
-    attachRangeGuards,
-    chartId,
-    chartOptions,
-    clearPulse,
-    containerRef,
-    markerCacheRef,
-    markerDetailsRef,
-    recenter,
-    registerChart,
-    seriesOptions,
-  ])
+  }, [chartId])
 
   return {
     chartRef,

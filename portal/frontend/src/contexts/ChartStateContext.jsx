@@ -41,17 +41,37 @@ export function ChartStateProvider({ children }) {
   const { debug, info } = useMemo(() => createLogger(LOG_NS), []);
   const [charts, dispatch] = useReducer(reducer, {});
   const chartsRef = useRef(charts);
+  const registerSeqRef = useRef(0);
+  const handleIdsRef = useRef(new WeakMap());
 
   useEffect(() => {
     chartsRef.current = charts;
   }, [charts]);
 
   // actions are stable; no effects that set state here
-  const registerChart = useCallback((id, handles) => {
+  const registerChart = useCallback((id, handles, meta = {}) => {
     const existingHandles = chartsRef.current?.[id]?.handles;
     if (existingHandles === handles) return; // avoid duplicate logs/dispatches
 
-    info('chart_register', { chartId: id, changed: Boolean(existingHandles) });
+    registerSeqRef.current += 1;
+    const nextSeq = registerSeqRef.current;
+    const getHandleId = (handle) => {
+      if (!handle) return 'null';
+      const map = handleIdsRef.current;
+      if (map.has(handle)) return map.get(handle);
+      const nextId = `h${map.size + 1}`;
+      map.set(handle, nextId);
+      return nextId;
+    };
+
+    info('chart_register', {
+      chartId: id,
+      changed: Boolean(existingHandles),
+      registerSeq: nextSeq,
+      previousHandleId: getHandleId(existingHandles),
+      nextHandleId: getHandleId(handles),
+      caller: meta?.caller || 'unknown',
+    });
     dispatch({ type: 'REGISTER', id, handles });
   }, [info]);
 
