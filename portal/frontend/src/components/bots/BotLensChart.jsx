@@ -334,6 +334,18 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     return regions
   }, [candleLookup, resolvedTrades])
 
+  const runWithAutoScrollGuard = useCallback((operation) => {
+    autoScrollRef.current = true
+    try {
+      operation?.()
+    } finally {
+      // Defer reset until after the chart has a chance to emit range callbacks
+      setTimeout(() => {
+        autoScrollRef.current = false
+      }, 0)
+    }
+  }, [])
+
   const updateViewport = useCallback(
     (tradeSegments = []) => {
       if (!chartRef.current || candleData.length === 0) return
@@ -791,18 +803,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       },
       [candleData, resolvedTrades, tradeRegions, updateViewport]
     )
-
-  const runWithAutoScrollGuard = useCallback((operation) => {
-    autoScrollRef.current = true
-    try {
-      operation?.()
-    } finally {
-      // Defer reset until after the chart has a chance to emit range callbacks
-      setTimeout(() => {
-        autoScrollRef.current = false
-      }, 0)
-    }
-  }, [])
 
   const reLockCamera = useCallback(() => {
     if (relockTimeoutRef.current) {
