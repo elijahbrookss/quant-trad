@@ -20,24 +20,29 @@ const deriveSpacing = (candles = [], barSpacingRef) => {
   return null
 }
 
-const computeSeriesRange = (candles = [], spacing, minBars, maxBars) => {
+const clampBars = (value, min = 10, max = 400) => Math.min(Math.max(value ?? min, min), max)
+
+const computeFollowRange = (candles = [], spacing, { lookbackBars = 24, forwardPadBars = 1.25 } = {}) => {
   const lastIndex = candles.length - 1
   const lastTime = candles[lastIndex]?.time
-  const barsToShow = Math.min(maxBars, Math.max(minBars, candles.length))
-  const fromIndex = Math.max(0, lastIndex - barsToShow + 1)
-  const fromTime = candles[fromIndex]?.time
-  const padTime = candles.length >= barsToShow ? 0 : Math.max(spacing ?? 0, 0)
-  const rawTo = Number.isFinite(lastTime) ? lastTime + padTime : lastIndex + (padTime ? 1 : 0)
-  const rawFrom = Number.isFinite(fromTime) ? fromTime : fromIndex
+  if (!Number.isFinite(lastTime)) return { range: null, logicalRange: null }
+
   const safeSpacing = Math.max(spacing ?? 1, 1)
-  const to = rawTo <= rawFrom ? rawFrom + safeSpacing : rawTo
-  const logicalFrom = Math.max(0, fromIndex)
-  const logicalTo = lastIndex + (padTime ? 1 : 0)
+  const lookback = clampBars(lookbackBars, 8, 480)
+  const forwardPad = Math.max(forwardPadBars, 0)
+  const spanBars = lookback + forwardPad
+  const to = lastTime + safeSpacing * forwardPad
+  const from = to - safeSpacing * spanBars
+
+  const logicalTo = lastIndex + forwardPad
+  const logicalFrom = Math.max(0, logicalTo - spanBars)
   const logicalRange = { from: logicalFrom, to: Math.max(logicalFrom + 1, logicalTo) }
-  if (Number.isFinite(rawFrom) && Number.isFinite(to)) {
-    return { range: { from: rawFrom, to }, logicalRange }
+
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+    return { range: null, logicalRange }
   }
-  return { range: null, logicalRange }
+
+  return { range: { from, to }, logicalRange }
 }
 
 const buildGhostPoints = (candles = [], segments = []) => {
@@ -66,6 +71,9 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const userOverrideUntilRef = useRef(0)
   const pendingFollowRef = useRef(false)
   const lastOverlaySignatureRef = useRef(null)
+  const preferredSpanBarsRef = useRef(24)
+  const lastLogicalRangeRef = useRef(null)
+  const interactionRef = useRef({ dragging: false })
 
   const applyRange = useCallback((range, logicalRange) => {
     const ts = chartRef.current?.timeScale?.()
@@ -88,6 +96,9 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
 
   const setLocked = useCallback((locked) => {
     lockedRef.current = locked
+    if (locked) {
+      userOverrideUntilRef.current = 0
+    }
   }, [])
 
   const setAnimationActive = useCallback(
@@ -97,12 +108,15 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         pendingFollowRef.current = false
         const candles = latestCandlesRef?.current || []
         const spacing = deriveSpacing(candles, barSpacingRef)
-        const { range, logicalRange } = computeSeriesRange(candles, spacing, 30, 120)
-        applyRange(range, logicalRange)
+        const follow = computeFollowRange(candles, spacing, {
+          lookbackBars: preferredSpanBarsRef.current,
+          forwardPadBars: 1.25,
+        })
+        applyRange(follow.range, follow.logicalRange)
         if (levelSeriesRef?.current) {
           levelSeriesRef.current.setData(buildGhostPoints(candles, []))
         }
-        logIntent({ intent: CameraIntents.FOLLOW_LATEST, reason: 'animation-complete' })
+        logIntent({ intent: CameraIntents.FOLLOW_LATEST, reason: 'animation-complete', range: follow.range })
       }
     },
     [applyRange, barSpacingRef, latestCandlesRef, levelSeriesRef, logIntent],
@@ -135,7 +149,10 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       }
       const candles = latestCandlesRef?.current || []
       const spacing = deriveSpacing(candles, barSpacingRef)
-      const { range, logicalRange } = computeSeriesRange(candles, spacing, 30, 200)
+      const follow = computeFollowRange(candles, spacing, {
+        lookbackBars: preferredSpanBarsRef.current,
+        forwardPadBars: 1.25,
+      })
       const tsRange = (() => {
         if (intent === CameraIntents.FOLLOW_LATEST) {
           if (animationActiveRef.current && !isUser) {
@@ -143,7 +160,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
             logIntent({ intent, reason: `${reason}-deferred` })
             return null
           }
-          return range ?? null
+          return follow.range ?? null
         }
         if (intent === CameraIntents.FIT_OVERLAY_EXTENTS) {
           const { extents, signature } = payload
@@ -165,7 +182,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
           return { from: center - span, to: center + span }
         }
         if (intent === CameraIntents.RECENTER) {
-          if (range) return range
+          if (follow.range) return follow.range
           return null
         }
         return null
@@ -176,10 +193,10 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         return
       }
 
-      if (tsRange || logicalRange) {
-        applyRange(tsRange, logicalRange)
+      if (tsRange || follow.logicalRange) {
+        applyRange(tsRange, follow.logicalRange)
         applyGhostSeries(candles, payload?.segments || [])
-        logIntent({ intent, reason, range: tsRange, logicalRange })
+        logIntent({ intent, reason, range: tsRange, logicalRange: follow.logicalRange })
       }
     },
     [applyGhostSeries, applyRange, barSpacingRef, latestCandlesRef, logIntent, notifyUserInteraction],
@@ -189,14 +206,52 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
     (containerEl) => {
       if (!containerEl || !chartRef.current) return () => {}
       const ts = chartRef.current.timeScale()
-      const markInteraction = () => notifyUserInteraction()
-      ts.subscribeVisibleLogicalRangeChange(markInteraction)
-      containerEl.addEventListener('mousedown', markInteraction)
-      containerEl.addEventListener('touchstart', markInteraction)
+      const handleRangeChange = (logicalRange) => {
+        const prev = lastLogicalRangeRef.current
+        lastLogicalRangeRef.current = logicalRange
+        const span = logicalRange ? logicalRange.to - logicalRange.from : null
+        const prevSpan = prev ? prev.to - prev.from : null
+        const spanChanged =
+          Number.isFinite(span) &&
+          Number.isFinite(prevSpan) &&
+          Math.abs(span - prevSpan) > 0.25
+        const seedSpan = Number.isFinite(span) && !Number.isFinite(prevSpan)
+
+        if ((spanChanged || seedSpan) && Number.isFinite(span)) {
+          preferredSpanBarsRef.current = clampBars(span, 8, 480)
+          return
+        }
+
+        if (interactionRef.current.dragging) {
+          notifyUserInteraction()
+        }
+      }
+
+      const markDragStart = () => {
+        interactionRef.current.dragging = true
+      }
+      const markDragEnd = () => {
+        interactionRef.current.dragging = false
+      }
+      const markWheel = () => {
+        interactionRef.current.dragging = false
+      }
+
+      ts.subscribeVisibleLogicalRangeChange(handleRangeChange)
+      containerEl.addEventListener('mousedown', markDragStart)
+      containerEl.addEventListener('mouseup', markDragEnd)
+      containerEl.addEventListener('mouseleave', markDragEnd)
+      containerEl.addEventListener('touchstart', markDragStart)
+      containerEl.addEventListener('touchend', markDragEnd)
+      containerEl.addEventListener('wheel', markWheel, { passive: true })
       return () => {
-        ts.unsubscribeVisibleLogicalRangeChange(markInteraction)
-        containerEl.removeEventListener('mousedown', markInteraction)
-        containerEl.removeEventListener('touchstart', markInteraction)
+        ts.unsubscribeVisibleLogicalRangeChange(handleRangeChange)
+        containerEl.removeEventListener('mousedown', markDragStart)
+        containerEl.removeEventListener('mouseup', markDragEnd)
+        containerEl.removeEventListener('mouseleave', markDragEnd)
+        containerEl.removeEventListener('touchstart', markDragStart)
+        containerEl.removeEventListener('touchend', markDragEnd)
+        containerEl.removeEventListener('wheel', markWheel)
       }
     },
     [chartRef, notifyUserInteraction],

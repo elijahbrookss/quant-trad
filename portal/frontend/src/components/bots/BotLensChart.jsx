@@ -60,10 +60,15 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
+  const candleLookupRef = useRef(candleLookup)
 
   useEffect(() => {
     latestCandlesRef.current = candleData
   }, [candleData])
+
+  useEffect(() => {
+    candleLookupRef.current = candleLookup
+  }, [candleLookup])
 
   const activeTradeAtLastCandle = useMemo(() => {
     const lastTime = candleData[candleData.length - 1]?.time
@@ -147,7 +152,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     chartOptions,
     seriesOptions,
     registerChart,
-    candleLookup,
+    candleLookupRef,
     focusAtTime,
     pulseTrade: pulseTradeElements,
     clearPulse: clearPulseArtifacts,

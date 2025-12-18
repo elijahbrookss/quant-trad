@@ -8,7 +8,7 @@ export const useBotLensChartCore = ({
   chartOptions,
   seriesOptions,
   registerChart,
-  candleLookup,
+  candleLookupRef,
   focusAtTime,
   pulseTrade,
   clearPulse,
@@ -65,7 +65,7 @@ export const useBotLensChartCore = ({
       get series() {
         return seriesRef.current
       },
-      focusAtTime: (time, priceHint) => focusAtTime(time, priceHint, candleLookup),
+      focusAtTime: (time, priceHint) => focusAtTime(time, priceHint, candleLookupRef?.current),
       pulseTrade,
       clearPulse,
       zoomIn: () => chartRef.current?.timeScale?.().zoomIn?.(),
@@ -120,12 +120,10 @@ export const useBotLensChartCore = ({
     }
   }, [
     attachRangeGuards,
-    candleLookup,
     chartId,
     chartOptions,
     clearPulse,
     containerRef,
-    focusAtTime,
     markerCacheRef,
     markerDetailsRef,
     recenter,
