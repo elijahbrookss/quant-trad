@@ -1,5 +1,4 @@
 import { useCallback, useRef } from 'react'
-import { createSeriesMarkers } from 'lightweight-charts'
 import { adaptPayload, getPaneViewsFor } from '../../../chart/indicators/registry.js'
 import { coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
@@ -21,32 +20,16 @@ export const useOverlaySync = ({
   seriesRef,
   paneMgrRef,
   barSpacingRef,
-  markersApiRef,
   overlayHandlesRef,
-  markerCacheRef,
   markerDetailsRef,
   prevPriceLinesRef,
-  applyViewport,
+  markerManager,
 }) => {
-  const initialViewportAppliedRef = useRef(false)
   const tradeViewportSignatureRef = useRef(null)
 
-  return useCallback(
-    ({
-      overlayPayloads = [],
-      tradeMarkers = [],
-      tradeTooltips = [],
-      tradeRegions = [],
-      tradePriceLines = [],
-      candleData = [],
-    }) => {
-      if (!seriesRef.current || !paneMgrRef.current) return
-      if (!markersApiRef.current) {
-        markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
-      }
-      paneMgrRef.current.clearFrame()
-
-      markerDetailsRef.current = Array.isArray(tradeTooltips) ? tradeTooltips : []
+  const computeArtifacts = useCallback(
+    ({ overlayPayloads = [], tradeMarkers = [], tradeTooltips = [], tradeRegions = [], tradePriceLines = [], candleData = [] }) => {
+      const markerDetails = Array.isArray(tradeTooltips) ? tradeTooltips : []
       const baseMarkers = [...tradeMarkers]
       const overlayMarkers = []
       const touchPoints = []
@@ -178,46 +161,6 @@ export const useOverlaySync = ({
         }
       }
 
-      const markerKey = (marker) => `${marker.time}-${marker.position}-${marker.text}-${marker.kind || ''}`
-
-      const applyMarkers = (set, animate = false) => {
-        const sorted = [...set].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-        if (!animate) {
-          markerCacheRef.current = sorted
-          markersApiRef.current?.setMarkers?.(sorted)
-          return
-        }
-        const previous = new Set((markerCacheRef.current || []).map((marker) => markerKey(marker)))
-        const staged = sorted.map((marker) => {
-          if (!previous.has(markerKey(marker))) {
-            if (marker.kind === 'entry') {
-              return { ...marker, size: (marker.size || 1) * 0.85, color: marker.color?.replace('0.82', '0.7') }
-            }
-            if (marker.kind === 'target') {
-              return { ...marker, color: marker.color?.replace('0.82', '0.6'), text: marker.text, __fadeIn: true }
-            }
-            if (marker.kind === 'stop') {
-              return { ...marker, color: marker.color?.replace('0.82', '0.55'), text: marker.text, __fadeIn: true }
-            }
-            return { ...marker, color: marker.color?.replace('0.82', '0.65'), __fadeIn: true }
-          }
-          return marker
-        })
-        markerCacheRef.current = staged
-        markersApiRef.current?.setMarkers?.(staged)
-        if (staged.some((marker) => marker.__fadeIn)) {
-          setTimeout(() => {
-            const finalized = sorted.map((marker) => {
-              const clone = { ...marker }
-              delete clone.__fadeIn
-              return clone
-            })
-            markerCacheRef.current = finalized
-            markersApiRef.current?.setMarkers?.(finalized)
-          }, 200)
-        }
-      }
-
       const groupedPriceLines = (() => {
         const normalised = []
         const seen = new Map()
@@ -258,9 +201,59 @@ export const useOverlaySync = ({
         return normalised
       })()
 
+      const extentSignature = (() => {
+        if (!tradeSegments.length) return null
+        const candidateTimes = tradeSegments
+          .flatMap((segment) => [segment.x1, segment.x2])
+          .filter((value) => Number.isFinite(value))
+        if (!candidateTimes.length) return null
+        const min = Math.min(...candidateTimes)
+        const max = Math.max(...candidateTimes)
+        return `${min}-${max}-${lastSeriesTime}`
+      })()
+
+      const extents = (() => {
+        if (!extentSignature) return null
+        const candidateTimes = tradeSegments
+          .flatMap((segment) => [segment.x1, segment.x2])
+          .filter((value) => Number.isFinite(value))
+        if (!candidateTimes.length) return null
+        const min = Math.min(...candidateTimes)
+        const max = Math.max(...candidateTimes)
+        const span = Math.max(max - min, barSpacingRef.current ?? 30)
+        const pad = Math.max(span * 0.05, barSpacingRef.current ?? 0)
+        return { from: min - pad, to: max + pad }
+      })()
+
+      return {
+        markers: [...baseMarkers, ...overlayMarkers],
+        markerDetails,
+        touchPoints,
+        boxes,
+        segments,
+        polylines,
+        bubbles,
+        priceLines: groupedPriceLines,
+        tradeSegments,
+        lastSeriesTime,
+        extentSignature,
+        extents,
+      }
+    },
+    [barSpacingRef],
+  )
+
+  const applyArtifacts = useCallback(
+    (artifacts = {}) => {
+      const { markers, markerDetails, touchPoints, boxes, segments, polylines, bubbles, priceLines, tradeSegments, extentSignature, extents, lastSeriesTime } = artifacts
+      if (!seriesRef.current || !paneMgrRef.current) return { extentChanged: false }
+
+      markerDetailsRef.current = markerDetails || []
+      markerManager?.setLayer('base', markers || [])
+      markerManager?.flush()
+
       const applyPriceLines = () => {
-        if (!seriesRef.current) return
-        const signature = groupedPriceLines.map((line) => ({
+        const signature = (priceLines || []).map((line) => ({
           price: line.price,
           role: line.role,
           count: line.count,
@@ -296,7 +289,7 @@ export const useOverlaySync = ({
             }
           })
           overlayHandlesRef.current.priceLines = []
-          groupedPriceLines.forEach((line) => {
+          ;(priceLines || []).forEach((line) => {
             const isStop = line.role === 'sl'
             const isTarget = line.role === 'tp'
             const isEntry = line.role === 'level' && (line.labels[0] === 'Entry' || line.source === 'active_trade_entry')
@@ -341,42 +334,27 @@ export const useOverlaySync = ({
         }
       }
 
-      applyMarkers([...baseMarkers, ...overlayMarkers], true)
       applyPriceLines()
 
-      paneMgrRef.current.setTouchPoints(touchPoints)
-      paneMgrRef.current.setVABlocks(boxes, {
+      paneMgrRef.current.setTouchPoints(touchPoints || [])
+      paneMgrRef.current.setVABlocks(boxes || [], {
         lastSeriesTime,
         barSpacing: barSpacingRef.current,
       })
-      paneMgrRef.current.setSegments(segments)
-      paneMgrRef.current.setPolylines(polylines)
-      paneMgrRef.current.setSignalBubbles(bubbles)
-      const tradeExtentSignature = (() => {
-        if (!tradeSegments.length) return null
-        const candidateTimes = tradeSegments
-          .flatMap((segment) => [segment.x1, segment.x2])
-          .filter((value) => Number.isFinite(value))
-        if (!candidateTimes.length) return null
-        const min = Math.min(...candidateTimes)
-        const max = Math.max(...candidateTimes)
-        return `${min}-${max}-${lastSeriesTime}`
-      })()
+      paneMgrRef.current.setSegments(segments || [])
+      paneMgrRef.current.setPolylines(polylines || [])
+      paneMgrRef.current.setSignalBubbles(bubbles || [])
 
-      if (tradeExtentSignature) {
-        if (tradeExtentSignature !== tradeViewportSignatureRef.current) {
-          applyViewport(candleData, tradeSegments)
-          tradeViewportSignatureRef.current = tradeExtentSignature
-          initialViewportAppliedRef.current = true
-        }
-      } else if (!initialViewportAppliedRef.current && candleData.length) {
-        applyViewport(candleData, [])
-        initialViewportAppliedRef.current = true
-        tradeViewportSignatureRef.current = null
-      } else {
-        tradeViewportSignatureRef.current = null
+      const extentChanged = extentSignature && extentSignature !== tradeViewportSignatureRef.current
+      if (extentChanged) {
+        console.debug('[BotLensChart] overlay extents changed', { signature: extentSignature, extents })
       }
+      tradeViewportSignatureRef.current = extentSignature || null
+
+      return { extentChanged, extents, signature: extentSignature }
     },
-    [applyViewport, barSpacingRef, markerCacheRef, markersApiRef, overlayHandlesRef, paneMgrRef, prevPriceLinesRef, seriesRef],
+    [barSpacingRef, markerManager, overlayHandlesRef, paneMgrRef, prevPriceLinesRef, seriesRef],
   )
+
+  return { computeArtifacts, applyArtifacts }
 }

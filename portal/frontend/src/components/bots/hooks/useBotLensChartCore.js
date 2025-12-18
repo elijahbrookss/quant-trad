@@ -16,6 +16,7 @@ export const useBotLensChartCore = ({
   attachRangeGuards,
   markerCacheRef,
   markerDetailsRef,
+  markerManager,
   chartRef: extChartRef,
   seriesRef: extSeriesRef,
   levelSeriesRef: extLevelSeriesRef,
@@ -64,21 +65,7 @@ export const useBotLensChartCore = ({
       get series() {
         return seriesRef.current
       },
-      focusAtTime: (time, priceHint) => {
-        const highlight = focusAtTime(time, priceHint, candleLookup)
-        if (!highlight || !markersApiRef.current) return
-
-        const combined = [...markerCacheRef.current, highlight].sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-        markersApiRef.current.setMarkers(combined)
-
-        if (focusTimeoutRef.current) {
-          clearTimeout(focusTimeoutRef.current)
-        }
-        focusTimeoutRef.current = setTimeout(() => {
-          markersApiRef.current?.setMarkers?.(markerCacheRef.current)
-          focusTimeoutRef.current = null
-        }, 600)
-      },
+      focusAtTime: (time, priceHint) => focusAtTime(time, priceHint, candleLookup),
       pulseTrade,
       clearPulse,
       zoomIn: () => chartRef.current?.timeScale?.().zoomIn?.(),
@@ -106,7 +93,10 @@ export const useBotLensChartCore = ({
       }
 
       clearPulse?.()
-      markersApiRef.current?.setMarkers?.([])
+      markerManager?.clearLayer('base')
+      markerManager?.clearLayer('focus')
+      markerManager?.clearLayer('pulse')
+      markerManager?.flush?.()
       markersApiRef.current = null
 
       paneMgrRef.current?.destroy()
