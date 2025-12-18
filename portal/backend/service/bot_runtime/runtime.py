@@ -249,6 +249,8 @@ class BotRuntime:
         self._rebuild_overlay_cache()
 
     def _build_trade_overlay(self, series: StrategySeries) -> Optional[Dict[str, Any]]:
+        # Disabled: TP/SL price lines are now created in frontend from trade data
+        return None
         engine = getattr(series, "risk_engine", None)
         trade = getattr(engine, "active_trade", None)
         if not trade or not trade.is_active():

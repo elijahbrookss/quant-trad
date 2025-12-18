@@ -40,7 +40,8 @@ def compute_tr_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     h_cp = (df["high"] - df["close"].shift()).abs()
     l_cp = (df["low"] - df["close"].shift()).abs()
 
-    tr = pd.concat([hl, h_cp, l_cp], axis=1).max(axis=1)
+    # For first candle, use high-low when previous close is NaN
+    tr = pd.concat([hl, h_cp, l_cp], axis=1).max(axis=1, skipna=True)
     df["tr"] = tr
     df["atr_wilder"] = tr.ewm(alpha=1 / period, adjust=False).mean()
     return df

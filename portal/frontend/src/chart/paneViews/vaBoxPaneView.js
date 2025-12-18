@@ -91,12 +91,6 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
        target.useBitmapCoordinateSpace(({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }) =>
          ({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }));
 
-      console.log('[vaBoxPaneView] event=draw_called', {
-        hasContext: !!ctx,
-        boxCount: boxes.length,
-        mediaWidth: mediaSize?.width,
-        mediaHeight: mediaSize?.height,
-      })
 
       if (!ctx) return;
       ctx.save();
@@ -118,10 +112,10 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     destroy: () => {},
     setBoxes(arr) {
       boxes = Array.isArray(arr) ? arr : [];
-      console.log('[vaBoxPaneView] event=set_boxes', {
-        boxCount: boxes.length,
-        sampleBoxes: boxes.slice(0, 2),
-      })
+      // console.log('[vaBoxPaneView] event=set_boxes', {
+      //   boxCount: boxes.length,
+      //   sampleBoxes: boxes.slice(0, 2),
+      // })
     },
   };
 }

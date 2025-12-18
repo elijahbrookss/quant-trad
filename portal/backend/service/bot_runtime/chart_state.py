@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import logging
 
+logger = logging.getLogger(__name__)
 
 class ChartStateBuilder:
     """Compose visible candles and overlays for the bot runtime chart payload."""
@@ -205,14 +207,29 @@ class ChartStateBuilder:
         if not isinstance(entry, Mapping):
             return None
         start_epoch = self._first_epoch_from(entry, ("start", "start_date", "startDate", "x1"))
+        # Filter boxes that haven't started yet
         if start_epoch is not None and start_epoch > current_epoch:
             return None
+
+        # For boxes extending past current time, trim the end to current_epoch (like segments)
         end_epoch = self._first_epoch_from(entry, ("end", "end_date", "endDate"))
         extend_flag = bool(entry.get("extend")) if "extend" in entry else False
         if end_epoch is None and not extend_flag:
             end_epoch = self._first_epoch_from(entry, ("x2",))
+
         if end_epoch is not None and end_epoch > current_epoch:
-            return None
+            # Trim the box end to current epoch instead of filtering it out
+            trimmed = dict(entry)
+            if "x2" in trimmed:
+                trimmed["x2"] = current_epoch
+            if "end" in trimmed:
+                trimmed["end"] = current_epoch
+            if "end_date" in trimmed:
+                trimmed["end_date"] = current_epoch
+            if "endDate" in trimmed:
+                trimmed["endDate"] = current_epoch
+            return trimmed
+
         return entry
 
     def _trim_segment_entry(self, entry: Any, current_epoch: int) -> Optional[Any]:

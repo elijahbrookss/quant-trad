@@ -76,13 +76,6 @@ export class PaneViewManager {
       this.vaBoxState.barSpacing = opts.barSpacing;
     }
 
-    console.log('[PaneViewManager] event=set_va_blocks', {
-      boxCount: this.vaBoxState.boxes.length,
-      lastSeriesTime: this.vaBoxState.lastSeriesTime,
-      barSpacing: this.vaBoxState.barSpacing,
-      sampleBoxes: this.vaBoxState.boxes.slice(0, 2),
-    })
-
     this._syncVABlocks();
   }
 
@@ -99,27 +92,17 @@ export class PaneViewManager {
 
   _syncVABlocks() {
     if (!this.views.has(PaneViewType.VA_BOX)) {
-      console.log('[PaneViewManager] event=sync_va_blocks_skip reason=no_view')
       return;
     }
 
     const view = this.views.get(PaneViewType.VA_BOX);
     const series = this.series.get(PaneViewType.VA_BOX);
     if (!view || !series) {
-      console.log('[PaneViewManager] event=sync_va_blocks_skip reason=missing_view_or_series', {
-        hasView: !!view,
-        hasSeries: !!series,
-      })
       return;
     }
 
     const boxes = this.vaBoxState.boxes || [];
     const { lastSeriesTime } = this.vaBoxState;
-
-    console.log('[PaneViewManager] event=sync_va_blocks_calling_set_boxes', {
-      boxCount: boxes.length,
-      sampleBoxes: boxes.slice(0, 2),
-    })
 
     view.setBoxes(boxes);
 
@@ -128,11 +111,6 @@ export class PaneViewManager {
     const seriesTimes = [...new Set(boxes.flatMap(b => [toSec(b.x1), toSec(b.x2), normalizedLast]))]
       .filter((t) => typeof t === 'number' && Number.isFinite(t))
       .sort((a, b) => a - b);
-
-    console.log('[PaneViewManager] event=sync_va_blocks_set_data', {
-      seriesTimeCount: seriesTimes.length,
-      sampleTimes: seriesTimes.slice(0, 5),
-    })
 
     series.setData(seriesTimes.map(t => ({ time: t, originalData: {} })));
   }

@@ -500,18 +500,35 @@ class LadderPosition:
     def _update_net(self) -> None:
         self.net_pnl = self.gross_pnl - self.fees_paid
 
+    @staticmethod
+    def _sanitize_for_json(value: Optional[float]) -> Optional[float]:
+        """Convert NaN/Inf to None for JSON serialization."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)) and (math.isnan(value) or math.isinf(value)):
+            return None
+        return value
+
     def _metrics_snapshot(self) -> Dict[str, object]:
         mae_r = (self.mae_ticks / self.r_ticks) if self.r_ticks else None
         mfe_r = (self.mfe_ticks / self.r_ticks) if self.r_ticks else None
+
+        # Sanitize all numeric values to prevent NaN/Inf in JSON
+        atr_clean = self._sanitize_for_json(self.atr_at_entry)
+        r_val_clean = self._sanitize_for_json(self.r_value)
+        r_ticks_clean = self._sanitize_for_json(self.r_ticks)
+        mae_r_clean = self._sanitize_for_json(mae_r)
+        mfe_r_clean = self._sanitize_for_json(mfe_r)
+
         return {
-            "atr_at_entry": None if self.atr_at_entry is None else round(self.atr_at_entry, 6),
+            "atr_at_entry": None if atr_clean is None else round(atr_clean, 6),
             "r_multiple_at_entry": self.r_multiple_at_entry,
-            "r_value": None if self.r_value is None else round(self.r_value, 6),
-            "r_ticks": None if self.r_ticks is None else round(self.r_ticks, 4),
+            "r_value": None if r_val_clean is None else round(r_val_clean, 6),
+            "r_ticks": None if r_ticks_clean is None else round(r_ticks_clean, 4),
             "mae_ticks": round(self.mae_ticks, 4),
             "mfe_ticks": round(self.mfe_ticks, 4),
-            "mae_r": None if mae_r is None else round(mae_r, 6),
-            "mfe_r": None if mfe_r is None else round(mfe_r, 6),
+            "mae_r": None if mae_r_clean is None else round(mae_r_clean, 6),
+            "mfe_r": None if mfe_r_clean is None else round(mfe_r_clean, 6),
             "bars_held": self.bars_held,
             "pre_entry_context": dict(self.pre_entry_context or {}),
         }
@@ -718,13 +735,35 @@ class LadderRiskEngine:
             trailing_distance_ticks = float(trailing_ticks)
         return trailing_distance_ticks
 
-    def _compute_r_ticks(self, candle: Candle) -> Optional[float]:
-        tick_stop = self.ticks_stop
-        if self.risk_unit_mode == "atr":
-            if not self._has_valid_atr(candle.atr) or self.tick_size in (None, 0):
-                return None
-            tick_stop = int(round((candle.atr * self.r_multiple) / self.tick_size))
-        return float(tick_stop or 0)
+    def _compute_r_ticks(self, candle: Candle) -> float:
+        """Compute stop distance in ticks from initial_stop config.
+
+        Stops are ALWAYS derived from ATR * atr_multiplier from initial_stop config.
+        Raises ValueError if ATR is invalid or configuration is missing.
+        """
+        if not self._has_valid_atr(candle.atr):
+            raise ValueError(
+                f"Cannot compute stop: ATR is required but got {candle.atr}. "
+                f"Ensure strategy includes ATR indicator and candles have valid ATR data."
+            )
+
+        if self.tick_size in (None, 0):
+            raise ValueError("tick_size is required to compute ATR-based stops")
+
+        if self.r_multiple in (None, 0):
+            raise ValueError(
+                f"Cannot compute stop: initial_stop.atr_multiplier is required but got {self.r_multiple}. "
+                f"Configure atr_multiplier in strategy template."
+            )
+
+        tick_stop = int(round((candle.atr * self.r_multiple) / self.tick_size))
+        if tick_stop <= 0:
+            raise ValueError(
+                f"Computed stop is {tick_stop} ticks (ATR={candle.atr}, multiplier={self.r_multiple}, "
+                f"tick_size={self.tick_size}). Stop must be > 0."
+            )
+
+        return float(tick_stop)
 
     def _build_stop_adjustments(self, legs: Sequence[Leg], r_ticks: Optional[float]) -> List[Dict[str, Any]]:
         adjustments: List[Dict[str, Any]] = []
@@ -752,28 +791,32 @@ class LadderRiskEngine:
         return adjustments
 
     def _r_value(self, candle: Candle) -> Optional[float]:
-        if self.risk_unit_mode == "ticks":
-            return self.tick_value * self.ticks_stop
+        """Calculate the monetary value of 1R (ATR * multiplier * tick_value)."""
         if not self._has_valid_atr(candle.atr):
             return None
         return self.tick_value * candle.atr * self.r_multiple
 
     def _r_ticks(self, candle: Candle) -> Optional[float]:
-        if self.risk_unit_mode == "ticks":
-            return float(self.ticks_stop)
+        """Calculate R in ticks (ATR * multiplier / tick_size)."""
         if not self._has_valid_atr(candle.atr) or self.tick_size in (None, 0):
             return None
         return float((candle.atr * self.r_multiple) / self.tick_size)
 
-    def _calculate_stop_price(self, candle: Candle, direction: str, r_ticks: Optional[float]) -> float:
-        """Calculate initial stop loss price for position."""
-        stop_ticks = self.stop_ticks
-        if r_ticks not in (None, 0):
-            stop_ticks = abs(int(r_ticks))
-            if direction == "short":
-                stop_ticks = -abs(stop_ticks)
+    def _calculate_stop_price(self, candle: Candle, direction: str, r_ticks: float) -> float:
+        """Calculate initial stop loss price for position.
 
-        stop_distance = stop_ticks * self.tick_size
+        Args:
+            candle: Current candle
+            direction: Trade direction ("long" or "short")
+            r_ticks: Stop distance in ticks (must be > 0)
+
+        Returns:
+            Stop price
+        """
+        if r_ticks <= 0:
+            raise ValueError(f"r_ticks must be > 0, got {r_ticks}")
+
+        stop_distance = r_ticks * self.tick_size
         if direction == "long":
             return candle.close - stop_distance
         return candle.close + stop_distance
@@ -792,7 +835,8 @@ class LadderRiskEngine:
             # Calculate target price based on configuration type
             if r_multiple not in (None, 0) and r_ticks not in (None, 0):
                 computed_ticks = float(r_multiple) * float(r_ticks)
-                target_price = risk_math.price_from_ticks(candle.close, computed_ticks, direction, self.tick_size)
+                distance = computed_ticks * self.tick_size
+                target_price = candle.close + distance if direction == "long" else candle.close - distance
                 target_ticks = int(round(computed_ticks))
             elif ticks is not None:
                 distance = ticks * self.tick_size
@@ -819,11 +863,9 @@ class LadderRiskEngine:
 
     def _new_position(self, candle: Candle, direction: str) -> LadderPosition:
         """Create a new ladder position from current candle and signal direction."""
-        # Calculate risk metrics
-        atr_at_entry = candle.atr if candle.atr not in (None, 0) else None
-        r_ticks = self._compute_r_ticks(candle)
-        if r_ticks in (None, 0):
-            r_ticks = float(self.stop_ticks)
+        # Calculate risk metrics - _compute_r_ticks will raise if ATR invalid or config missing
+        atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
+        r_ticks = self._compute_r_ticks(candle)  # Raises ValueError if stop cannot be computed
 
         r_value = self._r_value(candle)
         if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):

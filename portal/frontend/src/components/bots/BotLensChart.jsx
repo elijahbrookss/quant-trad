@@ -384,12 +384,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   const syncOverlays = useCallback(
     (overlayPayloads = [], tradeMarkerPayload = [], markerDetails = []) => {
-      console.log('[BotLensChart] event=sync_overlays_start', {
-        chartId,
-        overlayCount: overlayPayloads?.length || 0,
-        overlays: overlayPayloads?.map(o => ({ ind_id: o.ind_id, type: o.type, boxes: o.payload?.boxes?.length || 0 })),
-      })
-
       if (!seriesRef.current || !paneMgrRef.current) return
       if (!markersApiRef.current) {
         markersApiRef.current = createSeriesMarkers(seriesRef.current, [])
@@ -407,6 +401,69 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       const polylines = []
       const bubbles = []
       const priceLines = []
+
+      // Add price lines for active trades (Entry, TP, SL)
+      if (Array.isArray(resolvedTrades)) {
+        for (const trade of resolvedTrades) {
+          const entryTime = toSec(trade?.entry_time)
+          const entryPrice = toFiniteNumber(trade?.entry_price)
+          if (!Number.isFinite(entryTime) || !Number.isFinite(entryPrice)) continue
+
+          // Check if trade is still active (not all legs closed)
+          const hasOpenLegs = (trade.legs || []).some((leg) => !leg?.exit_time || leg.status === 'open')
+          if (hasOpenLegs) {
+            // Calculate unrealized P&L for entry line
+            const lastCandle = candleData[candleData.length - 1]
+            const currentPrice = toFiniteNumber(lastCandle?.close)
+            const isLong = (trade?.direction || '').toLowerCase() === 'long'
+            let pnl = null
+            let pnlPercent = null
+            if (Number.isFinite(currentPrice) && Number.isFinite(entryPrice)) {
+              pnl = isLong ? currentPrice - entryPrice : entryPrice - currentPrice
+              pnlPercent = (pnl / entryPrice) * 100
+            }
+
+            // Entry price line with P&L
+            priceLines.push({
+              price: entryPrice,
+              title: 'Entry',
+              color: '#94a3b8',
+              source: 'active_trade_entry',
+              precision: 2,
+              pnl,
+              pnlPercent,
+            })
+
+            // Stop loss price line
+            const stopPrice = toFiniteNumber(trade?.stop_price)
+            if (Number.isFinite(stopPrice)) {
+              priceLines.push({
+                price: stopPrice,
+                title: 'SL',
+                color: '#ef4444',
+                source: 'active_trade_sl',
+                precision: 2,
+              })
+            }
+
+            // Target price lines (from open legs)
+            const openLegs = (trade.legs || []).filter((leg) => !leg?.exit_time || leg.status === 'open')
+            for (const leg of openLegs) {
+              const targetPrice = toFiniteNumber(leg?.target_price)
+              if (Number.isFinite(targetPrice)) {
+                priceLines.push({
+                  price: targetPrice,
+                  title: 'TP',
+                  color: '#10b981',
+                  source: 'active_trade_tp',
+                  precision: 2,
+                })
+              }
+            }
+          }
+        }
+      }
+
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
       const lastCandle = candleData[candleData.length - 1]
       const prevCandle = candleData[candleData.length - 2]
@@ -437,24 +494,11 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
       for (const overlay of overlayPayloads || []) {
         const { type, payload, color, ind_id } = overlay || {}
-        console.log('[BotLensChart] event=processing_overlay', {
-          chartId,
-          ind_id,
-          type,
-          hasPayload: !!payload,
-          rawBoxes: payload?.boxes?.length || 0,
-        })
         if (!payload) continue
         const paneViews = getPaneViewsFor(type)
         const paneSet = new Set(paneViews || [])
         const norm = adaptPayload(type, payload, color)
-        console.log('[BotLensChart] event=overlay_adapted', {
-          chartId,
-          ind_id,
-          type,
-          normBoxes: norm?.boxes?.length || 0,
-          boxes: norm?.boxes,
-        })
+        // Note: TP/SL price lines are filtered out in adaptPayload registry
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
             const price = toFiniteNumber(pl?.price)
@@ -628,6 +672,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
               labels: [line?.title].filter(Boolean),
               precision: toPrecision(line),
               color: line?.color,
+              pnl: line?.pnl,
+              pnlPercent: line?.pnlPercent,
+              source: line?.source,
             })
           }
         }
@@ -644,6 +691,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           labels: line.labels.join('|'),
           precision: line.precision,
           color: line.color,
+          pnl: line.pnl,
+          pnlPercent: line.pnlPercent,
         }))
         const prevSignature = prevPriceLinesRef.current
         const unchanged =
@@ -657,7 +706,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
               prev.count === entry.count &&
               prev.labels === entry.labels &&
               prev.precision === entry.precision &&
-              prev.color === entry.color
+              prev.color === entry.color &&
+              prev.pnl === entry.pnl &&
+              prev.pnlPercent === entry.pnlPercent
             )
           })
         if (!unchanged) {
@@ -672,28 +723,44 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           groupedPriceLines.forEach((line) => {
             const isStop = line.role === 'sl'
             const isTarget = line.role === 'tp'
-            const baseColor = line.color || (isStop ? '#ef4444' : isTarget ? '#22c55e' : '#94a3b8')
-            const lineColor = toRgba(baseColor, 0.45) || 'rgba(148,163,184,0.35)'
-            const labelBg = toRgba(baseColor, 0.2) || 'rgba(148,163,184,0.2)'
+            const isEntry = line.role === 'level' && (line.labels[0] === 'Entry' || line.source === 'active_trade_entry')
+
+            // Calculate dynamic color for entry based on P&L
+            let baseColor = isStop ? '#ef4444' : isTarget ? '#10b981' : (line.color || '#94a3b8')
+            if (isEntry && Number.isFinite(line.pnl)) {
+              baseColor = line.pnl >= 0 ? '#10b981' : '#ef4444'
+            }
+
+            const lineColor = toRgba(baseColor, 0.9) || 'rgba(148,163,184,0.85)'
+            const labelBg = toRgba(baseColor, 1.0) || 'rgba(148,163,184,0.9)'
             const precision = Number.isFinite(line.precision) ? line.precision : 2
             const priceLabel = Number(line.price).toFixed(precision)
-            const labelSource = line.labels[0] || (isTarget ? 'TP' : isStop ? 'SL' : 'Level')
+            const labelSource = line.labels[0] || (isTarget ? 'Target' : isStop ? 'Stop Loss' : isEntry ? 'Entry' : 'Level')
             const labelCount = line.count > 1 && isTarget ? ` x${line.count}` : ''
-            const title = `${labelSource}${labelCount ? labelCount : ''} @ ${priceLabel}`
+
+            // Add P&L to entry line title
+            let title = `${labelSource}${labelCount ? labelCount : ''} ${priceLabel}`
+            if (isEntry && Number.isFinite(line.pnl) && Number.isFinite(line.pnlPercent)) {
+              const pnlSign = line.pnl >= 0 ? '+' : ''
+              const pnlValue = line.pnl.toFixed(2)
+              const pnlPct = line.pnlPercent.toFixed(2)
+              title = `Entry ${priceLabel} | ${pnlSign}${pnlValue} (${pnlSign}${pnlPct}%)`
+            }
+            const priceLineOptions = {
+              price: line.price,
+              color: lineColor,
+              lineWidth: 2,
+              lineStyle: 0, // 0 = solid, 1 = dotted, 2 = dashed, 3 = large dashed, 4 = sparse dotted
+              axisLabelVisible: true,
+              axisLabelColor: labelBg,
+              axisLabelTextColor: '#ffffff',
+              title,
+            }
             try {
-              const handle = seriesRef.current.createPriceLine({
-                price: line.price,
-                color: lineColor,
-                lineWidth: isStop ? 1.5 : 1,
-                lineStyle: isTarget ? 2 : 0,
-                axisLabelVisible: true,
-                axisLabelColor: labelBg,
-                axisLabelTextColor: '#f8fafc',
-                title,
-              })
+              const handle = seriesRef.current.createPriceLine(priceLineOptions)
               overlayHandlesRef.current.priceLines.push(handle)
-            } catch {
-              /* ignore */
+            } catch (err) {
+              console.warn('[BotLensChart] Failed to create price line:', err)
             }
           })
           prevPriceLinesRef.current = signature
@@ -702,14 +769,6 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
       applyMarkers([...baseMarkers, ...overlayMarkers], true)
       applyPriceLines()
-
-      console.log('[BotLensChart] event=setting_va_blocks', {
-        chartId,
-        totalBoxes: boxes.length,
-        sampleBoxes: boxes.slice(0, 3),
-        lastSeriesTime,
-        barSpacing: barSpacingRef.current,
-      })
 
       paneMgrRef.current.setTouchPoints(touchPoints)
       paneMgrRef.current.setVABlocks(boxes, {
@@ -819,22 +878,22 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           text: ' ',
         })
       }
-      const lineFor = (price, style = 0) => {
+      const lineFor = (price, isTarget = false) => {
         if (!Number.isFinite(price)) return null
         return seriesRef.current.createPriceLine({
           price,
-          color: style === 0 ? 'rgba(248,113,113,0.9)' : 'rgba(52,211,153,0.9)',
+          color: isTarget ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)',
           lineWidth: 2,
-          lineStyle: style,
+          lineStyle: 0,
           axisLabelVisible: false,
         })
       }
       if (Number.isFinite(stopPrice)) {
-        const handle = lineFor(stopPrice, 0)
+        const handle = lineFor(stopPrice, false)
         if (handle) pulseLineHandlesRef.current.push(handle)
       }
       targets.forEach((price) => {
-        const handle = lineFor(price, 2)
+        const handle = lineFor(price, true)
         if (handle) pulseLineHandlesRef.current.push(handle)
       })
       if (pulseMarkers.length && markersApiRef.current) {
@@ -968,16 +1027,21 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     const prevMatch = nextLast
       ? previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLast.time)
       : null
-    if (prevMatch && nextLast && activeTradeAtLastCandle && !instantPlayback) {
-      const base = next.slice(0, -1)
-      seriesRef.current.setData(base)
-      animateCandle(prevMatch, nextLast)
+
+    const isSameCandle = prevMatch && nextLast && prevMatch.time === nextLast.time
+    const shouldAnimate = isSameCandle && activeTradeAtLastCandle && !instantPlayback
+
+    if (shouldAnimate) {
+      // During intrabar updates, just update the last candle directly without animation
+      // to avoid jitter and timestamp errors
+      seriesRef.current.update(nextLast)
     } else {
       seriesRef.current.setData(next)
+      // Only fit content when we're moving to a new candle, not during intrabar updates
+      chartRef.current?.timeScale().fitContent()
     }
     prevCandleDataRef.current = next
-    chartRef.current?.timeScale().fitContent()
-  }, [activeTradeAtLastCandle, animateCandle, candleData, instantPlayback])
+  }, [activeTradeAtLastCandle, candleData, instantPlayback])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null

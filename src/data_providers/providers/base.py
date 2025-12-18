@@ -417,6 +417,10 @@ class BaseDataProvider(ProviderInterface):
                 combined.sort_values("timestamp", inplace=True)
                 df = combined.reset_index(drop=True)
 
+        # Recompute ATR to ensure it's up-to-date with the latest calculation logic
+        # This handles cases where cached data has stale or invalid ATR values
+        df = self._compute_tr_atr(df)
+
         return self._format_ohlcv_dataframe(df, ctx)
 
     def _fetch_and_format(self, ctx: DataContext) -> pd.DataFrame:

@@ -13,15 +13,15 @@ import {
 import LoadingOverlay from '../LoadingOverlay.jsx'
 
 const BOOTLINE_POOL = {
-  runtime: ['Spinning up bot runtime…', 'Teaching the bot patience…'],
-  strategy: ['Warming up indicators…', 'Wiring strategy overlays…'],
-  datasource: ['Syncing datasource with exchange…', 'Counting R multiples…'],
+  runtime: ['Spinning up bot runtime', 'Teaching the bot patience'],
+  strategy: ['Warming up indicators', 'Wiring strategy overlays'],
+  datasource: ['Syncing datasource with exchange', 'Counting R multiples'],
   generic: [
-    'Teaching the bot patience…',
-    'Counting R multiples…',
-    'Syncing datasource with exchange…',
-    'Warming up indicators…',
-    'Wiring strategy overlays…',
+    'Teaching the bot patience',
+    'Counting R multiples',
+    'Syncing datasource with exchange',
+    'Warming up indicators',
+    'Wiring strategy overlays',
   ],
 }
 
@@ -571,12 +571,38 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!source) return undefined
     streamRef.current = source
     setStreamStatus('connecting')
-    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop']
+    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
+
+    let pendingUpdate = null
+    let rafId = null
+
+    const flushUpdate = () => {
+      if (pendingUpdate) {
+        applyPayload(pendingUpdate)
+        pendingUpdate = null
+      }
+      rafId = null
+    }
+
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
         logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
-        applyPayload(data)
+
+        // For intrabar events, batch updates using RAF to avoid excessive re-renders
+        if (event.type === 'intrabar') {
+          pendingUpdate = data
+          if (!rafId) {
+            rafId = requestAnimationFrame(flushUpdate)
+          }
+        } else {
+          // For other events, apply immediately
+          if (rafId) {
+            cancelAnimationFrame(rafId)
+            flushUpdate()
+          }
+          applyPayload(data)
+        }
         setStreamStatus('open')
       } catch (err) {
         console.error('bot stream parse failed', err)
@@ -591,6 +617,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     }
     source.onopen = () => setStreamStatus('open')
     return () => {
+      if (rafId) {
+        cancelAnimationFrame(rafId)
+      }
       for (const evt of events) {
         source.removeEventListener(evt, handler)
       }
@@ -721,19 +750,28 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               <div className="flex flex-1 justify-center">
                 {renderedChip ? (
                   <div
-                    className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow transition-all duration-200 ${
-                      chipVisible ? 'border-sky-400/30 bg-white/5 opacity-100' : 'border-sky-400/10 bg-white/0 opacity-0'
-                    } ${chipVisible ? 'translate-y-0' : '-translate-y-1'}`}
+                    className={`flex flex-wrap items-center gap-2 rounded-full border px-3 py-2 text-xs text-white shadow-lg transition-all duration-300 ease-out ${
+                      chipVisible ? 'border-sky-400/40 bg-white/5 opacity-100 scale-100' : 'border-sky-400/10 bg-white/0 opacity-0 scale-95'
+                    } ${chipVisible ? 'translate-y-0' : '-translate-y-2'}`}
                     onMouseEnter={() => handleChipHover(true)}
                     onMouseLeave={() => handleChipHover(false)}
                   >
                     <span
-                      className={`h-2.5 w-2.5 rounded-full ${
+                      className={`relative h-2.5 w-2.5 rounded-full ${
                         renderedChip.direction === 'short'
                           ? 'bg-rose-400 shadow-[0_0_0_3px] shadow-rose-400/20'
                           : 'bg-emerald-400 shadow-[0_0_0_3px] shadow-emerald-400/20'
                       }`}
-                    />
+                    >
+                      {chipVisible && (
+                        <span
+                          className={`absolute inset-0 rounded-full animate-ping ${
+                            renderedChip.direction === 'short' ? 'bg-rose-400' : 'bg-emerald-400'
+                          }`}
+                          style={{ animationDuration: '2s' }}
+                        />
+                      )}
+                    </span>
                     <span className="text-sm font-semibold text-white">{renderedChip.headline}</span>
                     <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">{renderedChip.r}</span>
                     <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">{renderedChip.pnl}</span>
