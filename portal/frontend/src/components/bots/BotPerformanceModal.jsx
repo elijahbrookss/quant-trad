@@ -118,7 +118,10 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
-  const streamEligible = ['running', 'starting', 'paused', 'booting', 'initialising'].includes(runtimeStatus)
+  const streamEligible = useMemo(
+    () => ['running', 'starting', 'paused', 'booting', 'initialising'].includes(runtimeStatus),
+    [runtimeStatus]
+  )
   const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
   const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
   const isBooting = (isBootingStatus || loading || streamStatus === 'connecting')
@@ -574,14 +577,17 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
 
     let pendingUpdate = null
-    let rafId = null
+    let throttleTimer = null
+    let lastIntrabarUpdate = 0
+    const INTRABAR_THROTTLE_MS = 150 // Only update every 150ms for intrabar events
 
     const flushUpdate = () => {
       if (pendingUpdate) {
         applyPayload(pendingUpdate)
         pendingUpdate = null
+        lastIntrabarUpdate = Date.now()
       }
-      rafId = null
+      throttleTimer = null
     }
 
     const handler = (event) => {
@@ -589,17 +595,20 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
         const data = JSON.parse(event.data)
         logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
 
-        // For intrabar events, batch updates using RAF to avoid excessive re-renders
+        // For intrabar events, throttle updates to reduce re-renders
         if (event.type === 'intrabar') {
           pendingUpdate = data
-          if (!rafId) {
-            rafId = requestAnimationFrame(flushUpdate)
+          if (!throttleTimer) {
+            const timeSinceLastUpdate = Date.now() - lastIntrabarUpdate
+            const delay = Math.max(0, INTRABAR_THROTTLE_MS - timeSinceLastUpdate)
+            throttleTimer = setTimeout(flushUpdate, delay)
           }
         } else {
-          // For other events, apply immediately
-          if (rafId) {
-            cancelAnimationFrame(rafId)
-            flushUpdate()
+          // For other events, apply immediately and cancel any pending intrabar
+          if (throttleTimer) {
+            clearTimeout(throttleTimer)
+            throttleTimer = null
+            pendingUpdate = null
           }
           applyPayload(data)
         }
@@ -821,7 +830,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     value={playbackDraft}
                     onChange={handlePlaybackInput}
                     disabled={playbackDisabled}
-                    className="h-1 w-28 self-center accent-white [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-white/30"
+                    className="w-28 appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-white/30 [&::-webkit-slider-thumb]:mt-[-4px] [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-white/30 [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-white"
                   />
                   <span className="text-xs font-semibold text-white">
                     {playbackLabel}

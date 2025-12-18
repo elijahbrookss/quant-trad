@@ -163,6 +163,8 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const prevCandleDataRef = useRef([])
   const candleAnimationRef = useRef(null)
   const pulseLineHandlesRef = useRef([])
+  const cameraLockedRef = useRef(true) // Track if camera should follow newest candle
+  const userInteractedRef = useRef(false) // Track if user manually panned/zoomed
   const [markerTooltip, setMarkerTooltip] = useState(null)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
@@ -825,6 +827,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const centerView = useCallback(() => {
     const ts = chartRef.current?.timeScale?.()
     if (!ts) return
+
+    // Re-lock camera when user explicitly centers view
+    cameraLockedRef.current = true
+
     const candles = latestCandlesRef.current || []
     const last = candles[candles.length - 1]?.time
     const first = candles[0]?.time
@@ -972,6 +978,26 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       centerView,
     })
 
+    // Subscribe to visible range changes to detect user pan/zoom
+    const timeScale = chart.timeScale()
+    const handleVisibleRangeChange = () => {
+      // Only unlock camera if this change wasn't triggered by our auto-scroll
+      if (userInteractedRef.current) {
+        cameraLockedRef.current = false
+      }
+      // Reset flag after handling
+      userInteractedRef.current = false
+    }
+    timeScale.subscribeVisibleLogicalRangeChange(handleVisibleRangeChange)
+
+    // Detect mouse/touch interactions on the chart
+    el.addEventListener('mousedown', () => {
+      userInteractedRef.current = true
+    })
+    el.addEventListener('touchstart', () => {
+      userInteractedRef.current = true
+    })
+
     resizeObserverRef.current = new ResizeObserver(([entry]) => {
       const rect = entry?.contentRect
       if (!rect || !chartRef.current) return
@@ -980,6 +1006,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     resizeObserverRef.current.observe(el)
 
     return () => {
+      timeScale.unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange)
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
       if (focusTimeoutRef.current) {
@@ -1037,8 +1064,19 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       seriesRef.current.update(nextLast)
     } else {
       seriesRef.current.setData(next)
-      // Only fit content when we're moving to a new candle, not during intrabar updates
-      chartRef.current?.timeScale().fitContent()
+
+      // Camera lock: auto-scroll to follow newest candle during playback
+      if (cameraLockedRef.current && chartRef.current && next.length > 0) {
+        const timeScale = chartRef.current.timeScale()
+        const lastIndex = next.length - 1
+        const barsToShow = Math.min(80, Math.max(30, next.length))
+        const from = Math.max(0, lastIndex - barsToShow + 1)
+        const to = lastIndex + 5
+        timeScale.setVisibleLogicalRange({ from, to })
+      } else if (!cameraLockedRef.current) {
+        // If camera is unlocked, just fit content once
+        chartRef.current?.timeScale().fitContent()
+      }
     }
     prevCandleDataRef.current = next
   }, [activeTradeAtLastCandle, candleData, instantPlayback])

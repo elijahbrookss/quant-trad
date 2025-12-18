@@ -8,6 +8,18 @@ import { openBotsStream } from '../../adapters/bot.adapter.js'
 export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
   const [botStreamState, setBotStreamState] = useState('idle')
   const botStreamRef = useRef(null)
+  const mergeBotsRef = useRef(mergeBots)
+  const upsertBotRef = useRef(upsertBot)
+  const applyRuntimeRef = useRef(applyRuntime)
+  const loadBotsRef = useRef(loadBots)
+
+  // Keep refs up to date
+  useEffect(() => {
+    mergeBotsRef.current = mergeBots
+    upsertBotRef.current = upsertBot
+    applyRuntimeRef.current = applyRuntime
+    loadBotsRef.current = loadBots
+  })
 
   useEffect(() => {
     let retryTimer = null
@@ -33,21 +45,21 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
         try {
           const data = JSON.parse(event.data)
           if (Array.isArray(data)) {
-            mergeBots(data)
+            mergeBotsRef.current(data)
           } else if (Array.isArray(data?.bots)) {
-            mergeBots(data.bots)
+            mergeBotsRef.current(data.bots)
           } else if (data?.bot) {
-            upsertBot(data.bot)
+            upsertBotRef.current(data.bot)
             if (data.bot?.id && data.bot?.runtime) {
-              applyRuntime(data.bot.id, data.bot.runtime)
+              applyRuntimeRef.current(data.bot.id, data.bot.runtime)
             }
           } else if (data?.id) {
-            upsertBot(data)
+            upsertBotRef.current(data)
             if (data?.id && data?.runtime) {
-              applyRuntime(data.id, data.runtime)
+              applyRuntimeRef.current(data.id, data.runtime)
             }
           } else if (data?.bot_id && data?.runtime) {
-            applyRuntime(data.bot_id, data.runtime)
+            applyRuntimeRef.current(data.bot_id, data.runtime)
           }
           setBotStreamState('open')
         } catch (err) {
@@ -61,7 +73,7 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
           const botId = data?.bot_id || data?.bot?.id
           const runtime = data?.runtime || data?.bot?.runtime
           if (botId && runtime) {
-            applyRuntime(botId, runtime)
+            applyRuntimeRef.current(botId, runtime)
             setBotStreamState('open')
           }
         } catch (err) {
@@ -93,14 +105,14 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
         botStreamRef.current = null
       }
     }
-  }, [applyRuntime, mergeBots, upsertBot])
+  }, []) // No dependencies - using refs instead
 
   useEffect(() => {
     if (botStreamState === 'open') return undefined
     const intervalMs = botStreamState === 'error' ? 2000 : 4000
-    const id = setInterval(() => loadBots(false), intervalMs)
+    const id = setInterval(() => loadBotsRef.current(false), intervalMs)
     return () => clearInterval(id)
-  }, [botStreamState, loadBots])
+  }, [botStreamState])
 
   return botStreamState
 }
