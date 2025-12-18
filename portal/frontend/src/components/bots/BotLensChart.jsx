@@ -165,6 +165,10 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const pulseLineHandlesRef = useRef([])
   const cameraLockedRef = useRef(true) // Track if camera should follow newest candle
   const userInteractedRef = useRef(false) // Track if user manually panned/zoomed
+  const autoScrollRef = useRef(false) // Track programmatic camera moves
+  const lastVisibleRangeRef = useRef(null)
+  const relockTimeoutRef = useRef(null)
+  const pointerStateRef = useRef({ active: false, x: 0, y: 0 })
   const [markerTooltip, setMarkerTooltip] = useState(null)
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
@@ -350,7 +354,9 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
           if (Number.isFinite(minTime) && Number.isFinite(maxTime) && maxTime > minTime) {
             const span = Math.max(maxTime - minTime, 60)
             const pad = span * 0.05
-            timeScale.setVisibleRange({ from: minTime - pad, to: maxTime + pad })
+            runWithAutoScrollGuard(() =>
+              timeScale.setVisibleRange({ from: minTime - pad, to: maxTime + pad }),
+            )
             appliedRange = true
           }
         }
@@ -359,7 +365,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         const barsToShow = Math.min(200, Math.max(30, candleData.length))
         const from = Math.max(0, lastIndex - barsToShow + 1)
         const to = lastIndex + 5
-        timeScale.setVisibleLogicalRange({ from, to })
+        runWithAutoScrollGuard(() => timeScale.setVisibleLogicalRange({ from, to }))
       }
       if (!levelSeriesRef.current) return
       const overlayPrices = normalizedSegments.flatMap((segment) => {
@@ -381,7 +387,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       ghostPoints.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
       levelSeriesRef.current.setData(ghostPoints)
     },
-    [candleData],
+    [candleData, runWithAutoScrollGuard],
   )
 
   const syncOverlays = useCallback(
@@ -786,6 +792,33 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       [candleData, resolvedTrades, tradeRegions, updateViewport]
     )
 
+  const runWithAutoScrollGuard = useCallback((operation) => {
+    autoScrollRef.current = true
+    try {
+      operation?.()
+    } finally {
+      // Defer reset until after the chart has a chance to emit range callbacks
+      setTimeout(() => {
+        autoScrollRef.current = false
+      }, 0)
+    }
+  }, [])
+
+  const reLockCamera = useCallback(() => {
+    if (relockTimeoutRef.current) {
+      clearTimeout(relockTimeoutRef.current)
+      relockTimeoutRef.current = null
+    }
+    cameraLockedRef.current = true
+    userInteractedRef.current = false
+    const ts = chartRef.current?.timeScale?.()
+    if (ts) {
+      runWithAutoScrollGuard(() => {
+        ts.scrollToPosition(0, false)
+      })
+    }
+  }, [runWithAutoScrollGuard])
+
   const focusAtTime = useCallback(
     (time, priceHint) => {
       if (!chartRef.current || !seriesRef.current) return
@@ -793,7 +826,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       if (!Number.isFinite(epoch)) return
       const ts = chartRef.current.timeScale()
       const span = barSpacingRef.current ? Math.max(barSpacingRef.current * 20, 30) : 60
-      ts.setVisibleRange({ from: epoch - span, to: epoch + span })
+      runWithAutoScrollGuard(() => ts.setVisibleRange({ from: epoch - span, to: epoch + span }))
       const candle = candleLookup.get(epoch)
       const price = toFiniteNumber(coalesce(priceHint, candle?.close, candle?.open, candle?.high, candle?.low))
       const highlight = Number.isFinite(price)
@@ -811,7 +844,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         }, 600)
       }
     },
-    [candleLookup],
+    [candleLookup, runWithAutoScrollGuard],
   )
 
   const zoomIn = useCallback(() => {
@@ -829,19 +862,21 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     if (!ts) return
 
     // Re-lock camera when user explicitly centers view
-    cameraLockedRef.current = true
+    reLockCamera()
 
     const candles = latestCandlesRef.current || []
     const last = candles[candles.length - 1]?.time
     const first = candles[0]?.time
     if (Number.isFinite(last) && Number.isFinite(first)) {
       const span = Math.max(90, Math.round((last - first) / 4))
-      ts.setVisibleRange({ from: last - span, to: last })
-      ts.scrollToPosition(0, false)
+      runWithAutoScrollGuard(() => {
+        ts.setVisibleRange({ from: last - span, to: last })
+        ts.scrollToPosition(0, false)
+      })
     } else {
-      ts.scrollToRealTime()
+      runWithAutoScrollGuard(() => ts.scrollToRealTime())
     }
-  }, [])
+  }, [reLockCamera, runWithAutoScrollGuard])
 
   const clearPulseArtifacts = useCallback(() => {
     pulseLineHandlesRef.current.forEach((handle) => {
@@ -978,12 +1013,33 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       centerView,
     })
 
+    const scheduleRelock = () => {
+      if (relockTimeoutRef.current) {
+        clearTimeout(relockTimeoutRef.current)
+      }
+      relockTimeoutRef.current = setTimeout(() => {
+        reLockCamera()
+        relockTimeoutRef.current = null
+      }, 3000)
+    }
+
     // Subscribe to visible range changes to detect user pan/zoom
     const timeScale = chart.timeScale()
-    const handleVisibleRangeChange = () => {
-      // Only unlock camera if this change wasn't triggered by our auto-scroll
-      if (userInteractedRef.current) {
+    const handleVisibleRangeChange = (range) => {
+      const prevRange = lastVisibleRangeRef.current
+      lastVisibleRangeRef.current = range
+      if (autoScrollRef.current) {
+        userInteractedRef.current = false
+        return
+      }
+      const hasRangeDelta =
+        range &&
+        prevRange &&
+        (Math.abs((range.from ?? 0) - (prevRange.from ?? 0)) > 0.01 ||
+          Math.abs((range.to ?? 0) - (prevRange.to ?? 0)) > 0.01)
+      if (userInteractedRef.current && hasRangeDelta) {
         cameraLockedRef.current = false
+        scheduleRelock()
       }
       // Reset flag after handling
       userInteractedRef.current = false
@@ -991,12 +1047,30 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     timeScale.subscribeVisibleLogicalRangeChange(handleVisibleRangeChange)
 
     // Detect mouse/touch interactions on the chart
-    el.addEventListener('mousedown', () => {
-      userInteractedRef.current = true
-    })
-    el.addEventListener('touchstart', () => {
-      userInteractedRef.current = true
-    })
+    const handlePointerDown = (evt) => {
+      pointerStateRef.current = { active: true, x: evt.clientX ?? 0, y: evt.clientY ?? 0 }
+    }
+    const handlePointerMove = (evt) => {
+      if (!pointerStateRef.current.active) return
+      const dx = Math.abs((evt.clientX ?? 0) - pointerStateRef.current.x)
+      const dy = Math.abs((evt.clientY ?? 0) - pointerStateRef.current.y)
+      if (dx > 2 || dy > 2) {
+        userInteractedRef.current = true
+      }
+    }
+    const handlePointerUp = () => {
+      pointerStateRef.current = { active: false, x: 0, y: 0 }
+    }
+    const handleWheel = (evt) => {
+      if (Math.abs(evt.deltaY) > 0 || Math.abs(evt.deltaX) > 0) {
+        userInteractedRef.current = true
+      }
+    }
+    el.addEventListener('pointerdown', handlePointerDown)
+    el.addEventListener('pointermove', handlePointerMove)
+    el.addEventListener('pointerup', handlePointerUp)
+    el.addEventListener('pointercancel', handlePointerUp)
+    el.addEventListener('wheel', handleWheel, { passive: true })
 
     resizeObserverRef.current = new ResizeObserver(([entry]) => {
       const rect = entry?.contentRect
@@ -1007,6 +1081,15 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
     return () => {
       timeScale.unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange)
+      el.removeEventListener('pointerdown', handlePointerDown)
+      el.removeEventListener('pointermove', handlePointerMove)
+      el.removeEventListener('pointerup', handlePointerUp)
+      el.removeEventListener('pointercancel', handlePointerUp)
+      el.removeEventListener('wheel', handleWheel)
+      if (relockTimeoutRef.current) {
+        clearTimeout(relockTimeoutRef.current)
+        relockTimeoutRef.current = null
+      }
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
       if (focusTimeoutRef.current) {
@@ -1040,7 +1123,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       chartRef.current?.remove()
       chartRef.current = null
     }
-  }, [chartId, registerChart])
+  }, [chartId, registerChart, reLockCamera, runWithAutoScrollGuard])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -1072,14 +1155,14 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         const barsToShow = Math.min(80, Math.max(30, next.length))
         const from = Math.max(0, lastIndex - barsToShow + 1)
         const to = lastIndex + 5
-        timeScale.setVisibleLogicalRange({ from, to })
+        runWithAutoScrollGuard(() => timeScale.setVisibleLogicalRange({ from, to }))
       } else if (!cameraLockedRef.current) {
         // If camera is unlocked, just fit content once
-        chartRef.current?.timeScale().fitContent()
+        runWithAutoScrollGuard(() => chartRef.current?.timeScale().fitContent())
       }
     }
     prevCandleDataRef.current = next
-  }, [activeTradeAtLastCandle, candleData, instantPlayback])
+  }, [activeTradeAtLastCandle, candleData, instantPlayback, runWithAutoScrollGuard])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -1122,6 +1205,12 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   useEffect(() => {
     updateViewport(tradeSegmentsRef.current || [])
   }, [candleData, updateViewport])
+
+  useEffect(() => {
+    if (Number(playbackSpeed) > 0) {
+      reLockCamera()
+    }
+  }, [playbackSpeed, reLockCamera])
 
   return (
     <div
