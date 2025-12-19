@@ -13,6 +13,12 @@ log = logging.getLogger("MarketProfileRules")
 
 # Cache key for storing breakouts between evaluations
 BREAKOUT_CACHE_KEY = "market_profile_breakouts"
+VALUE_AREA_SIGNATURE_KEYS = (
+    "va_source",
+    "use_merged_value_areas",
+    "merge_threshold",
+    "min_merge_sessions",
+)
 
 
 def validate_context_and_dataframe(
@@ -122,6 +128,9 @@ def enrich_with_value_area_fields(
             "POC": breakout_meta.get("POC"),
         }
     )
+    for key in VALUE_AREA_SIGNATURE_KEYS:
+        if key in breakout_meta:
+            enriched[key] = breakout_meta.get(key)
 
 
 def set_direction_fields(

@@ -69,6 +69,14 @@ def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"Confidence {percent}%"
 
 
+def _va_span_meta(metadata: Mapping[str, Any]) -> Optional[str]:
+    vah = finite_float(metadata.get("VAH"))
+    val = finite_float(metadata.get("VAL"))
+    if vah is None or val is None:
+        return None
+    return f"VAH {vah:.2f} / VAL {val:.2f}"
+
+
 @overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],
@@ -114,7 +122,14 @@ def market_profile_overlay_adapter(
             else:
                 detail = f"Retest near {level_label} {float(level_price):.2f}"
 
+            meta_bits = []
             meta_label = _confidence_meta(metadata)
+            if meta_label:
+                meta_bits.append(meta_label)
+            va_span = _va_span_meta(metadata)
+            if va_span:
+                meta_bits.append(va_span)
+            meta_text = " · ".join(meta_bits) if meta_bits else None
             pointer_hint = str(
                 metadata.get("pointer_direction")
                 or metadata.get("breakout_direction")
@@ -138,7 +153,7 @@ def market_profile_overlay_adapter(
                     "price": float(anchor_price),
                     "label": f"{level_label} retest",
                     "detail": detail,
-                    "meta": meta_label,
+                    "meta": meta_text,
                     "accentColor": color,
                     "backgroundColor": rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
                     "textColor": "#ffffff",
@@ -186,6 +201,9 @@ def market_profile_overlay_adapter(
         value_area_id = metadata.get("value_area_id")
         if value_area_id:
             meta_bits.append(str(value_area_id))
+        va_span = _va_span_meta(metadata)
+        if va_span:
+            meta_bits.append(va_span)
         meta_text = " · ".join(meta_bits) if meta_bits else None
 
         bias_label = bias_label_from_direction(
@@ -193,21 +211,46 @@ def market_profile_overlay_adapter(
         )
 
         pointer_hint = metadata.get("pointer_direction") or breakout_direction or metadata.get("direction")
-        bubbles.append(
-            {
-                "time": marker_time,
-                "price": bubble_price,
-                "label": label,
-                "detail": detail,
-                "meta": meta_text,
-                "accentColor": color,
-                "backgroundColor": rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
-                "textColor": "#ffffff",
-                "direction": pointer_hint,
-                "bias": bias_label,
-                "subtype": "bubble",
-            }
-        )
+        confirm_indices = metadata.get("confirm_indices") or []
+        confirm_times = metadata.get("confirm_times") or []
+        marker_points: List[Dict[str, Any]] = []
+        if confirm_indices and plot_df is not None:
+            for idx, ts in zip(confirm_indices, confirm_times or confirm_indices):
+                try:
+                    ts_val = pd.Timestamp(plot_df.index[int(idx)]) if isinstance(ts, (int, float)) else pd.Timestamp(ts)
+                    row = plot_df.loc[ts_val]
+                    body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
+                    body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
+                    marker_points.append(
+                        {
+                            "time": int(ts_val.timestamp()),
+                            "price": (body_high + body_low) / 2.0,
+                            "shape": "square",
+                            "color": color,
+                            "text": "confirm",
+                            "position": "in_bar",
+                            "subtype": "marker",
+                        }
+                    )
+                except Exception:
+                    continue
+
+        bubble = {
+            "time": marker_time,
+            "price": bubble_price,
+            "label": label,
+            "detail": detail,
+            "meta": meta_text,
+            "accentColor": color,
+            "backgroundColor": rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
+            "textColor": "#ffffff",
+            "direction": pointer_hint,
+            "bias": bias_label,
+            "subtype": "bubble",
+        }
+        if marker_points:
+            bubble["_markers"] = marker_points
+        bubbles.append(bubble)
         summary["converted_breakout"] += 1
 
     duration = perf_counter() - start_time
@@ -229,9 +272,14 @@ def market_profile_overlay_adapter(
 
     if not bubbles:
         return []
+    markers: List[Dict[str, Any]] = []
+    for b in bubbles:
+        extra = b.pop("_markers", None)
+        if extra:
+            markers.extend(extra)
     payload = {
         "price_lines": [],
-        "markers": [],
+        "markers": markers,
         "bubbles": bubbles,
     }
 
