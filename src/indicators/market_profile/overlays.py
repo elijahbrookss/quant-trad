@@ -69,6 +69,14 @@ def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"Confidence {percent}%"
 
 
+def _va_span_meta(metadata: Mapping[str, Any]) -> Optional[str]:
+    vah = finite_float(metadata.get("VAH"))
+    val = finite_float(metadata.get("VAL"))
+    if vah is None or val is None:
+        return None
+    return f"VAH {vah:.2f} / VAL {val:.2f}"
+
+
 @overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],
@@ -114,7 +122,14 @@ def market_profile_overlay_adapter(
             else:
                 detail = f"Retest near {level_label} {float(level_price):.2f}"
 
+            meta_bits = []
             meta_label = _confidence_meta(metadata)
+            if meta_label:
+                meta_bits.append(meta_label)
+            va_span = _va_span_meta(metadata)
+            if va_span:
+                meta_bits.append(va_span)
+            meta_text = " · ".join(meta_bits) if meta_bits else None
             pointer_hint = str(
                 metadata.get("pointer_direction")
                 or metadata.get("breakout_direction")
@@ -138,7 +153,7 @@ def market_profile_overlay_adapter(
                     "price": float(anchor_price),
                     "label": f"{level_label} retest",
                     "detail": detail,
-                    "meta": meta_label,
+                    "meta": meta_text,
                     "accentColor": color,
                     "backgroundColor": rgba_from_hex(color, 0.18) or "rgba(14,165,233,0.25)",
                     "textColor": "#ffffff",
@@ -186,6 +201,9 @@ def market_profile_overlay_adapter(
         value_area_id = metadata.get("value_area_id")
         if value_area_id:
             meta_bits.append(str(value_area_id))
+        va_span = _va_span_meta(metadata)
+        if va_span:
+            meta_bits.append(va_span)
         meta_text = " · ".join(meta_bits) if meta_bits else None
 
         bias_label = bias_label_from_direction(

@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
+from signals.engine.market_profile import resolve_market_profile_params
 from signals.engine.market_profile_generator import build_value_area_payloads
 from signals.rules.market_profile import MarketProfileBreakoutConfig
 from signals.rules.pivot import PivotBreakoutConfig
@@ -210,14 +211,15 @@ class IndicatorSignalExecutor:
         self, instance, df, rule_config: Dict[str, Any], interval: str
     ) -> None:
         if isinstance(instance, MarketProfileIndicator) and "rule_payloads" not in rule_config:
-            rule_config.setdefault(
-                "market_profile_use_merged_value_areas",
-                getattr(instance, "use_merged_value_areas", True),
+            params = resolve_market_profile_params(
+                instance,
+                use_merged_value_areas=rule_config.get("market_profile_use_merged_value_areas"),
+                merge_threshold=rule_config.get("market_profile_merge_threshold"),
+                min_merge_sessions=rule_config.get("market_profile_merge_min_sessions"),
             )
-            rule_config.setdefault(
-                "market_profile_merge_threshold",
-                getattr(instance, "merge_threshold", 0.6),
-            )
+            rule_config["market_profile_use_merged_value_areas"] = params.use_merged_value_areas
+            rule_config["market_profile_merge_threshold"] = params.merge_threshold
+            rule_config["market_profile_merge_min_sessions"] = params.min_merge_sessions
 
             # Log merge parameters to diagnose discrepancies between Signal Preview and Generate Signals
             logger.info(
@@ -235,17 +237,14 @@ class IndicatorSignalExecutor:
                 getattr(instance, "min_merge_sessions", None),
             )
 
-            # CRITICAL FIX: Do NOT pass the stored instance as runtime_indicator
-            # The stored instance has stale data from when it was last computed.
-            # Instead, let build_value_area_payloads clone the indicator with the current dataframe.
             payloads = build_value_area_payloads(
                 instance,
                 df,
-                runtime_indicator=None,  # Force fresh computation with current df
+                runtime_indicator=instance,
                 interval=interval,
-                use_merged=rule_config.get("market_profile_use_merged_value_areas"),
-                merge_threshold=rule_config.get("market_profile_merge_threshold"),
-                min_merge_sessions=rule_config.get("market_profile_merge_min_sessions"),
+                use_merged=params.use_merged_value_areas,
+                merge_threshold=params.merge_threshold,
+                min_merge_sessions=params.min_merge_sessions,
             )
             rule_config["rule_payloads"] = payloads
 
