@@ -9,6 +9,7 @@ import pandas as pd
 from indicators.market_profile import MarketProfileIndicator
 from signals.rules.common.utils import format_duration
 
+from .params import MarketProfileParams, resolve_market_profile_params
 
 log = logging.getLogger("MarketProfilePayloads")
 
@@ -27,47 +28,23 @@ def _profiles_to_dicts(profiles: Optional[Sequence[Any]]) -> List[Dict[str, Any]
 
 def _clone_indicator_for_runtime(
     indicator: MarketProfileIndicator,
-    df: pd.DataFrame,
+    params: MarketProfileParams,
     *,
     interval: Optional[str] = None,
 ) -> Optional[MarketProfileIndicator]:
-    """Create a lightweight indicator instance for signal evaluation."""
+    """Clone indicator without recomputing profiles for signal evaluation."""
 
-    if df is None or df.empty:
+    if not isinstance(indicator, MarketProfileIndicator):
         return None
 
-    try:
-        # MarketProfileIndicator.__init__ accepts: df, bin_size, use_merged_value_areas,
-        # merge_threshold, min_merge_sessions, extend_value_area_to_chart_end, days_back
-        # Note: 'interval' and 'mode' are NOT __init__ parameters
-        runtime = MarketProfileIndicator(
-            df=df.copy(),
-            bin_size=getattr(indicator, "bin_size", None),  # None = auto-infer
-            use_merged_value_areas=getattr(
-                indicator,
-                "use_merged_value_areas",
-                True,
-            ),
-            merge_threshold=getattr(indicator, "merge_threshold", 0.6),
-            min_merge_sessions=getattr(
-                indicator,
-                "min_merge_sessions",
-                getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-            ),
-            extend_value_area_to_chart_end=getattr(
-                indicator,
-                "extend_value_area_to_chart_end",
-                True,
-            ),
-            days_back=getattr(
-                indicator,
-                "days_back",
-                getattr(MarketProfileIndicator, "DEFAULT_DAYS_BACK", 180),
-            ),
-        )
-    except Exception:
-        log.exception("Failed to initialise MarketProfileIndicator for signal payloads")
-        return None
+    runtime = indicator.clone_for_overlay(
+        use_merged_value_areas=params.use_merged_value_areas,
+        merge_threshold=params.merge_threshold,
+        min_merge_sessions=params.min_merge_sessions,
+    )
+
+    if interval is not None:
+        setattr(runtime, "interval", interval)
 
     return runtime
 
@@ -120,10 +97,26 @@ def build_value_area_payloads(
         runtime_indicator is not None,
     )
 
-    start_time = perf_counter()
-    runtime = runtime_indicator or _clone_indicator_for_runtime(
-        indicator, df, interval=interval
+    params = resolve_market_profile_params(
+        runtime_indicator or indicator,
+        use_merged_value_areas=use_merged,
+        merge_threshold=merge_threshold,
+        min_merge_sessions=min_merge_sessions,
     )
+
+    start_time = perf_counter()
+    if runtime_indicator is not None and hasattr(runtime_indicator, "clone_for_overlay"):
+        runtime = runtime_indicator.clone_for_overlay(
+            use_merged_value_areas=params.use_merged_value_areas,
+            merge_threshold=params.merge_threshold,
+            min_merge_sessions=params.min_merge_sessions,
+        )
+    else:
+        runtime = _clone_indicator_for_runtime(
+            indicator,
+            params,
+            interval=interval,
+        )
     if runtime is None:
         log.info(
             "Market profile payloads skipped | symbol=%s | reason=indicator-init",
@@ -131,33 +124,21 @@ def build_value_area_payloads(
         )
         return []
 
-    if use_merged is None:
-        use_merged = getattr(runtime, "use_merged_value_areas", True)
-    else:
-        use_merged = bool(use_merged)
+    if interval is not None:
+        setattr(runtime, "interval", interval)
 
     # Get daily profiles count before merging
     daily_profiles = getattr(runtime, "daily_profiles", None) or getattr(runtime, "_profiles", None)
     daily_count = len(daily_profiles) if daily_profiles else 0
 
-    if use_merged:
-        threshold = (
-            getattr(runtime, "merge_threshold", 0.6)
-            if merge_threshold is None
-            else float(merge_threshold)
-        )
-        default_min_merge = getattr(
-            runtime,
-            "min_merge_sessions",
-            getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-        )
-        min_merge = default_min_merge if min_merge_sessions is None else int(min_merge_sessions)
+    signature = params.signature()
 
+    if params.use_merged_value_areas:
         log.info(
             "Market profile merge params | symbol=%s | use_merged=True | threshold=%s | min_merge_sessions=%s | daily_profiles=%d | param_source=[threshold_from_config=%s, min_sessions_from_config=%s]",
             symbol,
-            threshold,
-            min_merge,
+            params.merge_threshold,
+            params.min_merge_sessions,
             daily_count,
             merge_threshold is not None,
             min_merge_sessions is not None,
@@ -166,7 +147,7 @@ def build_value_area_payloads(
         merged_profiles = None
         if hasattr(runtime, "get_merged_profiles"):
             merged_profiles = runtime.get_merged_profiles(
-                threshold=threshold, min_sessions=min_merge
+                threshold=params.merge_threshold, min_sessions=params.min_merge_sessions
             )
         elif hasattr(runtime, "merged_profiles"):
             merged_profiles = runtime.merged_profiles
@@ -191,6 +172,7 @@ def build_value_area_payloads(
     for idx, area in enumerate(value_areas or []):
         if isinstance(area, Mapping) and area.get("VAH") is not None and area.get("VAL") is not None:
             payload = dict(area)
+            payload.update(signature)
             payloads.append(payload)
             label = _value_area_reference(payload, idx)
             profile_labels.append(label)
@@ -218,7 +200,7 @@ def build_value_area_payloads(
         "Market profile payloads ready | symbol=%s | profiles=%d | merged=%s | duration=%s%s | sample_payloads=%s",
         symbol,
         len(payloads),
-        use_merged,
+        params.use_merged_value_areas,
         format_duration(elapsed),
         session_summary,
         payload_summary if payloads else "[]",

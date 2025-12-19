@@ -10,6 +10,10 @@ from signals.base import BaseSignal
 from signals.engine.signal_generator import build_signal_overlays
 from signals.engine.market_profile_generator import build_value_area_payloads
 from signals.engine import market_profile_generator  # noqa: F401 ensure adapter registration
+from signals.rules.market_profile._evaluators._shared import (
+    VALUE_AREA_SIGNATURE_KEYS,
+    enrich_with_value_area_fields,
+)
 
 
 def _make_df():
@@ -136,3 +140,43 @@ def test_build_value_area_payloads_can_reuse_precomputed_indicator(monkeypatch):
     )
 
     assert payloads, "Expected payloads when using precomputed indicator"
+
+
+def test_value_area_payloads_include_signature():
+    df = _make_df()
+    indicator = MarketProfileIndicator(df)
+
+    payloads = build_value_area_payloads(
+        indicator,
+        df,
+        use_merged=False,
+        merge_threshold=0.7,
+        min_merge_sessions=4,
+    )
+
+    assert payloads, "Expected value area payloads"
+    signature_payload = payloads[0]
+
+    assert signature_payload["va_source"] == "stored_indicator"
+    assert signature_payload["use_merged_value_areas"] is False
+    assert signature_payload["merge_threshold"] == pytest.approx(0.7)
+    assert signature_payload["min_merge_sessions"] == 4
+
+
+def test_enrich_with_value_area_fields_copies_signature():
+    enriched: dict = {}
+    breakout_meta = {
+        "value_area_id": "session-abc",
+        "VAH": 4305.0,
+        "VAL": 4295.0,
+        "POC": 4300.0,
+        "va_source": "stored_indicator",
+        "use_merged_value_areas": True,
+        "merge_threshold": 0.55,
+        "min_merge_sessions": 5,
+    }
+
+    enrich_with_value_area_fields(enriched, breakout_meta)
+
+    for key in VALUE_AREA_SIGNATURE_KEYS:
+        assert enriched[key] == breakout_meta[key]
