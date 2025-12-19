@@ -32,6 +32,8 @@ def _breakout_signal(time: datetime) -> BaseSignal:
         "source": "MarketProfile",
         "level_type": "VAH",
         "level_price": 4310.0,
+        "VAH": 4310.0,
+        "VAL": 4300.0,
         "breakout_direction": "above",
         "trigger_close": 4311.5,
         "trigger_high": 4312.0,
@@ -96,10 +98,12 @@ def test_market_profile_signals_render_as_bubbles():
     assert breakout_bubble["accentColor"] == "#16a34a"
     assert breakout_bubble["subtype"] == "bubble"
     assert breakout_bubble["price"] > 4311.0
+    assert "VAH" in (breakout_bubble.get("meta") or "")
 
     assert retest_bubble["direction"] == "down"
     assert retest_bubble["accentColor"] == "#f97316"
     assert retest_bubble["detail"].startswith("Retest after 3 bars")
+    assert "VAL" in (retest_bubble.get("meta") or "")
 
 
 def test_default_min_merge_consistency_between_overlay_and_signal(monkeypatch):
