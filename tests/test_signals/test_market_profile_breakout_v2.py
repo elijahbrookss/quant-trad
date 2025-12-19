@@ -37,6 +37,7 @@ def test_breakout_v2_type1_inside_to_outside_above():
     assert sig["confirm_bars"] == 3
     assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
     assert sig["level_type"] == "VAH"
+    assert sig["lockout_bars"] == 3
 
 
 def test_breakout_v2_type2_outside_above_to_inside():
@@ -54,6 +55,7 @@ def test_breakout_v2_type2_outside_above_to_inside():
     assert sig["direction"] == "below"
     assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
     assert sig["level_type"] == "VAH"
+    assert sig["lockout_bars"] == 3
 
 
 def test_breakout_v2_type3_outside_below_to_inside():
@@ -71,6 +73,7 @@ def test_breakout_v2_type3_outside_below_to_inside():
     assert sig["direction"] == "above"
     assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
     assert sig["level_type"] == "VAL"
+    assert sig["lockout_bars"] == 3
 
 
 def test_breakout_v2_type4_inside_to_outside_below():
@@ -88,6 +91,7 @@ def test_breakout_v2_type4_inside_to_outside_below():
     assert sig["direction"] == "below"
     assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
     assert sig["level_type"] == "VAL"
+    assert sig["lockout_bars"] == 3
 
 
 def test_retest_v2_after_breakout_above():
@@ -127,3 +131,25 @@ def test_retest_v2_after_breakout_below():
     assert retest["direction"] == "below"
     assert retest["VAH"] == 100.0 and retest["VAL"] == 90.0
     assert retest["level_type"] == "VAL"
+
+
+def test_breakout_v2_straddle_confirmation_does_not_emit():
+    # Two closes above VAH, one close back inside -> should NOT confirm
+    closes = [95, 96, 101, 100.5, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+    assert not signals, "Straddled confirmation should not emit breakout_v2"
+
+
+def test_breakout_v2_lockout_suppresses_second_signal():
+    # Two separate clean moves above VAH within lockout window -> only first emits
+    closes = [95, 96, 97, 101, 102, 103, 95, 96, 101, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3, lockout_bars=10)
+    assert len(signals) == 1

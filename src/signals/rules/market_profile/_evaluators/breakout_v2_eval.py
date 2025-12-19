@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import logging
 import pandas as pd
 
 from signals.rules.common.utils import value_area_identifier
+
+log = logging.getLogger("MarketProfileBreakoutV2Eval")
 
 Zone = str
 
@@ -38,6 +41,7 @@ def _make_breakout_meta(
     vah: float,
     val: float,
     confirm_bars: int,
+    lockout_bars: int,
 ) -> Dict[str, Any]:
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
@@ -49,13 +53,17 @@ def _make_breakout_meta(
         "level_type": boundary,
         "level_price": level_price,
         "breakout_variant": variant,
+        "breakout_type": variant,
         "direction": direction,
         "pre_zone": pre_zone,
         "post_zone": post_zone,
         "break_time": break_time.to_pydatetime() if hasattr(break_time, "to_pydatetime") else break_time,
         "time": break_time.to_pydatetime() if hasattr(break_time, "to_pydatetime") else break_time,
         "bar_index": break_idx,
+        "trigger_index": break_idx,
+        "trigger_time": break_time.to_pydatetime() if hasattr(break_time, "to_pydatetime") else break_time,
         "confirm_bars": confirm_bars,
+        "lockout_bars": lockout_bars,
         "va_id": va_id,
         "value_area_id": va_id,
         "VAH": vah,
@@ -69,6 +77,7 @@ def detect_breakouts_v2(
     value_area: Mapping[str, Any],
     *,
     confirm_bars: int = 3,
+    lockout_bars: int = 3,
 ) -> List[Dict[str, Any]]:
     """
     Close-only breakout detector with explicit origin/post zones.
@@ -107,22 +116,31 @@ def detect_breakouts_v2(
             and _all_zones(zones, start_idx, idx + 1, ABOVE)
             and last_emit["VAH"] < start_idx
         ):
-            last_emit["VAH"] = idx
-            results.append(
-                _make_breakout_meta(
-                    boundary="VAH",
-                    variant="inside_to_outside_above",
-                    direction="above",
-                    pre_zone=origin_zone,
-                    post_zone=ABOVE,
-                    break_idx=idx,
-                    break_time=df.index[idx],
-                    va_id=va_id,
-                    vah=vah,
-                    val=val,
-                    confirm_bars=confirm_bars,
+            if last_emit["VAH"] >= 0 and (idx - last_emit["VAH"]) <= lockout_bars:
+                log.debug(
+                    "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
+                    last_emit["VAH"],
+                    idx,
+                    lockout_bars,
                 )
-            )
+            else:
+                last_emit["VAH"] = idx
+                results.append(
+                    _make_breakout_meta(
+                        boundary="VAH",
+                        variant="inside_to_outside_above",
+                        direction="above",
+                        pre_zone=origin_zone,
+                        post_zone=ABOVE,
+                        break_idx=idx,
+                        break_time=df.index[idx],
+                        va_id=va_id,
+                        vah=vah,
+                        val=val,
+                        confirm_bars=confirm_bars,
+                        lockout_bars=lockout_bars,
+                    )
+                )
             continue
 
         # Type 2: outside above -> inside (VAH)
@@ -131,22 +149,31 @@ def detect_breakouts_v2(
             and _all_zones(zones, start_idx, idx + 1, INSIDE)
             and last_emit["VAH"] < start_idx
         ):
-            last_emit["VAH"] = idx
-            results.append(
-                _make_breakout_meta(
-                    boundary="VAH",
-                    variant="outside_above_to_inside",
-                    direction="below",
-                    pre_zone=origin_zone,
-                    post_zone=INSIDE,
-                    break_idx=idx,
-                    break_time=df.index[idx],
-                    va_id=va_id,
-                    vah=vah,
-                    val=val,
-                    confirm_bars=confirm_bars,
+            if last_emit["VAH"] >= 0 and (idx - last_emit["VAH"]) <= lockout_bars:
+                log.debug(
+                    "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
+                    last_emit["VAH"],
+                    idx,
+                    lockout_bars,
                 )
-            )
+            else:
+                last_emit["VAH"] = idx
+                results.append(
+                    _make_breakout_meta(
+                        boundary="VAH",
+                        variant="outside_above_to_inside",
+                        direction="below",
+                        pre_zone=origin_zone,
+                        post_zone=INSIDE,
+                        break_idx=idx,
+                        break_time=df.index[idx],
+                        va_id=va_id,
+                        vah=vah,
+                        val=val,
+                        confirm_bars=confirm_bars,
+                        lockout_bars=lockout_bars,
+                    )
+                )
             continue
 
         # Type 3: outside below -> inside (VAL)
@@ -155,22 +182,31 @@ def detect_breakouts_v2(
             and _all_zones(zones, start_idx, idx + 1, INSIDE)
             and last_emit["VAL"] < start_idx
         ):
-            last_emit["VAL"] = idx
-            results.append(
-                _make_breakout_meta(
-                    boundary="VAL",
-                    variant="outside_below_to_inside",
-                    direction="above",
-                    pre_zone=origin_zone,
-                    post_zone=INSIDE,
-                    break_idx=idx,
-                    break_time=df.index[idx],
-                    va_id=va_id,
-                    vah=vah,
-                    val=val,
-                    confirm_bars=confirm_bars,
+            if last_emit["VAL"] >= 0 and (idx - last_emit["VAL"]) <= lockout_bars:
+                log.debug(
+                    "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
+                    last_emit["VAL"],
+                    idx,
+                    lockout_bars,
                 )
-            )
+            else:
+                last_emit["VAL"] = idx
+                results.append(
+                    _make_breakout_meta(
+                        boundary="VAL",
+                        variant="outside_below_to_inside",
+                        direction="above",
+                        pre_zone=origin_zone,
+                        post_zone=INSIDE,
+                        break_idx=idx,
+                        break_time=df.index[idx],
+                        va_id=va_id,
+                        vah=vah,
+                        val=val,
+                        confirm_bars=confirm_bars,
+                        lockout_bars=lockout_bars,
+                    )
+                )
             continue
 
         # Type 4: inside -> below (VAL)
@@ -179,22 +215,31 @@ def detect_breakouts_v2(
             and _all_zones(zones, start_idx, idx + 1, BELOW)
             and last_emit["VAL"] < start_idx
         ):
-            last_emit["VAL"] = idx
-            results.append(
-                _make_breakout_meta(
-                    boundary="VAL",
-                    variant="inside_to_outside_below",
-                    direction="below",
-                    pre_zone=origin_zone,
-                    post_zone=BELOW,
-                    break_idx=idx,
-                    break_time=df.index[idx],
-                    va_id=va_id,
-                    vah=vah,
-                    val=val,
-                    confirm_bars=confirm_bars,
+            if last_emit["VAL"] >= 0 and (idx - last_emit["VAL"]) <= lockout_bars:
+                log.debug(
+                    "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
+                    last_emit["VAL"],
+                    idx,
+                    lockout_bars,
                 )
-            )
+            else:
+                last_emit["VAL"] = idx
+                results.append(
+                    _make_breakout_meta(
+                        boundary="VAL",
+                        variant="inside_to_outside_below",
+                        direction="below",
+                        pre_zone=origin_zone,
+                        post_zone=BELOW,
+                        break_idx=idx,
+                        break_time=df.index[idx],
+                        va_id=va_id,
+                        vah=vah,
+                        val=val,
+                        confirm_bars=confirm_bars,
+                        lockout_bars=lockout_bars,
+                    )
+                )
 
     return results
 

@@ -30,7 +30,15 @@ def market_profile_breakout_v2_rule(
 
     ensure_cache(context, _BREAKOUT_V2_CACHE_KEY, list)
 
-    matches = detect_breakouts_v2(context, payload, confirm_bars=3)
+    confirm_bars = int(context.get("market_profile_breakout_v2_confirm_bars", 3) or 3)
+    lockout_bars = int(context.get("market_profile_breakout_v2_lockout_bars", 3) or 3)
+
+    matches = detect_breakouts_v2(
+        context,
+        payload,
+        confirm_bars=confirm_bars,
+        lockout_bars=lockout_bars,
+    )
     results = []
 
     for meta in matches:
