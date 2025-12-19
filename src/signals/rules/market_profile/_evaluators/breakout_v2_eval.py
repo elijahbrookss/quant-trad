@@ -16,12 +16,14 @@ ABOVE: Zone = "OUTSIDE_ABOVE"
 BELOW: Zone = "OUTSIDE_BELOW"
 
 
-def _zone(close: float, vah: float, val: float) -> Zone:
-    if close > vah:
+def _zone(body_high: float, body_low: float, vah: float, val: float) -> Zone:
+    if body_low > vah:
         return ABOVE
-    if close < val:
+    if body_high < val:
         return BELOW
-    return INSIDE
+    if body_low >= val and body_high <= vah:
+        return INSIDE
+    return INSIDE  # Straddles count as inside for origin gating to avoid premature confirmation
 
 
 def _all_zones(zones: Sequence[Zone], start: int, end: int, target: Zone) -> bool:
@@ -42,6 +44,10 @@ def _make_breakout_meta(
     val: float,
     confirm_bars: int,
     lockout_bars: int,
+    formed_at: pd.Timestamp,
+    session_count: int,
+    va_start: Any,
+    va_end: Any,
 ) -> Dict[str, Any]:
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
@@ -70,6 +76,10 @@ def _make_breakout_meta(
         "VAH": vah,
         "VAL": val,
         "breakout_id": breakout_id,
+        "formed_at": formed_at.to_pydatetime() if hasattr(formed_at, "to_pydatetime") else formed_at,
+        "session_count": session_count,
+        "va_start": va_start,
+        "va_end": va_end,
     }
 
 
@@ -97,14 +107,41 @@ def detect_breakouts_v2(
     except (TypeError, ValueError):
         return []
 
-    va_id = value_area_identifier(value_area) or "va"
-    zones = [_zone(float(c), vah, val) for c in df["close"]]
+    formed_at_raw = value_area.get("formed_at") or value_area.get("end") or value_area.get("va_end")
+    try:
+        formed_at = pd.Timestamp(formed_at_raw) if formed_at_raw is not None else None
+    except Exception:
+        formed_at = None
+
+    if formed_at is None:
+        return []
+
+    eligible_df = df[df.index >= formed_at]
+    if eligible_df.empty:
+        return []
+
+    session_count = int(value_area.get("session_count") or 1)
+    min_merge_sessions = int(value_area.get("min_merge_sessions") or 1)
+    if session_count < min_merge_sessions:
+        return []
+
+    va_id = value_area_identifier(value_area) or value_area.get("value_area_id") or "va"
+
+    bodies = [
+        (
+            max(float(row["open"]), float(row["close"])),
+            min(float(row["open"]), float(row["close"])),
+        )
+        for _, row in eligible_df.iterrows()
+    ]
+    zones = [_zone(body_high, body_low, vah, val) for body_high, body_low in bodies]
 
     results: List[Dict[str, Any]] = []
     last_emit = {"VAH": -1, "VAL": -1}
 
-    for idx in range(len(df)):
-        start_idx = idx - confirm_bars + 1
+    for local_idx, ts in enumerate(eligible_df.index):
+        global_idx = df.index.get_loc(ts)
+        start_idx = local_idx - confirm_bars + 1
         if start_idx < 0:
             continue
 
@@ -114,18 +151,21 @@ def detect_breakouts_v2(
         # Type 1: inside -> above (VAH)
         if (
             origin_zone == INSIDE
-            and _all_zones(zones, start_idx, idx + 1, ABOVE)
+            and all(
+                bodies[i][1] > vah  # body_low > VAH
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAH"] < start_idx
         ):
-            if last_emit["VAH"] >= 0 and (idx - last_emit["VAH"]) <= lockout_bars:
+            if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
                 log.debug(
                     "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
                     last_emit["VAH"],
-                    idx,
+                    local_idx,
                     lockout_bars,
                 )
             else:
-                last_emit["VAH"] = idx
+                last_emit["VAH"] = local_idx
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -133,13 +173,17 @@ def detect_breakouts_v2(
                         direction="above",
                         pre_zone=origin_zone,
                         post_zone=ABOVE,
-                        break_idx=idx,
-                        break_time=df.index[idx],
+                        break_idx=global_idx,
+                        break_time=ts,
                         va_id=va_id,
                         vah=vah,
                         val=val,
                         confirm_bars=confirm_bars,
                         lockout_bars=lockout_bars,
+                        formed_at=formed_at,
+                        session_count=session_count,
+                        va_start=value_area.get("va_start"),
+                        va_end=value_area.get("va_end"),
                     )
                 )
             continue
@@ -147,18 +191,21 @@ def detect_breakouts_v2(
         # Type 2: outside above -> inside (VAH)
         if (
             origin_zone == ABOVE
-            and _all_zones(zones, start_idx, idx + 1, INSIDE)
+            and all(
+                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAH"] < start_idx
         ):
-            if last_emit["VAH"] >= 0 and (idx - last_emit["VAH"]) <= lockout_bars:
+            if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
                 log.debug(
                     "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
                     last_emit["VAH"],
-                    idx,
+                    local_idx,
                     lockout_bars,
                 )
             else:
-                last_emit["VAH"] = idx
+                last_emit["VAH"] = local_idx
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -166,13 +213,17 @@ def detect_breakouts_v2(
                         direction="below",
                         pre_zone=origin_zone,
                         post_zone=INSIDE,
-                        break_idx=idx,
-                        break_time=df.index[idx],
+                        break_idx=global_idx,
+                        break_time=ts,
                         va_id=va_id,
                         vah=vah,
                         val=val,
                         confirm_bars=confirm_bars,
                         lockout_bars=lockout_bars,
+                        formed_at=formed_at,
+                        session_count=session_count,
+                        va_start=value_area.get("va_start"),
+                        va_end=value_area.get("va_end"),
                     )
                 )
             continue
@@ -180,18 +231,21 @@ def detect_breakouts_v2(
         # Type 3: outside below -> inside (VAL)
         if (
             origin_zone == BELOW
-            and _all_zones(zones, start_idx, idx + 1, INSIDE)
+            and all(
+                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAL"] < start_idx
         ):
-            if last_emit["VAL"] >= 0 and (idx - last_emit["VAL"]) <= lockout_bars:
+            if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:
                 log.debug(
                     "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
                     last_emit["VAL"],
-                    idx,
+                    local_idx,
                     lockout_bars,
                 )
             else:
-                last_emit["VAL"] = idx
+                last_emit["VAL"] = local_idx
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
@@ -199,13 +253,17 @@ def detect_breakouts_v2(
                         direction="above",
                         pre_zone=origin_zone,
                         post_zone=INSIDE,
-                        break_idx=idx,
-                        break_time=df.index[idx],
+                        break_idx=global_idx,
+                        break_time=ts,
                         va_id=va_id,
                         vah=vah,
                         val=val,
                         confirm_bars=confirm_bars,
                         lockout_bars=lockout_bars,
+                        formed_at=formed_at,
+                        session_count=session_count,
+                        va_start=value_area.get("va_start"),
+                        va_end=value_area.get("va_end"),
                     )
                 )
             continue
@@ -213,18 +271,21 @@ def detect_breakouts_v2(
         # Type 4: inside -> below (VAL)
         if (
             origin_zone == INSIDE
-            and _all_zones(zones, start_idx, idx + 1, BELOW)
+            and all(
+                bodies[i][0] < val  # body_high < VAL
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAL"] < start_idx
         ):
-            if last_emit["VAL"] >= 0 and (idx - last_emit["VAL"]) <= lockout_bars:
+            if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:
                 log.debug(
                     "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
                     last_emit["VAL"],
-                    idx,
+                    local_idx,
                     lockout_bars,
                 )
             else:
-                last_emit["VAL"] = idx
+                last_emit["VAL"] = local_idx
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
@@ -232,13 +293,17 @@ def detect_breakouts_v2(
                         direction="below",
                         pre_zone=origin_zone,
                         post_zone=BELOW,
-                        break_idx=idx,
-                        break_time=df.index[idx],
+                        break_idx=global_idx,
+                        break_time=ts,
                         va_id=va_id,
                         vah=vah,
                         val=val,
                         confirm_bars=confirm_bars,
                         lockout_bars=lockout_bars,
+                        formed_at=formed_at,
+                        session_count=session_count,
+                        va_start=value_area.get("va_start"),
+                        va_end=value_area.get("va_end"),
                     )
                 )
 

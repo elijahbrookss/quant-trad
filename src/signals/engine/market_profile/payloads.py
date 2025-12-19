@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
-from signals.rules.common.utils import format_duration
+from signals.rules.common.utils import format_duration, value_area_identifier
 
 from .params import MarketProfileParams, resolve_market_profile_params
 
@@ -172,6 +172,18 @@ def build_value_area_payloads(
     for idx, area in enumerate(value_areas or []):
         if isinstance(area, Mapping) and area.get("VAH") is not None and area.get("VAL") is not None:
             payload = dict(area)
+            # Enrich with formed_at and identifiers for walk-forward gating
+            formed_at = payload.get("end") or payload.get("profile_end") or payload.get("session_end")
+            if formed_at is not None:
+                try:
+                    payload["formed_at"] = pd.Timestamp(formed_at)
+                except Exception:
+                    payload["formed_at"] = formed_at
+            payload.setdefault("session_count", payload.get("session_count", getattr(area, "session_count", 1)))
+            payload.setdefault("min_merge_sessions", min_merge_sessions or params.min_merge_sessions)
+            payload.setdefault("value_area_id", value_area_identifier(payload) or _value_area_reference(payload, idx))
+            payload.setdefault("va_start", payload.get("start") or payload.get("session_start"))
+            payload.setdefault("va_end", payload.get("end") or payload.get("session_end"))
             payload.update(signature)
             payloads.append(payload)
             label = _value_area_reference(payload, idx)
