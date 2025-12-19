@@ -16,12 +16,14 @@ ABOVE: Zone = "OUTSIDE_ABOVE"
 BELOW: Zone = "OUTSIDE_BELOW"
 
 
-def _zone(close: float, vah: float, val: float) -> Zone:
-    if close > vah:
+def _zone(body_high: float, body_low: float, vah: float, val: float) -> Zone:
+    if body_low > vah:
         return ABOVE
-    if close < val:
+    if body_high < val:
         return BELOW
-    return INSIDE
+    if body_low >= val and body_high <= vah:
+        return INSIDE
+    return INSIDE  # Straddles count as inside for origin gating to avoid premature confirmation
 
 
 def _all_zones(zones: Sequence[Zone], start: int, end: int, target: Zone) -> bool:
@@ -124,8 +126,14 @@ def detect_breakouts_v2(
 
     va_id = value_area_identifier(value_area) or value_area.get("value_area_id") or "va"
 
-    closes = list(eligible_df["close"])
-    zones = [_zone(float(c), vah, val) for c in closes]
+    bodies = [
+        (
+            max(float(row["open"]), float(row["close"])),
+            min(float(row["open"]), float(row["close"])),
+        )
+        for _, row in eligible_df.iterrows()
+    ]
+    zones = [_zone(body_high, body_low, vah, val) for body_high, body_low in bodies]
 
     results: List[Dict[str, Any]] = []
     last_emit = {"VAH": -1, "VAL": -1}
@@ -142,7 +150,10 @@ def detect_breakouts_v2(
         # Type 1: inside -> above (VAH)
         if (
             origin_zone == INSIDE
-            and _all_zones(zones, start_idx, local_idx + 1, ABOVE)
+            and all(
+                bodies[i][1] > vah  # body_low > VAH
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAH"] < start_idx
         ):
             if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
@@ -179,7 +190,10 @@ def detect_breakouts_v2(
         # Type 2: outside above -> inside (VAH)
         if (
             origin_zone == ABOVE
-            and _all_zones(zones, start_idx, local_idx + 1, INSIDE)
+            and all(
+                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAH"] < start_idx
         ):
             if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
@@ -216,7 +230,10 @@ def detect_breakouts_v2(
         # Type 3: outside below -> inside (VAL)
         if (
             origin_zone == BELOW
-            and _all_zones(zones, start_idx, local_idx + 1, INSIDE)
+            and all(
+                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAL"] < start_idx
         ):
             if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:
@@ -253,7 +270,10 @@ def detect_breakouts_v2(
         # Type 4: inside -> below (VAL)
         if (
             origin_zone == INSIDE
-            and _all_zones(zones, start_idx, local_idx + 1, BELOW)
+            and all(
+                bodies[i][0] < val  # body_high < VAL
+                for i in range(start_idx, local_idx + 1)
+            )
             and last_emit["VAL"] < start_idx
         ):
             if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:

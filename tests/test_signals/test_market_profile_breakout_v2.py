@@ -143,14 +143,16 @@ def test_retest_v2_after_breakout_below():
 
 
 def test_breakout_v2_straddle_confirmation_does_not_emit():
-    # Two closes above VAH, one close back inside -> should NOT confirm
-    closes = [95, 96, 101, 100.5, 102, 103]
+    # Bodies straddle VAH (close above but body touches inside) -> should NOT confirm
+    opens = [95, 96, 101, 100.0, 102, 103]
+    closes = [95, 96, 102, 99.5, 102.5, 103.5]
     df = _df_from_closes(closes)
+    df["open"] = opens
     ctx = {"df": df}
     vas = _value_area()
 
     signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
-    assert not signals, "Straddled confirmation should not emit breakout_v2"
+    assert not signals, "Straddled bodies should not emit breakout_v2"
 
 
 def test_breakout_v2_lockout_suppresses_second_signal():
@@ -176,3 +178,29 @@ def test_breakout_v2_respects_formed_at_no_lookahead():
     assert len(signals) == 1
     assert signals[0]["bar_index"] >= 5
     assert pd.Timestamp(signals[0]["formed_at"]) <= signals[0]["break_time"]
+
+
+def test_breakout_v2_body_outside_confirms():
+    # Bodies fully above VAH for 3 bars -> confirm
+    opens = [95, 96, 101, 101.5, 102.0, 102.5]
+    closes = [95, 96, 102, 102.0, 102.3, 102.7]
+    df = _df_from_closes(closes)
+    df["open"] = opens
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+    assert signals, "Bodies fully above VAH should confirm"
+
+
+def test_breakout_v2_doji_touching_boundary_rejects():
+    # Doji that touches VAH should not count as fully above
+    opens = [95, 96, 101, 101.0, 101.0, 101.0]
+    closes = [95, 96, 101, 101.0, 101.0, 101.0]
+    df = _df_from_closes(closes)
+    df["open"] = opens
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+    assert not signals, "Doji touching boundary should not confirm"
