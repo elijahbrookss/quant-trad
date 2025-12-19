@@ -55,6 +55,7 @@ def _make_breakout_meta(
         "type": "breakout_v2",
         "rule_id": "market_profile_breakout_v2",
         "pattern_id": "breakout_v2",
+        "source": "MarketProfile",
         "boundary": boundary,
         "level_type": boundary,
         "level_price": level_price,
