@@ -171,6 +171,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAH"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "inside_to_outside_above",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -215,6 +222,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAH"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "outside_above_to_inside",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -259,6 +273,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAL"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "outside_below_to_inside",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
@@ -303,6 +324,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAL"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "inside_to_outside_below",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
