@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
-from signals.rules.common.utils import format_duration
-from signals.rules.market_profile._evaluators._shared import value_area_identifier
+from signals.rules.common.utils import format_duration, value_area_identifier
 
 from .params import MarketProfileParams, resolve_market_profile_params
 
