@@ -403,24 +403,44 @@ export const IndicatorSection = ({ chartId }) => {
     setError(null);
     setModalOpen(false);
     setEditing(null);
-    setIsLoading(true);
-    updateChart(chartId, { overlays: [], overlayLoading: true });
 
     try {
       let indicatorId = meta.id ?? null;
+      let needsIndicatorUpdate = true;
 
+      // Check if only signal rules changed (not indicator params)
       if (meta.id) {
-        const existing = indicators.find((i) => i.id === meta.id) || null;
-        const payload = await updateIndicator(meta.id, {
-          type: meta.type,
-          params,
-          name: meta.name,
-          color: existing?.color ?? null,
-        });
-        indicatorId = payload?.id ?? meta.id;
+        const existing = indicators.find((i) => i.id === meta.id);
+        if (existing) {
+          // Compare core params (without runtime params like symbol/interval/start/end)
+          const existingCore = existing.params || {};
+          const coreParamsChanged = JSON.stringify(existingCore) !== JSON.stringify(core);
+          const nameChanged = meta.name !== existing.name;
+
+          // If only signalRules changed, don't update indicator
+          needsIndicatorUpdate = coreParamsChanged || nameChanged;
+        }
+      }
+
+      if (needsIndicatorUpdate) {
+        setIsLoading(true);
+        updateChart(chartId, { overlays: [], overlayLoading: true });
+
+        if (meta.id) {
+          const existing = indicators.find((i) => i.id === meta.id) || null;
+          const payload = await updateIndicator(meta.id, {
+            type: meta.type,
+            params,
+            name: meta.name,
+            color: existing?.color ?? null,
+          });
+          indicatorId = payload?.id ?? meta.id;
+        } else {
+          const created = await createIndicator({ type: meta.type, params, name: meta.name });
+          indicatorId = created?.id ?? null;
+        }
       } else {
-        const created = await createIndicator({ type: meta.type, params, name: meta.name });
-        indicatorId = created?.id ?? null;
+        indicatorId = meta.id;
       }
 
       if (indicatorId) {
@@ -438,7 +458,7 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
-      const latest = await fetchAndSyncIndicators({ silent: true });
+      const latest = await fetchAndSyncIndicators({ silent: !needsIndicatorUpdate });
       await refreshEnabledOverlays(latest);
     } catch (e) {
       setError(e.message);
@@ -616,27 +636,20 @@ export const IndicatorSection = ({ chartId }) => {
       ? color.trim()
       : DEFAULT_INDICATOR_COLOR;
 
-    const patchedParams = {
-      ...indicator.params,
-      symbol: indicator.params?.symbol ?? chartState?.symbol ?? undefined,
-      interval: indicator.params?.interval ?? chartState?.interval ?? undefined,
-      start: indicator.params?.start ?? startISO ?? undefined,
-      end: indicator.params?.end ?? endISO ?? undefined,
-    };
-
     setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
 
     const optimisticIndicators = indicators.map((ind) =>
-      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null, params: patchedParams } : ind,
+      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null } : ind,
     );
     setIndicators(optimisticIndicators);
     updateChart(chartId, { indicators: optimisticIndicators });
 
     try {
+      // Only send color, don't modify params to avoid triggering expensive recomputation
       const updated = await updateIndicator(indicatorId, {
         type: indicator.type,
         name: indicator.name,
-        params: patchedParams,
+        params: indicator.params,
         color: normalizedColor,
       });
       if (updated) {
