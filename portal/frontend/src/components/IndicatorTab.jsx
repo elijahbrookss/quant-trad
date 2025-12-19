@@ -616,27 +616,20 @@ export const IndicatorSection = ({ chartId }) => {
       ? color.trim()
       : DEFAULT_INDICATOR_COLOR;
 
-    const patchedParams = {
-      ...indicator.params,
-      symbol: indicator.params?.symbol ?? chartState?.symbol ?? undefined,
-      interval: indicator.params?.interval ?? chartState?.interval ?? undefined,
-      start: indicator.params?.start ?? startISO ?? undefined,
-      end: indicator.params?.end ?? endISO ?? undefined,
-    };
-
     setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
 
     const optimisticIndicators = indicators.map((ind) =>
-      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null, params: patchedParams } : ind,
+      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null } : ind,
     );
     setIndicators(optimisticIndicators);
     updateChart(chartId, { indicators: optimisticIndicators });
 
     try {
+      // Only send color, don't modify params to avoid triggering expensive recomputation
       const updated = await updateIndicator(indicatorId, {
         type: indicator.type,
         name: indicator.name,
-        params: patchedParams,
+        params: indicator.params,
         color: normalizedColor,
       });
       if (updated) {
