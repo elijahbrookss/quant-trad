@@ -156,6 +156,42 @@ class IndicatorInstanceUpdater:
         if type_str != meta["type"]:
             raise ValueError("Cannot change indicator type; create a new instance instead")
 
+        # Check if only color/name changed (no params change)
+        # This avoids expensive rebuild when user just updates color
+        # Note: scrub runtime params (datasource, exchange) before comparison since they're stored separately
+        scrubbed_params = scrub_runtime_params(params)
+        params_unchanged = scrubbed_params == meta.get("params", {})
+        color_only_update = params_unchanged and (color_provided or name)
+
+        if color_only_update:
+            # Fast path: only update metadata without rebuilding indicator
+            cached_inst = self._get_cached_instance(inst_id)
+            if cached_inst is None:
+                # If not cached, need full rebuild anyway
+                color_only_update = False
+
+        if color_only_update:
+            # Update only color/name in metadata without rebuilding
+            meta_payload = dict(meta)
+            if name:
+                meta_payload["name"] = name
+            if color_provided:
+                meta_payload["color"] = normalize_color(color)
+            meta_payload = ensure_color(meta_payload, ctx=self._ctx)
+            self._ctx.repository.upsert(meta_payload)
+            refreshed = self._ctx.repository.get(inst_id)
+            persisted_meta = (
+                build_meta_from_record(refreshed, ctx=self._ctx)
+                if refreshed
+                else meta_payload
+            )
+            # Update cache with existing instance but new metadata
+            self._ctx.cache_manager.cache_indicator(
+                inst_id, persisted_meta, cached_inst, (refreshed or {}).get("updated_at")
+            )
+            return persisted_meta
+
+        # Full rebuild path: params changed
         params_copy = dict(params)
         cached_inst = self._get_cached_instance(inst_id)
         self._maybe_strip_autosized_bin(params_copy, type_str, cached_inst)
