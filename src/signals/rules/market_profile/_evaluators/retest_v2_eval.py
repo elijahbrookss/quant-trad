@@ -81,6 +81,7 @@ def detect_retests_v2(
                         "rule_id": "market_profile_retest_v2",
                         "pattern_id": "retest_v2",
                         "boundary": boundary,
+                        "level_type": boundary,
                         "breakout_id": b.get("breakout_id"),
                         "breakout_variant": b.get("breakout_variant"),
                         "direction": direction,

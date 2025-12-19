@@ -35,6 +35,8 @@ def test_breakout_v2_type1_inside_to_outside_above():
     assert sig["breakout_variant"] == "inside_to_outside_above"
     assert sig["direction"] == "above"
     assert sig["confirm_bars"] == 3
+    assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
+    assert sig["level_type"] == "VAH"
 
 
 def test_breakout_v2_type2_outside_above_to_inside():
@@ -50,6 +52,8 @@ def test_breakout_v2_type2_outside_above_to_inside():
     assert sig["boundary"] == "VAH"
     assert sig["breakout_variant"] == "outside_above_to_inside"
     assert sig["direction"] == "below"
+    assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
+    assert sig["level_type"] == "VAH"
 
 
 def test_breakout_v2_type3_outside_below_to_inside():
@@ -65,6 +69,8 @@ def test_breakout_v2_type3_outside_below_to_inside():
     assert sig["boundary"] == "VAL"
     assert sig["breakout_variant"] == "outside_below_to_inside"
     assert sig["direction"] == "above"
+    assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
+    assert sig["level_type"] == "VAL"
 
 
 def test_breakout_v2_type4_inside_to_outside_below():
@@ -80,6 +86,8 @@ def test_breakout_v2_type4_inside_to_outside_below():
     assert sig["boundary"] == "VAL"
     assert sig["breakout_variant"] == "inside_to_outside_below"
     assert sig["direction"] == "below"
+    assert sig["VAH"] == 100.0 and sig["VAL"] == 90.0
+    assert sig["level_type"] == "VAL"
 
 
 def test_retest_v2_after_breakout_above():
@@ -98,6 +106,8 @@ def test_retest_v2_after_breakout_above():
     assert retest["boundary"] == "VAH"
     assert retest["retest_type"] == "reclaim"
     assert retest["direction"] == "above"
+    assert retest["VAH"] == 100.0 and retest["VAL"] == 90.0
+    assert retest["level_type"] == "VAH"
 
 
 def test_retest_v2_after_breakout_below():
@@ -115,3 +125,5 @@ def test_retest_v2_after_breakout_below():
     assert retest["boundary"] == "VAL"
     assert retest["retest_type"] == "reject"
     assert retest["direction"] == "below"
+    assert retest["VAH"] == 100.0 and retest["VAL"] == 90.0
+    assert retest["level_type"] == "VAL"

@@ -46,6 +46,8 @@ def _make_breakout_meta(
         "rule_id": "market_profile_breakout_v2",
         "pattern_id": "breakout_v2",
         "boundary": boundary,
+        "level_type": boundary,
+        "level_price": level_price,
         "breakout_variant": variant,
         "direction": direction,
         "pre_zone": pre_zone,
@@ -58,7 +60,6 @@ def _make_breakout_meta(
         "value_area_id": va_id,
         "VAH": vah,
         "VAL": val,
-        "level_price": level_price,
         "breakout_id": breakout_id,
     }
 
