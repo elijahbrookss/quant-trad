@@ -23,6 +23,7 @@ from signals.rules.market_profile._config import (
     _DEFAULT_BREAKOUT_CONFIG,
     resolve_breakout_config,
 )
+from signals.rules.market_profile.confirmation import enforce_full_bar_confirmation
 from signals.rules.market_profile._evaluators._shared import VALUE_AREA_SIGNATURE_KEYS
 from signals.rules.pivot import _detect_retest as _pivot_detect_retest, _evaluate_level as _pivot_evaluate_level
 from signals.rules.patterns import SignalPattern, evaluate_signal_patterns
@@ -328,6 +329,15 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                 if end_ts is not None and trigger_ts is not None and trigger_ts > end_ts:
                     if not allow_beyond_end:
                         continue
+
+                if not enforce_full_bar_confirmation(
+                    df,
+                    start_index=trigger_idx,
+                    boundary_price=active_level_price,
+                    direction=direction,
+                    required_bars=config.confirmation_bars,
+                ):
+                    continue
 
                 breakout_start_ts = normalise_meta_timestamp(enriched.get("breakout_start"), tz)
                 if breakout_start_ts is not None:
