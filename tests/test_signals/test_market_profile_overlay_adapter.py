@@ -40,6 +40,8 @@ def _breakout_signal(time: datetime) -> BaseSignal:
         "trigger_low": 4310.5,
         "confidence": 0.72,
         "value_area_id": "session-123",
+        "confirm_indices": [5, 6, 7],
+        "confirm_times": [],
     }
     return BaseSignal(
         type="breakout",
@@ -99,6 +101,9 @@ def test_market_profile_signals_render_as_bubbles():
     assert breakout_bubble["subtype"] == "bubble"
     assert breakout_bubble["price"] > 4311.0
     assert "VAH" in (breakout_bubble.get("meta") or "")
+    assert payload["markers"], "Expected markers for confirmation candles"
+    marker_shapes = {m["shape"] for m in payload["markers"]}
+    assert "square" in marker_shapes
 
     assert retest_bubble["direction"] == "down"
     assert retest_bubble["accentColor"] == "#f97316"

@@ -48,6 +48,8 @@ def _make_breakout_meta(
     session_count: int,
     va_start: Any,
     va_end: Any,
+    confirm_indices: Sequence[int],
+    confirm_times: Sequence[pd.Timestamp],
 ) -> Dict[str, Any]:
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
@@ -71,6 +73,10 @@ def _make_breakout_meta(
         "trigger_time": break_time.to_pydatetime() if hasattr(break_time, "to_pydatetime") else break_time,
         "confirm_bars": confirm_bars,
         "lockout_bars": lockout_bars,
+        "confirm_indices": list(confirm_indices),
+        "confirm_times": [
+            t.to_pydatetime() if hasattr(t, "to_pydatetime") else t for t in confirm_times
+        ],
         "va_id": va_id,
         "value_area_id": va_id,
         "VAH": vah,
@@ -166,6 +172,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAH"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "inside_to_outside_above",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -184,6 +197,10 @@ def detect_breakouts_v2(
                         session_count=session_count,
                         va_start=value_area.get("va_start"),
                         va_end=value_area.get("va_end"),
+                        confirm_indices=[
+                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
+                        ],
+                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
                     )
                 )
             continue
@@ -206,6 +223,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAH"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "outside_above_to_inside",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAH",
@@ -224,6 +248,10 @@ def detect_breakouts_v2(
                         session_count=session_count,
                         va_start=value_area.get("va_start"),
                         va_end=value_area.get("va_end"),
+                        confirm_indices=[
+                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
+                        ],
+                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
                     )
                 )
             continue
@@ -246,6 +274,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAL"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "outside_below_to_inside",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
@@ -264,6 +299,10 @@ def detect_breakouts_v2(
                         session_count=session_count,
                         va_start=value_area.get("va_start"),
                         va_end=value_area.get("va_end"),
+                        confirm_indices=[
+                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
+                        ],
+                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
                     )
                 )
             continue
@@ -286,6 +325,13 @@ def detect_breakouts_v2(
                 )
             else:
                 last_emit["VAL"] = local_idx
+                log.debug(
+                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
+                    "inside_to_outside_below",
+                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
+                    list(eligible_df.index[start_idx : local_idx + 1]),
+                    va_id,
+                )
                 results.append(
                     _make_breakout_meta(
                         boundary="VAL",
@@ -304,6 +350,10 @@ def detect_breakouts_v2(
                         session_count=session_count,
                         va_start=value_area.get("va_start"),
                         va_end=value_area.get("va_end"),
+                        confirm_indices=[
+                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
+                        ],
+                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
                     )
                 )
 

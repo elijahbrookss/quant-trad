@@ -83,6 +83,12 @@ def market_profile_overlay_adapter(
     plot_df: pd.DataFrame,
     **_: Any,
 ) -> List[Dict[str, Any]]:
+    log.info(
+        "🚀 OVERLAY ADAPTER CALLED | signals=%d | has_plot_df=%s | plot_df_len=%s",
+        len(signals),
+        plot_df is not None,
+        len(plot_df) if plot_df is not None else 0,
+    )
     start_time = perf_counter()
     bubbles: List[Dict[str, Any]] = []
     summary = {
@@ -96,6 +102,13 @@ def market_profile_overlay_adapter(
 
     for sig in signals:
         metadata = sig.metadata or {}
+        log.info(
+            "Processing signal | type=%s | source=%s | has_confirm_indices=%s | confirm_indices=%s",
+            sig.type,
+            metadata.get("source"),
+            "confirm_indices" in metadata,
+            metadata.get("confirm_indices", []),
+        )
         if metadata.get("source") != "MarketProfile":
             summary["skipped_source"] += 1
             continue
@@ -211,21 +224,55 @@ def market_profile_overlay_adapter(
         )
 
         pointer_hint = metadata.get("pointer_direction") or breakout_direction or metadata.get("direction")
-        bubbles.append(
-            {
-                "time": marker_time,
-                "price": bubble_price,
-                "label": label,
-                "detail": detail,
-                "meta": meta_text,
-                "accentColor": color,
-                "backgroundColor": rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
-                "textColor": "#ffffff",
-                "direction": pointer_hint,
-                "bias": bias_label,
-                "subtype": "bubble",
-            }
+        confirm_indices = metadata.get("confirm_indices") or []
+        confirm_times = metadata.get("confirm_times") or []
+        marker_points: List[Dict[str, Any]] = []
+
+        log.debug(
+            "Processing breakout | confirm_indices=%s | confirm_times=%s | has_plot_df=%s",
+            confirm_indices,
+            confirm_times,
+            plot_df is not None,
         )
+
+        if confirm_indices and plot_df is not None:
+            for idx, ts in zip(confirm_indices, confirm_times or confirm_indices):
+                try:
+                    ts_val = pd.Timestamp(plot_df.index[int(idx)]) if isinstance(ts, (int, float)) else pd.Timestamp(ts)
+                    row = plot_df.loc[ts_val]
+                    body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
+                    body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
+                    marker_point = {
+                        "time": int(ts_val.timestamp()),
+                        "price": (body_high + body_low) / 2.0,
+                        "shape": "square",
+                        "color": color,
+                        "text": "✓",
+                        "position": "inBar",
+                        "subtype": "marker",
+                    }
+                    marker_points.append(marker_point)
+                    log.debug("Created confirmation marker: %s", marker_point)
+                except Exception as e:
+                    log.warning("Failed to create confirmation marker for idx=%s, ts=%s: %s", idx, ts, e)
+                    continue
+
+        bubble = {
+            "time": marker_time,
+            "price": bubble_price,
+            "label": label,
+            "detail": detail,
+            "meta": meta_text,
+            "accentColor": color,
+            "backgroundColor": rgba_from_hex(color, 0.2) or "rgba(30,41,59,0.75)",
+            "textColor": "#ffffff",
+            "direction": pointer_hint,
+            "bias": bias_label,
+            "subtype": "bubble",
+        }
+        if marker_points:
+            bubble["_markers"] = marker_points
+        bubbles.append(bubble)
         summary["converted_breakout"] += 1
 
     duration = perf_counter() - start_time
@@ -247,9 +294,23 @@ def market_profile_overlay_adapter(
 
     if not bubbles:
         return []
+    markers: List[Dict[str, Any]] = []
+    for b in bubbles:
+        extra = b.pop("_markers", None)
+        if extra:
+            markers.extend(extra)
+
+    log.info(
+        "Market profile overlays final | bubbles=%d | confirmation_markers=%d",
+        len(bubbles),
+        len(markers),
+    )
+    if markers:
+        log.debug("Sample confirmation marker: %s", markers[0] if markers else None)
+
     payload = {
         "price_lines": [],
-        "markers": [],
+        "markers": markers,
         "bubbles": bubbles,
     }
 
