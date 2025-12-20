@@ -31,6 +31,50 @@ _RETEST_COLORS = {
     "resistance": "#f97316",  # amber
 }
 
+def _normalize_marker_time(
+    ts: Any,
+    plot_df: Optional[pd.DataFrame],
+    idx: Optional[int],
+    marker_kind: str,
+) -> Optional[int]:
+    """Normalize marker timestamps to epoch seconds, preferring plot_df index when available."""
+
+    epoch_from_meta = to_epoch_seconds(ts)
+    epoch_from_index: Optional[int] = None
+
+    if plot_df is not None and idx is not None:
+        try:
+            index_value = plot_df.index[idx]
+            epoch_from_index = to_epoch_seconds(index_value)
+        except Exception as exc:
+            log.warning(
+                "Failed to read %s marker time from plot_df index | idx=%s | ts=%s | error=%s",
+                marker_kind,
+                idx,
+                ts,
+                exc,
+            )
+
+    if epoch_from_meta is not None and epoch_from_index is not None and epoch_from_meta != epoch_from_index:
+        log.warning(
+            "Marker time mismatch | kind=%s | idx=%s | ts=%s | meta_epoch=%s | index_epoch=%s",
+            marker_kind,
+            idx,
+            ts,
+            epoch_from_meta,
+            epoch_from_index,
+        )
+
+    normalized = epoch_from_index if epoch_from_index is not None else epoch_from_meta
+    if normalized is None:
+        log.warning(
+            "Skipping %s marker due to invalid timestamp | ts=%s | idx=%s",
+            marker_kind,
+            ts,
+            idx,
+        )
+    return normalized
+
 
 def _resolve_level_price(metadata: Mapping[str, Any]) -> Optional[float]:
     price = finite_float(metadata.get("level_price"))
@@ -233,10 +277,14 @@ def market_profile_overlay_adapter(
         )
 
         if confirm_times and plot_df is not None:
-            for ts in confirm_times:
-                normalized_time = to_epoch_seconds(ts)
+            for ts_idx, ts in enumerate(confirm_times):
+                normalized_time = _normalize_marker_time(
+                    ts,
+                    plot_df=plot_df,
+                    idx=confirm_indices[ts_idx] if ts_idx < len(confirm_indices) else None,
+                    marker_kind="confirm",
+                )
                 if normalized_time is None:
-                    log.warning("Skipping confirmation marker due to invalid timestamp | ts=%s", ts)
                     continue
                 try:
                     ts_val = pd.Timestamp(ts)
@@ -283,9 +331,13 @@ def market_profile_overlay_adapter(
 
         if prior_times and plot_df is not None:
             for position, ts in enumerate(prior_times):
-                normalized_time = to_epoch_seconds(ts)
+                normalized_time = _normalize_marker_time(
+                    ts,
+                    plot_df=plot_df,
+                    idx=prior_indices[position] if position < len(prior_indices) else None,
+                    marker_kind="prior",
+                )
                 if normalized_time is None:
-                    log.warning("Skipping prior marker due to invalid timestamp | ts=%s", ts)
                     continue
                 try:
                     ts_val = pd.Timestamp(ts)
