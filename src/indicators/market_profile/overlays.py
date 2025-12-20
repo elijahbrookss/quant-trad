@@ -286,17 +286,22 @@ def market_profile_overlay_adapter(
 
         if confirm_times and plot_df is not None:
             for ts_idx, ts in enumerate(confirm_times):
+                confirm_idx = confirm_indices[ts_idx] if ts_idx < len(confirm_indices) else None
                 normalized_time = _normalize_marker_time(
                     ts,
                     plot_df=plot_df,
-                    idx=confirm_indices[ts_idx] if ts_idx < len(confirm_indices) else None,
+                    idx=confirm_idx,
                     marker_kind="confirm",
                 )
                 if normalized_time is None:
                     continue
                 try:
-                    ts_val = pd.Timestamp(ts)
-                    row = plot_df.loc[ts_val]
+                    if isinstance(confirm_idx, int) and 0 <= confirm_idx < len(plot_df):
+                        row = plot_df.iloc[confirm_idx]
+                        ts_val = plot_df.index[confirm_idx]
+                    else:
+                        ts_val = pd.Timestamp(ts)
+                        row = plot_df.loc[ts_val]
                     body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
                     body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
 
@@ -318,9 +323,10 @@ def market_profile_overlay_adapter(
                     )
                 except Exception as e:
                     log.warning(
-                        "Failed to create confirmation marker | ts=%s | epoch=%s | error=%s",
+                        "Failed to create confirmation marker | ts=%s | epoch=%s | idx=%s | error=%s",
                         ts,
                         normalized_time,
+                        confirm_idx,
                         e,
                     )
                     continue
@@ -339,17 +345,22 @@ def market_profile_overlay_adapter(
 
         if prior_times and plot_df is not None:
             for position, ts in enumerate(prior_times):
+                prior_idx = prior_indices[position] if position < len(prior_indices) else None
                 normalized_time = _normalize_marker_time(
                     ts,
                     plot_df=plot_df,
-                    idx=prior_indices[position] if position < len(prior_indices) else None,
+                    idx=prior_idx,
                     marker_kind="prior",
                 )
                 if normalized_time is None:
                     continue
                 try:
-                    ts_val = pd.Timestamp(ts)
-                    row = plot_df.loc[ts_val]
+                    if isinstance(prior_idx, int) and 0 <= prior_idx < len(plot_df):
+                        row = plot_df.iloc[prior_idx]
+                        ts_val = plot_df.index[prior_idx]
+                    else:
+                        ts_val = pd.Timestamp(ts)
+                        row = plot_df.loc[ts_val]
                     body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
                     body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
 
@@ -375,9 +386,10 @@ def market_profile_overlay_adapter(
                     )
                 except Exception as e:
                     log.warning(
-                        "Failed to create prior marker | ts=%s | epoch=%s | error=%s",
+                        "Failed to create prior marker | ts=%s | epoch=%s | idx=%s | error=%s",
                         ts,
                         normalized_time,
+                        prior_idx,
                         e,
                     )
                     continue
