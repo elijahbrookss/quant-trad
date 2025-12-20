@@ -62,7 +62,8 @@ def _make_breakout_meta(
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
     meta = {
-        "type": "breakout_v2",
+        # Normalize outward-facing signal type to breakout for strategy compatibility.
+        "type": "breakout",
         "rule_id": "market_profile_breakout_v2",
         "pattern_id": "breakout_v2",
         "source": "MarketProfile",
