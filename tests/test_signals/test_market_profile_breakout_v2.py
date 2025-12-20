@@ -204,3 +204,97 @@ def test_breakout_v2_doji_touching_boundary_rejects():
 
     signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
     assert not signals, "Doji touching boundary should not confirm"
+
+
+# Tests for new level_breakout_v1 integration
+
+def test_breakout_v2_includes_prior_indices():
+    """Verify that prior_indices are included in metadata."""
+    closes = [95, 96, 97, 101, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert "prior_indices" in sig
+    assert len(sig["prior_indices"]) == 3
+    assert all(isinstance(idx, int) for idx in sig["prior_indices"])
+
+
+def test_breakout_v2_includes_prior_times():
+    """Verify that prior_times are included in metadata."""
+    closes = [95, 96, 97, 101, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert "prior_times" in sig
+    assert len(sig["prior_times"]) == 3
+
+
+def test_breakout_v2_prior_window_length():
+    """Verify prior window has correct length."""
+    closes = [85, 86, 87, 88, 105, 106, 107, 108]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+
+    if signals:
+        sig = signals[0]
+        assert len(sig["prior_indices"]) == 3
+        assert len(sig["prior_times"]) == 3
+        assert len(sig["confirm_indices"]) == 3
+        assert len(sig["confirm_times"]) == 3
+
+
+def test_breakout_v2_prior_before_confirm():
+    """Verify prior window comes before confirm window."""
+    closes = [85, 86, 87, 105, 106, 107]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+
+    assert len(signals) == 1
+    sig = signals[0]
+
+    # Prior indices should be [0, 1, 2]
+    # Confirm indices should be [3, 4, 5]
+    prior_indices = sig["prior_indices"]
+    confirm_indices = sig["confirm_indices"]
+
+    assert max(prior_indices) < min(confirm_indices), "Prior window should be before confirm window"
+
+
+def test_breakout_v2_metadata_structure_unchanged():
+    """Verify existing metadata structure is preserved."""
+    closes = [95, 96, 97, 101, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+    vas = _value_area()
+
+    signals = detect_breakouts_v2(ctx, vas, confirm_bars=3)
+
+    assert len(signals) == 1
+    sig = signals[0]
+
+    # Verify all existing fields still present
+    expected_fields = [
+        "type", "rule_id", "pattern_id", "source", "boundary",
+        "level_type", "level_price", "breakout_variant", "direction",
+        "break_time", "time", "bar_index", "confirm_bars",
+        "confirm_indices", "confirm_times", "VAH", "VAL"
+    ]
+
+    for field in expected_fields:
+        assert field in sig, f"Missing expected field: {field}"

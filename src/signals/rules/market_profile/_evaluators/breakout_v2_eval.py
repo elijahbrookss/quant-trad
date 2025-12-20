@@ -6,6 +6,12 @@ import logging
 import pandas as pd
 
 from signals.rules.common.utils import value_area_identifier
+from signals.util.level_breakout_v1 import (
+    detect_level_breakouts,
+    ABOVE as LB_ABOVE,
+    BELOW as LB_BELOW,
+    STRADDLE as LB_STRADDLE,
+)
 
 log = logging.getLogger("MarketProfileBreakoutV2Eval")
 
@@ -50,10 +56,12 @@ def _make_breakout_meta(
     va_end: Any,
     confirm_indices: Sequence[int],
     confirm_times: Sequence[pd.Timestamp],
+    prior_indices: Optional[Sequence[int]] = None,
+    prior_times: Optional[Sequence[pd.Timestamp]] = None,
 ) -> Dict[str, Any]:
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
-    return {
+    meta = {
         "type": "breakout_v2",
         "rule_id": "market_profile_breakout_v2",
         "pattern_id": "breakout_v2",
@@ -88,6 +96,97 @@ def _make_breakout_meta(
         "va_end": va_end,
     }
 
+    # Add prior window data if provided
+    if prior_indices is not None:
+        meta["prior_indices"] = list(prior_indices)
+    if prior_times is not None:
+        meta["prior_times"] = [
+            t.to_pydatetime() if hasattr(t, "to_pydatetime") else t for t in prior_times
+        ]
+
+    return meta
+
+
+def _convert_to_breakout_v2_meta(
+    event: Dict[str, Any],
+    boundary: str,
+    value_area: Mapping[str, Any],
+    df: pd.DataFrame,
+    vah: float,
+    val: float,
+) -> Dict[str, Any]:
+    """Convert level_breakout_v1 event to breakout_v2 metadata format."""
+    direction = event["direction"]
+    confirm_times = event["confirm_times"]
+    prior_times = event["prior_times"]
+
+    # Map direction + boundary to variant and breakout_direction
+    if boundary == "VAH":
+        if direction == "bull":
+            variant = "inside_to_outside_above"
+            breakout_direction = "above"
+            pre_zone = INSIDE
+            post_zone = ABOVE
+        else:
+            variant = "outside_above_to_inside"
+            breakout_direction = "below"
+            pre_zone = ABOVE
+            post_zone = INSIDE
+    else:  # VAL
+        if direction == "bull":
+            variant = "outside_below_to_inside"
+            breakout_direction = "above"
+            pre_zone = BELOW
+            post_zone = INSIDE
+        else:
+            variant = "inside_to_outside_below"
+            breakout_direction = "below"
+            pre_zone = INSIDE
+            post_zone = BELOW
+
+    # Calculate global indices using full df
+    confirm_indices = [df.index.get_loc(ts) for ts in confirm_times]
+    prior_indices = [df.index.get_loc(ts) for ts in prior_times]
+
+    break_time = event["confirm_end_time"]
+    break_idx = confirm_indices[-1]
+
+    log.debug(
+        "Converting event to metadata | boundary=%s | direction=%s | break_time=%s | break_idx=%s | "
+        "confirm_times=%s | confirm_indices=%s | prior_times=%s | prior_indices=%s",
+        boundary, direction, break_time, break_idx, confirm_times, confirm_indices, prior_times, prior_indices
+    )
+
+    va_id = value_area_identifier(value_area) or value_area.get("value_area_id") or "va"
+    formed_at_raw = value_area.get("formed_at") or value_area.get("end") or value_area.get("va_end")
+    try:
+        formed_at = pd.Timestamp(formed_at_raw) if formed_at_raw is not None else break_time
+    except Exception:
+        formed_at = break_time
+
+    return _make_breakout_meta(
+        boundary=boundary,
+        variant=variant,
+        direction=breakout_direction,
+        pre_zone=pre_zone,
+        post_zone=post_zone,
+        break_idx=break_idx,
+        break_time=break_time,
+        va_id=va_id,
+        vah=vah,
+        val=val,
+        confirm_bars=len(confirm_times),
+        lockout_bars=3,  # Legacy field, no longer used
+        formed_at=formed_at,
+        session_count=value_area.get("session_count", 1),
+        va_start=value_area.get("va_start"),
+        va_end=value_area.get("va_end"),
+        confirm_indices=confirm_indices,
+        confirm_times=confirm_times,
+        prior_indices=prior_indices,
+        prior_times=prior_times,
+    )
+
 
 def detect_breakouts_v2(
     context: Mapping[str, Any],
@@ -98,6 +197,9 @@ def detect_breakouts_v2(
 ) -> List[Dict[str, Any]]:
     """
     Close-only breakout detector with explicit origin/post zones.
+
+    Now powered by level_breakout_v1 engine. The lockout_bars parameter
+    is deprecated as deduplication is handled internally by the new engine.
     """
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
     if df is None or df.empty or "close" not in df.columns:
@@ -131,231 +233,32 @@ def detect_breakouts_v2(
     if session_count < min_merge_sessions:
         return []
 
-    va_id = value_area_identifier(value_area) or value_area.get("value_area_id") or "va"
+    # Call level_breakout_v1 for VAH
+    vah_events, _ = detect_level_breakouts(
+        df=eligible_df,
+        level=vah,
+        level_name="VAH",
+        confirm_bars=confirm_bars,
+        prior_bars=3,
+        debug=False,
+    )
 
-    bodies = [
-        (
-            max(float(row["open"]), float(row["close"])),
-            min(float(row["open"]), float(row["close"])),
-        )
-        for _, row in eligible_df.iterrows()
-    ]
-    zones = [_zone(body_high, body_low, vah, val) for body_high, body_low in bodies]
+    # Call level_breakout_v1 for VAL
+    val_events, _ = detect_level_breakouts(
+        df=eligible_df,
+        level=val,
+        level_name="VAL",
+        confirm_bars=confirm_bars,
+        prior_bars=3,
+        debug=False,
+    )
 
+    # Convert events to breakout_v2 metadata format
     results: List[Dict[str, Any]] = []
-    last_emit = {"VAH": -1, "VAL": -1}
-
-    for local_idx, ts in enumerate(eligible_df.index):
-        global_idx = df.index.get_loc(ts)
-        start_idx = local_idx - confirm_bars + 1
-        if start_idx < 0:
-            continue
-
-        origin_idx = start_idx - 1
-        origin_zone = zones[origin_idx] if origin_idx >= 0 else None
-
-        # Type 1: inside -> above (VAH)
-        if (
-            origin_zone == INSIDE
-            and all(
-                bodies[i][1] > vah  # body_low > VAH
-                for i in range(start_idx, local_idx + 1)
-            )
-            and last_emit["VAH"] < start_idx
-        ):
-            if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
-                log.debug(
-                    "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
-                    last_emit["VAH"],
-                    local_idx,
-                    lockout_bars,
-                )
-            else:
-                last_emit["VAH"] = local_idx
-                log.debug(
-                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
-                    "inside_to_outside_above",
-                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
-                    list(eligible_df.index[start_idx : local_idx + 1]),
-                    va_id,
-                )
-                results.append(
-                    _make_breakout_meta(
-                        boundary="VAH",
-                        variant="inside_to_outside_above",
-                        direction="above",
-                        pre_zone=origin_zone,
-                        post_zone=ABOVE,
-                        break_idx=global_idx,
-                        break_time=ts,
-                        va_id=va_id,
-                        vah=vah,
-                        val=val,
-                        confirm_bars=confirm_bars,
-                        lockout_bars=lockout_bars,
-                        formed_at=formed_at,
-                        session_count=session_count,
-                        va_start=value_area.get("va_start"),
-                        va_end=value_area.get("va_end"),
-                        confirm_indices=[
-                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
-                        ],
-                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
-                    )
-                )
-            continue
-
-        # Type 2: outside above -> inside (VAH)
-        if (
-            origin_zone == ABOVE
-            and all(
-                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
-                for i in range(start_idx, local_idx + 1)
-            )
-            and last_emit["VAH"] < start_idx
-        ):
-            if last_emit["VAH"] >= 0 and (local_idx - last_emit["VAH"]) <= lockout_bars:
-                log.debug(
-                    "breakout_v2 suppressed | reason=lockout | boundary=VAH | last=%s | idx=%s | lockout=%s",
-                    last_emit["VAH"],
-                    local_idx,
-                    lockout_bars,
-                )
-            else:
-                last_emit["VAH"] = local_idx
-                log.debug(
-                    "breakout_v2 confirm window | boundary=VAH | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
-                    "outside_above_to_inside",
-                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
-                    list(eligible_df.index[start_idx : local_idx + 1]),
-                    va_id,
-                )
-                results.append(
-                    _make_breakout_meta(
-                        boundary="VAH",
-                        variant="outside_above_to_inside",
-                        direction="below",
-                        pre_zone=origin_zone,
-                        post_zone=INSIDE,
-                        break_idx=global_idx,
-                        break_time=ts,
-                        va_id=va_id,
-                        vah=vah,
-                        val=val,
-                        confirm_bars=confirm_bars,
-                        lockout_bars=lockout_bars,
-                        formed_at=formed_at,
-                        session_count=session_count,
-                        va_start=value_area.get("va_start"),
-                        va_end=value_area.get("va_end"),
-                        confirm_indices=[
-                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
-                        ],
-                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
-                    )
-                )
-            continue
-
-        # Type 3: outside below -> inside (VAL)
-        if (
-            origin_zone == BELOW
-            and all(
-                bodies[i][1] >= val and bodies[i][0] <= vah  # body fully inside
-                for i in range(start_idx, local_idx + 1)
-            )
-            and last_emit["VAL"] < start_idx
-        ):
-            if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:
-                log.debug(
-                    "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
-                    last_emit["VAL"],
-                    local_idx,
-                    lockout_bars,
-                )
-            else:
-                last_emit["VAL"] = local_idx
-                log.debug(
-                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
-                    "outside_below_to_inside",
-                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
-                    list(eligible_df.index[start_idx : local_idx + 1]),
-                    va_id,
-                )
-                results.append(
-                    _make_breakout_meta(
-                        boundary="VAL",
-                        variant="outside_below_to_inside",
-                        direction="above",
-                        pre_zone=origin_zone,
-                        post_zone=INSIDE,
-                        break_idx=global_idx,
-                        break_time=ts,
-                        va_id=va_id,
-                        vah=vah,
-                        val=val,
-                        confirm_bars=confirm_bars,
-                        lockout_bars=lockout_bars,
-                        formed_at=formed_at,
-                        session_count=session_count,
-                        va_start=value_area.get("va_start"),
-                        va_end=value_area.get("va_end"),
-                        confirm_indices=[
-                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
-                        ],
-                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
-                    )
-                )
-            continue
-
-        # Type 4: inside -> below (VAL)
-        if (
-            origin_zone == INSIDE
-            and all(
-                bodies[i][0] < val  # body_high < VAL
-                for i in range(start_idx, local_idx + 1)
-            )
-            and last_emit["VAL"] < start_idx
-        ):
-            if last_emit["VAL"] >= 0 and (local_idx - last_emit["VAL"]) <= lockout_bars:
-                log.debug(
-                    "breakout_v2 suppressed | reason=lockout | boundary=VAL | last=%s | idx=%s | lockout=%s",
-                    last_emit["VAL"],
-                    local_idx,
-                    lockout_bars,
-                )
-            else:
-                last_emit["VAL"] = local_idx
-                log.debug(
-                    "breakout_v2 confirm window | boundary=VAL | variant=%s | confirm_indices=%s | confirm_times=%s | va_id=%s",
-                    "inside_to_outside_below",
-                    [df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]],
-                    list(eligible_df.index[start_idx : local_idx + 1]),
-                    va_id,
-                )
-                results.append(
-                    _make_breakout_meta(
-                        boundary="VAL",
-                        variant="inside_to_outside_below",
-                        direction="below",
-                        pre_zone=origin_zone,
-                        post_zone=BELOW,
-                        break_idx=global_idx,
-                        break_time=ts,
-                        va_id=va_id,
-                        vah=vah,
-                        val=val,
-                        confirm_bars=confirm_bars,
-                        lockout_bars=lockout_bars,
-                        formed_at=formed_at,
-                        session_count=session_count,
-                        va_start=value_area.get("va_start"),
-                        va_end=value_area.get("va_end"),
-                        confirm_indices=[
-                            df.index.get_loc(t) for t in eligible_df.index[start_idx : local_idx + 1]
-                        ],
-                        confirm_times=list(eligible_df.index[start_idx : local_idx + 1]),
-                    )
-                )
+    for event in vah_events:
+        results.append(_convert_to_breakout_v2_meta(event, "VAH", value_area, df, vah, val))
+    for event in val_events:
+        results.append(_convert_to_breakout_v2_meta(event, "VAL", value_area, df, vah, val))
 
     return results
 

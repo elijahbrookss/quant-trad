@@ -103,11 +103,13 @@ def market_profile_overlay_adapter(
     for sig in signals:
         metadata = sig.metadata or {}
         log.info(
-            "Processing signal | type=%s | source=%s | has_confirm_indices=%s | confirm_indices=%s",
+            "Processing signal | type=%s | source=%s | sig.time=%s | has_confirm_indices=%s | confirm_indices=%s | confirm_times=%s",
             sig.type,
             metadata.get("source"),
+            sig.time,
             "confirm_indices" in metadata,
             metadata.get("confirm_indices", []),
+            metadata.get("confirm_times", []),
         )
         if metadata.get("source") != "MarketProfile":
             summary["skipped_source"] += 1
@@ -186,23 +188,16 @@ def market_profile_overlay_adapter(
         trigger_high = finite_float(metadata.get("trigger_high")) or anchor_price
         trigger_low = finite_float(metadata.get("trigger_low")) or anchor_price
 
-        level_gap = abs(float(anchor_price) - float(level_price))
-        wick_gap_above = max(0.0, float(trigger_high) - float(anchor_price))
-        wick_gap_below = max(0.0, float(anchor_price) - float(trigger_low))
-        base_offset = max(abs(float(anchor_price)) * 0.001, 0.1)
+        # Position bubble at the level price
+        bubble_price = float(level_price)
 
         if breakout_direction == "above":
-            offset = max(level_gap * 0.25, wick_gap_above * 0.5, base_offset)
-            bubble_price = float(anchor_price) + offset
             label = f"{level_label} breakout"
             detail_prefix = "Closed above"
         elif breakout_direction == "below":
-            offset = max(level_gap * 0.25, wick_gap_below * 0.5, base_offset)
-            bubble_price = float(anchor_price) - offset
             label = f"{level_label} breakdown"
             detail_prefix = "Closed below"
         else:
-            bubble_price = float(anchor_price) + base_offset
             label = f"{level_label} breakout"
             detail_prefix = "Closed near"
 
@@ -224,9 +219,11 @@ def market_profile_overlay_adapter(
         )
 
         pointer_hint = metadata.get("pointer_direction") or breakout_direction or metadata.get("direction")
+
+        # Confirmation markers (checkmarks)
         confirm_indices = metadata.get("confirm_indices") or []
         confirm_times = metadata.get("confirm_times") or []
-        marker_points: List[Dict[str, Any]] = []
+        confirm_markers: List[Dict[str, Any]] = []
 
         log.debug(
             "Processing breakout | confirm_indices=%s | confirm_times=%s | has_plot_df=%s",
@@ -235,15 +232,16 @@ def market_profile_overlay_adapter(
             plot_df is not None,
         )
 
-        if confirm_indices and plot_df is not None:
-            for idx, ts in zip(confirm_indices, confirm_times or confirm_indices):
+        if confirm_times and plot_df is not None:
+            for ts in confirm_times:
                 try:
-                    ts_val = pd.Timestamp(plot_df.index[int(idx)]) if isinstance(ts, (int, float)) else pd.Timestamp(ts)
+                    ts_val = pd.Timestamp(ts)
                     row = plot_df.loc[ts_val]
                     body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
                     body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
+
                     marker_point = {
-                        "time": int(ts_val.timestamp()),
+                        "time": ts,  # Send timestamp as-is, let frontend handle conversion
                         "price": (body_high + body_low) / 2.0,
                         "shape": "square",
                         "color": color,
@@ -251,11 +249,52 @@ def market_profile_overlay_adapter(
                         "position": "inBar",
                         "subtype": "marker",
                     }
-                    marker_points.append(marker_point)
+                    confirm_markers.append(marker_point)
                     log.debug("Created confirmation marker: %s", marker_point)
                 except Exception as e:
-                    log.warning("Failed to create confirmation marker for idx=%s, ts=%s: %s", idx, ts, e)
+                    log.warning("Failed to create confirmation marker for ts=%s: %s", ts, e)
                     continue
+
+        # Prior markers (circles)
+        prior_indices = metadata.get("prior_indices") or []
+        prior_times = metadata.get("prior_times") or []
+        prior_markers: List[Dict[str, Any]] = []
+
+        log.debug(
+            "Processing prior window | prior_indices=%s | prior_times=%s | has_plot_df=%s",
+            prior_indices,
+            prior_times,
+            plot_df is not None,
+        )
+
+        if prior_times and plot_df is not None:
+            for position, ts in enumerate(prior_times):
+                try:
+                    ts_val = pd.Timestamp(ts)
+                    row = plot_df.loc[ts_val]
+                    body_high = max(float(row.get("open", row.get("close"))), float(row.get("close")))
+                    body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
+
+                    # Circle with numbered text or bullet
+                    marker_text = str(position + 1) if len(prior_times) > 1 else "•"
+
+                    prior_marker = {
+                        "time": ts,  # Send timestamp as-is, let frontend handle conversion
+                        "price": (body_high + body_low) / 2.0,
+                        "shape": "circle",
+                        "color": color,
+                        "text": marker_text,
+                        "position": "inBar",
+                        "subtype": "marker",
+                    }
+                    prior_markers.append(prior_marker)
+                    log.debug("Created prior marker: %s", prior_marker)
+                except Exception as e:
+                    log.warning("Failed to create prior marker for ts=%s: %s", ts, e)
+                    continue
+
+        # Combine both marker types (prior first, then confirm)
+        marker_points = prior_markers + confirm_markers
 
         bubble = {
             "time": marker_time,
@@ -272,6 +311,13 @@ def market_profile_overlay_adapter(
         }
         if marker_points:
             bubble["_markers"] = marker_points
+
+        # Debug logging for bubble placement
+        log.info(
+            "Created bubble | time=%s (epoch=%s) | price=%.2f | level_price=%.2f | label=%s | markers=%d",
+            sig.time, marker_time, bubble_price, level_price, label, len(marker_points) if marker_points else 0
+        )
+
         bubbles.append(bubble)
         summary["converted_breakout"] += 1
 
@@ -300,13 +346,19 @@ def market_profile_overlay_adapter(
         if extra:
             markers.extend(extra)
 
+    # Count marker types for logging
+    confirm_marker_count = sum(1 for m in markers if m.get("shape") == "square")
+    prior_marker_count = sum(1 for m in markers if m.get("shape") == "circle")
+
     log.info(
-        "Market profile overlays final | bubbles=%d | confirmation_markers=%d",
+        "Market profile overlays final | bubbles=%d | markers=%d (confirm=%d, prior=%d)",
         len(bubbles),
         len(markers),
+        confirm_marker_count,
+        prior_marker_count,
     )
     if markers:
-        log.debug("Sample confirmation marker: %s", markers[0] if markers else None)
+        log.debug("Sample marker: %s", markers[0] if markers else None)
 
     payload = {
         "price_lines": [],
