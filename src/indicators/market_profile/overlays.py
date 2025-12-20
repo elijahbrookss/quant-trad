@@ -234,6 +234,10 @@ def market_profile_overlay_adapter(
 
         if confirm_times and plot_df is not None:
             for ts in confirm_times:
+                normalized_time = to_epoch_seconds(ts)
+                if normalized_time is None:
+                    log.warning("Skipping confirmation marker due to invalid timestamp | ts=%s", ts)
+                    continue
                 try:
                     ts_val = pd.Timestamp(ts)
                     row = plot_df.loc[ts_val]
@@ -241,7 +245,7 @@ def market_profile_overlay_adapter(
                     body_low = min(float(row.get("open", row.get("close"))), float(row.get("close")))
 
                     marker_point = {
-                        "time": ts,  # Send timestamp as-is, let frontend handle conversion
+                        "time": normalized_time,
                         "price": (body_high + body_low) / 2.0,
                         "shape": "square",
                         "color": color,
@@ -250,9 +254,19 @@ def market_profile_overlay_adapter(
                         "subtype": "marker",
                     }
                     confirm_markers.append(marker_point)
-                    log.debug("Created confirmation marker: %s", marker_point)
+                    log.debug(
+                        "Created confirmation marker | ts=%s | epoch=%s | price=%.5f",
+                        ts,
+                        normalized_time,
+                        marker_point["price"],
+                    )
                 except Exception as e:
-                    log.warning("Failed to create confirmation marker for ts=%s: %s", ts, e)
+                    log.warning(
+                        "Failed to create confirmation marker | ts=%s | epoch=%s | error=%s",
+                        ts,
+                        normalized_time,
+                        e,
+                    )
                     continue
 
         # Prior markers (circles)
@@ -269,6 +283,10 @@ def market_profile_overlay_adapter(
 
         if prior_times and plot_df is not None:
             for position, ts in enumerate(prior_times):
+                normalized_time = to_epoch_seconds(ts)
+                if normalized_time is None:
+                    log.warning("Skipping prior marker due to invalid timestamp | ts=%s", ts)
+                    continue
                 try:
                     ts_val = pd.Timestamp(ts)
                     row = plot_df.loc[ts_val]
@@ -279,7 +297,7 @@ def market_profile_overlay_adapter(
                     marker_text = str(position + 1) if len(prior_times) > 1 else "•"
 
                     prior_marker = {
-                        "time": ts,  # Send timestamp as-is, let frontend handle conversion
+                        "time": normalized_time,
                         "price": (body_high + body_low) / 2.0,
                         "shape": "circle",
                         "color": color,
@@ -288,9 +306,20 @@ def market_profile_overlay_adapter(
                         "subtype": "marker",
                     }
                     prior_markers.append(prior_marker)
-                    log.debug("Created prior marker: %s", prior_marker)
+                    log.debug(
+                        "Created prior marker | ts=%s | epoch=%s | price=%.5f | text=%s",
+                        ts,
+                        normalized_time,
+                        prior_marker["price"],
+                        marker_text,
+                    )
                 except Exception as e:
-                    log.warning("Failed to create prior marker for ts=%s: %s", ts, e)
+                    log.warning(
+                        "Failed to create prior marker | ts=%s | epoch=%s | error=%s",
+                        ts,
+                        normalized_time,
+                        e,
+                    )
                     continue
 
         # Combine both marker types (prior first, then confirm)
