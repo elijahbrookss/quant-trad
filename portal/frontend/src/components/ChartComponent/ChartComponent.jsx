@@ -1224,6 +1224,16 @@ export const ChartComponent = ({ chartId }) => {
         polylines: Array.isArray(norm.polylines) ? norm.polylines.length : 0,
         bubbles: Array.isArray(norm.bubbles) ? norm.bubbles.length : 0,
       });
+      const markerTimes = (norm.markers || []).map(m => m?.time).filter(t => Number.isFinite(t));
+      const bubbleTimes = (norm.bubbles || []).map(b => b?.time).filter(t => Number.isFinite(t));
+      if (markerTimes.length || bubbleTimes.length) {
+        overlayLogger.debug('overlay_time_bounds', {
+          markerMin: markerTimes.length ? Math.min(...markerTimes) : null,
+          markerMax: markerTimes.length ? Math.max(...markerTimes) : null,
+          bubbleMin: bubbleTimes.length ? Math.min(...bubbleTimes) : null,
+          bubbleMax: bubbleTimes.length ? Math.max(...bubbleTimes) : null,
+        });
+      }
 
       // 3a) Price lines.
       if (Array.isArray(payload.price_lines)) {

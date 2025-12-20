@@ -31,6 +31,7 @@ _RETEST_COLORS = {
     "resistance": "#f97316",  # amber
 }
 
+
 def _normalize_marker_time(
     ts: Any,
     plot_df: Optional[pd.DataFrame],
@@ -159,14 +160,21 @@ def market_profile_overlay_adapter(
             summary["skipped_source"] += 1
             continue
 
+        breakout_index = metadata.get("bar_index") or metadata.get("trigger_index")
+        marker_time = _normalize_marker_time(sig.time, plot_df, breakout_index, "bubble")
+        log.debug(
+            "Normalized bubble time | raw=%s | epoch=%s | idx=%s",
+            sig.time,
+            marker_time,
+            breakout_index,
+        )
+        if marker_time is None:
+            summary["skipped_time"] += 1
+            continue
+
         level_price = _resolve_level_price(metadata)
         if level_price is None:
             summary["skipped_price"] += 1
-            continue
-
-        marker_time = to_epoch_seconds(sig.time)
-        if marker_time is None:
-            summary["skipped_time"] += 1
             continue
 
         level_label = _level_label(metadata)
@@ -395,8 +403,14 @@ def market_profile_overlay_adapter(
 
         # Debug logging for bubble placement
         log.info(
-            "Created bubble | time=%s (epoch=%s) | price=%.2f | level_price=%.2f | label=%s | markers=%d",
-            sig.time, marker_time, bubble_price, level_price, label, len(marker_points) if marker_points else 0
+            "Created bubble | time=%s (epoch=%s) | idx=%s | price=%.2f | level_price=%.2f | label=%s | markers=%d",
+            sig.time,
+            marker_time,
+            breakout_index,
+            bubble_price,
+            level_price,
+            label,
+            len(marker_points) if marker_points else 0,
         )
 
         bubbles.append(bubble)
@@ -440,6 +454,18 @@ def market_profile_overlay_adapter(
     )
     if markers:
         log.debug("Sample marker: %s", markers[0] if markers else None)
+
+    marker_times = [m.get("time") for m in markers if isinstance(m.get("time"), (int, float))]
+    bubble_times = [b.get("time") for b in bubbles if isinstance(b.get("time"), (int, float))]
+    log.debug(
+        "Overlay time bounds | marker_min=%s | marker_max=%s | bubble_min=%s | bubble_max=%s | marker_count=%d | bubble_count=%d",
+        min(marker_times) if marker_times else None,
+        max(marker_times) if marker_times else None,
+        min(bubble_times) if bubble_times else None,
+        max(bubble_times) if bubble_times else None,
+        len(marker_times),
+        len(bubble_times),
+    )
 
     payload = {
         "price_lines": [],
