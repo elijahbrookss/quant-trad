@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
+import { createChart, CandlestickSeries } from 'lightweight-charts';
 import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
@@ -1029,7 +1029,6 @@ export const ChartComponent = ({ chartId }) => {
             // ignore failures when price line already removed
           }
         });
-        overlayHandles?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
         pvMgrRef.current = null;
         chartRef.current?.remove();
@@ -1181,13 +1180,6 @@ export const ChartComponent = ({ chartId }) => {
       }
     });
     overlayHandlesRef.current.priceLines = [];
-
-    // Ensure markers plugin exists; clear existing markers.
-    if (!overlayHandlesRef.current.markersApi) {
-      overlayHandlesRef.current.markersApi = createSeriesMarkers(seriesRef.current, []);
-    } else {
-      overlayHandlesRef.current.markersApi.setMarkers([]);
-    }
 
     pvMgrRef.current?.clearFrame();
 
@@ -1424,12 +1416,9 @@ export const ChartComponent = ({ chartId }) => {
     // 4) Sort markers for deterministic rendering.
     markers.sort((a, b) => a.time - b.time);
 
-    // 5) Apply markers to the main series.
+    // 5) Apply markers via pane view manager (proper UTC support)
     try {
-      // seriesRef.current.setMarkers(markers);
-      overlayHandlesRef.current.markersApi.setMarkers(markers);
-      
-
+      pvMgrRef.current?.setMarkers(markers);
       pvMgrRef.current?.setTouchPoints(touchPoints);
       pvMgrRef.current?.setVABlocks(boxes, {
         lastSeriesTime: lastBarRef.current?.time,

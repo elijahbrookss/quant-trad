@@ -179,7 +179,7 @@ def market_profile_overlay_adapter(
 
         level_label = _level_label(metadata)
 
-        if sig.type == "retest":
+        if sig.type in ("retest", "retest_v2"):
             retest_role = str(metadata.get("retest_role", "retest")).lower()
             color = _RETEST_COLORS.get(retest_role, "#38bdf8")
             anchor_price = finite_float(metadata.get("retest_close")) or level_price

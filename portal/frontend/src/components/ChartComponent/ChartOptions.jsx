@@ -1,5 +1,5 @@
 import {CrosshairMode, LineStyle} from 'lightweight-charts'
- 
+
  export const options = {
       layout: {
         textColor: '#DDD',
@@ -21,7 +21,36 @@ import {CrosshairMode, LineStyle} from 'lightweight-charts'
           color: '#C3BCDB70',
           labelBackgroundColor: '#000',
         },
-      }
+      },
+      localization: {
+        timeFormatter: (businessDayOrTimestamp) => {
+          // Handle both business days and UTC timestamps
+          if (typeof businessDayOrTimestamp === 'object') {
+            // Business day format
+            const { year, month, day } = businessDayOrTimestamp;
+            return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          }
+          // UTC timestamp in seconds
+          const date = new Date(businessDayOrTimestamp * 1000);
+          return date.toISOString().slice(11, 19);
+        },
+        dateFormatter: (businessDayOrTimestamp) => {
+          if (typeof businessDayOrTimestamp === 'object') {
+            const { year, month, day } = businessDayOrTimestamp;
+            return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          }
+          const date = new Date(businessDayOrTimestamp * 1000);
+          const year = date.getUTCFullYear();
+          const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+          const day = String(date.getUTCDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        },
+      },
+      timeScale: {
+        // Force UTC time interpretation
+        timeVisible: true,
+        secondsVisible: false,
+      },
     }
 
 export const seriesOptions = {
