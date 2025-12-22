@@ -551,6 +551,7 @@ def run_indicator_rules(
             rule_name = getattr(rule, "__name__", repr(rule))
             rule_id = getattr(rule, "signal_id", None)
             t_start = time.perf_counter()
+            signals_before = len(signals)
             try:
                 results = rule(context, payloads)  # Pass ALL payloads
                 if results:
@@ -559,9 +560,10 @@ def run_indicator_rules(
                             pass  # Signal added to list
             except Exception:
                 logger.exception("Bootstrap rule error | rule=%s", rule_name)
+            signals_added = len(signals) - signals_before
             logger.debug(
                 "Bootstrap rule complete | rule=%s | emitted=%d | time_ms=%d",
-                rule_name, len(signals), int((time.perf_counter() - t_start) * 1000)
+                rule_name, signals_added, int((time.perf_counter() - t_start) * 1000)
             )
 
     # Phase 2: PER_PAYLOAD - Run once per payload (standard behavior)
@@ -606,6 +608,7 @@ def run_indicator_rules(
             rule_name = getattr(rule, "__name__", repr(rule))
             rule_id = getattr(rule, "signal_id", None)
             t_start = time.perf_counter()
+            signals_before = len(signals)
             try:
                 results = rule(context, payloads)  # Pass ALL payloads
                 if results:
@@ -614,9 +617,10 @@ def run_indicator_rules(
                             pass  # Signal added to list
             except Exception:
                 logger.exception("Aggregation rule error | rule=%s", rule_name)
+            signals_added = len(signals) - signals_before
             logger.debug(
                 "Aggregation rule complete | rule=%s | emitted=%d | time_ms=%d",
-                rule_name, len(signals), int((time.perf_counter() - t_start) * 1000)
+                rule_name, signals_added, int((time.perf_counter() - t_start) * 1000)
             )
 
     if indicator_type == "market_profile":
