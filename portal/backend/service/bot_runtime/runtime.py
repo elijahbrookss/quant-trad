@@ -83,7 +83,6 @@ class BotRuntime:
         self._pause_event.set()
         self._paused = False
         self._series: List[StrategySeries] = []
-        self._primary_series: Optional[StrategySeries] = None
         self._total_bars: int = 0
         self._bar_index: int = 0
         self._prepared: bool = False
@@ -178,13 +177,19 @@ class BotRuntime:
             self._set_error_state(message)
             raise RuntimeError(message)
         self._series = streams
-        self._primary_series = self._series[0]
-        self._total_bars = len(self._primary_series.candles)
+        # Calculate total bars as max across all series (for multi-instrument support)
+        self._total_bars = max(len(series.candles) for series in self._series) if self._series else 0
         self._bar_index = 0
         self._rebuild_overlay_cache()
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
+        logger.info(
+            "Bot runtime prepared | bot=%s | series=%d | total_bars=%d",
+            self.bot_id,
+            len(self._series),
+            self._total_bars,
+        )
         self._log_event("prepared", total_bars=self._total_bars)
         self._push_update("prepared")
 
@@ -387,7 +392,6 @@ class BotRuntime:
         with self._lock:
             self._prepared = False
             self._series = []
-            self._primary_series = None
             self._total_bars = 0
             self._bar_index = 0
             self._chart_overlays = []
@@ -459,8 +463,8 @@ class BotRuntime:
                 break
             if not self._pause_event.wait(timeout=0.2):
                 continue
-            series = self._primary_series
-            if not series or not series.candles:
+            # Check if any series has candles remaining
+            if not self._series or not any(len(s.candles) > self._bar_index for s in self._series):
                 break
             self._apply_bar(self._bar_index)
             self._sleep_between_bars()
@@ -470,8 +474,9 @@ class BotRuntime:
             status = "completed"
         self._next_bar_at = None
         self._log_event(status, message=f"Bot runtime {status}")
-        if self._primary_series and self._primary_series.candles:
-            self._update_state(self._primary_series.candles[-1], status=status)
+        # Update state with last candle from first series (backward compatibility)
+        if self._series and self._series[0].candles:
+            self._update_state(self._series[0].candles[-1], status=status)
         else:
             with self._lock:
                 self.state.update({"status": status})
@@ -522,9 +527,9 @@ class BotRuntime:
             self._update_trade_overlay(series)
             series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
         self._bar_index = index + 1
-        primary = self._primary_series
-        if primary and primary.candles:
-            candle = primary.candles[min(index, len(primary.candles) - 1)]
+        # Update state with current candle from first series (backward compatibility)
+        if self._series and self._series[0].candles:
+            candle = self._series[0].candles[min(index, len(self._series[0].candles) - 1)]
             self._update_state(candle)
         self._push_update("bar")
 
@@ -588,9 +593,8 @@ class BotRuntime:
             if self._append_series_updates(series, start_iso, end_iso):
                 updated = True
         if updated:
-            primary = self._primary_series
-            if primary:
-                self._total_bars = len(primary.candles)
+            # Recalculate total bars as max across all series
+            self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
             self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended live candles")
             self._push_update("live_refresh")
@@ -889,8 +893,10 @@ class BotRuntime:
                     continue
 
     def _visible_candles(self) -> List[Dict[str, Any]]:
+        # Use first series for chart state (backward compatibility)
+        primary = self._series[0] if self._series else None
         return self._chart_state_builder.visible_candles(
-            self._primary_series,
+            primary,
             self.state.get("status"),
             self._bar_index,
             self._intrabar_manager,
@@ -975,7 +981,8 @@ class BotRuntime:
         )
 
     def _current_epoch(self) -> Optional[int]:
-        primary = self._primary_series
+        # Use first series for current epoch (backward compatibility)
+        primary = self._series[0] if self._series else None
         if not primary or not primary.candles:
             return None
         if self._bar_index <= 0:
