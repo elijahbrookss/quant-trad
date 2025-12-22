@@ -153,6 +153,7 @@ class IndicatorBreakoutCache:
                 rule_signal_types={
                     "market_profile_breakout": {"breakout"},
                     "market_profile_retest": {"retest"},
+                    "market_profile_retest_v2": {"retest"},
                 },
                 context_defaults={_BREAKOUT_CACHE_INITIALISED: True},
             ),

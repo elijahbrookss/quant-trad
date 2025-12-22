@@ -458,8 +458,12 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
-      const latest = await fetchAndSyncIndicators({ silent: !needsIndicatorUpdate });
-      await refreshEnabledOverlays(latest);
+      // Only refetch and refresh overlays if indicator params actually changed
+      // Signal rule changes are client-side only (stored in chart state)
+      if (needsIndicatorUpdate) {
+        const latest = await fetchAndSyncIndicators({ silent: false });
+        await refreshEnabledOverlays(latest);
+      }
     } catch (e) {
       setError(e.message);
       logError('indicator_save_failed', e);

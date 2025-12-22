@@ -51,6 +51,26 @@ _RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
                 },
             ],
         },
+        "market_profile_retest_v2": {
+            "signal_type": "retest",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long retest",
+                    "description": (
+                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
+                        " favouring continuation to the upside."
+                    ),
+                },
+                {
+                    "id": "short",
+                    "label": "Short retest",
+                    "description": (
+                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds," " signalling continuation lower."
+                    ),
+                },
+            ],
+        },
     },
     "pivot_level": {
         "pivot_breakout": {

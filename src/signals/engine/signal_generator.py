@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
 from signals.base import BaseSignal
@@ -25,6 +26,19 @@ logger = logging.getLogger(__name__)
 
 RuleCallable = Callable[[Mapping[str, Any], Any], Optional[Sequence[Mapping[str, Any]]]]
 OverlayAdapter = Callable[[Sequence[BaseSignal], "DataFrame"], Sequence[Mapping[str, Any]]]
+
+
+class RulePhase(Enum):
+    """Execution phase for signal rules.
+
+    Rules are executed in phase order:
+    1. BOOTSTRAP: Run once with all payloads, typically to populate caches
+    2. PER_PAYLOAD: Run once per payload (default behavior)
+    3. AGGREGATION: Run once with all payloads, typically to consume caches
+    """
+    BOOTSTRAP = "bootstrap"
+    PER_PAYLOAD = "per-payload"
+    AGGREGATION = "aggregation"
 
 
 @dataclass
@@ -212,8 +226,19 @@ def signal_rule(
     rule_id: Optional[str] = None,
     label: Optional[str] = None,
     description: Optional[str] = None,
+    phase: RulePhase = RulePhase.PER_PAYLOAD,
+    depends_on: Optional[List[str]] = None,
 ) -> Callable[[RuleCallable], RuleCallable]:
-    """Decorator to attach metadata and register a signal rule for an indicator."""
+    """Decorator to attach metadata and register a signal rule for an indicator.
+
+    Args:
+        indicator: Indicator type this rule applies to
+        rule_id: Unique identifier for the rule
+        label: Human-readable label
+        description: Description of what the rule detects
+        phase: Execution phase (BOOTSTRAP, PER_PAYLOAD, or AGGREGATION)
+        depends_on: List of rule_ids this rule depends on (must run after)
+    """
 
     def decorator(func: RuleCallable) -> RuleCallable:
         if rule_id:
@@ -222,6 +247,10 @@ def signal_rule(
             setattr(func, "signal_label", label)
         if description:
             setattr(func, "signal_description", description)
+
+        # Store phase and dependency metadata
+        setattr(func, "_rule_phase", phase)
+        setattr(func, "_rule_depends_on", depends_on or [])
 
         registration = _get_decorated_registration(indicator)
         registration.rules.append(func)
@@ -253,23 +282,83 @@ def overlay_adapter(indicator: Union[str, Any]) -> Callable[[OverlayAdapter], Ov
     return decorator
 
 
+def _resolve_dependencies(
+    all_rules: Sequence[RuleCallable],
+    explicitly_requested: Set[str],
+) -> Tuple[List[RuleCallable], Set[str]]:
+    """Resolve rule dependencies and return (rules_to_execute, explicitly_requested_ids).
+
+    Args:
+        all_rules: All available rules
+        explicitly_requested: Set of rule_ids that were explicitly requested
+
+    Returns:
+        - rules_to_execute: List of rules to execute (includes dependencies)
+        - explicitly_requested_ids: Set of rule_ids that were explicitly requested (unchanged)
+    """
+    # Build a map of rule_id -> rule
+    rules_by_id: Dict[str, RuleCallable] = {}
+    for rule in all_rules:
+        rule_id = getattr(rule, "signal_id", None)
+        if rule_id:
+            rules_by_id[rule_id] = rule
+
+    # Track which rules to execute (start with explicitly requested)
+    rules_to_execute_ids: Set[str] = set(explicitly_requested)
+
+    # Recursively add dependencies
+    to_process = list(explicitly_requested)
+    while to_process:
+        current_rule_id = to_process.pop()
+        current_rule = rules_by_id.get(current_rule_id)
+        if not current_rule:
+            continue
+
+        dependencies = getattr(current_rule, "_rule_depends_on", [])
+        for dep_id in dependencies:
+            if dep_id not in rules_to_execute_ids:
+                logger.debug("Adding dependency: %s (required by %s)", dep_id, current_rule_id)
+                rules_to_execute_ids.add(dep_id)
+                to_process.append(dep_id)
+
+    # Build final list of rules to execute (preserve original order)
+    final_rules = [rule for rule in all_rules if getattr(rule, "signal_id", None) in rules_to_execute_ids]
+
+    return final_rules, explicitly_requested
+
+
 def _filter_enabled_rules(
     rules: Sequence[RuleCallable],
     enabled_rules: Optional[Iterable[Any]],
     indicator_type: str,
-) -> Sequence[RuleCallable]:
+) -> Tuple[Sequence[RuleCallable], Set[str]]:
+    """Filter rules based on enabled_rules config and resolve dependencies.
+
+    Returns:
+        - filtered_rules: List of rules to execute (includes dependencies)
+        - explicitly_requested: Set of rule_ids that were explicitly requested (for signal filtering)
+    """
     if not enabled_rules:
-        return rules
+        # No filter specified - all rules are explicitly requested
+        explicitly_requested = {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
+        return rules, explicitly_requested
 
     desired: Set[str] = {str(rule_id).lower() for rule_id in enabled_rules if rule_id is not None}
     if not desired:
-        return rules
+        explicitly_requested = {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
+        return rules, explicitly_requested
 
+    # Find explicitly requested rules
     filtered: List[RuleCallable] = []
+    explicitly_requested: Set[str] = set()
+
     for rule in rules:
         identifiers = {ident.lower() for ident in _rule_identifiers(rule)}
         if identifiers & desired:
             filtered.append(rule)
+            rule_id = getattr(rule, "signal_id", None)
+            if rule_id:
+                explicitly_requested.add(rule_id)
 
     if not filtered:
         logger.warning(
@@ -278,9 +367,12 @@ def _filter_enabled_rules(
             sorted(desired),
             [tuple(_rule_identifiers(rule))[0] for rule in rules],
         )
-        return rules
+        return rules, {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
 
-    return tuple(filtered)
+    # Resolve dependencies
+    final_rules, explicitly_requested = _resolve_dependencies(rules, explicitly_requested)
+
+    return tuple(final_rules), explicitly_requested
 
 
 def _resolve_payloads(config: Mapping[str, Any]) -> List[Any]:
@@ -335,6 +427,68 @@ def _metadata_to_signal(meta: Mapping[str, Any], default_confidence: float = 1.0
         metadata=metadata,
     )
 
+
+def _validate_and_process_signal(
+    meta: Mapping[str, Any],
+    rule_name: str,
+    rule_id: Optional[str],
+    context: Mapping[str, Any],
+    validate_only: bool,
+    signals: List[BaseSignal],
+    explicitly_requested: Set[str],
+    payload_idx: Optional[int] = None,
+) -> bool:
+    """Validate signal metadata and add to signals list. Returns True if successful.
+
+    Args:
+        rule_id: The rule_id of the rule that generated this signal
+        explicitly_requested: Set of rule_ids that were explicitly requested by the user
+
+    Note:
+        Signals are only emitted if the rule_id is in explicitly_requested.
+        This allows dependency rules to run without polluting the signal output.
+    """
+    # Validate minimal fields before conversion
+    missing = {"type", "time"} - set(meta.keys())
+    if missing:
+        logger.warning(
+            "Result missing required keys %s | rule=%s%s | meta=%r",
+            missing,
+            rule_name,
+            f" | payload_idx={payload_idx}" if payload_idx is not None else "",
+            meta
+        )
+        return False
+
+    # Ensure symbol is set
+    meta_with_symbol = meta
+    if "symbol" not in meta and "symbol" in context:
+        meta_with_symbol = dict(meta)
+        meta_with_symbol.setdefault("symbol", context["symbol"])
+
+    if validate_only:
+        logger.debug("VALIDATE-ONLY: would emit %r", meta_with_symbol)
+        return True
+
+    # Filter signals: only emit from explicitly requested rules
+    if rule_id and rule_id not in explicitly_requested:
+        logger.debug(
+            "Skipping signal from dependency rule | rule=%s | rule_id=%s | signal=%r",
+            rule_name, rule_id, meta_with_symbol.get("type")
+        )
+        return True  # Still return True (valid signal, just filtered)
+
+    try:
+        sig = _metadata_to_signal(meta_with_symbol)
+        signals.append(sig)
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to convert metadata to BaseSignal | rule=%s | meta=%r",
+            rule_name, meta_with_symbol
+        )
+        return False
+
 def run_indicator_rules(
     indicator: Union[str, Any],
     market_df: "DataFrame",
@@ -381,72 +535,89 @@ def run_indicator_rules(
         logger.debug("Context preview=\n%s", pformat(ctx_preview))
 
     enabled_rules = config.get("enabled_rules")
-    active_rules = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
+    active_rules, explicitly_requested = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
+
+    # Group rules by execution phase
+    bootstrap_rules = [r for r in active_rules if getattr(r, "_rule_phase", RulePhase.PER_PAYLOAD) == RulePhase.BOOTSTRAP]
+    per_payload_rules = [r for r in active_rules if getattr(r, "_rule_phase", RulePhase.PER_PAYLOAD) == RulePhase.PER_PAYLOAD]
+    aggregation_rules = [r for r in active_rules if getattr(r, "_rule_phase", RulePhase.PER_PAYLOAD) == RulePhase.AGGREGATION]
 
     signals: List[BaseSignal] = []
-    total_rules = len(active_rules)
-    for r_idx, rule in enumerate(active_rules):
-        rule_name = getattr(rule, "__name__", repr(rule))
-        t_rule_start = time.perf_counter()
-        logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
 
-        rule_emitted = 0
-        for p_idx, payload in enumerate(payloads):
-            t_payload_start = time.perf_counter()
+    # Phase 1: BOOTSTRAP - Run once with all payloads (populate caches)
+    if bootstrap_rules:
+        logger.debug("Phase 1: BOOTSTRAP | rules=%d", len(bootstrap_rules))
+        for rule in bootstrap_rules:
+            rule_name = getattr(rule, "__name__", repr(rule))
+            rule_id = getattr(rule, "signal_id", None)
+            t_start = time.perf_counter()
             try:
-                results = rule(context, payload)
+                results = rule(context, payloads)  # Pass ALL payloads
+                if results:
+                    for meta in results:
+                        if _validate_and_process_signal(meta, rule_name, rule_id, context, validate_only, signals, explicitly_requested):
+                            pass  # Signal added to list
             except Exception:
-                logger.exception(
-                    "Rule error | rule=%s | payload_idx=%d | payload=%r",
-                    rule_name, p_idx, payload
-                )
-                continue
-
-            took_ms = int((time.perf_counter() - t_payload_start) * 1000)
-            count = 0 if not results else len(results)
+                logger.exception("Bootstrap rule error | rule=%s", rule_name)
             logger.debug(
-                "Rule payload done | rule=%s | payload_idx=%d | results=%d | %dms",
-                rule_name, p_idx, count, took_ms
+                "Bootstrap rule complete | rule=%s | emitted=%d | time_ms=%d",
+                rule_name, len(signals), int((time.perf_counter() - t_start) * 1000)
             )
 
-            if not results:
-                continue
+    # Phase 2: PER_PAYLOAD - Run once per payload (standard behavior)
+    if per_payload_rules:
+        logger.debug("Phase 2: PER_PAYLOAD | rules=%d | payloads=%d", len(per_payload_rules), len(payloads))
+        for rule in per_payload_rules:
+            rule_name = getattr(rule, "__name__", repr(rule))
+            rule_id = getattr(rule, "signal_id", None)
+            t_rule_start = time.perf_counter()
 
-            for meta_idx, meta in enumerate(results):
-                # Validate minimal fields before conversion
-                missing = {"type", "time"} - set(meta.keys())
-                if missing:
-                    logger.warning(
-                        "Result missing required keys %s | rule=%s | payload_idx=%d | meta=%r",
-                        missing, rule_name, p_idx, meta
-                    )
-                    continue
-
-                # Ensure symbol is set
-                if "symbol" not in meta and "symbol" in context:
-                    meta = dict(meta)
-                    meta.setdefault("symbol", context["symbol"])
-
-                if validate_only:
-                    logger.debug("VALIDATE-ONLY: would emit %r", meta)
-                    continue
-
+            for p_idx, payload in enumerate(payloads):
+                t_payload_start = time.perf_counter()
                 try:
-                    sig = _metadata_to_signal(meta)
+                    results = rule(context, payload)
                 except Exception:
                     logger.exception(
-                        "Failed to convert metadata to BaseSignal | rule=%s | meta_idx=%d | meta=%r",
-                        rule_name, meta_idx, meta
+                        "Rule error | rule=%s | payload_idx=%d | payload=%r",
+                        rule_name, p_idx, payload
                     )
                     continue
 
-                signals.append(sig)
-                rule_emitted += 1
+                took_ms = int((time.perf_counter() - t_payload_start) * 1000)
+                count = 0 if not results else len(results)
+                logger.debug(
+                    "Rule payload done | rule=%s | payload_idx=%d | results=%d | %dms",
+                    rule_name, p_idx, count, took_ms
+                )
 
-        logger.debug(
-            "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
-            rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
-        )
+                if results:
+                    for meta in results:
+                        _validate_and_process_signal(meta, rule_name, rule_id, context, validate_only, signals, explicitly_requested, p_idx)
+
+            logger.debug(
+                "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
+                rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
+            )
+
+    # Phase 3: AGGREGATION - Run once with all payloads (consume caches)
+    if aggregation_rules:
+        logger.debug("Phase 3: AGGREGATION | rules=%d", len(aggregation_rules))
+        for rule in aggregation_rules:
+            rule_name = getattr(rule, "__name__", repr(rule))
+            rule_id = getattr(rule, "signal_id", None)
+            t_start = time.perf_counter()
+            try:
+                results = rule(context, payloads)  # Pass ALL payloads
+                if results:
+                    for meta in results:
+                        if _validate_and_process_signal(meta, rule_name, rule_id, context, validate_only, signals, explicitly_requested):
+                            pass  # Signal added to list
+            except Exception:
+                logger.exception("Aggregation rule error | rule=%s", rule_name)
+            logger.debug(
+                "Aggregation rule complete | rule=%s | emitted=%d | time_ms=%d",
+                rule_name, len(signals), int((time.perf_counter() - t_start) * 1000)
+            )
 
     if indicator_type == "market_profile":
         type_counts = Counter(sig.type for sig in signals if getattr(sig, "type", None))
@@ -600,6 +771,7 @@ def describe_indicator_rules(indicator_type: str) -> List[Mapping[str, Any]]:
 
 
 __all__ = [
+    "RulePhase",
     "indicator",
     "signal_rule",
     "overlay_adapter",

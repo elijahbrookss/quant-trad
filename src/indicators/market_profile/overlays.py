@@ -122,6 +122,85 @@ def _va_span_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"VAH {vah:.2f} / VAL {val:.2f}"
 
 
+def _apply_collision_avoidance(
+    bubbles: List[Dict[str, Any]],
+    time_threshold_seconds: int = 3600,  # 1 hour
+    price_threshold_percent: float = 0.5,  # 0.5% price difference
+) -> None:
+    """
+    Adjust bubble positions to prevent overlapping signals.
+
+    Modifies bubbles in-place to offset prices when signals are too close together.
+    Uses a simple vertical stacking approach for overlapping bubbles.
+
+    Args:
+        bubbles: List of bubble dictionaries to adjust
+        time_threshold_seconds: Max time difference to consider bubbles overlapping (in seconds)
+        price_threshold_percent: Max price difference % to consider bubbles overlapping
+    """
+    if not bubbles:
+        return
+
+    # Sort bubbles by time, then price
+    bubbles.sort(key=lambda b: (b.get("time", 0), b.get("price", 0)))
+
+    # Track occupied positions (time, price_range) and their offset levels
+    occupied_positions: List[Dict[str, Any]] = []
+
+    for bubble in bubbles:
+        bubble_time = bubble.get("time")
+        bubble_price = bubble.get("price")
+
+        if bubble_time is None or bubble_price is None:
+            continue
+
+        # Find overlapping bubbles
+        offset_level = 0
+        price_range = bubble_price * (price_threshold_percent / 100.0)
+
+        for pos in occupied_positions:
+            # Check if this bubble overlaps with an existing position
+            time_overlap = abs(bubble_time - pos["time"]) <= time_threshold_seconds
+            price_overlap = abs(bubble_price - pos["price"]) <= (pos["price_range"] + price_range)
+
+            if time_overlap and price_overlap:
+                # Found overlap - need to offset this bubble
+                offset_level = max(offset_level, pos["offset_level"] + 1)
+
+        # Apply offset if needed (shift price by small percentage per level)
+        if offset_level > 0:
+            # Determine offset direction based on bubble direction or default to upward
+            direction = bubble.get("direction", "above")
+            if direction in ("below", "down"):
+                # Shift downward for bubbles pointing down
+                price_offset_multiplier = -1
+            else:
+                # Shift upward for bubbles pointing up
+                price_offset_multiplier = 1
+
+            # Apply 0.3% offset per level
+            offset_percent = 0.3 * offset_level * price_offset_multiplier
+            original_price = bubble_price
+            bubble["price"] = bubble_price * (1 + offset_percent / 100.0)
+
+            log.debug(
+                "Applied collision avoidance | time=%s | original_price=%.2f | new_price=%.2f | offset_level=%d | direction=%s",
+                bubble_time,
+                original_price,
+                bubble["price"],
+                offset_level,
+                direction,
+            )
+
+        # Record this bubble's position
+        occupied_positions.append({
+            "time": bubble_time,
+            "price": bubble["price"],  # Use adjusted price
+            "price_range": price_range,
+            "offset_level": offset_level,
+        })
+
+
 @overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],
@@ -161,10 +240,13 @@ def market_profile_overlay_adapter(
             continue
 
         breakout_index = metadata.get("bar_index") or metadata.get("trigger_index")
-        marker_time = _normalize_marker_time(sig.time, plot_df, breakout_index, "bubble")
+
+        # Use the signal time directly instead of the origin time
+        signal_time = metadata.get("time") or metadata.get("trigger_time") or sig.time
+        marker_time = _normalize_marker_time(signal_time, plot_df, breakout_index, "bubble")
         log.debug(
-            "Normalized bubble time | raw=%s | epoch=%s | idx=%s",
-            sig.time,
+            "Normalized bubble time | signal_time=%s | epoch=%s | idx=%s",
+            signal_time,
             marker_time,
             breakout_index,
         )
@@ -182,7 +264,8 @@ def market_profile_overlay_adapter(
         if sig.type in ("retest", "retest_v2"):
             retest_role = str(metadata.get("retest_role", "retest")).lower()
             color = _RETEST_COLORS.get(retest_role, "#38bdf8")
-            anchor_price = finite_float(metadata.get("retest_close")) or level_price
+            # Position at retest close instead of level price
+            anchor_price = finite_float(metadata.get("retest_close")) or finite_float(metadata.get("trigger_close")) or level_price
             bars_since = metadata.get("bars_since_breakout")
             if bars_since is not None:
                 detail = f"Retest after {int(bars_since)} bars near {level_label} {float(level_price):.2f}"
@@ -236,12 +319,28 @@ def market_profile_overlay_adapter(
 
         breakout_direction = str(metadata.get("breakout_direction", "")).lower()
         color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")
-        anchor_price = finite_float(metadata.get("trigger_close")) or level_price
-        trigger_high = finite_float(metadata.get("trigger_high")) or anchor_price
-        trigger_low = finite_float(metadata.get("trigger_low")) or anchor_price
 
-        # Position bubble at the level price
-        bubble_price = float(level_price)
+        # Get trigger candle OHLC from plot_df using breakout_index
+        trigger_close = None
+        if breakout_index is not None and plot_df is not None:
+            try:
+                if isinstance(breakout_index, int) and 0 <= breakout_index < len(plot_df):
+                    row = plot_df.iloc[breakout_index]
+                    trigger_close = finite_float(row.get("close"))
+            except Exception as exc:
+                log.warning(
+                    "Failed to read trigger close from plot_df | idx=%s | error=%s",
+                    breakout_index,
+                    exc,
+                )
+
+        # Fallback to metadata or level price
+        if trigger_close is None:
+            trigger_close = finite_float(metadata.get("trigger_close"))
+        anchor_price = trigger_close or level_price
+
+        # Position bubble at the close of the signal candle instead of level price
+        bubble_price = float(anchor_price)
 
         if breakout_direction == "above":
             label = f"{level_label} breakout"
@@ -258,9 +357,8 @@ def market_profile_overlay_adapter(
         meta_label = _confidence_meta(metadata)
         if meta_label:
             meta_bits.append(meta_label)
-        value_area_id = metadata.get("value_area_id")
-        if value_area_id:
-            meta_bits.append(str(value_area_id))
+        # Don't include value_area_id in meta text - it's an ISO timestamp that's confusing to users
+        # value_area_id is still in metadata for matching breakouts to retests
         va_span = _va_span_meta(metadata)
         if va_span:
             meta_bits.append(va_span)
@@ -415,11 +513,12 @@ def market_profile_overlay_adapter(
 
         # Debug logging for bubble placement
         log.info(
-            "Created bubble | time=%s (epoch=%s) | idx=%s | price=%.2f | level_price=%.2f | label=%s | markers=%d",
-            sig.time,
+            "Created bubble | signal_time=%s (epoch=%s) | idx=%s | price=%.2f (close=%.2f, level=%.2f) | label=%s | markers=%d",
+            signal_time,
             marker_time,
             breakout_index,
             bubble_price,
+            trigger_close or 0,
             level_price,
             label,
             len(marker_points) if marker_points else 0,
@@ -447,6 +546,10 @@ def market_profile_overlay_adapter(
 
     if not bubbles:
         return []
+
+    # Apply collision avoidance to prevent overlapping bubbles
+    _apply_collision_avoidance(bubbles)
+
     markers: List[Dict[str, Any]] = []
     for b in bubbles:
         extra = b.pop("_markers", None)
