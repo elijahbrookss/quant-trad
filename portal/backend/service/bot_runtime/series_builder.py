@@ -79,7 +79,7 @@ class SeriesBuilder:
             strategy_ids: List of strategy IDs to build series for
 
         Returns:
-            List of StrategySeries ready for runtime execution
+            List of StrategySeries ready for runtime execution (one per enabled instrument per strategy)
 
         Raises:
             ValueError: If any strategy not found
@@ -88,8 +88,9 @@ class SeriesBuilder:
         for strategy_id in strategy_ids:
             # Load strategy fresh from DB with proper typing
             strategy = StrategyLoader.fetch_strategy(strategy_id)
-            stream = self._build_series_for_strategy(strategy)
-            series_list.append(stream)
+            # Build one series per enabled instrument
+            series_per_strategy = self._build_series_for_strategy(strategy)
+            series_list.extend(series_per_strategy)
         return series_list
 
     def append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
@@ -275,30 +276,117 @@ class SeriesBuilder:
 
         return atm_template
 
-    def _build_series_for_strategy(self, strategy: Strategy) -> StrategySeries:
-        """Build complete series for a single strategy (orchestrator method).
+    @staticmethod
+    def _apply_risk_multiplier(atm_template: Dict[str, Any], multiplier: float) -> Dict[str, Any]:
+        """Apply risk multiplier to ATM template.
+
+        Multiplies the 'risk_per_trade' field (if present) by the given multiplier.
+        This allows per-instrument risk scaling within a strategy.
+
+        Args:
+            atm_template: Original ATM template
+            multiplier: Risk multiplier (e.g., 1.5 = 150% of base risk)
+
+        Returns:
+            Modified ATM template with adjusted risk
+        """
+        template_copy = deepcopy(atm_template)
+        if "risk_per_trade" in template_copy:
+            original_risk = template_copy["risk_per_trade"]
+            template_copy["risk_per_trade"] = original_risk * multiplier
+        return template_copy
+
+    def _build_series_for_strategy(self, strategy: Strategy) -> List[StrategySeries]:
+        """Build series for all enabled instruments in a strategy.
+
+        This method coordinates multi-instrument support by:
+        1. Iterating through all enabled instrument_links
+        2. Building a separate StrategySeries for each instrument
+        3. Applying per-instrument risk multipliers
+
+        Args:
+            strategy: Strategy domain model loaded from database
+
+        Returns:
+            List of StrategySeries (one per enabled instrument)
+
+        Raises:
+            RuntimeError: If strategy has no instruments or cannot build series
+        """
+        if not strategy.instrument_links:
+            raise RuntimeError(f"Strategy {strategy.id} has no instruments configured")
+
+        series_list: List[StrategySeries] = []
+
+        for instrument_link in strategy.instrument_links:
+            # Skip disabled instruments
+            if not instrument_link.enabled:
+                logger.info(
+                    "Skipping disabled instrument | strategy=%s | symbol=%s",
+                    strategy.id,
+                    instrument_link.symbol,
+                )
+                continue
+
+            try:
+                series = self._build_single_series(strategy, instrument_link)
+                series_list.append(series)
+                logger.info(
+                    "Built series for instrument | strategy=%s | symbol=%s | candles=%d",
+                    strategy.id,
+                    instrument_link.symbol,
+                    len(series.candles),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to build series for instrument | strategy=%s | symbol=%s | error=%s",
+                    strategy.id,
+                    instrument_link.symbol,
+                    exc,
+                )
+                # Continue with other instruments rather than failing entirely
+                continue
+
+        if not series_list:
+            raise RuntimeError(
+                f"Strategy {strategy.id} has {len(strategy.instrument_links)} instrument(s) "
+                f"but no series could be built (check if all instruments are disabled or errored)"
+            )
+
+        return series_list
+
+    def _build_single_series(
+        self,
+        strategy: Strategy,
+        instrument_link: Any,  # StrategyInstrumentLink type
+    ) -> StrategySeries:
+        """Build complete series for a single instrument (orchestrator method).
 
         This method coordinates:
         1. Metadata resolution (symbol, timeframe, window)
         2. Data fetching (OHLCV candles)
         3. Strategy evaluation (signals, overlays)
         4. Instrument resolution and ATM template merging
-        5. Risk engine creation
+        5. Risk engine creation with per-instrument risk multiplier
 
         Args:
             strategy: Strategy domain model loaded from database
+            instrument_link: StrategyInstrumentLink for this specific instrument
 
         Returns:
             StrategySeries ready for runtime execution
         """
-        # Step 1: Resolve strategy metadata
-        symbol = strategy.symbol
+        # Step 1: Resolve strategy metadata from instrument link
+        symbol = instrument_link.symbol
         if not symbol:
-            raise RuntimeError(f"Strategy {strategy.id} missing instrument")
+            raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")
 
         timeframe = strategy.timeframe
-        datasource = self.config.get("datasource") or strategy.datasource
-        exchange = self.config.get("exchange") or strategy.exchange
+        datasource = self.config.get("datasource") or instrument_link.datasource or strategy.datasource
+        exchange = self.config.get("exchange") or instrument_link.exchange or strategy.exchange
+
+        # Extract risk multiplier for this instrument
+        risk_multiplier = instrument_link.risk_multiplier or 1.0
 
         # Determine time window
         if self.run_type == "backtest":
@@ -335,6 +423,16 @@ class SeriesBuilder:
 
         atm_template = self._build_atm_template_with_instrument(strategy, instrument)
 
+        # Apply per-instrument risk multiplier to ATM template
+        if risk_multiplier != 1.0:
+            atm_template = self._apply_risk_multiplier(atm_template, risk_multiplier)
+            logger.info(
+                "Applied risk multiplier | strategy=%s | symbol=%s | multiplier=%.2f",
+                strategy.id,
+                symbol,
+                risk_multiplier,
+            )
+
         # Step 5: Create risk engine and assemble series
         risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
 
@@ -354,7 +452,7 @@ class SeriesBuilder:
 
         return StrategySeries(
             strategy_id=strategy.id,
-            name=strategy.name,
+            name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
             symbol=symbol,
             timeframe=timeframe,
             datasource=datasource,
