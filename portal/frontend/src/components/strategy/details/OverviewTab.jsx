@@ -1,5 +1,6 @@
 import React from 'react'
 import { formatNumber, formatCurrency } from '../../../utils'
+import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
 
 /**
  * Overview tab showing strategy information, risk configuration, and statistics.
@@ -21,7 +22,7 @@ export const OverviewTab = ({ strategy, ruleCount, indicatorCount, atmTargets })
           </div>
           <div>
             <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbols</dt>
-            <dd className="mt-1 text-white">{(strategy.symbols || []).join(', ') || '—'}</dd>
+            <dd className="mt-1 text-white">{symbolsFromInstrumentSlots(strategy.instrument_slots).join(', ') || '—'}</dd>
           </div>
           <div>
             <dt className="text-xs uppercase tracking-[0.3em] text-slate-500">Data Source</dt>

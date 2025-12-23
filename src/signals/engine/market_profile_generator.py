@@ -47,6 +47,7 @@ class MarketProfileSignalGenerator(BaseSignalGenerator):
                 df,
                 runtime_indicator=self.indicator,
                 interval=getattr(self.indicator, "interval", None),
+                symbol=self.symbol,
                 use_merged=config.get("market_profile_use_merged_value_areas"),
                 merge_threshold=config.get("market_profile_merge_threshold"),
                 min_merge_sessions=config.get("market_profile_merge_min_sessions"),

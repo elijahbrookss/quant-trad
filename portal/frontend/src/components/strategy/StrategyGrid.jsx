@@ -1,10 +1,11 @@
 import React from 'react'
 import { formatNumber } from '../../utils/formatters'
+import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols'
 
 /**
  * Grid display of strategy cards.
  */
-export const StrategyGrid = ({ strategies, selectedId, onSelect, onEdit, onDelete }) => {
+export const StrategyGrid = ({ strategies, selectedId, onSelect, onEdit, onDelete, layout = 'grid' }) => {
   if (!strategies.length) {
     return (
       <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-12 text-center">
@@ -27,14 +28,22 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect, onEdit, onDelet
     )
   }
 
+  const gridClasses =
+    layout === 'stacked'
+      ? 'grid gap-3'
+      : 'grid gap-4 sm:grid-cols-2 lg:grid-cols-3'
+
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div className={gridClasses}>
       {strategies.map((strategy) => {
         const isActive = strategy.id === selectedId
         const ruleCount = Array.isArray(strategy.rules) ? strategy.rules.length : 0
         const indicatorCount = Array.isArray(strategy.indicator_ids) ? strategy.indicator_ids.length : 0
         const atmTargets = strategy.atm_template?.take_profit_orders?.length || 0
         const stopR = strategy.atm_template?.initial_stop?.atr_multiplier || strategy.atm_template?.stop_r_multiple || null
+        const symbols = symbolsFromInstrumentSlots(strategy.instrument_slots)
+        const symbolPreview = symbols.slice(0, 3).join(', ')
+        const symbolSuffix = symbols.length > 3 ? ` +${symbols.length - 3}` : ''
 
         return (
           <div
@@ -56,7 +65,7 @@ export const StrategyGrid = ({ strategies, selectedId, onSelect, onEdit, onDelet
               <div>
                 <h3 className="text-base font-semibold text-white">{strategy.name}</h3>
                 <p className="mt-1 text-xs text-slate-400">
-                  {strategy.timeframe} • {strategy.symbols?.slice(0, 3).join(', ')}{strategy.symbols?.length > 3 ? ` +${strategy.symbols.length - 3}` : ''}
+                  {strategy.timeframe} • {symbolPreview}{symbolSuffix}
                 </p>
               </div>
 

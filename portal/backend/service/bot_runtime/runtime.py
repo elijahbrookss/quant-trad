@@ -993,6 +993,17 @@ class BotRuntime:
         candle = primary.candles[idx]
         return int(candle.time.timestamp())
 
+    def _current_epoch_for(self, series: Optional[StrategySeries]) -> Optional[int]:
+        if not series or not series.candles:
+            return None
+        if self._bar_index <= 0:
+            status = str(self.state.get("status") or "").lower()
+            if status in {"idle", "initialising"}:
+                return None
+        idx = min(max(self._bar_index - 1, 0), len(series.candles) - 1)
+        candle = series.candles[idx]
+        return int(candle.time.timestamp())
+
     def _visible_overlays(self) -> List[Dict[str, Any]]:
         status = str(self.state.get("status") or "").lower()
         return self._chart_state_builder.visible_overlays(
@@ -1001,16 +1012,49 @@ class BotRuntime:
             self._current_epoch(),
         )
 
+    def _series_payloads(self) -> List[Dict[str, Any]]:
+        status = str(self.state.get("status") or "").lower()
+        payloads: List[Dict[str, Any]] = []
+        for series in self._series:
+            overlays = list(series.overlays or [])
+            if series.trade_overlay:
+                overlays.append(series.trade_overlay)
+            payloads.append(
+                {
+                    "strategy_id": series.strategy_id,
+                    "symbol": series.symbol,
+                    "timeframe": series.timeframe,
+                    "datasource": series.datasource,
+                    "exchange": series.exchange,
+                    "instrument": series.instrument,
+                    "candles": self._chart_state_builder.visible_candles(
+                        series,
+                        status,
+                        self._bar_index,
+                        self._intrabar_manager,
+                    ),
+                    "overlays": self._chart_state_builder.visible_overlays(
+                        overlays,
+                        status,
+                        self._current_epoch_for(series),
+                    ),
+                    "trades": series.risk_engine.serialise_trades(),
+                }
+            )
+        return payloads
+
     def _chart_state(self) -> Dict[str, Any]:
         candles = self._visible_candles()
         overlays = self._visible_overlays()
-        return self._chart_state_builder.chart_state(
+        payload = self._chart_state_builder.chart_state(
             candles,
             self._aggregate_trades(),
             self._last_stats or self._aggregate_stats(),
             overlays,
             self.logs(),
         )
+        payload["series"] = self._series_payloads()
+        return payload
 
     def _push_update(self, event: str) -> None:
         payload = self._chart_state()

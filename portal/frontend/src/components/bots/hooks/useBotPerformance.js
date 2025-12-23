@@ -8,39 +8,44 @@ import {
 } from '../../../adapters/bot.adapter.js'
 import { toSec } from '../chartDataUtils.js'
 
-const logCandleDiagnostics = (label, candles, botId) => {
-  if (!Array.isArray(candles) || candles.length === 0) {
+const logCandleDiagnostics = (label, seriesList, botId) => {
+  if (!Array.isArray(seriesList) || seriesList.length === 0) {
     return
   }
-  let previous = null
-  let violation = null
-  let first = null
-  let last = null
-  for (let idx = 0; idx < candles.length; idx += 1) {
-    const raw = candles[idx]?.time
-    const epoch = toSec(raw)
-    if (!Number.isFinite(epoch)) {
-      continue
+  for (const series of seriesList) {
+    const candles = Array.isArray(series?.candles) ? series.candles : []
+    if (!candles.length) continue
+    let previous = null
+    let violation = null
+    let first = null
+    let last = null
+    for (let idx = 0; idx < candles.length; idx += 1) {
+      const raw = candles[idx]?.time
+      const epoch = toSec(raw)
+      if (!Number.isFinite(epoch)) {
+        continue
+      }
+      if (first === null) first = epoch
+      last = epoch
+      if (previous !== null && epoch < previous) {
+        violation = { index: idx, prev: previous, current: epoch }
+        break
+      }
+      previous = epoch
     }
-    if (first === null) first = epoch
-    last = epoch
-    if (previous !== null && epoch < previous) {
-      violation = { index: idx, prev: previous, current: epoch }
-      break
+    const context = {
+      botId,
+      label,
+      symbol: series?.symbol,
+      count: candles.length,
+      first,
+      last,
     }
-    previous = epoch
-  }
-  const context = {
-    botId,
-    label,
-    count: candles.length,
-    first,
-    last,
-  }
-  if (violation) {
-    console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
-  } else {
-    console.debug('[BotPerformanceModal] Candle payload received', context)
+    if (violation) {
+      console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
+    } else {
+      console.debug('[BotPerformanceModal] Candle payload received', context)
+    }
   }
 }
 
@@ -88,11 +93,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
 
   const applyPayload = useCallback((incoming) => {
     if (!incoming) return
-    setPayload((prev) => {
-      const next = { ...(prev || {}), ...incoming }
-      next.meta = incoming.meta || prev?.meta || next.meta || null
-      return next
-    })
+    setPayload(incoming)
   }, [])
 
   const loadPerformance = useCallback(
@@ -102,7 +103,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
       setError(null)
       try {
         const data = await fetchBotPerformance(bot.id)
-        logCandleDiagnostics('initial_fetch', data?.candles, bot?.id)
+        logCandleDiagnostics('initial_fetch', data?.series, bot?.id)
         applyPayload(data)
       } catch (err) {
         setError(err?.message || 'Unable to fetch performance')
@@ -149,7 +150,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
-        logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
+        logCandleDiagnostics(event.type || 'message', data?.series, bot?.id)
 
         if (event.type === 'intrabar') {
           pendingUpdate = data

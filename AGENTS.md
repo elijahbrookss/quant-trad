@@ -25,6 +25,10 @@ If you violate these constraints you will create incorrect simulations, data-sno
 
 ---
 
+## Fallbacks
+
+Ideally we want no fallbacks. but if you're unsure prompt the user
+
 ## Logging Standards (Readability + Traceability > Volume)
 
 Logging is not optional. Logs should tell the story of a user session and make it possible to trace:

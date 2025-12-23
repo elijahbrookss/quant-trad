@@ -3,6 +3,7 @@ import { Dialog, DialogPanel, DialogTitle } from '@headlessui/react'
 import { Bot, CheckSquare, PlusCircle, Search, X } from 'lucide-react'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
+import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
 function StrategySelector({ strategies, selectedIds, onToggle, loading, error }) {
   const [query, setQuery] = useState('')
@@ -11,7 +12,8 @@ function StrategySelector({ strategies, selectedIds, onToggle, loading, error })
     const needle = query.trim().toLowerCase()
     if (!needle) return strategies
     return strategies.filter((strategy) => {
-      const haystack = [strategy.name, strategy.timeframe, strategy.exchange, strategy.datasource]
+      const symbols = symbolsFromInstrumentSlots(strategy.instrument_slots).join(', ')
+      const haystack = [strategy.name, strategy.timeframe, strategy.exchange, strategy.datasource, symbols]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
@@ -46,6 +48,7 @@ function StrategySelector({ strategies, selectedIds, onToggle, loading, error })
         ) : (
           filteredStrategies.map((strategy) => {
             const checked = selectedIds.includes(strategy.id)
+            const symbols = symbolsFromInstrumentSlots(strategy.instrument_slots).join(', ')
             return (
               <label
                 key={strategy.id}
@@ -60,7 +63,7 @@ function StrategySelector({ strategies, selectedIds, onToggle, loading, error })
                 <div className="flex flex-col gap-0.5">
                   <span className="text-sm font-semibold text-white">{strategy.name}</span>
                   <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                    {strategy.timeframe} • {strategy.exchange || strategy.datasource || '—'}
+                    {strategy.timeframe} • {symbols} • {strategy.exchange || strategy.datasource || '—'}
                   </span>
                 </div>
               </label>

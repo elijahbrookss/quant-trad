@@ -3,8 +3,11 @@ import React from 'react'
 /**
  * Component displaying a summary of signal generation results.
  */
-export const SignalSummary = ({ result }) => {
-  if (!result) return null
+export const SignalSummary = ({ result, instrumentId }) => {
+  if (!result || !instrumentId) return null
+
+  const instrumentResult = result?.instruments?.[instrumentId]
+  if (!instrumentResult) return null
 
   const {
     window,
@@ -13,7 +16,7 @@ export const SignalSummary = ({ result }) => {
     rule_results: rules = [],
     status,
     missing_indicators: missingIndicatorsRaw = [],
-  } = result
+  } = instrumentResult
 
   const matchedRules = rules.filter((entry) => entry?.matched).length
   const totalRules = rules.length

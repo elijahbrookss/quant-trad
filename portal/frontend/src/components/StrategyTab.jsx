@@ -21,6 +21,7 @@ import ATMTemplateSummary from './atm/ATMTemplateSummary.jsx'
 import InstrumentDetailsPanel from './InstrumentDetailsPanel.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
 import { createLogger } from '../utils/logger.js'
+import { symbolsFromInstrumentSlots } from '../utils/instrumentSymbols.js'
 import { DateRangePickerComponent } from './ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 import { TimeframeSelect } from './ChartComponent/TimeframeSelectComponent.jsx'
@@ -479,8 +480,6 @@ function StrategyFormModal({
     if (initialValues) {
       const initialSlots = (() => {
         if (Array.isArray(initialValues.instrument_slots)) return inflateSlots(initialValues.instrument_slots)
-        if (Array.isArray(initialValues.symbols)) return inflateSlots(initialValues.symbols)
-        if (initialValues.symbols) return inflateSlots([initialValues.symbols])
         return inflateSlots([])
       })()
       const fallbackTemplate = cloneATMTemplate(initialValues.atm_template || DEFAULT_ATM_TEMPLATE)
@@ -494,8 +493,8 @@ function StrategyFormModal({
         name: initialValues.name || '',
         description: initialValues.description || '',
         timeframe: initialValues.timeframe || '15m',
-        provider_id: (initialValues.provider_id || initialValues.datasource || '').toUpperCase() || '',
-        venue_id: (initialValues.venue_id || initialValues.exchange || '').toUpperCase() || '',
+        provider_id: (initialValues.provider_id || '').toUpperCase() || '',
+        venue_id: (initialValues.venue_id || '').toUpperCase() || '',
         instrument_slots: initialSlots,
         atm_template: match ? cloneATMTemplate(match.template) : fallbackTemplate,
       })
@@ -821,7 +820,6 @@ function StrategyFormModal({
       venue_id: (form.venue_id || '').trim().toUpperCase() || null,
       datasource: null,
       exchange: null,
-      symbols: cleanedSlots.map((slot) => slot.symbol),
       instrument_slots: cleanedSlots,
       atm_template_id: atmMode === 'existing' ? selectedATMTemplateId || null : null,
       base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
@@ -2183,6 +2181,8 @@ const StrategyDetails = ({
   setSignalWindow,
   signalResult,
   signalsLoading,
+  signalInstrumentId,
+  setSignalInstrumentId,
   onAddInstrument = () => {},
 }) => {
   const hasStrategy = Boolean(strategy)
@@ -2192,6 +2192,7 @@ const StrategyDetails = ({
     : EMPTY_LIST
   const strategyDatasource = strategy?.datasource || ''
   const strategyExchange = strategy?.exchange || ''
+  const strategySymbols = symbolsFromInstrumentSlots(strategy?.instrument_slots)
 
   const handleDateRangeChange = (range) => {
     setSignalWindow((prev) => ({ ...prev, dateRange: range }))
@@ -2278,7 +2279,7 @@ const StrategyDetails = ({
             <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Strategy details</p>
             <p className="text-lg font-semibold text-white">{strategy.name}</p>
             <p className="text-sm text-slate-400">
-              {strategy.timeframe} • {(strategy.symbols || []).join(', ')}
+              {strategy.timeframe} • {strategySymbols.join(', ')}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -2388,9 +2389,13 @@ const StrategyDetails = ({
         <TabPanel active={activeTab === 'signals'}>
           <SignalsTab
             strategy={strategy}
+            instruments={strategyInstruments}
+            attachedIndicators={attachedIndicators}
             signalWindow={signalWindow}
             signalsLoading={signalsLoading}
             signalResult={signalResult}
+            signalInstrumentId={signalInstrumentId}
+            onInstrumentChange={setSignalInstrumentId}
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
             DateRangePickerComponent={DateRangePickerComponent}
@@ -2419,6 +2424,7 @@ const StrategyTab = ({ chartId }) => {
   const [savingRule, setSavingRule] = useState(false)
   const [signalsLoading, setSignalsLoading] = useState(false)
   const [signalResult, setSignalResult] = useState(null)
+  const [signalInstrumentId, setSignalInstrumentId] = useState(null)
   const [instrumentModal, setInstrumentModal] = useState({ open: false, defaults: null })
   const [savingInstrument, setSavingInstrument] = useState(false)
   const [instrumentError, setInstrumentError] = useState(null)
@@ -2434,6 +2440,23 @@ const StrategyTab = ({ chartId }) => {
     () => strategies.find((strategy) => strategy.id === selectedId) || null,
     [strategies, selectedId],
   )
+  const selectedStrategyInstruments = useMemo(
+    () => (Array.isArray(selectedStrategy?.instruments) ? selectedStrategy.instruments : []),
+    [selectedStrategy],
+  )
+  const selectedInstrumentIds = useMemo(
+    () => selectedStrategyInstruments.map((instrument) => instrument?.id).filter(Boolean),
+    [selectedStrategyInstruments],
+  )
+  const instrumentById = useMemo(() => {
+    const map = new Map()
+    selectedStrategyInstruments.forEach((instrument) => {
+      if (instrument?.id) {
+        map.set(instrument.id, instrument)
+      }
+    })
+    return map
+  }, [selectedStrategyInstruments])
 
   const atmTemplateKey = useCallback((template) => {
     try {
@@ -2472,12 +2495,11 @@ const StrategyTab = ({ chartId }) => {
 
   const openInstrumentModal = useCallback(
     (defaults = {}) => {
-      const fallbackSymbol = defaults.symbol || selectedStrategy?.symbols?.[0] || ''
       setInstrumentError(null)
       setInstrumentModal({
         open: true,
         defaults: {
-          symbol: fallbackSymbol,
+          symbol: defaults.symbol || '',
           datasource: defaults.datasource || selectedStrategy?.datasource || '',
           exchange: defaults.exchange || selectedStrategy?.exchange || '',
         },
@@ -2649,6 +2671,20 @@ const StrategyTab = ({ chartId }) => {
     loadIndicators()
   }, [loadIndicators])
 
+  useEffect(() => {
+    if (!selectedInstrumentIds.length) {
+      setSignalInstrumentId(null)
+      return
+    }
+    setSignalInstrumentId((prev) =>
+      prev && selectedInstrumentIds.includes(prev) ? prev : selectedInstrumentIds[0],
+    )
+  }, [selectedInstrumentIds])
+
+  useEffect(() => {
+    setSignalResult(null)
+  }, [selectedStrategy?.id])
+
   const openCreateStrategy = () => {
     setErrorMessage(null) // Clear any previous errors
     setStrategyModal({ open: true, strategy: null })
@@ -2793,40 +2829,54 @@ const StrategyTab = ({ chartId }) => {
       setErrorMessage('A valid start and end date are required to generate signals.')
       return
     }
+    if (!signalInstrumentId) {
+      setErrorMessage('Select an instrument to focus the preview.')
+      return
+    }
+    if (!selectedInstrumentIds.includes(signalInstrumentId)) {
+      setErrorMessage('Selected instrument is not attached to this strategy.')
+      return
+    }
     setSignalsLoading(true)
     setSignalResult(null)
     setErrorMessage(null)
     try {
-      const symbol = selectedStrategy.symbols?.[0] || chartSnapshot?.symbol
-      const interval = selectedStrategy.timeframe || chartSnapshot?.interval || '15m'
-      const datasource = selectedStrategy.datasource || chartSnapshot?.datasource || ''
-      const exchange = selectedStrategy.exchange || chartSnapshot?.exchange || ''
-
-      if (!symbol) {
-        setErrorMessage('A symbol is required to generate signals.')
-        setSignalsLoading(false)
-        return
-      }
+      const interval = selectedStrategy.timeframe
 
       const result = await generateStrategySignals(selectedStrategy.id, {
         start: startDate.toISOString(),
         end: endDate.toISOString(),
         interval,
-        symbol,
-        datasource: datasource || undefined,
-        exchange: exchange || undefined,
+        instrument_ids: [signalInstrumentId],
       })
       setSignalResult(result)
       info('strategy_signals_generated', { strategyId: selectedStrategy.id })
 
-      const appliedInputs = result?.applied_inputs || {}
-      const resolvedSymbol = appliedInputs.symbol || symbol
-      const resolvedInterval = appliedInputs.timeframe || interval
-      const resolvedDatasource = appliedInputs.datasource || datasource
-      const resolvedExchange = appliedInputs.exchange || exchange
+      const instrumentResult = result?.instruments?.[signalInstrumentId]
+      if (!instrumentResult?.window) {
+        setErrorMessage('Signal preview response is missing the window payload for the selected instrument.')
+        return
+      }
 
-      const buyMarkers = Array.isArray(result?.chart_markers?.buy) ? result.chart_markers.buy : []
-      const sellMarkers = Array.isArray(result?.chart_markers?.sell) ? result.chart_markers.sell : []
+      const {
+        instrument_id: resolvedInstrumentId,
+        symbol: resolvedSymbol,
+        interval: resolvedInterval,
+        datasource: resolvedDatasource,
+        exchange: resolvedExchange,
+      } = instrumentResult.window
+
+      if (!resolvedInstrumentId || resolvedInstrumentId !== signalInstrumentId) {
+        setErrorMessage('Signal preview response does not match the selected instrument.')
+        return
+      }
+      if (!resolvedSymbol || !resolvedInterval || !resolvedDatasource) {
+        setErrorMessage('Signal preview response is missing symbol, interval, or datasource.')
+        return
+      }
+
+      const buyMarkers = Array.isArray(instrumentResult?.chart_markers?.buy) ? instrumentResult.chart_markers.buy : []
+      const sellMarkers = Array.isArray(instrumentResult?.chart_markers?.sell) ? instrumentResult.chart_markers.sell : []
       const combinedMarkers = [...buyMarkers, ...sellMarkers]
 
       const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
@@ -2854,8 +2904,8 @@ const StrategyTab = ({ chartId }) => {
         overlays,
         symbol: resolvedSymbol,
         interval: resolvedInterval,
-        datasource: resolvedDatasource || null,
-        exchange: resolvedExchange || null,
+        datasource: resolvedDatasource,
+        exchange: resolvedExchange,
         dateRange: appliedDateRange,
       })
     } catch (err) {
@@ -2869,10 +2919,13 @@ const StrategyTab = ({ chartId }) => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-white">Strategies</h2>
-          <p className="mt-1 text-sm text-slate-400">Manage your trading strategies, indicators, and execution rules.</p>
+          <p className="text-xs uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Strategy Studio</p>
+          <h2 className="text-xl font-semibold text-white">Design, test, and wire strategies</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Build rules, validate signals, and prepare bots from a single workspace.
+          </p>
         </div>
         <ActionButton onClick={openCreateStrategy}>
           <svg className="mr-1.5 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2884,51 +2937,74 @@ const StrategyTab = ({ chartId }) => {
 
       {/* Error Message */}
       {errorMessage && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3">
+        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4">
           <p className="text-sm text-rose-200">{errorMessage}</p>
         </div>
       )}
 
-      {/* Strategy Grid */}
-      {loading ? (
-        <div className="flex items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/10 p-16">
-          <div className="text-center">
-            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/80"></div>
-            <p className="mt-3 text-sm text-slate-400">Loading strategies…</p>
+      <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Strategy Library</p>
+                <p className="text-sm text-slate-400">{strategies.length} strategies</p>
+              </div>
+              <ActionButton variant="ghost" onClick={openCreateStrategy}>
+                Add
+              </ActionButton>
+            </div>
           </div>
-        </div>
-      ) : (
-        <StrategyGrid
-          strategies={strategies}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onEdit={openEditStrategy}
-          onDelete={handleDeleteStrategy}
-        />
-      )}
 
-      {/* Strategy Details (shown when a strategy is selected) */}
-      {selectedStrategy && (
-        <StrategyDetails
-          strategy={selectedStrategy}
-          attachedIndicators={attachedIndicators}
-          availableIndicators={indicators}
-          indicatorLookup={indicatorLookup}
-          onEdit={() => openEditStrategy(selectedStrategy)}
-          onDelete={() => handleDeleteStrategy(selectedStrategy)}
-          onAttachIndicator={handleAttachIndicator}
-          onDetachIndicator={handleDetachIndicator}
-          onAddRule={() => openRuleModal(null)}
-          onEditRule={(rule) => openRuleModal(rule)}
-          onDeleteRule={handleDeleteRule}
-          onRunSignals={runSignals}
-          signalWindow={signalWindow}
-          setSignalWindow={setSignalWindow}
-          signalResult={signalResult}
-          signalsLoading={signalsLoading}
-          onAddInstrument={(defaults) => openInstrumentModal(defaults)}
-        />
-      )}
+          {loading ? (
+            <div className="flex items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/10 p-10">
+              <div className="text-center">
+                <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/80"></div>
+                <p className="mt-3 text-sm text-slate-400">Loading strategies…</p>
+              </div>
+            </div>
+          ) : (
+            <StrategyGrid
+              strategies={strategies}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onEdit={openEditStrategy}
+              onDelete={handleDeleteStrategy}
+              layout="stacked"
+            />
+          )}
+        </div>
+
+        <div className="space-y-4">
+          {selectedStrategy ? (
+            <StrategyDetails
+              strategy={selectedStrategy}
+              attachedIndicators={attachedIndicators}
+              availableIndicators={indicators}
+              indicatorLookup={indicatorLookup}
+              onEdit={() => openEditStrategy(selectedStrategy)}
+              onDelete={() => handleDeleteStrategy(selectedStrategy)}
+              onAttachIndicator={handleAttachIndicator}
+              onDetachIndicator={handleDetachIndicator}
+              onAddRule={() => openRuleModal(null)}
+              onEditRule={(rule) => openRuleModal(rule)}
+              onDeleteRule={handleDeleteRule}
+              onRunSignals={runSignals}
+              signalWindow={signalWindow}
+              setSignalWindow={setSignalWindow}
+              signalResult={signalResult}
+              signalsLoading={signalsLoading}
+              signalInstrumentId={signalInstrumentId}
+              setSignalInstrumentId={setSignalInstrumentId}
+              onAddInstrument={(defaults) => openInstrumentModal(defaults)}
+            />
+          ) : (
+            <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-10 text-center text-sm text-slate-400">
+              Select a strategy to view instruments, indicators, and signal previews.
+            </div>
+          )}
+        </div>
+      </div>
 
       <StrategyFormModal
         open={strategyModal.open}

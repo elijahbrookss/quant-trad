@@ -1,5 +1,6 @@
 import { Play, Square, Eye, Trash2, Pause, RotateCw } from 'lucide-react'
 import { memo, useMemo } from 'react'
+import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
 const STATUS_ORDER = {
   running: 0,
@@ -151,10 +152,11 @@ function describeBotMeta(bot, strategyLookup, key) {
   for (const strategyId of bot.strategy_ids || []) {
     const strategy = strategyLookup.get(strategyId)
     if (!strategy) continue
-    const value = strategy[key]
-    if (!value && Array.isArray(strategy?.symbols) && key === 'symbol') {
-      strategy.symbols.forEach((sym) => fromStrategies.add(sym))
+    if (key === 'symbol') {
+      symbolsFromInstrumentSlots(strategy.instrument_slots).forEach((sym) => fromStrategies.add(sym))
+      continue
     }
+    const value = strategy[key]
     if (value) {
       if (Array.isArray(value)) {
         value.forEach((val) => fromStrategies.add(val))
@@ -168,12 +170,7 @@ function describeBotMeta(bot, strategyLookup, key) {
     const label = Array.from(fromStrategies).join(', ')
     return key === 'timeframe' ? label.toUpperCase() : label
   }
-
-  const raw = bot?.[key] || bot?.config?.[key] || bot?.runtime?.[key]
-  if (!raw) return null
-  if (key === 'timeframe') return String(raw).toUpperCase()
-  if (Array.isArray(raw)) return raw.join(', ')
-  return raw
+  return null
 }
 
 function MetaPill({ label, value }) {
@@ -249,4 +246,3 @@ export function sortBots(bots) {
     return (a.name || '').localeCompare(b.name || '')
   })
 }
-

@@ -161,7 +161,7 @@ class IndicatorSignalExecutor:
         rule_config: Dict[str, Any] = dict(config or {})
         stored_params = meta.get("params", {}) if isinstance(meta, Mapping) else {}
         self._apply_breakout_defaults(instance, stored_params, rule_config)
-        self._maybe_add_market_profile_payloads(instance, df, rule_config, interval)
+        self._maybe_add_market_profile_payloads(instance, df, rule_config, interval, symbol)
         rule_config.setdefault("symbol", symbol)
 
         indicator_name = getattr(instance, "NAME", instance.__class__.__name__)
@@ -208,7 +208,7 @@ class IndicatorSignalExecutor:
             )
 
     def _maybe_add_market_profile_payloads(
-        self, instance, df, rule_config: Dict[str, Any], interval: str
+        self, instance, df, rule_config: Dict[str, Any], interval: str, symbol: str
     ) -> None:
         if isinstance(instance, MarketProfileIndicator) and "rule_payloads" not in rule_config:
             params = resolve_market_profile_params(
@@ -242,6 +242,7 @@ class IndicatorSignalExecutor:
                 df,
                 runtime_indicator=instance,
                 interval=interval,
+                symbol=symbol,
                 use_merged=params.use_merged_value_areas,
                 merge_threshold=params.merge_threshold,
                 min_merge_sessions=params.min_merge_sessions,

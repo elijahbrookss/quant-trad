@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { X, ChevronDown } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
-import { useChartValue } from '../../contexts/ChartStateContext.jsx'
+import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
 import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
 import LoadingOverlay from '../LoadingOverlay.jsx'
 import { BotStatusChips } from './BotStatusChips.jsx'
@@ -12,6 +12,7 @@ import { TradeLogList } from './TradeLogList.jsx'
 import { ActiveTradeChip } from './ActiveTradeChip.jsx'
 import { describeLog, formatStatValue } from './botPerformanceFormatters.js'
 import { useBotPerformance } from './hooks/useBotPerformance.js'
+import { symbolsFromInstruments } from '../../utils/instrumentSymbols.js'
 
 const BOOTLINE_POOL = {
   runtime: ['Spinning up bot runtime', 'Teaching the bot patience'],
@@ -34,7 +35,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [renderedChip, setRenderedChip] = useState(null)
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
-  const chartHandle = useChartValue(`bot-${bot?.id}`)
+  const [activeSymbol, setActiveSymbol] = useState(null)
+  const { getChart } = useChartState()
 
   const {
     action,
@@ -57,12 +59,35 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [bot?.id])
 
   const logs = payload?.logs || []
-  const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const strategies = payload?.meta?.strategies || []
-  const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
+  const seriesList = Array.isArray(payload?.series) ? payload.series : []
+  const seriesBySymbol = useMemo(() => {
+    const map = new Map()
+    for (const series of seriesList) {
+      if (series?.symbol) {
+        map.set(series.symbol, series)
+      }
+    }
+    return map
+  }, [seriesList])
+  const seriesSymbols = useMemo(() => seriesList.map((series) => series?.symbol).filter(Boolean), [seriesList])
 
-  const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
+  useEffect(() => {
+    if (!seriesSymbols.length) {
+      setActiveSymbol(null)
+      return
+    }
+    setActiveSymbol((prev) => (prev && seriesSymbols.includes(prev) ? prev : seriesSymbols[0]))
+  }, [seriesSymbols])
+
+  const activeSeries = activeSymbol ? seriesBySymbol.get(activeSymbol) : null
+  const activeTrades = Array.isArray(activeSeries?.trades) ? activeSeries.trades : []
+  const quoteCurrency = payload?.stats?.quote_currency || activeTrades?.[0]?.currency
+  const activeChartId = activeSymbol ? `bot-${bot?.id}-${activeSymbol}` : ''
+  const chartHandle = useChartValue(activeChartId)
+
+  const chartHasData = Array.isArray(activeSeries?.candles) && activeSeries.candles.length > 0
   const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
   const isBooting = isBootingStatus || loading || streamStatus === 'connecting'
   const showInactiveState = !isBooting && (Boolean(payload?.inactive) || (!streamEligible && !chartHasData))
@@ -80,9 +105,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
 
   const lastCandle = useMemo(() => {
-    if (!Array.isArray(payload?.candles) || payload.candles.length === 0) return null
-    return payload.candles[payload.candles.length - 1]
-  }, [payload?.candles])
+    if (!Array.isArray(activeSeries?.candles) || activeSeries.candles.length === 0) return null
+    return activeSeries.candles[activeSeries.candles.length - 1]
+  }, [activeSeries?.candles])
 
   const simTimeLabel = useMemo(() => {
     const epoch = toSec(lastCandle?.time)
@@ -109,14 +134,13 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   )
 
   const activeTrade = useMemo(() => {
-    const trades = Array.isArray(payload?.trades) ? payload.trades : []
     return (
-      trades.find((trade) => {
+      activeTrades.find((trade) => {
         const hasOpenLeg = (trade.legs || []).some((leg) => leg.status === 'open' || !leg.exit_time)
         return hasOpenLeg || !trade?.closed_at
       }) || null
     )
-  }, [payload?.trades])
+  }, [activeTrades])
 
   const sumContracts = useCallback((legs = []) => {
     return legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
@@ -201,7 +225,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [activeTradeChip, renderedChip])
 
   const tradeMetrics = useMemo(() => {
-    const trades = Array.isArray(payload?.trades) ? payload.trades : []
+    const trades = activeTrades
     const toContracts = (legs = []) => legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
     const sortedTrades = trades.slice().sort((a, b) => (toSec(a?.entry_time) || 0) - (toSec(b?.entry_time) || 0))
     let totalR = 0
@@ -248,7 +272,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     const avgWin = winPnls.length ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : null
     const avgLoss = lossPnls.length ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null
     return { totalR, expectancyR, expectancyPnl, maxDrawdown, avgWin, avgLoss }
-  }, [payload?.trades])
+  }, [activeTrades])
 
   const statEntries = useMemo(() => {
     const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
@@ -333,31 +357,26 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       }
       return Array.from(set)
     }
-    const strategySymbols = collectUnique(strategies.flatMap((s) => s?.symbols || []))
+    const strategySymbols = collectUnique(strategies.flatMap((s) => symbolsFromInstruments(s?.instruments)))
     if (strategySymbols.length) {
       parts.push(`Symbols: ${strategySymbols.join(', ')}`)
     }
-    const strategyTimeframes = collectUnique(strategies.map((s) => s?.timeframe))
-    const timeframes = strategyTimeframes.length
-      ? strategyTimeframes
-      : botMeta.timeframe
-        ? [botMeta.timeframe]
-        : []
+    const timeframes = collectUnique(strategies.map((s) => s?.timeframe))
     if (timeframes.length) {
       parts.push(`Timeframe: ${timeframes.join(', ')}`)
     }
-    const datasources = collectUnique(strategies.map((s) => s?.datasource || botMeta.datasource))
+    const datasources = collectUnique(strategies.map((s) => s?.datasource))
     if (datasources.length) {
       parts.push(`Datasource: ${datasources.join(', ')}`)
     }
-    const exchanges = collectUnique(strategies.map((s) => s?.exchange || botMeta.exchange))
+    const exchanges = collectUnique(strategies.map((s) => s?.exchange))
     if (exchanges.length) {
       parts.push(`Exchange: ${exchanges.join(', ')}`)
     }
     parts.push(`Mode: ${bot?.mode}`)
     parts.push(`Run: ${(bot?.run_type || 'backtest').replace('_', ' ')}`)
     return parts.filter(Boolean).join(' • ')
-  }, [strategies, botMeta.timeframe, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.run_type])
+  }, [strategies, bot?.mode, bot?.run_type])
 
   useEffect(() => {
     const handler = (event) => {
@@ -382,13 +401,21 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const focusChartOnLog = useCallback(
     (entry) => {
-      const handles = chartHandle?.handles || chartHandle
+      const time = toSec(entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time)
+      const price = entry?.price ? Number(entry.price) : undefined
+      let handles = chartHandle?.handles || chartHandle
+      if (entry?.symbol && seriesBySymbol.has(entry.symbol)) {
+        const targetId = `bot-${bot?.id}-${entry.symbol}`
+        const target = getChart(targetId)
+        if (target) {
+          handles = target?.handles || target
+        }
+        setActiveSymbol(entry.symbol)
+      }
       if (!handles?.focusAtTime) return
-      const time = entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time
-      const price = entry?.price
       handles.focusAtTime(time, price)
     },
-    [chartHandle],
+    [bot?.id, chartHandle, getChart, seriesBySymbol],
   )
 
   const handleZoomIn = useCallback(() => {
@@ -450,6 +477,25 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           <ActiveTradeChip chip={renderedChip} visible={chipVisible} onHover={handleChipHover} />
         </div>
 
+        {seriesSymbols.length ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {seriesSymbols.map((symbol) => (
+              <button
+                key={`bot-series-${symbol}`}
+                type="button"
+                onClick={() => setActiveSymbol(symbol)}
+                className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${
+                  symbol === activeSymbol
+                    ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-white'
+                    : 'border-white/10 bg-black/20 text-slate-300 hover:border-white/30 hover:text-white'
+                }`}
+              >
+                {symbol}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         <div className="relative min-h-[360px]">
             <div
               className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
@@ -474,10 +520,10 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 </div>
               ) : chartHasData ? (
                 <BotLensChart
-                  chartId={`bot-${bot?.id}`}
-                  candles={payload?.candles || []}
-                  trades={payload?.trades || []}
-                  overlays={payload?.overlays || []}
+                  chartId={activeChartId}
+                  candles={activeSeries?.candles || []}
+                  trades={activeTrades}
+                  overlays={activeSeries?.overlays || []}
                   playbackSpeed={playbackDraft}
                 />
               ) : (
@@ -501,11 +547,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </div>
               <div className="space-y-3">
                 {strategies.map((strategy) => {
-                  const summarySymbols = strategy.symbols?.join(', ') || strategy.symbol || '—'
-                  const timeframeLabel = strategy.timeframe || botMeta.timeframe || '—'
-                  const datasourceLabel = strategy.datasource || botMeta.datasource || '—'
-                  const exchangeLabel = strategy.exchange || botMeta.exchange || '—'
-                  const primaryInstrument = strategy.instruments?.[0] || strategy.instrument
+                  const summarySymbols = symbolsFromInstruments(strategy.instruments).join(', ')
+                  const timeframeLabel = strategy.timeframe || '—'
+                  const datasourceLabel = strategy.datasource || '—'
+                  const exchangeLabel = strategy.exchange || '—'
+                  const primaryInstrument = strategy.instruments?.[0]
                   const contractSize = primaryInstrument?.contract_size ?? strategy.atm_template?.contract_size ?? '—'
                   const rrDisplay = formatRiskReward(strategy.atm_metrics)
                   const isExpanded = expandedStrategies.has(strategy.id)

@@ -1,5 +1,6 @@
 import React from 'react'
 import { formatInstrumentNumber } from '../../../utils'
+import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
 import { Button } from '../../ui'
 
 /**
@@ -35,7 +36,7 @@ export const InstrumentsTab = ({
       </p>
 
       <div className="space-y-3">
-        {(strategy.symbols || []).map((symbol) => {
+        {symbolsFromInstrumentSlots(strategy.instrument_slots).map((symbol) => {
           const key = (symbol || '').toUpperCase()
           const record = key ? instrumentMap.get(key) : null
           const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)

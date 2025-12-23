@@ -977,21 +977,29 @@ class StrategyRegistry:
         start: str,
         end: str,
         interval: str,
-        symbol: Optional[str] = None,
-        datasource: Optional[str] = None,
-        exchange: Optional[str] = None,
+        instrument_ids: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evaluate a strategy against current indicator signals."""
 
         record = self.get(strategy_id)
 
-        effective_symbol = symbol or (record.symbols[0] if record.symbols else None)
-        if not effective_symbol:
-            raise ValueError("Strategy has no symbol defined")
+        requested_ids = [str(item).strip() for item in (instrument_ids or []) if item]
+        if not requested_ids:
+            raise ValueError("instrument_ids is required for signal preview")
 
-        effective_datasource = datasource or record.datasource
-        effective_exchange = exchange or record.exchange
+        allowed_instruments: Dict[str, InstrumentSlot] = {}
+        for slot in record.instruments:
+            inst_id = None
+            if isinstance(slot.metadata, dict):
+                inst_id = slot.metadata.get("instrument_id")
+            if not inst_id:
+                raise ValueError(f"Instrument id missing for strategy slot {slot.symbol}")
+            allowed_instruments[str(inst_id)] = slot
+
+        for inst_id in requested_ids:
+            if inst_id not in allowed_instruments:
+                raise ValueError(f"Instrument {inst_id} is not attached to this strategy")
 
         indicator_rule_map: Dict[str, List[str]] = {}
         for rule in record.rules.values():
@@ -1035,11 +1043,6 @@ class StrategyRegistry:
 
             return ordered
 
-        indicator_payloads: Dict[str, Dict[str, Any]] = {}
-        missing_indicators: List[str] = []
-        run_id = uuid.uuid4().hex
-        base_config = dict(config or {})
-
         def _config_diff(base: Mapping[str, Any], derived: Mapping[str, Any]) -> Dict[str, Any]:
             diff: Dict[str, Any] = {}
             base_keys = set(base.keys())
@@ -1051,209 +1054,153 @@ class StrategyRegistry:
                 diff["_removed"] = sorted(removed)
             return diff
 
-        logger.info(
-            "strategy_signal_preview_start | run_id=%s strategy=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s config_keys=%s indicator_count=%d",
-            run_id,
-            strategy_id,
-            start,
-            end,
-            interval,
-            effective_symbol,
-            effective_datasource,
-            effective_exchange,
-            sorted(base_config.keys()),
-            len(record.indicator_ids),
-        )
+        def _evaluate_for_instrument(instrument_id: str) -> Dict[str, Any]:
+            instrument_rec = instrument_service.get_instrument_record(instrument_id)
+            if not instrument_rec:
+                raise ValueError(f"Instrument record not found: {instrument_id}")
 
-        total_signals = 0
-        for inst_id in record.indicator_ids:
-            try:
-                per_config = dict(base_config)
-                rule_filters = indicator_rule_map.get(inst_id)
-                if rule_filters:
-                    merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
-                    if merged_rules:
-                        per_config["enabled_rules"] = merged_rules
-                    else:
-                        per_config.pop("enabled_rules", None)
-                logger.info(
-                    "strategy_signal_preview_generate | run_id=%s strategy=%s indicator=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s enabled_rules=%s config_diff=%s",
-                    run_id,
-                    strategy_id,
-                    inst_id,
-                    start,
-                    end,
-                    interval,
-                    effective_symbol,
-                    effective_datasource,
-                    effective_exchange,
-                    per_config.get("enabled_rules"),
-                    _config_diff(base_config, per_config),
-                )
-                payload = generate_signals_for_instance(
-                    inst_id,
-                    start=start,
-                    end=end,
-                    interval=interval,
-                    symbol=effective_symbol,
-                    datasource=effective_datasource,
-                    exchange=effective_exchange,
-                    config=per_config,
-                )
-                indicator_payloads[inst_id] = payload
-                signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
-                signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
-                total_signals += signal_count
-                error_hint = payload.get("error") if isinstance(payload, Mapping) else None
-                logger.info(
-                    "strategy_signal_preview_result | run_id=%s strategy=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
-                    run_id,
-                    strategy_id,
-                    inst_id,
-                    signal_count,
-                    start,
-                    end,
-                    interval,
-                    error_hint,
-                )
-                if isinstance(signals_obj, list):
-                    for signal in signals_obj:
-                        if isinstance(signal, dict):
-                            _ensure_signal_direction(signal)
-                    summary = _summarise_signal_population(signals_obj)
-                    logger.debug(
-                        "strategy_indicator_signal_summary | strategy=%s indicator=%s total=%d types=[%s] rules=[%s] directions=[%s]",
-                        strategy_id,
-                        inst_id,
-                        len(signals_obj),
-                        _format_counter(summary["types"]),
-                        _format_counter(summary["rules"]),
-                        _format_counter(summary["directions"]),
-                    )
-            except KeyError:
-                missing_indicators.append(inst_id)
-                indicator_payloads[inst_id] = {"error": "Indicator not available"}
-                logger.warning(
-                    "strategy_indicator_missing | strategy=%s indicator=%s",
-                    strategy_id,
-                    inst_id,
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
-                logger.warning(
-                    "strategy_signal_preview_failed | run_id=%s strategy=%s indicator=%s error=%s",
-                    run_id,
-                    strategy_id,
-                    inst_id,
-                    exc,
-                )
-                indicator_payloads[inst_id] = {"error": str(exc)}
+            effective_symbol = instrument_rec.get("symbol")
+            effective_datasource = instrument_rec.get("datasource")
+            effective_exchange = instrument_rec.get("exchange")
+            if not effective_symbol:
+                raise ValueError(f"Instrument {instrument_id} is missing a symbol")
+            if not effective_datasource:
+                raise ValueError(f"Instrument {instrument_id} is missing a datasource")
 
-        logger.info(
-            "strategy_signal_preview_complete | run_id=%s strategy=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s indicators=%d missing=%s total_signals=%d",
-            run_id,
-            strategy_id,
-            start,
-            end,
-            interval,
-            effective_symbol,
-            effective_datasource,
-            effective_exchange,
-            len(record.indicator_ids),
-            missing_indicators,
-            total_signals,
-        )
-
-        rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
-        for res in rule_results:
-            conditions = res.get("conditions") or []
-            matched_count = sum(1 for cond in conditions if cond.get("matched"))
-            total_conditions = len(conditions)
-            logger.debug(
-                "strategy_rule_evaluated | strategy=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
-                strategy_id,
-                res.get("rule_id"),
-                res.get("action"),
-                res.get("matched"),
-                matched_count,
-                total_conditions,
-                res.get("reason"),
-            )
-            for cond in conditions:
-                logger.debug(
-                    "strategy_rule_condition | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
-                    strategy_id,
-                    res.get("rule_id"),
-                    cond.get("indicator_id"),
-                    cond.get("signal_type"),
-                    cond.get("direction"),
-                    cond.get("direction_detected"),
-                    cond.get("matched"),
-                    cond.get("reason"),
-                    cond.get("stats"),
-                    cond.get("observed_rules"),
-                    cond.get("observed_directions"),
-                )
-
-        buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
-        sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
-
-        chart_markers = build_chart_markers(buy_signals, sell_signals)
-
-        logger.info(
-            "strategy_signals_generated | strategy=%s symbol=%s interval=%s start=%s end=%s buys=%d sells=%d",
-            strategy_id,
-            effective_symbol,
-            interval,
-            start,
-            end,
-            len(buy_signals),
-            len(sell_signals),
-        )
-
-        if not buy_signals and not sell_signals:
-            aggregate_stats = {
-                "signals": 0,
-                "type_matches": 0,
-                "rule_matches": 0,
-                "direction_matches": 0,
-                "final_matches": 0,
-            }
-            aggregate_rules: set[str] = set()
-            aggregate_directions: set[str] = set()
-            for res in rule_results:
-                for cond in res.get("conditions") or []:
-                    stats = cond.get("stats") or {}
-                    for key in aggregate_stats:
-                        try:
-                            aggregate_stats[key] += int(stats.get(key, 0) or 0)
-                        except (TypeError, ValueError):  # pragma: no cover - defensive
-                            continue
-                    observed_rules = cond.get("observed_rules") or []
-                    observed_directions = cond.get("observed_directions") or []
-                    aggregate_rules.update(map(str, observed_rules))
-                    aggregate_directions.update(map(str, observed_directions))
+            indicator_payloads: Dict[str, Dict[str, Any]] = {}
+            missing_indicators: List[str] = []
+            run_id = uuid.uuid4().hex
+            base_config = dict(config or {})
 
             logger.info(
-                "strategy_signals_none | strategy=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d stats=%s observed_rules=%s observed_directions=%s",
+                "strategy_signal_preview_start | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s config_keys=%s indicator_count=%d",
+                run_id,
                 strategy_id,
-                effective_symbol,
-                interval,
+                instrument_id,
                 start,
                 end,
-                len(indicator_payloads),
-                len(rule_results),
-                aggregate_stats,
-                sorted(aggregate_rules),
-                sorted(aggregate_directions),
+                interval,
+                effective_symbol,
+                effective_datasource,
+                effective_exchange,
+                sorted(base_config.keys()),
+                len(record.indicator_ids),
             )
+
+            total_signals = 0
+            for inst_id in record.indicator_ids:
+                try:
+                    per_config = dict(base_config)
+                    rule_filters = indicator_rule_map.get(inst_id)
+                    if rule_filters:
+                        merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
+                        if merged_rules:
+                            per_config["enabled_rules"] = merged_rules
+                        else:
+                            per_config.pop("enabled_rules", None)
+                    logger.info(
+                        "strategy_signal_preview_generate | run_id=%s strategy=%s instrument_id=%s indicator=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s enabled_rules=%s config_diff=%s",
+                        run_id,
+                        strategy_id,
+                        instrument_id,
+                        inst_id,
+                        start,
+                        end,
+                        interval,
+                        effective_symbol,
+                        effective_datasource,
+                        effective_exchange,
+                        per_config.get("enabled_rules"),
+                        _config_diff(base_config, per_config),
+                    )
+                    payload = generate_signals_for_instance(
+                        inst_id,
+                        start=start,
+                        end=end,
+                        interval=interval,
+                        symbol=effective_symbol,
+                        datasource=effective_datasource,
+                        exchange=effective_exchange,
+                        config=per_config,
+                    )
+                    indicator_payloads[inst_id] = payload
+                    signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
+                    signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
+                    total_signals += signal_count
+                    error_hint = payload.get("error") if isinstance(payload, Mapping) else None
+                    logger.info(
+                        "strategy_signal_preview_result | run_id=%s strategy=%s instrument_id=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
+                        run_id,
+                        strategy_id,
+                        instrument_id,
+                        inst_id,
+                        signal_count,
+                        start,
+                        end,
+                        interval,
+                        error_hint,
+                    )
+                    if isinstance(signals_obj, list):
+                        for signal in signals_obj:
+                            if isinstance(signal, dict):
+                                _ensure_signal_direction(signal)
+                        summary = _summarise_signal_population(signals_obj)
+                        logger.debug(
+                            "strategy_indicator_signal_summary | strategy=%s instrument_id=%s indicator=%s total=%d types=[%s] rules=[%s] directions=[%s]",
+                            strategy_id,
+                            instrument_id,
+                            inst_id,
+                            len(signals_obj),
+                            _format_counter(summary["types"]),
+                            _format_counter(summary["rules"]),
+                            _format_counter(summary["directions"]),
+                        )
+                except KeyError:
+                    missing_indicators.append(inst_id)
+                    indicator_payloads[inst_id] = {"error": "Indicator not available"}
+                    logger.warning(
+                        "strategy_indicator_missing | strategy=%s instrument_id=%s indicator=%s",
+                        strategy_id,
+                        instrument_id,
+                        inst_id,
+                    )
+                    continue
+                except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
+                    logger.warning(
+                        "strategy_signal_preview_failed | run_id=%s strategy=%s instrument_id=%s indicator=%s error=%s",
+                        run_id,
+                        strategy_id,
+                        instrument_id,
+                        inst_id,
+                        exc,
+                    )
+                    indicator_payloads[inst_id] = {"error": str(exc)}
+
+            logger.info(
+                "strategy_signal_preview_complete | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s indicators=%d missing=%s total_signals=%d",
+                run_id,
+                strategy_id,
+                instrument_id,
+                start,
+                end,
+                interval,
+                effective_symbol,
+                effective_datasource,
+                effective_exchange,
+                len(record.indicator_ids),
+                missing_indicators,
+                total_signals,
+            )
+
+            rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
             for res in rule_results:
                 conditions = res.get("conditions") or []
                 matched_count = sum(1 for cond in conditions if cond.get("matched"))
                 total_conditions = len(conditions)
-                logger.info(
-                    "strategy_rule_trace | strategy=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
+                logger.debug(
+                    "strategy_rule_evaluated | strategy=%s instrument_id=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
                     strategy_id,
+                    instrument_id,
                     res.get("rule_id"),
                     res.get("action"),
                     res.get("matched"),
@@ -1262,9 +1209,10 @@ class StrategyRegistry:
                     res.get("reason"),
                 )
                 for cond in conditions:
-                    logger.info(
-                        "strategy_condition_trace | strategy=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
+                    logger.debug(
+                        "strategy_rule_condition | strategy=%s instrument_id=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
                         strategy_id,
+                        instrument_id,
                         res.get("rule_id"),
                         cond.get("indicator_id"),
                         cond.get("signal_type"),
@@ -1277,34 +1225,133 @@ class StrategyRegistry:
                         cond.get("observed_directions"),
                     )
 
-        status = "ok"
-        if missing_indicators:
-            status = "missing_indicators"
+            buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
+            sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
+
+            chart_markers = build_chart_markers(buy_signals, sell_signals)
+
+            logger.info(
+                "strategy_signals_generated | strategy=%s instrument_id=%s symbol=%s interval=%s start=%s end=%s buys=%d sells=%d",
+                strategy_id,
+                instrument_id,
+                effective_symbol,
+                interval,
+                start,
+                end,
+                len(buy_signals),
+                len(sell_signals),
+            )
+
+            if not buy_signals and not sell_signals:
+                aggregate_stats = {
+                    "signals": 0,
+                    "type_matches": 0,
+                    "rule_matches": 0,
+                    "direction_matches": 0,
+                    "final_matches": 0,
+                }
+                aggregate_rules: set[str] = set()
+                aggregate_directions: set[str] = set()
+                for res in rule_results:
+                    for cond in res.get("conditions") or []:
+                        stats = cond.get("stats") or {}
+                        for key in aggregate_stats:
+                            try:
+                                aggregate_stats[key] += int(stats.get(key, 0) or 0)
+                            except (TypeError, ValueError):  # pragma: no cover - defensive
+                                continue
+                        observed_rules = cond.get("observed_rules") or []
+                        observed_directions = cond.get("observed_directions") or []
+                        aggregate_rules.update(map(str, observed_rules))
+                        aggregate_directions.update(map(str, observed_directions))
+
+                logger.info(
+                    "strategy_signals_none | strategy=%s instrument_id=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d stats=%s observed_rules=%s observed_directions=%s",
+                    strategy_id,
+                    instrument_id,
+                    effective_symbol,
+                    interval,
+                    start,
+                    end,
+                    len(indicator_payloads),
+                    len(rule_results),
+                    aggregate_stats,
+                    sorted(aggregate_rules),
+                    sorted(aggregate_directions),
+                )
+                for res in rule_results:
+                    conditions = res.get("conditions") or []
+                    matched_count = sum(1 for cond in conditions if cond.get("matched"))
+                    total_conditions = len(conditions)
+                    logger.info(
+                        "strategy_rule_trace | strategy=%s instrument_id=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
+                        strategy_id,
+                        instrument_id,
+                        res.get("rule_id"),
+                        res.get("action"),
+                        res.get("matched"),
+                        matched_count,
+                        total_conditions,
+                        res.get("reason"),
+                    )
+                    for cond in conditions:
+                        logger.info(
+                            "strategy_condition_trace | strategy=%s instrument_id=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
+                            strategy_id,
+                            instrument_id,
+                            res.get("rule_id"),
+                            cond.get("indicator_id"),
+                            cond.get("signal_type"),
+                            cond.get("direction"),
+                            cond.get("direction_detected"),
+                            cond.get("matched"),
+                            cond.get("reason"),
+                            cond.get("stats"),
+                            cond.get("observed_rules"),
+                            cond.get("observed_directions"),
+                        )
+
+            status = "ok"
+            if missing_indicators:
+                status = "missing_indicators"
+
+            return {
+                "instrument_id": instrument_id,
+                "symbol": effective_symbol,
+                "window": {
+                    "start": start,
+                    "end": end,
+                    "interval": interval,
+                    "instrument_id": instrument_id,
+                    "symbol": effective_symbol,
+                    "datasource": effective_datasource,
+                    "exchange": effective_exchange,
+                },
+                "indicator_results": indicator_payloads,
+                "rule_results": rule_results,
+                "buy_signals": buy_signals,
+                "sell_signals": sell_signals,
+                "chart_markers": chart_markers,
+                "applied_inputs": {
+                    "instrument_id": instrument_id,
+                    "symbol": effective_symbol,
+                    "timeframe": record.timeframe,
+                    "datasource": effective_datasource,
+                    "exchange": effective_exchange,
+                },
+                "missing_indicators": missing_indicators,
+                "status": status,
+            }
+
+        instrument_payloads = {
+            instrument_id: _evaluate_for_instrument(instrument_id)
+            for instrument_id in requested_ids
+        }
 
         return {
             "strategy_id": record.id,
             "strategy_name": record.name,
-            "window": {
-                "start": start,
-                "end": end,
-                "interval": interval,
-                "symbol": effective_symbol,
-                "datasource": effective_datasource,
-                "exchange": effective_exchange,
-            },
-            "indicator_results": indicator_payloads,
-            "rule_results": rule_results,
-            "buy_signals": buy_signals,
-            "sell_signals": sell_signals,
-            "chart_markers": chart_markers,
-            "applied_inputs": {
-                "symbol": effective_symbol,
-                "timeframe": record.timeframe,
-                "datasource": effective_datasource,
-                "exchange": effective_exchange,
-            },
-            "missing_indicators": missing_indicators,
-            "status": status,
+            "instruments": instrument_payloads,
         }
 
 
@@ -1441,9 +1488,7 @@ def generate_strategy_signals(
     start: str,
     end: str,
     interval: str,
-    symbol: Optional[str] = None,
-    datasource: Optional[str] = None,
-    exchange: Optional[str] = None,
+    instrument_ids: Optional[List[str]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate the strategy rules for the requested window."""
@@ -1453,9 +1498,7 @@ def generate_strategy_signals(
         start=start,
         end=end,
         interval=interval,
-        symbol=symbol,
-        datasource=datasource,
-        exchange=exchange,
+        instrument_ids=instrument_ids,
         config=config,
     )
 

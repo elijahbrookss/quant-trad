@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
+from indicators.config import DataContext
 from indicators.pivot_level import PivotLevelIndicator
 from signals.engine.market_profile import resolve_market_profile_params
 from signals.base import BaseSignal
@@ -92,6 +93,8 @@ class IndicatorBreakoutCache:
         *,
         interval: Optional[str] = None,
         symbol: Optional[str] = None,
+        provider: Any = None,
+        data_ctx: Optional[DataContext] = None,
     ) -> MarketProfileIndicator:
         """
         Clone market profile indicator for overlay rendering.
@@ -110,6 +113,25 @@ class IndicatorBreakoutCache:
             Cloned MarketProfileIndicator sharing the same profiles
         """
         params = resolve_market_profile_params(indicator)
+        indicator_symbol = getattr(indicator, "symbol", None)
+
+        if symbol and indicator_symbol and symbol != indicator_symbol:
+            if provider is None or data_ctx is None:
+                raise ValueError("Market profile overlay requires provider and data_ctx for symbol mismatch.")
+            runtime = MarketProfileIndicator.from_context(
+                provider=provider,
+                ctx=data_ctx,
+                bin_size=getattr(indicator, "bin_size", None),
+                use_merged_value_areas=params.use_merged_value_areas,
+                merge_threshold=params.merge_threshold,
+                min_merge_sessions=params.min_merge_sessions,
+                extend_value_area_to_chart_end=True,
+                days_back=getattr(indicator, "days_back", MarketProfileIndicator.DEFAULT_DAYS_BACK),
+            )
+            setattr(runtime, "symbol", symbol)
+            if interval is not None:
+                setattr(runtime, "interval", interval)
+            return runtime
 
         # Clone with existing profiles (don't recompute!)
         # Always extend value areas to chart end for overlay display

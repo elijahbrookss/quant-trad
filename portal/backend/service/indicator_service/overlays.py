@@ -67,7 +67,14 @@ class IndicatorOverlayBuilder:
             len(df),
         )
         overlay_indicator = self._build_overlay_indicator(
-            entry.instance, df, inst_id, sym, interval, overlay_options
+            entry.instance,
+            df,
+            inst_id,
+            sym,
+            interval,
+            overlay_options,
+            provider=provider,
+            data_ctx=data_ctx,
         )
         logger.info(
             "event=overlay_indicator_built indicator_id=%s indicator_type=%s",
@@ -206,6 +213,9 @@ class IndicatorOverlayBuilder:
         symbol: str,
         interval: str,
         overlay_options: Optional[Mapping[str, Any]],
+        *,
+        provider=None,
+        data_ctx: Optional[DataContext] = None,
     ):
         options = dict(overlay_options or {})
         if isinstance(instance, MarketProfileIndicator) and hasattr(instance, "to_lightweight"):
@@ -214,6 +224,8 @@ class IndicatorOverlayBuilder:
                 df,
                 interval=interval,
                 symbol=symbol,
+                provider=provider,
+                data_ctx=data_ctx,
             )
             logger.debug(
                 "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s",

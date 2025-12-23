@@ -11,6 +11,7 @@ import { useIntrabarCandleAnimator, AnimatorStates } from './hooks/useIntrabarCa
 import { useMarkerManager } from './hooks/useMarkerManager.js'
 import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
+import { createLogger } from '../../utils/logger.js'
 
 const chartOptions = {
   layout: {
@@ -40,7 +41,15 @@ const seriesOptions = {
   priceLineVisible: false,
 }
 
-export function BotLensChart({ chartId, candles = [], trades = [], overlays = [], playbackSpeed = 10 }) {
+export function BotLensChart({
+  chartId,
+  candles = [],
+  trades = [],
+  overlays = [],
+  playbackSpeed = 10,
+  debugRanges = false,
+  className = '',
+}) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -50,6 +59,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const overlayHandlesRef = useRef({ priceLines: [] })
   const barSpacingRef = useRef(null)
   const latestCandlesRef = useRef([])
+  const seriesInstanceRef = useRef(null)
   const markerCacheRef = useRef([])
   const prevPriceLinesRef = useRef([])
   const markerDetailsRef = useRef([])
@@ -58,6 +68,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
   const pendingCameraIntentRef = useRef(null)
   const { registerChart } = useChartState()
+  const logger = useMemo(() => createLogger('BotLensChart', { chartId }), [chartId])
 
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
@@ -130,9 +141,17 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
         first,
         last,
       })
+      if (debugRanges) {
+        logger.info('candles_normalized', {
+          raw: resolvedCandles.length,
+          normalized: candleData.length,
+          first,
+          last,
+        })
+      }
       diagLoggedRef.current = true
     }
-  }, [candleData, chartId])
+  }, [candleData, chartId, debugRanges, logger, resolvedCandles.length])
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, priceLines: tradePriceLines } =
     useTradeMarkers(resolvedTrades, candleLookup, candleData)
@@ -145,6 +164,7 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     barSpacingRef,
     latestCandlesRef,
     markerManager,
+    debugRanges,
   })
 
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({
@@ -207,6 +227,12 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
 
   useEffect(() => {
     if (!seriesRef.current) return
+    if (seriesRef.current !== seriesInstanceRef.current) {
+      seriesInstanceRef.current = seriesRef.current
+      prevCandleDataRef.current = []
+      frameSampleRef.current = { total: 0, count: 0, logged: false }
+      diagLoggedRef.current = false
+    }
     const previous = prevCandleDataRef.current || []
     const next = candleData
     const prevLast = previous[previous.length - 1]
@@ -260,7 +286,23 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
 
     prevCandleDataRef.current = next
-  }, [activeTradeAtLastCandle, cancelAnimator, candleData, instantPlayback, playbackSpeed, seriesRef, startAnimator])
+
+    if (debugRanges) {
+      const timeScale = chartRef.current?.timeScale?.()
+      const range = timeScale?.getVisibleRange?.() || null
+      const logicalRange = timeScale?.getVisibleLogicalRange?.() || null
+      logger.info('series_update', {
+        count: next.length,
+        requiresReset,
+        isAppend,
+        isSameCandle,
+        historyRewound,
+        longJump,
+        range,
+        logicalRange,
+      })
+    }
+  }, [activeTradeAtLastCandle, cancelAnimator, candleData, debugRanges, instantPlayback, logger, playbackSpeed, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -287,6 +329,18 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
       candleData,
     })
     const overlayResult = applyArtifacts(artifacts)
+    if (debugRanges) {
+      const markerTimes = (artifacts?.markers || [])
+        .map((marker) => marker?.time)
+        .filter((value) => Number.isFinite(value))
+      const unique = new Set(markerTimes)
+      logger.info('marker_times', {
+        total: markerTimes.length,
+        unique: unique.size,
+        first: markerTimes[0] ?? null,
+        last: markerTimes[markerTimes.length - 1] ?? null,
+      })
+    }
     if (overlayResult.extentChanged && overlayResult.extents) {
       requestIntent({
         intent: CameraIntents.FIT_OVERLAY_EXTENTS,
@@ -305,11 +359,15 @@ export function BotLensChart({ chartId, candles = [], trades = [], overlays = []
     }
   }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
 
+  const containerClasses = [
+    'relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]',
+    className,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   return (
-    <div
-      ref={containerRef}
-      className="relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]"
-    >
+    <div ref={containerRef} className={containerClasses}>
       <MarkerTooltip markerTooltip={markerTooltip} />
     </div>
   )

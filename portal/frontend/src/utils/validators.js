@@ -72,9 +72,14 @@ export function validateStrategy(strategy) {
     errors.timeframe = 'Timeframe is required'
   }
 
-  // Validate symbols
-  if (!Array.isArray(strategy.symbols) || strategy.symbols.length === 0) {
-    errors.symbols = 'At least one symbol is required'
+  // Validate instruments
+  if (!Array.isArray(strategy.instrument_slots) || strategy.instrument_slots.length === 0) {
+    errors.instrument_slots = 'At least one symbol is required'
+  } else {
+    const hasSymbol = strategy.instrument_slots.some((slot) => Boolean(slot?.symbol))
+    if (!hasSymbol) {
+      errors.instrument_slots = 'At least one symbol is required'
+    }
   }
 
   // Validate risk parameters if present

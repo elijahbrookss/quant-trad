@@ -205,11 +205,7 @@ class StrategySignalRequest(BaseModel):
     start: str
     end: str
     interval: str
-    symbol: Optional[str] = None
-    datasource: Optional[str] = None
-    exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
+    instrument_ids: List[str] = Field(default_factory=list)
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -513,15 +509,12 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
     """Generate buy/sell signal summaries for a strategy."""
 
     try:
-        market = _apply_market_aliases(body.dict())
         return strategy_service.generate_strategy_signals(
             strategy_id,
             start=body.start,
             end=body.end,
             interval=body.interval,
-            symbol=market.get("symbol") or body.symbol,
-            datasource=market.get("datasource"),
-            exchange=market.get("exchange"),
+            instrument_ids=body.instrument_ids,
             config=body.config,
         )
     except KeyError as exc:
@@ -565,4 +558,3 @@ async def delete_symbol_preset(preset_id: str) -> Response:
     strategy_service.delete_symbol_preset_service(preset_id)
 
     return Response(status_code=204)
-

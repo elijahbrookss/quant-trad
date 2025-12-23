@@ -213,9 +213,7 @@ class SeriesBuilder:
         start_iso: str,
         end_iso: str,
         timeframe: str,
-        symbol: str,
-        datasource: Optional[str],
-        exchange: Optional[str],
+        instrument_id: str,
     ) -> Dict[str, Any]:
         """Evaluate strategy and generate signals."""
         from .. import strategy_service
@@ -226,9 +224,7 @@ class SeriesBuilder:
                 start=start_iso,
                 end=end_iso,
                 interval=timeframe,
-                symbol=symbol,
-                datasource=datasource,
-                exchange=exchange,
+                instrument_ids=[instrument_id],
                 config={"mode": self.run_type},
             )
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -297,10 +293,10 @@ class SeriesBuilder:
         return template_copy
 
     def _build_series_for_strategy(self, strategy: Strategy) -> List[StrategySeries]:
-        """Build series for all enabled instruments in a strategy.
+        """Build series for all instruments in a strategy.
 
         This method coordinates multi-instrument support by:
-        1. Iterating through all enabled instrument_links
+        1. Iterating through all instrument_links
         2. Building a separate StrategySeries for each instrument
         3. Applying per-instrument risk multipliers
 
@@ -308,7 +304,7 @@ class SeriesBuilder:
             strategy: Strategy domain model loaded from database
 
         Returns:
-            List of StrategySeries (one per enabled instrument)
+            List of StrategySeries (one per instrument)
 
         Raises:
             RuntimeError: If strategy has no instruments or cannot build series
@@ -319,8 +315,8 @@ class SeriesBuilder:
         series_list: List[StrategySeries] = []
 
         for instrument_link in strategy.instrument_links:
-            # Skip disabled instruments
-            if not instrument_link.enabled:
+            enabled = getattr(instrument_link, "enabled", True)
+            if enabled is False:
                 logger.info(
                     "Skipping disabled instrument | strategy=%s | symbol=%s",
                     strategy.id,
@@ -380,10 +376,13 @@ class SeriesBuilder:
         symbol = instrument_link.symbol
         if not symbol:
             raise RuntimeError(f"Instrument link for strategy {strategy.id} missing symbol")
+        instrument_id = instrument_link.instrument_id
+        if not instrument_id:
+            raise RuntimeError(f"Instrument link for strategy {strategy.id} missing instrument_id")
 
         timeframe = strategy.timeframe
-        datasource = self.config.get("datasource") or instrument_link.datasource or strategy.datasource
-        exchange = self.config.get("exchange") or instrument_link.exchange or strategy.exchange
+        datasource = strategy.datasource
+        exchange = strategy.exchange
 
         # Extract risk multiplier for this instrument
         risk_multiplier = instrument_link.risk_multiplier or 1.0
@@ -409,7 +408,7 @@ class SeriesBuilder:
 
         # Step 3: Evaluate strategy for signals and overlays
         evaluation = self._evaluate_strategy(
-            strategy.id, start_iso, end_iso, timeframe, symbol, datasource, exchange
+            strategy.id, start_iso, end_iso, timeframe, instrument_id
         )
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})

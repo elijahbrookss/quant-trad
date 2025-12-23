@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { toSec } from '../chartDataUtils.js'
+import { createLogger } from '../../../utils/logger.js'
 
 export const CameraIntents = {
   FOLLOW_LATEST: 'FOLLOW_LATEST',
@@ -65,7 +66,7 @@ const buildGhostPoints = (candles = [], segments = []) => {
   return ghostPoints
 }
 
-export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef }) => {
+export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges = false }) => {
   const lockedRef = useRef(true)
   const animationActiveRef = useRef(false)
   const userOverrideUntilRef = useRef(0)
@@ -74,6 +75,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const preferredSpanBarsRef = useRef(24)
   const lastLogicalRangeRef = useRef(null)
   const interactionRef = useRef({ dragging: false })
+  const logger = useMemo(() => createLogger('ViewportController'), [])
 
   const applyRange = useCallback((range, logicalRange) => {
     const ts = chartRef.current?.timeScale?.()
@@ -176,9 +178,21 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         applyRange(tsRange, follow.logicalRange)
         applyGhostSeries(candles, payload?.segments || [])
         logIntent({ intent, reason, range: tsRange, logicalRange: follow.logicalRange })
+        if (debugRanges) {
+          logger.info('viewport_intent', {
+            intent,
+            reason,
+            range: tsRange,
+            logicalRange: follow.logicalRange,
+            locked: lockedRef.current,
+            candleCount: candles.length,
+            lastTime: candles[candles.length - 1]?.time ?? null,
+            spacing,
+          })
+        }
       }
     },
-    [applyGhostSeries, applyRange, barSpacingRef, latestCandlesRef, logIntent, notifyUserInteraction],
+    [applyGhostSeries, applyRange, barSpacingRef, debugRanges, latestCandlesRef, logIntent, logger, notifyUserInteraction],
   )
 
   const setAnimationActive = useCallback(
@@ -215,12 +229,26 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
 
         if ((spanChanged || seedSpan) && Number.isFinite(span)) {
           preferredSpanBarsRef.current = clampBars(span, 8, 480)
+          if (debugRanges) {
+            logger.info('viewport_span_update', {
+              span,
+              logicalRange,
+              locked: lockedRef.current,
+            })
+          }
           return
         }
 
         if (interactionRef.current.dragging) {
           notifyUserInteraction()
         }
+      }
+      const handleTimeRangeChange = (timeRange) => {
+        if (!debugRanges) return
+        logger.info('viewport_time_range', {
+          timeRange,
+          locked: lockedRef.current,
+        })
       }
 
       const markDragStart = () => {
@@ -234,6 +262,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       }
 
       ts.subscribeVisibleLogicalRangeChange(handleRangeChange)
+      ts.subscribeVisibleTimeRangeChange?.(handleTimeRangeChange)
       containerEl.addEventListener('mousedown', markDragStart)
       containerEl.addEventListener('mouseup', markDragEnd)
       containerEl.addEventListener('mouseleave', markDragEnd)
@@ -242,6 +271,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       containerEl.addEventListener('wheel', markWheel, { passive: true })
       return () => {
         ts.unsubscribeVisibleLogicalRangeChange(handleRangeChange)
+        ts.unsubscribeVisibleTimeRangeChange?.(handleTimeRangeChange)
         containerEl.removeEventListener('mousedown', markDragStart)
         containerEl.removeEventListener('mouseup', markDragEnd)
         containerEl.removeEventListener('mouseleave', markDragEnd)
@@ -250,7 +280,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         containerEl.removeEventListener('wheel', markWheel)
       }
     },
-    [chartRef, notifyUserInteraction],
+    [chartRef, debugRanges, logger, notifyUserInteraction],
   )
 
   useEffect(() => {
