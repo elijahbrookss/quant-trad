@@ -1,13 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
 import { ChartComponent } from './components/ChartComponent/ChartComponent'
-import { TabManager } from './components/TabManager'
+import { IndicatorSection } from './components/IndicatorTab.jsx'
+import StrategyTab from './components/StrategyTab.jsx'
+import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
-import { RefreshCw } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FlaskConical, Layers, Menu, RefreshCw, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
 
-const sections = [
-  { id: 'quantlab', label: 'QuantLab', description: 'Strategy workbench for indicators, charts, and overlays.' },
+const navItems = [
+  {
+    id: 'quantlab',
+    label: 'QuantLab',
+    description: 'Research workspace for indicators, charts, and overlays.',
+    kicker: 'Research Lens',
+    to: '/quantlab',
+    icon: FlaskConical,
+  },
+  {
+    id: 'strategy',
+    label: 'Strategy',
+    description: 'Decision logic builder for signals, rules, and risk.',
+    kicker: 'Decision Lens',
+    to: '/strategy',
+    icon: Layers,
+  },
+  {
+    id: 'bots',
+    label: 'Bots',
+    description: 'Execution layer for backtests, playback, and live runs.',
+    kicker: 'Execution Lens',
+    to: '/bots',
+    icon: Bot,
+  },
 ]
 
 function ApiStatusPill({ chartId }) {
@@ -36,15 +62,111 @@ function ApiStatusPill({ chartId }) {
   )
 }
 
-function SectionHeading({ title, description, kicker }) {
+function SectionHeading({ title, description, kicker, actions }) {
   return (
-    <div className="space-y-3">
-      {kicker ? (
-        <span className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">{kicker}</span>
-      ) : null}
-      <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
-      <p className="max-w-2xl text-sm text-slate-400">{description}</p>
+    <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+      <div className="space-y-3">
+        {kicker ? (
+          <span className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">{kicker}</span>
+        ) : null}
+        <h2 className="text-3xl font-semibold tracking-tight text-slate-100">{title}</h2>
+        <p className="max-w-2xl text-sm text-slate-400">{description}</p>
+      </div>
+      {actions ? <div className="w-full max-w-sm">{actions}</div> : null}
     </div>
+  )
+}
+
+function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
+  return (
+    <>
+      <div
+        className={`fixed inset-0 z-30 bg-black/40 transition lg:hidden ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        onClick={onClose}
+        aria-hidden={!open}
+      />
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-white/5 bg-[#151924]/95 px-4 py-6 backdrop-blur transition lg:static lg:z-auto ${
+          open ? 'translate-x-0' : '-translate-x-full'
+        } ${collapsed ? 'lg:w-20' : 'lg:w-64'} lg:translate-x-0`}
+      >
+        <div className={`flex items-center ${collapsed ? 'justify-center lg:justify-between' : 'justify-between'}`}>
+          <div className={`flex items-center gap-3 ${collapsed ? 'lg:gap-0' : ''}`}>
+            <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-soft)]">
+              QT
+            </span>
+            {!collapsed ? (
+              <div className="space-y-1">
+                <div className="text-sm font-semibold text-slate-100">QuantTrad</div>
+                <div className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Portal</div>
+              </div>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="hidden h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:inline-flex"
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {collapsed ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
+              aria-label="Close sidebar"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+
+        <nav className="mt-8 space-y-2 text-sm">
+          {navItems.map((item) => {
+            const Icon = item.icon
+            return (
+              <NavLink
+                key={item.id}
+                to={item.to}
+                title={item.label}
+                className={({ isActive }) =>
+                  [
+                    'flex items-center gap-3 rounded-2xl border px-3 py-3 transition',
+                    collapsed ? 'justify-center lg:px-2' : '',
+                    isActive
+                      ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong)]'
+                      : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                }
+              >
+                <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/5 text-[color:var(--accent-text-soft)]">
+                  <Icon className="size-5" />
+                </span>
+                {!collapsed ? (
+                  <div className="min-w-0">
+                    <div className="font-semibold">{item.label}</div>
+                    <div className="text-[11px] text-slate-500">{item.kicker}</div>
+                  </div>
+                ) : null}
+              </NavLink>
+            )
+          })}
+        </nav>
+
+        {!collapsed ? (
+          <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
+            <div className="uppercase tracking-[0.3em] text-slate-500">Flow</div>
+            <p className="mt-2 text-sm text-slate-200">QuantLab → Strategy → Bot</p>
+            <p className="mt-1 text-[11px] text-slate-500">Each lens stays isolated to preserve walk-forward integrity.</p>
+          </div>
+        ) : null}
+      </aside>
+    </>
   )
 }
 
@@ -54,6 +176,9 @@ function AppShell({ chartId }) {
   const [checkingHealth, setCheckingHealth] = useState(false)
   const healthErrorRef = useRef(null)
   const mountedRef = useRef(true)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const location = useLocation()
 
   useEffect(() => {
     info('app_mounted')
@@ -128,79 +253,154 @@ function AppShell({ chartId }) {
     }
   }, [runHealthCheck])
 
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [location.pathname])
+
   const healthMessage = chart.healthStatus === 'error'
     ? (chart.healthMessage || healthErrorRef.current)
     : null
 
+  const currentNav = useMemo(() => {
+    return navItems.find((item) => location.pathname.startsWith(item.to)) || navItems[0]
+  }, [location.pathname])
+
   return (
     <div className="min-h-screen bg-[#14171f] bg-[radial-gradient(circle_at_top,_var(--accent-gradient-spot)_0%,_rgba(20,23,31,1)_55%)] text-slate-100">
-        <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 backdrop-blur">
-          <div className="mx-auto flex max-w-[1600px] flex-col gap-5 px-8 py-6 md:flex-row md:items-center md:justify-between">
-            <div className="space-y-1">
-              <div className="flex items-center gap-3 text-lg font-semibold text-slate-100">
-                <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-soft)]">QT</span>
-                <span>QuantTrad Portal</span>
-              </div>
-              <p className="text-sm text-slate-400">QuantLab • Ops Command • Insight Reports</p>
-            </div>
-            <nav className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.32em] text-slate-400">
-              {sections.map((section) => (
-                <a
-                  key={section.id}
-                  href={`#${section.id}`}
-                  className="rounded-full border border-white/5 bg-white/5 px-4 py-2 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
-                >
-                  {section.label}
-                </a>
-              ))}
-            </nav>
-          </div>
-        </header>
+      <div className="flex min-h-screen">
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+        />
 
-        <main className="mx-auto max-w-[1600px] space-y-20 px-8 py-12">
-          <section id="quantlab" className="space-y-10">
-            <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-              <SectionHeading
-                title="QuantLab"
-                description="Visualize price action, overlays, and execution signals in a focused, minimal environment."
-              />
-              <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300 sm:items-end">
-                <div className="flex items-center gap-3">
-                  <ApiStatusPill chartId={chartId} />
-                  <button
-                    type="button"
-                    onClick={runHealthCheck}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
-                    aria-label="Check API health"
-                    disabled={checkingHealth}
-                  >
-                    <RefreshCw className="size-4" />
-                  </button>
-                </div>
-                <span className="text-[11px] tracking-[0.25em] text-slate-400">{lastHealthCheckLabel}</span>
-                {healthMessage ? (
-                  <span className="text-[11px] text-rose-300/80">{healthMessage}</span>
-                ) : null}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="sticky top-0 z-20 border-b border-white/5 bg-[#1c1f2b]/90 px-6 py-4 backdrop-blur lg:px-10">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
+                aria-label="Open sidebar"
+              >
+                <Menu className="size-5" />
+              </button>
+              <div className="space-y-1">
+                <span className="text-[11px] uppercase tracking-[0.35em] text-slate-500">{currentNav?.kicker}</span>
+                <div className="text-lg font-semibold text-slate-100">{currentNav?.label}</div>
+              </div>
+              <div className="ml-auto hidden items-center gap-3 text-xs text-slate-400 md:flex">
+                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 uppercase tracking-[0.2em]">QuantTrad</span>
+                <span className="text-slate-500">Walk-forward only</span>
               </div>
             </div>
-            <div className="space-y-10">
-              <ChartComponent chartId={chartId} />
+          </header>
 
-              <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                <header className="flex flex-col gap-3 border-b border-white/5 pb-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="space-y-1">
-                    <h3 className="text-lg font-semibold text-slate-100">Indicator &amp; Signal Console</h3>
-                    <p className="text-xs text-slate-400">Configure overlays today and plan strategies, signals, and presets tomorrow.</p>
-                  </div>
-                </header>
-                <div className="pt-4">
-                  <TabManager chartId={chartId} />
-                </div>
-              </section>
+          <main className="flex-1 px-6 py-10 lg:px-10">
+            <div className="mx-auto w-full max-w-[1600px] space-y-10">
+              <Routes>
+                <Route path="/" element={<Navigate to="/quantlab" replace />} />
+                <Route
+                  path="/quantlab"
+                  element={
+                    <div className="space-y-10">
+                      <SectionHeading
+                        title="QuantLab"
+                        kicker="Research Lens"
+                        description="Visualize price action, overlays, and indicator signals in a focused, minimal workspace."
+                        actions={
+                          <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300 sm:items-end">
+                            <div className="flex items-center gap-3">
+                              <ApiStatusPill chartId={chartId} />
+                              <button
+                                type="button"
+                                onClick={runHealthCheck}
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
+                                aria-label="Check API health"
+                                disabled={checkingHealth}
+                              >
+                                <RefreshCw className="size-4" />
+                              </button>
+                            </div>
+                            <span className="text-[11px] tracking-[0.25em] text-slate-400">{lastHealthCheckLabel}</span>
+                            {healthMessage ? (
+                              <span className="text-[11px] text-rose-300/80">{healthMessage}</span>
+                            ) : null}
+                          </div>
+                        }
+                      />
+
+                      <div className="space-y-10">
+                        <ChartComponent chartId={chartId} />
+
+                        <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
+                          <header className="flex flex-col gap-3 border-b border-white/5 pb-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="space-y-1">
+                              <h3 className="text-lg font-semibold text-slate-100">Indicator &amp; Signal Console</h3>
+                              <p className="text-xs text-slate-400">
+                                Configure overlays and indicator signals before wiring strategy logic.
+                              </p>
+                            </div>
+                          </header>
+                          <div className="pt-4">
+                            <IndicatorSection chartId={chartId} />
+                          </div>
+                        </section>
+                      </div>
+                    </div>
+                  }
+                />
+                <Route
+                  path="/strategy"
+                  element={
+                    <div className="space-y-10">
+                      <SectionHeading
+                        title="Strategy"
+                        kicker="Decision Lens"
+                        description="Author decision logic, attach indicators, and preview rule outputs without execution realism."
+                        actions={
+                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
+                            <div className="uppercase tracking-[0.3em] text-slate-500">Focus</div>
+                            <p className="mt-2 text-sm text-slate-200">Signals, rules, and ATM templates.</p>
+                            <p className="mt-1 text-[11px] text-slate-500">Execution realism stays in Bot runs.</p>
+                          </div>
+                        }
+                      />
+                      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
+                        <StrategyTab chartId={chartId} />
+                      </section>
+                    </div>
+                  }
+                />
+                <Route
+                  path="/bots"
+                  element={
+                    <div className="space-y-10">
+                      <SectionHeading
+                        title="Bots"
+                        kicker="Execution Lens"
+                        description="Run walk-forward backtests, paper sims, or live runs with realistic execution constraints."
+                        actions={
+                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
+                            <div className="uppercase tracking-[0.3em] text-slate-500">Playback</div>
+                            <p className="mt-2 text-sm text-slate-200">Trade lifecycles, stops, and targets.</p>
+                            <p className="mt-1 text-[11px] text-slate-500">All runs respect walk-forward timing.</p>
+                          </div>
+                        }
+                      />
+                      <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
+                        <BotPanel />
+                      </section>
+                    </div>
+                  }
+                />
+                <Route path="*" element={<Navigate to="/quantlab" replace />} />
+              </Routes>
             </div>
-          </section>
-
-        </main>
+          </main>
+        </div>
+      </div>
     </div>
   )
 }
@@ -208,9 +408,10 @@ function AppShell({ chartId }) {
 export default function App() {
   const chartId = 'main'
   return (
-    <ChartStateProvider>
-      <AppShell chartId={chartId} />
-    </ChartStateProvider>
+    <BrowserRouter>
+      <ChartStateProvider>
+        <AppShell chartId={chartId} />
+      </ChartStateProvider>
+    </BrowserRouter>
   )
 }
-
