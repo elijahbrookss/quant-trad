@@ -3,26 +3,22 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import uuid
 import time
 from collections import deque
-from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .. import risk_math, storage, strategy_service
-from ..candle_service import fetch_ohlcv
+from .. import storage
 from .domain import (
     Candle,
-    LadderRiskEngine,
     StrategySignal,
     coerce_float,
     isoformat,
     normalize_epoch,
-    timeframe_duration,
     timeframe_to_seconds,
 )
 from .reporting import (
@@ -44,6 +40,20 @@ MAX_LOG_ENTRIES = 500
 INTRABAR_BASE_SECONDS = 0.4
 
 
+@dataclass
+class SeriesExecutionState:
+    series: StrategySeries
+    bar_index: int = 0
+    total_bars: int = 0
+    next_step_at: Optional[datetime] = None
+    intrabar_candles: List[Candle] = field(default_factory=list)
+    intrabar_index: int = 0
+    active_candle: Optional[Candle] = None
+    done: bool = False
+
+    def intrabar_active(self) -> bool:
+        return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)
+
 def _coerce_float(value: Optional[object], default: Optional[float] = None) -> Optional[float]:
     return coerce_float(value, default)
 
@@ -54,10 +64,6 @@ def _isoformat(value: Optional[datetime]) -> Optional[str]:
 
 def _timeframe_to_seconds(label: Optional[str]) -> Optional[int]:
     return timeframe_to_seconds(label)
-
-
-def _timeframe_duration(label: Optional[str]) -> Optional[timedelta]:
-    return timeframe_duration(label)
 
 
 class BotRuntime:
@@ -74,6 +80,7 @@ class BotRuntime:
         self.mode = (self.config.get("mode") or "instant").lower()
         self.run_type = (self.config.get("run_type") or "backtest").lower()
         self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
+        self.focus_symbol = self.config.get("focus_symbol")
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
         self.state["playback_speed"] = self.playback_speed
         self._lock = threading.Lock()
@@ -83,14 +90,17 @@ class BotRuntime:
         self._pause_event.set()
         self._paused = False
         self._series: List[StrategySeries] = []
+        self._series_states: List[SeriesExecutionState] = []
+        self._series_state_map: Dict[str, SeriesExecutionState] = {}
+        self._primary_series_key: Optional[str] = None
         self._total_bars: int = 0
-        self._bar_index: int = 0
         self._prepared: bool = False
         self._chart_overlays: List[Dict[str, Any]] = []
         self._last_stats: Dict[str, Any] = {}
         self._next_bar_at: Optional[datetime] = None
         self._live_mode = self.run_type == "sim_trade"
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
+        self._decision_events: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._subscribers: Dict[str, Queue] = {}
         self._state_callback = state_callback
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
@@ -127,6 +137,8 @@ class BotRuntime:
             self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
             with self._lock:
                 self.state["playback_speed"] = self.playback_speed
+        if "focus_symbol" in payload:
+            self.focus_symbol = payload.get("focus_symbol") or None
 
     def _set_error_state(
         self,
@@ -179,7 +191,7 @@ class BotRuntime:
         self._series = streams
         # Calculate total bars as max across all series (for multi-instrument support)
         self._total_bars = max(len(series.candles) for series in self._series) if self._series else 0
-        self._bar_index = 0
+        self._build_series_states()
         self._rebuild_overlay_cache()
         self._prepared = True
         with self._lock:
@@ -200,6 +212,76 @@ class BotRuntime:
             if series.trade_overlay:
                 overlays.append(series.trade_overlay)
         self._chart_overlays = overlays
+
+    def _build_series_states(self) -> None:
+        self._series_states = []
+        self._series_state_map = {}
+        self._primary_series_key = None
+        for series in self._series:
+            state = SeriesExecutionState(series=series, total_bars=len(series.candles))
+            key = self._strategy_key(series)
+            self._series_states.append(state)
+            self._series_state_map[key] = state
+            if self._primary_series_key is None:
+                self._primary_series_key = key
+
+    def _series_state_for(self, series: Optional[StrategySeries]) -> Optional[SeriesExecutionState]:
+        if series is None:
+            return None
+        return self._series_state_map.get(self._strategy_key(series))
+
+    def _active_series_states(self) -> List[SeriesExecutionState]:
+        return [state for state in self._series_states if not state.done]
+
+    def _compute_progress(self) -> float:
+        if not self._series_states:
+            return 0.0
+        progress_total = 0.0
+        counted = 0
+        for state in self._series_states:
+            if state.total_bars <= 0:
+                continue
+            progress_total += min(state.bar_index, state.total_bars) / state.total_bars
+            counted += 1
+        return round(progress_total / counted, 4) if counted else 0.0
+
+    def _refresh_next_bar_at(self) -> None:
+        next_at: Optional[datetime] = None
+        for state in self._active_series_states():
+            candidate = state.next_step_at
+            if candidate is None:
+                continue
+            if next_at is None or candidate < next_at:
+                next_at = candidate
+        self._next_bar_at = next_at
+
+    def _bar_interval(self) -> float:
+        return self._compute_playback_interval()
+
+    def _intrabar_interval(self) -> float:
+        return self._compute_playback_interval(INTRABAR_BASE_SECONDS)
+
+    def _schedule_next_step(self, state: SeriesExecutionState, interval: float) -> None:
+        if self.mode != "walk-forward" or interval <= 0:
+            state.next_step_at = None
+            return
+        state.next_step_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
+
+    def _due_series_states(self, now: datetime) -> List[SeriesExecutionState]:
+        due: List[SeriesExecutionState] = []
+        for state in self._active_series_states():
+            if state.next_step_at is None or now >= state.next_step_at:
+                due.append(state)
+        return due
+
+    def _next_step_time(self) -> Optional[datetime]:
+        next_at: Optional[datetime] = None
+        for state in self._active_series_states():
+            if state.next_step_at is None:
+                return None
+            if next_at is None or state.next_step_at < next_at:
+                next_at = state.next_step_at
+        return next_at
 
     def _instrument_for(
         self,
@@ -333,7 +415,15 @@ class BotRuntime:
 
     @staticmethod
     def _strategy_key(series: StrategySeries) -> str:
-        return str(getattr(series, "strategy_id", getattr(series, "id", id(series))))
+        strategy_id = getattr(series, "strategy_id", getattr(series, "id", id(series)))
+        symbol = getattr(series, "symbol", None)
+        timeframe = getattr(series, "timeframe", None)
+        parts = [str(strategy_id)]
+        if symbol:
+            parts.append(str(symbol))
+        if timeframe:
+            parts.append(str(timeframe))
+        return ":".join(parts)
 
     def _snapshot_candle_for_state(self, base: Candle, snapshot: Mapping[str, Any]) -> Candle:
         open_price = _coerce_float(snapshot.get("open"), base.open) or base.open
@@ -349,28 +439,114 @@ class BotRuntime:
             end=snapshot.get("end") or base.end,
         )
 
-    def _step_series_with_intrabar(self, series: StrategySeries, candle: Candle) -> List[Dict[str, Any]]:
+    def _prime_intrabar_or_step_bar(self, state: SeriesExecutionState, candle: Candle) -> List[Dict[str, Any]]:
+        series = state.series
         engine = series.risk_engine
         if engine is None:
             return []
         intrabar = self._intrabar_manager.intrabar_candles(series, candle)
         if not intrabar:
             return engine.step(candle)
-        events: List[Dict[str, Any]] = []
-        snapshot_used = False
-        for minute_bar in intrabar:
-            events.extend(engine.step(minute_bar))
-            snapshot = self._intrabar_manager.update_snapshot(series, candle, minute_bar)
-            snapshot_used = True
-            temp_candle = self._snapshot_candle_for_state(candle, snapshot)
-            self._update_state(temp_candle)
-            self._push_update("intrabar")
-            if engine.active_trade is None:
-                break
-            self._pace_intrabar_step()
-        if snapshot_used:
-            self._intrabar_manager.snapshots.pop(self._strategy_key(series), None)
-        return events
+        state.intrabar_candles = intrabar
+        state.intrabar_index = 0
+        self._schedule_next_step(state, self._intrabar_interval())
+        logger.debug(
+            "intrabar_start | bot=%s | strategy=%s | symbol=%s | bars=%d",
+            self.bot_id,
+            series.strategy_id,
+            series.symbol,
+            len(intrabar),
+        )
+        return []
+
+    def _step_intrabar(self, state: SeriesExecutionState) -> None:
+        series = state.series
+        engine = series.risk_engine
+        if engine is None or not state.intrabar_active():
+            self._finish_intrabar(state)
+            return
+        if state.active_candle is None:
+            if state.total_bars <= 0:
+                self._finish_intrabar(state)
+                return
+            state.active_candle = series.candles[min(state.bar_index, state.total_bars - 1)]
+        minute_bar = state.intrabar_candles[state.intrabar_index]
+        state.intrabar_index += 1
+        events = engine.step(minute_bar)
+        snapshot = self._intrabar_manager.update_snapshot(series, state.active_candle, minute_bar)
+        temp_candle = self._snapshot_candle_for_state(state.active_candle, snapshot)
+        self._update_state(self._state_candle_for(series, temp_candle))
+        self._push_update("intrabar")
+        for event in events:
+            self._log_event(
+                event.get("type", "event"),
+                series,
+                state.active_candle,
+                trade_id=event.get("trade_id"),
+                leg=event.get("leg"),
+                price=event.get("price"),
+                event_time=event.get("time"),
+                bar_index=state.bar_index,
+                contracts=event.get("contracts"),
+            )
+            self._persist_trade_event(series, event)
+        if engine.active_trade is None or not state.intrabar_active():
+            self._finish_intrabar(state)
+        else:
+            self._schedule_next_step(state, self._intrabar_interval())
+
+    def _finish_intrabar(self, state: SeriesExecutionState) -> None:
+        if state.intrabar_candles:
+            self._intrabar_manager.snapshots.pop(self._strategy_key(state.series), None)
+        if state.intrabar_candles:
+            logger.debug(
+                "intrabar_complete | bot=%s | strategy=%s | symbol=%s | steps=%d",
+                self.bot_id,
+                state.series.strategy_id,
+                state.series.symbol,
+                state.intrabar_index,
+            )
+        state.intrabar_candles = []
+        state.intrabar_index = 0
+        if state.active_candle is not None:
+            self._finalize_bar_step(state, state.active_candle)
+
+    def _finalize_bar_step(self, state: SeriesExecutionState, candle: Candle) -> None:
+        state.bar_index += 1
+        if state.bar_index >= state.total_bars:
+            state.done = True
+        if state.bar_index % 50 == 0 or state.done:
+            logger.info(
+                "walk_forward_step | bot=%s | strategy=%s | symbol=%s | timeframe=%s | bar_index=%d | bar_time=%s",
+                self.bot_id,
+                state.series.strategy_id,
+                state.series.symbol,
+                state.series.timeframe,
+                state.bar_index,
+                _isoformat(candle.time),
+            )
+        if state.done:
+            state.next_step_at = None
+        else:
+            self._schedule_next_step(state, self._bar_interval())
+        self._update_state(self._state_candle_for(state.series, candle))
+        self._push_update("bar")
+
+    def _primary_state_candle(self) -> Optional[Candle]:
+        if not self._series_states:
+            return None
+        primary = self._series_states[0]
+        if not primary.series.candles:
+            return None
+        idx = max(primary.bar_index - 1, 0)
+        idx = min(idx, len(primary.series.candles) - 1)
+        return primary.series.candles[idx]
+
+    def _state_candle_for(self, series: StrategySeries, candle: Candle) -> Candle:
+        if self._primary_series_key and self._strategy_key(series) == self._primary_series_key:
+            return candle
+        primary_candle = self._primary_state_candle()
+        return primary_candle or candle
 
     @staticmethod
     def _normalise_epoch(value: Any) -> Optional[int]:
@@ -392,12 +568,15 @@ class BotRuntime:
         with self._lock:
             self._prepared = False
             self._series = []
+            self._series_states = []
+            self._series_state_map = {}
+            self._primary_series_key = None
             self._total_bars = 0
-            self._bar_index = 0
             self._chart_overlays = []
             self._last_stats = {}
             self._next_bar_at = None
             self._logs.clear()
+            self._decision_events.clear()
             self._intrabar_manager.clear_cache()
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
@@ -410,7 +589,9 @@ class BotRuntime:
 
         status = str(self.state.get("status") or "").lower()
         finished = status in {"completed", "stopped", "error"}
-        exhausted = bool(self._total_bars) and self._bar_index >= self._total_bars
+        exhausted = bool(self._series_states) and all(
+            state.done or state.bar_index >= state.total_bars for state in self._series_states
+        )
         thread_active = self._thread and self._thread.is_alive()
         return not thread_active and (finished or exhausted)
 
@@ -457,17 +638,21 @@ class BotRuntime:
         status = "running"
         self._log_event("running", message="Bot execution loop started")
         while not self._stop.is_set():
-            if self._bar_index >= self._total_bars:
-                if self._live_mode and self._append_live_candles_if_needed():
-                    continue
-                break
             if not self._pause_event.wait(timeout=0.2):
                 continue
-            # Check if any series has candles remaining
-            if not self._series or not any(len(s.candles) > self._bar_index for s in self._series):
+            now = datetime.now(timezone.utc)
+            due_states = self._due_series_states(now)
+            if not due_states:
+                if self._live_mode and self._append_live_candles_if_needed():
+                    continue
+                next_at = self._next_step_time()
+                if next_at:
+                    interval = max((next_at - now).total_seconds(), 0)
+                    self._pace(interval, update_next_bar=True)
+                    continue
                 break
-            self._apply_bar(self._bar_index)
-            self._sleep_between_bars()
+            for state in due_states:
+                self._step_series_state(state)
         if self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
@@ -483,67 +668,124 @@ class BotRuntime:
         self._push_update(status)
         self._persist_runtime_state(status)
 
-    def _apply_bar(self, index: int) -> None:
-        for series in self._series:
-            if index >= len(series.candles):
-                continue
-            candle = series.candles[index]
-            epoch = int(candle.time.timestamp())
-            direction = self._next_signal_for(series, epoch)
-            new_trade = series.risk_engine.maybe_enter(candle, direction)
+    def _step_series_state(self, state: SeriesExecutionState) -> None:
+        if state.done:
+            return
+        if state.intrabar_active():
+            self._step_intrabar(state)
+            return
+        if state.bar_index >= state.total_bars:
+            state.done = True
+            return
+        series = state.series
+        candle = series.candles[state.bar_index]
+        state.active_candle = candle
+        epoch = int(candle.time.timestamp())
+
+        # Debug: Log signal queue status
+        signals_pending = len(series.signals) if series.signals else 0
+        logger.debug(
+            "apply_bar | index=%d epoch=%d strategy=%s signals_pending=%d",
+            state.bar_index,
+            epoch,
+            series.strategy_id,
+            signals_pending,
+        )
+
+        direction = self._next_signal_for(series, epoch)
+
+        # Debug: Log signal consumption result
+        if direction is not None:
+            logger.debug(
+                "signal_consumed | index=%d epoch=%d strategy=%s direction=%s",
+                state.bar_index,
+                epoch,
+                series.strategy_id,
+                direction,
+            )
+
+        # Attempt to create trade from signal
+        new_trade = series.risk_engine.maybe_enter(candle, direction)
+
+        # Log decision event
+        if direction is not None:
             if new_trade is not None:
-                targets = [
-                    {"name": leg.name, "price": round(leg.target_price, 4)}
-                    for leg in new_trade.legs
-                ]
-                self._log_event(
-                    "entry",
-                    series,
-                    candle,
+                # Signal was accepted and trade was opened
+                self._log_decision_event(
+                    event="signal_accepted",
+                    series=series,
+                    candle=candle,
+                    signal_type="strategy_signal",  # Generic type for now
+                    signal_direction=direction,
+                    signal_price=candle.close,
+                    rule_id=None,  # Not available in current signal queue
+                    decision="accepted",
+                    reason=None,
                     trade_id=new_trade.trade_id,
-                    direction=direction,
-                    entry_price=round(new_trade.entry_price, 4),
-                    stop_price=round(new_trade.stop_price, 4),
-                    targets=targets,
-                    bar_index=index,
-                    contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
                 )
-                self._persist_trade_entry(series, new_trade)
-                self._update_trade_overlay(series)
-            trade_events = self._step_series_with_intrabar(series, candle)
-            for event in trade_events:
-                self._log_event(
-                    event.get("type", "event"),
-                    series,
-                    candle,
-                    trade_id=event.get("trade_id"),
-                    leg=event.get("leg"),
-                    price=event.get("price"),
-                    event_time=event.get("time"),
-                    bar_index=index,
-                    contracts=event.get("contracts"),
+            else:
+                # Signal was rejected (no trade opened)
+                # Determine rejection reason
+                rejection_reason = "Active trade already open"
+                if series.risk_engine.active_trade is None:
+                    rejection_reason = "Risk engine declined entry"
+
+                self._log_decision_event(
+                    event="signal_rejected",
+                    series=series,
+                    candle=candle,
+                    signal_type="strategy_signal",
+                    signal_direction=direction,
+                    signal_price=candle.close,
+                    rule_id=None,
+                    decision="rejected",
+                    reason=rejection_reason,
+                    trade_id=None,
                 )
-                self._persist_trade_event(series, event)
+
+        if new_trade is not None:
+            targets = [
+                {"name": leg.name, "price": round(leg.target_price, 4)}
+                for leg in new_trade.legs
+            ]
+            self._log_event(
+                "entry",
+                series,
+                candle,
+                trade_id=new_trade.trade_id,
+                direction=direction,
+                entry_price=round(new_trade.entry_price, 4),
+                stop_price=round(new_trade.stop_price, 4),
+                targets=targets,
+                bar_index=state.bar_index,
+                contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
+            )
+            self._persist_trade_entry(series, new_trade)
             self._update_trade_overlay(series)
-            series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
-        self._bar_index = index + 1
-        # Update state with current candle from first series (backward compatibility)
-        if self._series and self._series[0].candles:
-            candle = self._series[0].candles[min(index, len(self._series[0].candles) - 1)]
-            self._update_state(candle)
-        self._push_update("bar")
+        trade_events = self._prime_intrabar_or_step_bar(state, candle)
+        for event in trade_events:
+            self._log_event(
+                event.get("type", "event"),
+                series,
+                candle,
+                trade_id=event.get("trade_id"),
+                leg=event.get("leg"),
+                price=event.get("price"),
+                event_time=event.get("time"),
+                bar_index=state.bar_index,
+                contracts=event.get("contracts"),
+            )
+            self._persist_trade_event(series, event)
+        self._update_trade_overlay(series)
+        series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
+        if not state.intrabar_active():
+            self._finalize_bar_step(state, candle)
 
     def _next_signal_for(self, series: StrategySeries, epoch: int) -> Optional[str]:
         direction: Optional[str] = None
         while series.signals and series.signals[0].epoch <= epoch:
             direction = series.signals.popleft().direction
         return direction
-
-    def _sleep_between_bars(self) -> None:
-        if self.mode != "walk-forward":
-            return
-        interval = self._compute_playback_interval()
-        self._pace(interval, update_next_bar=True)
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
         speed = self.playback_speed or 0.0
@@ -576,12 +818,6 @@ class BotRuntime:
                 break
             time.sleep(min(0.25, remaining))
 
-    def _pace_intrabar_step(self) -> None:
-        if self.mode != "walk-forward":
-            return
-        interval = self._compute_playback_interval(INTRABAR_BASE_SECONDS)
-        self._pace(interval)
-
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
         end_iso = _isoformat(datetime.now(timezone.utc))
@@ -595,6 +831,10 @@ class BotRuntime:
         if updated:
             # Recalculate total bars as max across all series
             self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
+            for state in self._series_states:
+                state.total_bars = len(state.series.candles)
+                if state.done and state.bar_index < state.total_bars:
+                    state.done = False
             self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended live candles")
             self._push_update("live_refresh")
@@ -711,11 +951,60 @@ class BotRuntime:
         with self._lock:
             self._logs.append(entry)
 
+    def _log_decision_event(
+        self,
+        event: str,
+        series: StrategySeries,
+        candle: Candle,
+        signal_type: str,
+        signal_direction: Optional[str] = None,
+        signal_price: Optional[float] = None,
+        rule_id: Optional[str] = None,
+        decision: Optional[str] = None,
+        reason: Optional[str] = None,
+        trade_id: Optional[str] = None,
+        conditions: Optional[List[Dict[str, Any]]] = None,
+        **metadata: object,
+    ) -> None:
+        """Log a strategy-level decision event for the decision trace."""
+        from .domain import DecisionEvent
+
+        decision_event = DecisionEvent(
+            event_id=str(uuid.uuid4()),
+            event=event,
+            timestamp=_isoformat(datetime.now(timezone.utc)),
+            bar_time=_isoformat(candle.time),
+            strategy_id=series.strategy_id,
+            strategy_name=series.name or series.strategy_id,
+            symbol=series.symbol,
+            signal_type=signal_type,
+            signal_direction=signal_direction,
+            signal_price=signal_price or candle.close,
+            rule_id=rule_id,
+            decision=decision,
+            reason=reason,
+            trade_id=trade_id,
+            conditions=conditions,
+            metadata=dict(metadata) if metadata else None,
+        )
+
+        with self._lock:
+            self._decision_events.append(decision_event.serialize())
+
     def logs(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Return up to *limit* recent log entries."""
 
         with self._lock:
             entries = list(self._logs)
+        if limit and limit > 0:
+            entries = entries[-limit:]
+        return entries
+
+    def decision_events(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return up to *limit* recent decision events."""
+
+        with self._lock:
+            entries = list(self._decision_events)
         if limit and limit > 0:
             entries = entries[-limit:]
         return entries
@@ -801,7 +1090,8 @@ class BotRuntime:
     def _update_state(self, candle: Candle, status: str = "running") -> None:
         stats = self._aggregate_stats()
         self._last_stats = stats
-        progress = 0.0 if not self._total_bars else round(min(self._bar_index, self._total_bars) / self._total_bars, 4)
+        self._refresh_next_bar_at()
+        progress = self._compute_progress()
         snapshot = {
             "status": status,
             "progress": progress,
@@ -827,6 +1117,7 @@ class BotRuntime:
         return round(delta, 2) if delta > 0 else 0.0
 
     def _state_payload(self) -> Dict[str, object]:
+        self._refresh_next_bar_at()
         with self._lock:
             payload = dict(self.state)
         payload.setdefault("stats", self._last_stats)
@@ -894,11 +1185,12 @@ class BotRuntime:
 
     def _visible_candles(self) -> List[Dict[str, Any]]:
         # Use first series for chart state (backward compatibility)
-        primary = self._series[0] if self._series else None
+        primary_state = self._series_states[0] if self._series_states else None
+        primary = primary_state.series if primary_state else None
         return self._chart_state_builder.visible_candles(
             primary,
             self.state.get("status"),
-            self._bar_index,
+            primary_state.bar_index if primary_state else 0,
             self._intrabar_manager,
         )
 
@@ -982,25 +1274,27 @@ class BotRuntime:
 
     def _current_epoch(self) -> Optional[int]:
         # Use first series for current epoch (backward compatibility)
-        primary = self._series[0] if self._series else None
-        if not primary or not primary.candles:
+        primary_state = self._series_states[0] if self._series_states else None
+        primary = primary_state.series if primary_state else None
+        if not primary_state or not primary or not primary.candles:
             return None
-        if self._bar_index <= 0:
+        if primary_state.bar_index <= 0:
             status = str(self.state.get("status") or "").lower()
             if status in {"idle", "initialising"}:
                 return None
-        idx = min(max(self._bar_index - 1, 0), len(primary.candles) - 1)
+        idx = min(max(primary_state.bar_index - 1, 0), len(primary.candles) - 1)
         candle = primary.candles[idx]
         return int(candle.time.timestamp())
 
     def _current_epoch_for(self, series: Optional[StrategySeries]) -> Optional[int]:
-        if not series or not series.candles:
+        state = self._series_state_for(series)
+        if not series or not series.candles or state is None:
             return None
-        if self._bar_index <= 0:
+        if state.bar_index <= 0:
             status = str(self.state.get("status") or "").lower()
             if status in {"idle", "initialising"}:
                 return None
-        idx = min(max(self._bar_index - 1, 0), len(series.candles) - 1)
+        idx = min(max(state.bar_index - 1, 0), len(series.candles) - 1)
         candle = series.candles[idx]
         return int(candle.time.timestamp())
 
@@ -1016,6 +1310,8 @@ class BotRuntime:
         status = str(self.state.get("status") or "").lower()
         payloads: List[Dict[str, Any]] = []
         for series in self._series:
+            state = self._series_state_for(series)
+            bar_index = state.bar_index if state else 0
             overlays = list(series.overlays or [])
             if series.trade_overlay:
                 overlays.append(series.trade_overlay)
@@ -1030,7 +1326,7 @@ class BotRuntime:
                     "candles": self._chart_state_builder.visible_candles(
                         series,
                         status,
-                        self._bar_index,
+                        bar_index,
                         self._intrabar_manager,
                     ),
                     "overlays": self._chart_state_builder.visible_overlays(
@@ -1052,6 +1348,7 @@ class BotRuntime:
             self._last_stats or self._aggregate_stats(),
             overlays,
             self.logs(),
+            self.decision_events(),
         )
         payload["series"] = self._series_payloads()
         return payload

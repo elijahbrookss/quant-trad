@@ -24,14 +24,20 @@ class DataProviderResolver:
         return cleaned or None
 
     def resolve(self, datasource: Optional[str], *, exchange: Optional[str] = None):
+        """Resolve data provider from datasource and exchange.
+
+        No defaults: datasource must be explicitly provided.
+        Raises ValueError if datasource is None.
+        """
         datasource_normalized = self.normalize_datasource(datasource)
         exchange_normalized = self.normalize_exchange(exchange)
 
-        if exchange_normalized and not datasource_normalized:
-            datasource_normalized = DataSource.CCXT.value
-
+        # No hardcoded defaults - fail loudly if datasource is missing
         if not datasource_normalized:
-            datasource_normalized = DataSource.ALPACA.value
+            raise ValueError(
+                f"datasource is required to resolve data provider "
+                f"(got datasource={datasource}, exchange={exchange})"
+            )
 
         if datasource_normalized == DataSource.ALPACA.value:
             return AlpacaProvider()

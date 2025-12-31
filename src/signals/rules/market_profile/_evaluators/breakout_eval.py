@@ -89,7 +89,13 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
 
     extend_override = context.get("market_profile_extend_value_area_to_chart_end")
     if extend_override is None:
-        extend_to_chart_end = bool(getattr(indicator, "extend_value_area_to_chart_end", True))
+        # MUST be present on indicator (no fallback/default)
+        if not hasattr(indicator, "extend_value_area_to_chart_end"):
+            raise ValueError(
+                "Market Profile indicator missing 'extend_value_area_to_chart_end' attribute - "
+                "indicator may not have been loaded with stored params from database"
+            )
+        extend_to_chart_end = bool(indicator.extend_value_area_to_chart_end)
     elif isinstance(extend_override, str):
         extend_to_chart_end = extend_override.strip().lower() not in {"false", "0", "no", "off"}
     else:

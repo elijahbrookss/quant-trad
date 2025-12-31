@@ -81,6 +81,7 @@ class BotUpdateRequest(BaseModel):
     # timeframe is intentionally managed by strategies; bots don't own it
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
+    focus_symbol: Optional[str] = None
 
 
 class BotResponse(BotBase):

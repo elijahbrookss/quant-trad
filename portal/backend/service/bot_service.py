@@ -241,6 +241,8 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         record["playback_speed"] = _coerce_playback_speed(payload["playback_speed"])
     elif "fetch_seconds" in payload and payload["fetch_seconds"] is not None:
         record["playback_speed"] = _coerce_playback_speed(payload["fetch_seconds"])
+    if "focus_symbol" in payload:
+        record["focus_symbol"] = payload.get("focus_symbol") or None
     if "datasource" in payload and payload["datasource"] is not None:
         # Ignore attempts to set peripheral runtime context on bots; derive from strategies
         pass
@@ -419,22 +421,21 @@ def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
     for link in sources or []:
         if not isinstance(link, dict):
             continue
-        snapshot = dict(
-            link.get("indicator_snapshot")
-            or link.get("meta")
-            or link.get("snapshot")
+        # Use meta field (loaded fresh from DB) instead of snapshot
+        meta = dict(
+            link.get("meta")
             or {}
         )
-        indicator_id = link.get("indicator_id") or link.get("id") or snapshot.get("id")
+        indicator_id = link.get("indicator_id") or link.get("id") or meta.get("id")
         indicators.append(
             {
                 "id": indicator_id,
-                "name": snapshot.get("name") or snapshot.get("type") or indicator_id,
-                "type": snapshot.get("type"),
-                "color": snapshot.get("color"),
-                "datasource": snapshot.get("datasource"),
-                "exchange": snapshot.get("exchange"),
-                "params": dict(snapshot.get("params") or {}),
+                "name": meta.get("name") or meta.get("type") or indicator_id,
+                "type": meta.get("type"),
+                "color": meta.get("color"),
+                "datasource": meta.get("datasource"),
+                "exchange": meta.get("exchange"),
+                "params": dict(meta.get("params") or {}),
             }
         )
     return indicators

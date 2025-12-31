@@ -303,7 +303,7 @@ class StrategyDefinition:
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     indicator_ids: List[str] = field(default_factory=list)
-    indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
+    # REMOVED: indicator_snapshots - strategies now load indicators fresh from DB
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     atm_template_id: Optional[str] = None
@@ -325,7 +325,7 @@ class StrategyDefinition:
         indicators: List[Dict[str, Any]] = []
         missing: List[str] = []
         for identifier in self.indicator_ids:
-            snapshot = self.indicator_snapshots.get(identifier, {})
+            # Load fresh indicator metadata from DB (no snapshots)
             active_meta: Optional[Dict[str, Any]] = None
             try:
                 active_meta = get_instance_meta(identifier)
@@ -341,8 +341,8 @@ class StrategyDefinition:
             payload = {
                 "id": identifier,
                 "status": "active" if active_meta else "missing",
-                "meta": active_meta or snapshot or {"id": identifier},
-                "snapshot": snapshot,
+                "meta": active_meta or {"id": identifier},
+                # REMOVED: snapshot field - no longer storing snapshots
             }
             indicators.append(payload)
             if not active_meta:
@@ -487,9 +487,7 @@ class StrategyDefinition:
             if indicator_ids:
                 # Preserve ordering while dropping duplicates.
                 new_ids = list(dict.fromkeys(indicator_ids))
-                removed = set(self.indicator_ids) - set(new_ids)
-                for obsolete in removed:
-                    self.indicator_snapshots.pop(obsolete, None)
+                # REMOVED: indicator_snapshots cleanup - no longer storing snapshots
                 self.indicator_ids = new_ids
         if "atm_template_id" in fields:
             self.atm_template_id = fields.get("atm_template_id") or None
@@ -578,8 +576,7 @@ class StrategyRegistry:
                     continue
                 if indicator_id not in base.indicator_ids:
                     base.indicator_ids.append(indicator_id)
-                snapshot = link.get("indicator_snapshot") or {}
-                base.indicator_snapshots[indicator_id] = snapshot
+                # REMOVED: indicator_snapshots assignment - no longer storing snapshots
 
             for rule_entry in entry.get("rules_raw", []):
                 rule_id = str(rule_entry.get("id") or "").strip()
@@ -717,7 +714,7 @@ class StrategyRegistry:
                 meta = deepcopy(get_instance_meta(inst_id))
             except KeyError:
                 meta = {}
-            record.indicator_snapshots[inst_id] = meta
+            # REMOVED: indicator_snapshots assignment - no longer storing snapshots
         self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
@@ -725,7 +722,7 @@ class StrategyRegistry:
             storage_upsert_strategy_indicator(
                 strategy_id=strategy_id,
                 indicator_id=inst_id,
-                snapshot=record.indicator_snapshots.get(inst_id, {}),
+                # REMOVED: snapshot parameter - no longer storing snapshots
             )
         # Persist instrument links for any resolved instruments
         for slot in record.instruments:
@@ -845,12 +842,12 @@ class StrategyRegistry:
         if inst_id not in record.indicator_ids:
             record.indicator_ids.append(inst_id)
             record.updated_at = _utcnow()
-        record.indicator_snapshots[inst_id] = meta
+        # REMOVED: indicator_snapshots assignment - no longer storing snapshots
         storage_upsert_strategy(record.to_storage_payload())
         storage_upsert_strategy_indicator(
             strategy_id=strategy_id,
             indicator_id=inst_id,
-            snapshot=meta,
+            # REMOVED: snapshot parameter - no longer storing snapshots
         )
 
         logger.info(
@@ -872,7 +869,7 @@ class StrategyRegistry:
                 if identifier != inst_id
             ]
             record.updated_at = _utcnow()
-            record.indicator_snapshots.pop(inst_id, None)
+            # REMOVED: indicator_snapshots cleanup - no longer storing snapshots
             storage_upsert_strategy(record.to_storage_payload())
             storage_delete_strategy_indicator(strategy_id, inst_id)
 
@@ -1001,6 +998,19 @@ class StrategyRegistry:
             if inst_id not in allowed_instruments:
                 raise ValueError(f"Instrument {inst_id} is not attached to this strategy")
 
+        # Validate that the strategy has indicators attached
+        if not record.indicator_ids:
+            logger.error(
+                "strategy_signal_preview_no_indicators | strategy=%s instrument_ids=%s rules=%d "
+                "message='Strategy has no indicators attached. Please attach indicators to this strategy before running signal preview.'",
+                strategy_id,
+                requested_ids,
+                len(record.rules),
+            )
+            raise ValueError(
+                "Strategy has no indicators attached. Please attach indicators to this strategy before running signal preview."
+            )
+
         indicator_rule_map: Dict[str, List[str]] = {}
         for rule in record.rules.values():
             for condition in rule.conditions:
@@ -1011,6 +1021,21 @@ class StrategyRegistry:
                 bucket = indicator_rule_map.setdefault(indicator_id, [])
                 if rule_id not in bucket:
                     bucket.append(rule_id)
+
+        # Validate that all indicators referenced in rules are actually attached to the strategy
+        orphaned_indicators = [ind_id for ind_id in indicator_rule_map.keys() if ind_id not in record.indicator_ids]
+        if orphaned_indicators:
+            logger.error(
+                "strategy_signal_preview_orphaned_indicators | strategy=%s orphaned_indicators=%s attached_indicators=%s "
+                "message='Strategy rules reference indicators that are not attached to the strategy.'",
+                strategy_id,
+                orphaned_indicators,
+                record.indicator_ids,
+            )
+            raise ValueError(
+                f"Strategy rules reference indicators that are not attached to the strategy: {', '.join(orphaned_indicators)}. "
+                "Please attach these indicators to the strategy or update the rules."
+            )
 
         def _merge_enabled_rules(existing: Any, extras: Iterable[str]) -> List[str]:
             ordered: List[str] = []

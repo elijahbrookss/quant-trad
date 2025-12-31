@@ -57,6 +57,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
   const [streamStatus, setStreamStatus] = useState('idle')
   const streamRef = useRef(null)
   const playbackDebounceRef = useRef(null)
+  const focusDebounceRef = useRef(null)
   const [playbackDraft, setPlaybackDraft] = useState(() => {
     const initial = bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
     const raw = Number(initial)
@@ -86,6 +87,9 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     () => () => {
       if (playbackDebounceRef.current) {
         clearTimeout(playbackDebounceRef.current)
+      }
+      if (focusDebounceRef.current) {
+        clearTimeout(focusDebounceRef.current)
       }
     },
     [],
@@ -226,6 +230,24 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     [persistPlaybackSpeed],
   )
 
+  const handleFocusSymbolChange = useCallback(
+    (symbol) => {
+      if (!bot?.id) return
+      if (focusDebounceRef.current) {
+        clearTimeout(focusDebounceRef.current)
+      }
+      focusDebounceRef.current = setTimeout(async () => {
+        focusDebounceRef.current = null
+        try {
+          await updateBot(bot.id, { focus_symbol: symbol || null })
+        } catch (err) {
+          console.error('bot focus symbol update failed', err)
+        }
+      }, 150)
+    },
+    [bot?.id],
+  )
+
   const handlePause = useCallback(async () => {
     if (!bot?.id) return
     setAction('pause')
@@ -264,6 +286,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     error,
     handlePause,
     handlePlaybackInput,
+    handleFocusSymbolChange,
     handleResume,
     loadPerformance,
     payload,

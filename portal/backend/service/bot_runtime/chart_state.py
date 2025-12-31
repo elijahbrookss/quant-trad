@@ -74,6 +74,7 @@ class ChartStateBuilder:
         stats: Mapping[str, Any],
         overlays: List[Dict[str, Any]],
         logs: List[Dict[str, Any]],
+        decision_events: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return {
             "candles": candles,
@@ -81,6 +82,7 @@ class ChartStateBuilder:
             "stats": stats,
             "overlays": overlays,
             "logs": logs,
+            "decisions": decision_events or [],
         }
 
     def _overlay_is_ready(self, overlay: Mapping[str, Any], current_epoch: int) -> bool:

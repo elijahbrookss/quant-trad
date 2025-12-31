@@ -18,7 +18,7 @@ from .utils import (
     load_indicator_record,
     normalize_color,
     pull_datasource_exchange,
-    refresh_strategy_links,
+    # REMOVED: refresh_strategy_links - no longer needed
     resolve_data_provider,
     scrub_runtime_params,
 )
@@ -50,7 +50,7 @@ class IndicatorInstanceCreator:
         )
         meta = self._build_meta(type_str, name, runtime_params, color, datasource, exchange)
         persisted_meta = self._persist_and_cache(meta, instance)
-        refresh_strategy_links(meta["id"], persisted_meta, ctx=self._ctx)
+        # REMOVED: refresh_strategy_links call - strategies load indicators fresh from DB
         return persisted_meta
 
     def _resolve_type(self, type_str: str):
@@ -79,8 +79,17 @@ class IndicatorInstanceCreator:
             inst = Cls.from_context(provider=provider, ctx=data_ctx, **ctor_params)
         except Exception as exc:
             raise RuntimeError(f"Failed to instantiate indicator: {exc}")
-        if isinstance(inst, MarketProfileIndicator):
-            setattr(inst, "symbol", data_ctx.symbol)
+
+        # Validate all required params are present (fail-fast for indicators with REQUIRED_PARAMS)
+        required_params = getattr(Cls, "REQUIRED_PARAMS", None)
+        if required_params and isinstance(required_params, dict):
+            missing = [k for k in required_params.keys() if ctor_params.get(k) is None]
+            if missing:
+                raise ValueError(
+                    f"{indicator_name} indicator missing required params: {missing}. "
+                    f"This should not happen after param enforcement."
+                )
+
         return inst
 
     def _capture_runtime_params(
@@ -91,12 +100,23 @@ class IndicatorInstanceCreator:
         exchange: Optional[str],
     ) -> Dict[str, Any]:
         captured = extract_ctor_params(inst)
+        logger.debug(
+            "event=extract_ctor_params_result indicator=%s extracted_keys=%s",
+            getattr(inst, "NAME", inst.__class__.__name__),
+            list(captured.keys()),
+        )
         runtime_params = dict(captured)
         if datasource:
             runtime_params["datasource"] = datasource
         if exchange:
             runtime_params["exchange"] = exchange
-        return scrub_runtime_params(runtime_params)
+        scrubbed = scrub_runtime_params(runtime_params)
+        logger.debug(
+            "event=scrub_runtime_params_result indicator=%s scrubbed_keys=%s",
+            getattr(inst, "NAME", inst.__class__.__name__),
+            list(scrubbed.keys()),
+        )
+        return scrubbed
 
     def _build_meta(
         self,
@@ -107,6 +127,12 @@ class IndicatorInstanceCreator:
         datasource: Optional[str],
         exchange: Optional[str],
     ) -> Dict[str, Any]:
+        logger.debug(
+            "event=build_meta_called type=%s runtime_params_keys=%s runtime_params=%s",
+            type_str,
+            list(runtime_params.keys()),
+            runtime_params,
+        )
         inst_id = str(uuid.uuid4())
         meta = {
             "id": inst_id,
@@ -115,23 +141,47 @@ class IndicatorInstanceCreator:
             "enabled": True,
             "name": name or type_str.replace("_", " ").title(),
         }
-        meta["datasource"] = datasource or DataSource.ALPACA.value
+        # Datasource/exchange are optional for indicators (compute-only)
+        # They will be provided by instrument/strategy context at execution time
+        if datasource:
+            meta["datasource"] = datasource
         if exchange:
             meta["exchange"] = exchange
         meta["color"] = normalize_color(color)
+        logger.debug(
+            "event=build_meta_result type=%s meta_params_keys=%s",
+            type_str,
+            list(meta.get("params", {}).keys()),
+        )
         return meta
 
     def _persist_and_cache(self, meta: Dict[str, Any], inst) -> Dict[str, Any]:
+        logger.info(
+            "event=persist_and_cache_called indicator_id=%s meta_params_keys=%s meta_params=%s",
+            meta.get("id"),
+            list(meta.get("params", {}).keys()),
+            meta.get("params"),
+        )
         self._ctx.repository.upsert(meta)
+        logger.info(
+            "event=after_upsert indicator_id=%s meta_params_keys=%s meta_params=%s",
+            meta.get("id"),
+            list(meta.get("params", {}).keys()),
+            meta.get("params"),
+        )
         persisted = self._ctx.repository.get(meta["id"])
+        logger.info(
+            "event=persisted_record_retrieved indicator_id=%s persisted_params_keys=%s persisted_params=%s",
+            meta.get("id"),
+            list((persisted or {}).get("params", {}).keys()),
+            (persisted or {}).get("params"),
+        )
         persisted_meta = (
             build_meta_from_record(persisted, ctx=self._ctx)
             if persisted
             else self._ctx.factory.ensure_color(meta)
         )
-        self._ctx.cache_manager.cache_indicator(
-            meta["id"], persisted_meta, inst, (persisted or {}).get("updated_at")
-        )
+        # Cache removed: instances are now built fresh from DB on each access
         return persisted_meta
 
 
@@ -185,10 +235,7 @@ class IndicatorInstanceUpdater:
                 if refreshed
                 else meta_payload
             )
-            # Update cache with existing instance but new metadata
-            self._ctx.cache_manager.cache_indicator(
-                inst_id, persisted_meta, cached_inst, (refreshed or {}).get("updated_at")
-            )
+            # Cache removed: instances are now built fresh from DB on each access
             return persisted_meta
 
         # Full rebuild path: params changed
@@ -216,14 +263,12 @@ class IndicatorInstanceUpdater:
             exchange=exchange,
         )
         persisted_meta = self._persist_and_cache(inst_id, instance, meta_payload)
-        refresh_strategy_links(inst_id, persisted_meta, ctx=self._ctx)
+        # REMOVED: refresh_strategy_links call - strategies load indicators fresh from DB
         return persisted_meta
 
     def _get_cached_instance(self, inst_id: str):
-        try:
-            return self._ctx.cache_manager.get_entry(inst_id).instance
-        except KeyError:
-            return None
+        # Cache removed: always return None (no cached instances)
+        return None
 
     def _maybe_strip_autosized_bin(self, params: Dict[str, Any], type_str: str, cached_inst) -> None:
         if (
@@ -235,7 +280,24 @@ class IndicatorInstanceUpdater:
             params.pop("bin_size", None)
 
     def _ensure_ctor_params(self, type_str: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure required params are present using class-declared defaults."""
         Cls = _INDICATOR_MAP.get(type_str)
+
+        # Check if indicator class declares required params (modular approach)
+        required_params = getattr(Cls, "REQUIRED_PARAMS", None)
+
+        if required_params and isinstance(required_params, dict):
+            for key, default_value in required_params.items():
+                if key not in params:
+                    params[key] = default_value
+                    logger.info(
+                        "event=indicator_param_default_applied type=%s param=%s value=%s",
+                        getattr(Cls, "NAME", Cls.__name__),
+                        key,
+                        default_value
+                    )
+
+        # Fallback: inspect constructor signature for indicators without REQUIRED_PARAMS
         sig = inspect.signature(Cls.__init__)
         for pname, p in sig.parameters.items():
             if pname in ("self", "df"):
@@ -271,12 +333,23 @@ class IndicatorInstanceUpdater:
         exchange: Optional[str],
     ) -> Dict[str, Any]:
         captured = extract_ctor_params(inst)
+        logger.debug(
+            "event=extract_ctor_params_result_updater indicator=%s extracted_keys=%s",
+            getattr(inst, "NAME", inst.__class__.__name__),
+            list(captured.keys()),
+        )
         runtime_params = dict(captured)
         if datasource:
             runtime_params["datasource"] = datasource
         if exchange:
             runtime_params["exchange"] = exchange
-        return scrub_runtime_params(runtime_params)
+        scrubbed = scrub_runtime_params(runtime_params)
+        logger.debug(
+            "event=scrub_runtime_params_result_updater indicator=%s scrubbed_keys=%s",
+            getattr(inst, "NAME", inst.__class__.__name__),
+            list(scrubbed.keys()),
+        )
+        return scrubbed
 
     def _refresh_meta(
         self,
@@ -298,7 +371,13 @@ class IndicatorInstanceUpdater:
             meta_payload["name"] = name
         if color_provided:
             meta_payload["color"] = normalize_color(color)
-        meta_payload["datasource"] = datasource or DataSource.ALPACA.value
+        # Datasource/exchange are optional for indicators (compute-only)
+        # They will be provided by instrument/strategy context at execution time
+        if datasource:
+            meta_payload["datasource"] = datasource
+        elif "datasource" in meta_payload:
+            # Remove datasource if explicitly set to None
+            meta_payload.pop("datasource", None)
         if exchange:
             meta_payload["exchange"] = exchange
         elif "exchange" in meta_payload:
@@ -313,9 +392,7 @@ class IndicatorInstanceUpdater:
             if refreshed
             else meta_payload
         )
-        self._ctx.cache_manager.cache_indicator(
-            inst_id, persisted_meta, instance, (refreshed or {}).get("updated_at")
-        )
+        # Cache removed: instances are now built fresh from DB on each access
         return persisted_meta
 
 

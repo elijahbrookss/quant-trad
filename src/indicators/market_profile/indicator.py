@@ -41,6 +41,16 @@ class MarketProfileIndicator(ComputeIndicator):
     DEFAULT_MIN_MERGE_SESSIONS = 3
     DEFAULT_DAYS_BACK = 180
 
+    # Define required params with defaults (used during creation only)
+    # These params MUST be present in stored indicator records
+    REQUIRED_PARAMS = {
+        "use_merged_value_areas": True,
+        "merge_threshold": 0.6,
+        "min_merge_sessions": DEFAULT_MIN_MERGE_SESSIONS,
+        "extend_value_area_to_chart_end": True,
+        "days_back": DEFAULT_DAYS_BACK,
+    }
+
     def __init__(
         self,
         df: pd.DataFrame,

@@ -17,6 +17,7 @@ from ...db.models import (
     StrategyIndicatorLink as StrategyIndicatorLinkDB,
     StrategyInstrumentLink as StrategyInstrumentLinkDB,
     StrategyRecord,
+    StrategyRuleRecord,
 )
 from ..atm import normalise_template
 from .models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
@@ -71,7 +72,7 @@ class StrategyLoader:
                     id=link.id,
                     strategy_id=link.strategy_id,
                     indicator_id=link.indicator_id,
-                    indicator_snapshot=link.indicator_snapshot or {},
+                    # REMOVED: indicator_snapshot - will load fresh from DB when needed
                 )
                 for link in indicator_links_db
             ]
@@ -91,11 +92,20 @@ class StrategyLoader:
                 for link in instrument_links_db
             ]
 
+            # Fetch strategy rules
+            rules_db = session.execute(
+                select(StrategyRuleRecord).where(StrategyRuleRecord.strategy_id == strategy_id)
+            ).scalars().all()
+
+            # Convert rules to dict keyed by rule_id
+            rules = {rule.id: rule.to_dict() for rule in rules_db}
+
             logger.debug(
-                "strategy_loaded | id=%s | indicators=%d | instruments=%d",
+                "strategy_loaded | id=%s | indicators=%d | instruments=%d | rules=%d",
                 strategy_id,
                 len(indicator_links),
                 len(instrument_links),
+                len(rules),
             )
 
             # Build domain model
@@ -111,6 +121,7 @@ class StrategyLoader:
                 global_risk_multiplier=strategy_rec.global_risk_multiplier,
                 indicator_links=indicator_links,
                 instrument_links=instrument_links,
+                rules=rules,
             )
 
     @staticmethod

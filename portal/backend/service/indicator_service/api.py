@@ -80,7 +80,7 @@ def list_indicator_strategies(inst_id: str, *, ctx: IndicatorServiceContext = _c
 
 def delete_instance(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
     load_indicator_record(inst_id, ctx=ctx)
-    ctx.cache_manager.evict(inst_id)
+    # Cache removed: no eviction needed
     purge_breakout_cache(inst_id, ctx=ctx)
     ctx.repository.delete(inst_id)
 
@@ -94,10 +94,7 @@ def duplicate_instance(inst_id: str, name: Optional[str] = None, *, ctx: Indicat
     ctx.repository.upsert(clone_record)
     refreshed = ctx.repository.get(clone_id)
     persisted = build_meta_from_record(refreshed, ctx=ctx) if refreshed else build_meta_from_record(clone_record, ctx=ctx)
-    inst = build_indicator_instance(persisted, ctx=ctx)
-    ctx.cache_manager.cache_indicator(
-        clone_id, persisted, inst, (refreshed or {}).get("updated_at")
-    )
+    # Cache removed: instances are now built fresh from DB on each access
     return persisted
 
 
@@ -108,7 +105,7 @@ def set_instance_enabled(inst_id: str, enabled: bool, *, ctx: IndicatorServiceCo
     ctx.repository.upsert(updated)
     refreshed = ctx.repository.get(inst_id)
     persisted = build_meta_from_record(refreshed, ctx=ctx) if refreshed else build_meta_from_record(updated, ctx=ctx)
-    ctx.cache_manager.evict(inst_id)
+    # Cache removed: no eviction needed
     return persisted
 
 

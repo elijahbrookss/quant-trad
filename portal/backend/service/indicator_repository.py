@@ -26,10 +26,10 @@ class IndicatorRepository:
         return storage.strategies_for_indicator(inst_id)
 
     def upsert_strategy_indicator(
-        self, *, strategy_id: str, indicator_id: str, snapshot: Mapping[str, object]
+        self, *, strategy_id: str, indicator_id: str
     ) -> None:
         storage.upsert_strategy_indicator(
-            strategy_id=strategy_id, indicator_id=indicator_id, snapshot=snapshot
+            strategy_id=strategy_id, indicator_id=indicator_id
         )
 
 

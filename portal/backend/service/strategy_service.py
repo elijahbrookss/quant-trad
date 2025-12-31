@@ -773,7 +773,7 @@ class StrategyDefinition:
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     indicator_ids: List[str] = field(default_factory=list)
-    indicator_snapshots: MutableMapping[str, Dict[str, Any]] = field(default_factory=dict)
+    # REMOVED: indicator_snapshots - strategies now load indicators fresh from DB
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     atm_template_id: Optional[str] = None
@@ -795,7 +795,7 @@ class StrategyDefinition:
         indicators: List[Dict[str, Any]] = []
         missing: List[str] = []
         for identifier in self.indicator_ids:
-            snapshot = self.indicator_snapshots.get(identifier, {})
+            # Load fresh indicator metadata from DB (no snapshots)
             active_meta: Optional[Dict[str, Any]] = None
             try:
                 active_meta = get_instance_meta(identifier)
@@ -804,8 +804,8 @@ class StrategyDefinition:
             payload = {
                 "id": identifier,
                 "status": "active" if active_meta else "missing",
-                "meta": active_meta or snapshot or {"id": identifier},
-                "snapshot": snapshot,
+                "meta": active_meta or {"id": identifier},
+                # REMOVED: snapshot field - no longer storing snapshots
             }
             indicators.append(payload)
             if not active_meta:
@@ -922,9 +922,7 @@ class StrategyDefinition:
             if indicator_ids:
                 # Preserve ordering while dropping duplicates.
                 new_ids = list(dict.fromkeys(indicator_ids))
-                removed = set(self.indicator_ids) - set(new_ids)
-                for obsolete in removed:
-                    self.indicator_snapshots.pop(obsolete, None)
+                # REMOVED: indicator_snapshots cleanup - no longer storing snapshots
                 self.indicator_ids = new_ids
         if "atm_template_id" in fields:
             self.atm_template_id = fields.get("atm_template_id") or None
@@ -992,8 +990,7 @@ class StrategyRegistry:
                     continue
                 if indicator_id not in base.indicator_ids:
                     base.indicator_ids.append(indicator_id)
-                snapshot = link.get("indicator_snapshot") or {}
-                base.indicator_snapshots[indicator_id] = snapshot
+                # REMOVED: indicator_snapshots assignment - no longer storing snapshots
 
             for rule_entry in entry.get("rules_raw", []):
                 rule_id = str(rule_entry.get("id") or "").strip()
@@ -1120,12 +1117,7 @@ class StrategyRegistry:
                 **(dict(risk_overrides or {})),
             },
         )
-        for inst_id in record.indicator_ids:
-            try:
-                meta = deepcopy(get_instance_meta(inst_id))
-            except KeyError:
-                meta = {}
-            record.indicator_snapshots[inst_id] = meta
+        # REMOVED: indicator_snapshots population - no longer storing snapshots
         self._sync_instruments(record)
         self._records[strategy_id] = record
         storage_upsert_strategy(record.to_storage_payload())
@@ -1133,7 +1125,7 @@ class StrategyRegistry:
             storage_upsert_strategy_indicator(
                 strategy_id=strategy_id,
                 indicator_id=inst_id,
-                snapshot=record.indicator_snapshots.get(inst_id, {}),
+                # REMOVED: snapshot parameter - no longer storing snapshots
             )
         logger.info("strategy_created | id=%s name=%s", strategy_id, clean_name)
         return record.to_dict()
@@ -1185,17 +1177,18 @@ class StrategyRegistry:
         if not inst_id:
             raise ValueError("Indicator id must be provided")
 
-        meta = deepcopy(get_instance_meta(inst_id))
+        # Verify indicator exists
+        _ = deepcopy(get_instance_meta(inst_id))  # Will raise if not found
 
         if inst_id not in record.indicator_ids:
             record.indicator_ids.append(inst_id)
             record.updated_at = _utcnow()
-        record.indicator_snapshots[inst_id] = meta
+        # REMOVED: indicator_snapshots assignment - no longer storing snapshots
         storage_upsert_strategy(record.to_storage_payload())
         storage_upsert_strategy_indicator(
             strategy_id=strategy_id,
             indicator_id=inst_id,
-            snapshot=meta,
+            # REMOVED: snapshot parameter - no longer storing snapshots
         )
 
         logger.info(
@@ -1217,7 +1210,7 @@ class StrategyRegistry:
                 if identifier != inst_id
             ]
             record.updated_at = _utcnow()
-            record.indicator_snapshots.pop(inst_id, None)
+            # REMOVED: indicator_snapshots cleanup - no longer storing snapshots
             storage_upsert_strategy(record.to_storage_payload())
             storage_delete_strategy_indicator(strategy_id, inst_id)
 

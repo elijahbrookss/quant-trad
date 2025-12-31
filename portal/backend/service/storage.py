@@ -336,6 +336,12 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
     if not db.available:
         return
     try:
+        logger.info(
+            "event=upsert_indicator_called indicator_id=%s meta_params_keys=%s meta_params=%s",
+            meta.get("id"),
+            list((meta.get("params") or {}).keys()),
+            meta.get("params"),
+        )
         with db.session() as session:
             record = session.get(IndicatorRecord, meta["id"])
             now = _utcnow()
@@ -348,7 +354,14 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
                 session.add(record)
             record.name = meta.get("name") or record.name
             record.type = meta.get("type") or record.type
-            record.params = dict(meta.get("params") or {})
+            params_to_store = dict(meta.get("params") or {})
+            logger.info(
+                "event=upsert_indicator_params_assignment indicator_id=%s params_keys=%s params=%s",
+                meta.get("id"),
+                list(params_to_store.keys()),
+                params_to_store,
+            )
+            record.params = params_to_store
             record.color = meta.get("color")
             # datasource/exchange removed from persisted indicators
             record.enabled = bool(meta.get("enabled", True))
@@ -558,9 +571,9 @@ def upsert_strategy_indicator(
     *,
     strategy_id: str,
     indicator_id: str,
-    snapshot: Dict[str, Any],
+    # REMOVED: snapshot parameter - no longer storing snapshots
 ) -> None:
-    """Persist the association between a strategy and indicator."""
+    """Persist the association between a strategy and indicator (no snapshot storage)."""
 
     if not db.available:
         return
@@ -578,13 +591,13 @@ def upsert_strategy_indicator(
                     id=f"{strategy_id}:{indicator_id}",
                     strategy_id=strategy_id,
                     indicator_id=indicator_id,
-                    indicator_snapshot=dict(snapshot or {}),
+                    # REMOVED: indicator_snapshot assignment - no longer storing snapshots
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(link)
             else:
-                link.indicator_snapshot = dict(snapshot or {})
+                # REMOVED: indicator_snapshot update - no longer storing snapshots
                 link.updated_at = now
     except SQLAlchemyError as exc:
         logger.warning(

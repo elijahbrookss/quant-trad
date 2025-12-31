@@ -55,7 +55,7 @@ class IndicatorSignalExecutor:
         exchange: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        entry = self._load_entry(inst_id, start, end, interval, symbol)
+        entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
         sym = self._resolve_symbol(entry, symbol)
         provider, data_ctx = self._prepare_provider(
             entry.meta, sym, start, end, interval, datasource, exchange
@@ -79,7 +79,14 @@ class IndicatorSignalExecutor:
         return payload
 
     def _load_entry(
-        self, inst_id: str, start: str, end: str, interval: str, symbol: Optional[str]
+        self,
+        inst_id: str,
+        start: str,
+        end: str,
+        interval: str,
+        symbol: Optional[str],
+        datasource: Optional[str] = None,
+        exchange: Optional[str] = None,
     ):
         return get_indicator_entry(
             inst_id,
@@ -88,6 +95,8 @@ class IndicatorSignalExecutor:
                 "start": start,
                 "end": end,
                 "interval": interval,
+                "datasource": datasource,
+                "exchange": exchange,
             },
             ctx=self._ctx,
         )
@@ -122,9 +131,22 @@ class IndicatorSignalExecutor:
 
         effective_datasource = req_datasource or stored_datasource
         effective_exchange = req_exchange or stored_exchange
-        if effective_exchange and not effective_datasource:
-            effective_datasource = "ccxt"
 
+        logger.info(
+            "event=signal_executor_prepare_provider indicator_id=%s symbol=%s "
+            "req_datasource=%s req_exchange=%s stored_datasource=%s stored_exchange=%s "
+            "effective_datasource=%s effective_exchange=%s",
+            meta.get("id"),
+            symbol,
+            req_datasource,
+            req_exchange,
+            stored_datasource,
+            stored_exchange,
+            effective_datasource,
+            effective_exchange,
+        )
+
+        # resolve_data_provider will raise ValueError if effective_datasource is None
         provider = resolve_data_provider(
             effective_datasource,
             exchange=effective_exchange,

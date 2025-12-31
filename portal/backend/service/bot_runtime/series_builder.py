@@ -116,6 +116,32 @@ class SeriesBuilder:
             return False
         series.candles.extend(new_candles)
         try:
+            config = {"mode": self.run_type}
+            logger.info(
+                "append_series_updates | bot=%s strategy=%s has_meta=%s",
+                self.bot_id,
+                series.strategy_id,
+                series.meta is not None,
+            )
+            if series.meta:
+                rules = series.meta.get("rules", [])
+                logger.info(
+                    "append_series_updates | bot=%s strategy=%s rules_in_meta=%d",
+                    self.bot_id,
+                    series.strategy_id,
+                    len(rules),
+                )
+
+            logger.info(
+                "append_series_updates_call | bot=%s strategy=%s start=%s end=%s symbol=%s config=%s",
+                self.bot_id,
+                series.strategy_id,
+                series.window_start or start_iso,
+                end_iso,
+                series.symbol,
+                config,
+            )
+
             evaluation = strategy_service.evaluate(
                 strategy_id=series.strategy_id,
                 start=series.window_start or start_iso,
@@ -124,7 +150,7 @@ class SeriesBuilder:
                 symbol=series.symbol,
                 datasource=series.datasource,
                 exchange=series.exchange,
-                config={"mode": self.run_type},
+                config=config,
             )
             overlays = self._extract_indicator_overlays(evaluation)
             overlays.extend(
@@ -139,9 +165,31 @@ class SeriesBuilder:
                 )
             )
             series.overlays = overlays
-            signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
+            chart_markers = evaluation.get("chart_markers") or {}
+            logger.debug(
+                "append_series_updates | bot=%s strategy=%s chart_markers_keys=%s buy_markers=%d sell_markers=%d",
+                self.bot_id,
+                series.strategy_id,
+                sorted(chart_markers.keys()),
+                len(chart_markers.get("buy", [])),
+                len(chart_markers.get("sell", [])),
+            )
+            signals = self._build_signals_from_markers(chart_markers)
+            logger.debug(
+                "append_series_updates | bot=%s strategy=%s raw_signals=%d last_consumed_epoch=%d",
+                self.bot_id,
+                series.strategy_id,
+                len(signals),
+                series.last_consumed_epoch,
+            )
             while signals and signals[0].epoch <= series.last_consumed_epoch:
                 signals.popleft()
+            logger.debug(
+                "append_series_updates | bot=%s strategy=%s filtered_signals=%d",
+                self.bot_id,
+                series.strategy_id,
+                len(signals),
+            )
             series.signals = signals
             series.window_end = end_iso
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -209,23 +257,62 @@ class SeriesBuilder:
 
     def _evaluate_strategy(
         self,
-        strategy_id: Optional[str],
         start_iso: str,
         end_iso: str,
         timeframe: str,
         instrument_id: str,
+        strategy: Any,
     ) -> Dict[str, Any]:
         """Evaluate strategy and generate signals."""
         from .. import strategy_service
 
         try:
+            config = {"mode": self.run_type}
+            rules = strategy.rules if hasattr(strategy, "rules") else {}
+            logger.info(
+                "_evaluate_strategy | bot=%s strategy=%s has_rules=%s rule_count=%d",
+                self.bot_id,
+                strategy.id,
+                hasattr(strategy, "rules"),
+                len(rules),
+            )
+            # Intentionally avoid enabled_rules filtering here to keep bot runtime
+            # aligned with strategy preview outputs.
+
+            logger.info(
+                "_evaluate_strategy_call | bot=%s strategy=%s start=%s end=%s interval=%s instrument=%s config=%s",
+                self.bot_id,
+                strategy.id,
+                start_iso,
+                end_iso,
+                timeframe,
+                instrument_id,
+                config,
+            )
+
             evaluation = strategy_service.generate_strategy_signals(
-                strategy_id=strategy_id,
+                strategy_id=strategy.id,
                 start=start_iso,
                 end=end_iso,
                 interval=timeframe,
                 instrument_ids=[instrument_id],
-                config={"mode": self.run_type},
+                config=config,
+            )
+
+            instrument_payload = None
+            if isinstance(evaluation, dict) and "instruments" in evaluation:
+                instruments = evaluation.get("instruments") or {}
+                instrument_payload = instruments.get(instrument_id)
+            if not isinstance(instrument_payload, dict):
+                instrument_payload = evaluation
+            # Log what we got back
+            chart_markers = instrument_payload.get("chart_markers", {}) if isinstance(instrument_payload, dict) else {}
+            logger.info(
+                "_evaluate_strategy_result | bot=%s strategy=%s buy_markers=%d sell_markers=%d",
+                self.bot_id,
+                strategy.id,
+                len(chart_markers.get("buy", [])),
+                len(chart_markers.get("sell", [])),
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             message = f"Strategy evaluation failed: {exc}"
@@ -237,7 +324,7 @@ class SeriesBuilder:
             )
             raise RuntimeError(message) from exc
 
-        return evaluation
+        return instrument_payload if isinstance(instrument_payload, dict) else evaluation
 
     def _build_atm_template_with_instrument(
         self,
@@ -327,12 +414,27 @@ class SeriesBuilder:
             try:
                 series = self._build_single_series(strategy, instrument_link)
                 series_list.append(series)
-                logger.info(
-                    "Built series for instrument | strategy=%s | symbol=%s | candles=%d",
-                    strategy.id,
-                    instrument_link.symbol,
-                    len(series.candles),
-                )
+
+                # Log series build success with signal count
+                signal_count = len(series.signals) if series.signals else 0
+                if signal_count == 0:
+                    logger.warning(
+                        "Built series with NO SIGNALS | strategy=%s | strategy_name=%s | symbol=%s | candles=%d | signals=%d | Check strategy rules and indicator configuration",
+                        strategy.id,
+                        strategy.name,
+                        instrument_link.symbol,
+                        len(series.candles),
+                        signal_count,
+                    )
+                else:
+                    logger.info(
+                        "Built series for instrument | strategy=%s | strategy_name=%s | symbol=%s | candles=%d | signals=%d",
+                        strategy.id,
+                        strategy.name,
+                        instrument_link.symbol,
+                        len(series.candles),
+                        signal_count,
+                    )
             except Exception as exc:
                 logger.exception(
                     "Failed to build series for instrument | strategy=%s | symbol=%s | error=%s",
@@ -347,6 +449,19 @@ class SeriesBuilder:
             raise RuntimeError(
                 f"Strategy {strategy.id} has {len(strategy.instrument_links)} instrument(s) "
                 f"but no series could be built (check if all instruments are disabled or errored)"
+            )
+
+        # Summary: Check for series with zero signals
+        zero_signal_series = [s for s in series_list if not s.signals or len(s.signals) == 0]
+        if zero_signal_series:
+            symbols = [s.symbol for s in zero_signal_series]
+            logger.warning(
+                "Strategy has %d series with ZERO SIGNALS | strategy=%s | strategy_name=%s | symbols=%s | "
+                "This may indicate: (1) No signals in timeframe, (2) Missing enabled_rules, (3) Indicator not generating signals",
+                len(zero_signal_series),
+                strategy.id,
+                strategy.name,
+                symbols,
             )
 
         return series_list
@@ -408,7 +523,7 @@ class SeriesBuilder:
 
         # Step 3: Evaluate strategy for signals and overlays
         evaluation = self._evaluate_strategy(
-            strategy.id, start_iso, end_iso, timeframe, instrument_id
+            start_iso, end_iso, timeframe, instrument_id, strategy
         )
         overlays = self._extract_indicator_overlays(evaluation)
         signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
@@ -527,30 +642,77 @@ class SeriesBuilder:
             if not indicator_id or indicator_id in seen:
                 continue
             seen.add(indicator_id)
-            snapshot = dict(link.get("indicator_snapshot") or {})
-            params = dict(snapshot.get("params") or {})
-            indicator_type = snapshot.get("type") or link.get("indicator_type") or "indicator"
-            color = snapshot.get("color") or link.get("color")
-            window_symbol = symbol or params.get("symbol")
+
+            # Load fresh indicator metadata from DB (no snapshots)
+            try:
+                indicator_meta = indicator_service.get_instance_meta(indicator_id)
+            except KeyError:
+                logger.warning(
+                    "event=bot_overlay_indicator_not_found bot_id=%s indicator_id=%s",
+                    self.bot_id,
+                    indicator_id,
+                )
+                continue
+
+            params = dict(indicator_meta.get("params") or {})
+            indicator_type = indicator_meta.get("type") or "indicator"
+            color = indicator_meta.get("color")
+
+            # Debug log to verify params loaded from fresh indicator metadata
+            logger.debug(
+                "event=bot_overlay_params_loaded bot_id=%s indicator_id=%s indicator_type=%s params_keys=%s",
+                self.bot_id,
+                indicator_id,
+                indicator_type,
+                list(params.keys()),
+            )
+
+            # For multi-instrument strategies, always use the series symbol (not indicator's stored symbol)
+            # Fallback to indicator params symbol only if series symbol is truly missing
+            window_symbol = symbol if symbol else params.get("symbol")
+            if not window_symbol:
+                logger.warning(
+                    "event=bot_overlay_missing_symbol bot_id=%s indicator_id=%s",
+                    self.bot_id,
+                    indicator_id,
+                )
+                continue
+
             interval = params.get("interval") or timeframe
             if not interval:
                 raise RuntimeError("Indicator overlay requires an interval; set strategy 'timeframe' or indicator params")
-            # Prefer explicit link-level datasource, then params, then
-            # strategy-level datasource/exchange. Fall back to any stored
-            # snapshot values only if no runtime context is available.
+
+            # Prefer explicit link-level datasource, then params from fresh indicator metadata,
+            # then strategy-level datasource/exchange
             ds = (
                 link.get("datasource")
                 or params.get("datasource")
                 or datasource
-                or snapshot.get("datasource")
+                or indicator_meta.get("datasource")
             )
             ex = (
                 link.get("exchange")
                 or params.get("exchange")
                 or exchange
-                or snapshot.get("exchange")
+                or indicator_meta.get("exchange")
             )
-            cache_key = self._indicator_overlay_cache_key(indicator_id, start_iso, end_iso, interval, window_symbol, ds, ex)
+            # IMPORTANT: Don't pass overlay_options for botlens - use indicator's stored params
+            # The indicator instance is loaded with the correct params from the database.
+            # Passing overlay_options would override the stored params with the same values,
+            # which is circular and unnecessary. Overlay options are for UI-level temporary
+            # overrides, not for reading stored configuration.
+            overlay_options = None
+            overlay_signature = ""
+            cache_key = self._indicator_overlay_cache_key(
+                indicator_id,
+                start_iso,
+                end_iso,
+                interval,
+                window_symbol,
+                ds,
+                ex,
+                overlay_signature,
+            )
             cached = self._indicator_overlay_cache.get(cache_key)
             if cached:
                 logger.info(
@@ -561,6 +723,14 @@ class SeriesBuilder:
                 )
                 overlays.append(deepcopy(cached))
                 continue
+            if overlay_options:
+                logger.info(
+                    "event=bot_overlay_options bot_id=%s indicator_id=%s indicator_type=%s options=%s",
+                    self.bot_id,
+                    indicator_id,
+                    indicator_type,
+                    overlay_options,
+                )
             logger.info(
                 "event=bot_overlay_request bot_id=%s indicator_id=%s indicator_type=%s start=%s end=%s interval=%s symbol=%s",
                 self.bot_id,
@@ -580,6 +750,7 @@ class SeriesBuilder:
                     symbol=window_symbol,
                     datasource=ds,
                     exchange=ex,
+                    overlay_options=overlay_options or None,
                 )
                 logger.info(
                     "event=bot_overlay_received bot_id=%s indicator_id=%s boxes=%d markers=%d price_lines=%d",
@@ -625,6 +796,7 @@ class SeriesBuilder:
         symbol: Optional[str],
         datasource: Optional[str],
         exchange: Optional[str],
+        overlay_signature: Optional[str] = None,
     ) -> str:
         parts = [
             indicator_id or "",
@@ -634,8 +806,42 @@ class SeriesBuilder:
             (symbol or "").upper(),
             (datasource or "").lower(),
             (exchange or "").lower(),
+            overlay_signature or "",
         ]
         return ":".join(parts)
+
+    @staticmethod
+    def _overlay_signature(options: Mapping[str, Any]) -> str:
+        if not options:
+            return ""
+        parts = [f"{key}={options[key]}" for key in sorted(options.keys())]
+        return "|".join(parts)
+
+    @staticmethod
+    def _overlay_options_for_indicator(
+        indicator_type: str, params: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        """Extract overlay options using single-key lookup (no dual-key fallbacks)."""
+        if indicator_type != "market_profile":
+            return {}
+
+        options: Dict[str, Any] = {}
+
+        # Direct key access (no dual-key fallback to market_profile_ prefix)
+        for key in ("use_merged_value_areas", "merge_threshold", "min_merge_sessions",
+                    "extend_value_area_to_chart_end"):
+            if key in params:
+                options[key] = params[key]
+
+        # Debug log to verify extraction
+        logger.debug(
+            "event=overlay_options_extracted indicator_type=%s params_keys=%s options=%s",
+            indicator_type,
+            list(params.keys()),
+            options,
+        )
+
+        return options
 
     @staticmethod
     def _extract_indicator_overlays(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -647,15 +853,23 @@ class SeriesBuilder:
     @staticmethod
     def _build_signals_from_markers(markers: Mapping[str, Any]) -> Deque[StrategySignal]:
         queued: List[StrategySignal] = []
-        for entry in markers.get("buy", []) or []:
+        buy_markers = markers.get("buy", []) or []
+        sell_markers = markers.get("sell", []) or []
+        logger.debug(
+            "build_signals_from_markers | buy_count=%d sell_count=%d",
+            len(buy_markers),
+            len(sell_markers),
+        )
+        for entry in buy_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="long"))
-        for entry in markers.get("sell", []) or []:
+        for entry in sell_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="short"))
         queued.sort(key=lambda signal: signal.epoch)
+        logger.debug("build_signals_from_markers | total_signals=%d", len(queued))
         return deque(queued)
 
     @staticmethod

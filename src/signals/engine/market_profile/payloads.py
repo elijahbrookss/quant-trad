@@ -111,14 +111,26 @@ def build_value_area_payloads(
     if runtime_indicator is not None and isinstance(runtime_indicator, MarketProfileIndicator):
         runtime_symbol_set = getattr(runtime_indicator, "symbol", None)
         if runtime_symbol is not None and runtime_symbol_set and runtime_symbol_set != runtime_symbol:
+            # Extract all required params from runtime_indicator - MUST be present (no fallbacks/defaults)
+            if not hasattr(runtime_indicator, "days_back"):
+                raise ValueError(
+                    "Market Profile runtime_indicator missing 'days_back' attribute - "
+                    "indicator may not have been loaded with stored params from database"
+                )
+            if not hasattr(runtime_indicator, "extend_value_area_to_chart_end"):
+                raise ValueError(
+                    "Market Profile runtime_indicator missing 'extend_value_area_to_chart_end' attribute - "
+                    "indicator may not have been loaded with stored params from database"
+                )
+
             runtime = MarketProfileIndicator(
                 df,
                 bin_size=getattr(runtime_indicator, "bin_size", None),
                 use_merged_value_areas=params.use_merged_value_areas,
                 merge_threshold=params.merge_threshold,
                 min_merge_sessions=params.min_merge_sessions,
-                extend_value_area_to_chart_end=getattr(runtime_indicator, "extend_value_area_to_chart_end", True),
-                days_back=getattr(runtime_indicator, "days_back", MarketProfileIndicator.DEFAULT_DAYS_BACK),
+                extend_value_area_to_chart_end=runtime_indicator.extend_value_area_to_chart_end,
+                days_back=runtime_indicator.days_back,
             )
             setattr(runtime, "symbol", runtime_symbol)
             va_source = "runtime_df"

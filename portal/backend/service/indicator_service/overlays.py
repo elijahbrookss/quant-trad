@@ -157,9 +157,22 @@ class IndicatorOverlayBuilder:
 
         effective_datasource = req_datasource or stored_datasource
         effective_exchange = req_exchange or stored_exchange
-        if effective_exchange and not effective_datasource:
-            effective_datasource = "ccxt"
 
+        logger.info(
+            "event=overlay_builder_prepare_provider indicator_id=%s symbol=%s "
+            "req_datasource=%s req_exchange=%s stored_datasource=%s stored_exchange=%s "
+            "effective_datasource=%s effective_exchange=%s",
+            meta.get("id"),
+            symbol,
+            req_datasource,
+            req_exchange,
+            stored_datasource,
+            stored_exchange,
+            effective_datasource,
+            effective_exchange,
+        )
+
+        # resolve_data_provider will raise ValueError if effective_datasource is None
         provider = resolve_data_provider(
             effective_datasource,
             exchange=effective_exchange,
@@ -169,7 +182,13 @@ class IndicatorOverlayBuilder:
         # Extend time window for Market Profile indicators that need historical data
         effective_start = start
         if meta.get("type") == "market_profile":
-            days_back = stored_params.get("days_back", 180)
+            # days_back MUST be present in stored params (no fallbacks/defaults)
+            days_back = stored_params.get("days_back")
+            if days_back is None:
+                raise ValueError(
+                    "Market Profile indicator missing 'days_back' in stored params. "
+                    "Indicator may need to be recreated with proper params."
+                )
             try:
                 start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
                 extended_start_dt = start_dt - timedelta(days=days_back)
@@ -219,6 +238,7 @@ class IndicatorOverlayBuilder:
     ):
         options = dict(overlay_options or {})
         if isinstance(instance, MarketProfileIndicator) and hasattr(instance, "to_lightweight"):
+            mp_overrides = self._market_profile_overrides(options)
             clone = self._ctx.breakout_cache.build_market_profile_overlay_indicator(
                 instance,
                 df,
@@ -226,6 +246,7 @@ class IndicatorOverlayBuilder:
                 symbol=symbol,
                 provider=provider,
                 data_ctx=data_ctx,
+                **mp_overrides,
             )
             logger.debug(
                 "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s",
@@ -233,14 +254,28 @@ class IndicatorOverlayBuilder:
                 symbol,
                 interval,
             )
-            if "extend_value_area_to_chart_end" in options:
-                setattr(
-                    clone,
-                    "extend_value_area_to_chart_end",
-                    bool(options["extend_value_area_to_chart_end"]),
-                )
             return clone
         return instance
+
+    @staticmethod
+    def _market_profile_overrides(options: Mapping[str, Any]) -> Dict[str, Any]:
+        """Extract Market Profile overlay overrides using single-key lookup (no dual-key fallbacks)."""
+        overrides: Dict[str, Any] = {}
+
+        # Single-key lookup only (no market_profile_ prefix fallbacks)
+        if "use_merged_value_areas" in options:
+            overrides["use_merged_value_areas"] = options["use_merged_value_areas"]
+
+        if "merge_threshold" in options:
+            overrides["merge_threshold"] = options["merge_threshold"]
+
+        if "min_merge_sessions" in options:
+            overrides["min_merge_sessions"] = options["min_merge_sessions"]
+
+        if "extend_value_area_to_chart_end" in options:
+            overrides["extend_value_area_to_chart_end"] = options["extend_value_area_to_chart_end"]
+
+        return overrides
 
     def _serialize_payload(self, overlay_indicator, df) -> Tuple[Dict[str, Any], Any]:
         if hasattr(overlay_indicator, "to_lightweight"):

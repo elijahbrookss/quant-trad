@@ -211,6 +211,14 @@ def overlays(inst_id: str, req: OverlayRequest):
 
 @router.post("/{inst_id}/signals")
 async def signals(inst_id: str, req: SignalRequest):
+    logger.info(
+        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s",
+        inst_id,
+        req.datasource,
+        req.exchange,
+        req.symbol,
+        req.interval,
+    )
     try:
         return generate_signals_for_instance(
             inst_id=inst_id,

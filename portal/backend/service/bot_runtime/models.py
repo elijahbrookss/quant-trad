@@ -6,18 +6,18 @@ replacing the Dict[str, Any] approach that caused confusion and drift.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
 class StrategyIndicatorLink:
-    """Link between strategy and indicator instance."""
+    """Link between strategy and indicator instance (no snapshot - loads fresh from DB)."""
 
     id: str
     strategy_id: str
     indicator_id: str
-    indicator_snapshot: Dict[str, Any]
+    # REMOVED: indicator_snapshot - indicators loaded fresh from DB
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StrategyIndicatorLink:
@@ -26,7 +26,7 @@ class StrategyIndicatorLink:
             id=data["id"],
             strategy_id=data["strategy_id"],
             indicator_id=data["indicator_id"],
-            indicator_snapshot=data.get("indicator_snapshot") or {},
+            # REMOVED: indicator_snapshot - indicators loaded fresh from DB
         )
 
 
@@ -81,6 +81,7 @@ class Strategy:
     # Relationships
     indicator_links: List[StrategyIndicatorLink]
     instrument_links: List[StrategyInstrumentLink]
+    rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # rule_id -> rule dict
 
     @property
     def primary_instrument(self) -> Optional[StrategyInstrumentLink]:
@@ -118,7 +119,7 @@ class Strategy:
                     "id": link.id,
                     "strategy_id": link.strategy_id,
                     "indicator_id": link.indicator_id,
-                    "indicator_snapshot": link.indicator_snapshot,
+                    # REMOVED: indicator_snapshot - indicators loaded fresh from DB
                 }
                 for link in self.indicator_links
             ],

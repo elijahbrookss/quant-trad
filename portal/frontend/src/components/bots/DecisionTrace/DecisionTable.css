@@ -1,0 +1,135 @@
+.decision-table {
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(6, 10, 18, 0.85);
+  padding: 1rem;
+}
+
+.decision-table-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.decision-table-kicker {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.35em;
+  color: rgba(148, 163, 184, 0.8);
+  margin: 0;
+}
+
+.decision-table-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.decision-table-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.decision-table-button {
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(248, 250, 252, 0.9);
+  font-size: 0.75rem;
+  padding: 0.35rem 0.9rem;
+}
+
+.decision-table-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.decision-table-page {
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.decision-table-scroll {
+  max-height: 520px;
+  overflow: auto;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.decision-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.decision-table thead {
+  position: sticky;
+  top: 0;
+  background: rgba(8, 12, 20, 0.95);
+  z-index: 1;
+}
+
+.decision-table th,
+.decision-table td {
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  vertical-align: top;
+}
+
+.decision-table th {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.65rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.decision-table tbody tr {
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.decision-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.decision-table tbody tr.execution td {
+  color: rgba(226, 232, 240, 0.92);
+}
+
+.decision-table tbody tr.decision td {
+  color: rgba(248, 250, 252, 0.92);
+}
+
+.decision-table-empty {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.decision-table .decision-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid transparent;
+}
+
+.decision-table .decision-pill.long {
+  background: rgba(16, 185, 129, 0.18);
+  color: rgba(52, 211, 153, 1);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.decision-table .decision-pill.short {
+  background: rgba(239, 68, 68, 0.18);
+  color: rgba(248, 113, 113, 1);
+  border-color: rgba(239, 68, 68, 0.3);
+}

@@ -190,10 +190,16 @@ export const IndicatorSection = ({ chartId }) => {
       setIsLoading(false);
       return;
     }
-    if (!chartState.symbol || !chartState.interval) {
-      warn('indicator_refresh_skipped_inputs', {
+
+    // Wait for all required context fields before triggering overlay refresh
+    // This prevents race conditions where _version bumps before datasource is set
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval) {
+      warn('indicator_refresh_skipped_context', {
+        datasource: chartState.datasource,
+        exchange: chartState.exchange,
         symbol: chartState.symbol,
         interval: chartState.interval,
+        reason: !chartState.datasource ? 'no_datasource' : !chartState.symbol ? 'no_symbol' : 'no_interval',
       });
       setIsLoading(false);
       return;
@@ -219,7 +225,7 @@ export const IndicatorSection = ({ chartId }) => {
     })();
 
     return () => { isMounted = false; };
-  }, [chartId, chartState?._version]);
+  }, [chartId, chartState?._version, chartState?.datasource, chartState?.exchange]);
 
   // When indicator colors change, recolor overlays in chart context (post-render).
   useEffect(() => {
@@ -238,6 +244,22 @@ export const IndicatorSection = ({ chartId }) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
     if (!chartState) {
+      updateChart(chartId, { overlays: [], overlayLoading: false });
+      return;
+    }
+
+    // Wait for datasource and all required fields before loading overlays
+    // This prevents race conditions where _version bumps before datasource is set
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval) {
+      warn('overlay_refresh_waiting_for_context', {
+        chartId,
+        hasChartState: Boolean(chartState),
+        datasource: chartState.datasource,
+        exchange: chartState.exchange,
+        symbol: chartState.symbol,
+        interval: chartState.interval,
+        reason: !chartState.datasource ? 'no_datasource' : !chartState.symbol ? 'no_symbol' : 'no_interval',
+      });
       updateChart(chartId, { overlays: [], overlayLoading: false });
       return;
     }
@@ -603,13 +625,55 @@ export const IndicatorSection = ({ chartId }) => {
       })
   }
 
-  // Regenerate signals (not yet implemented)
+  // Regenerate signals
   const generateSignals = async (id) => {
+    info('signal_generation_start', {
+      indicatorId: id,
+      chartState: {
+        datasource: chartState?.datasource,
+        exchange: chartState?.exchange,
+        symbol: chartState?.symbol,
+        interval: chartState?.interval,
+      },
+    });
+
+    // Validate chart state has all required fields before generating signals
+    if (!chartState?.datasource || !chartState?.symbol || !chartState?.interval) {
+      const missing = !chartState?.datasource ? 'datasource' : !chartState?.symbol ? 'symbol' : 'interval';
+      const errorMsg = `Cannot generate signals: ${missing} is not set. Please ensure chart is fully loaded.`;
+      setError(errorMsg);
+      warn('signal_generation_blocked', {
+        indicatorId: id,
+        reason: `missing_${missing}`,
+        chartState: {
+          datasource: chartState?.datasource,
+          exchange: chartState?.exchange,
+          symbol: chartState?.symbol,
+          interval: chartState?.interval,
+        },
+      });
+      return;
+    }
+
     const indicator = indicators.find((ind) => ind.id === id);
+
+    // Get fresh chart state right before calling runSignalGeneration
+    // to avoid stale closure issues
+    const freshChartState = getChart(chartId);
+    info('signal_generation_fresh_state', {
+      indicatorId: id,
+      freshChartState: {
+        datasource: freshChartState?.datasource,
+        exchange: freshChartState?.exchange,
+        symbol: freshChartState?.symbol,
+        interval: freshChartState?.interval,
+      },
+    });
+
     await runSignalGeneration({
       indicator,
       chartId,
-      chartState,
+      chartState: freshChartState,
       startISO,
       endISO,
       indColors,

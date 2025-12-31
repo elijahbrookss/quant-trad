@@ -184,6 +184,58 @@ class StrategySignal:
 
 
 @dataclass
+class DecisionEvent:
+    """Represents a strategy-level decision point for observability."""
+
+    event_id: str
+    event: str  # "signal_received", "signal_accepted", "signal_rejected", "trade_opened", etc.
+    timestamp: str  # ISO8601 when event occurred
+    bar_time: str  # ISO8601 of the bar that triggered this event
+    strategy_id: str
+    strategy_name: str
+    symbol: str
+    signal_type: str  # e.g., "breakout", "retest"
+    signal_direction: Optional[str] = None  # "long" | "short"
+    signal_price: Optional[float] = None
+    rule_id: Optional[str] = None
+    decision: Optional[str] = None  # "accepted" | "rejected"
+    reason: Optional[str] = None  # Why rejected (if applicable)
+    trade_id: Optional[str] = None  # Links to actual trade if opened
+    conditions: Optional[List[Dict[str, Any]]] = None  # Rule condition results
+    metadata: Optional[Dict[str, Any]] = None
+
+    def serialize(self) -> Dict[str, Any]:
+        """Return a JSON-serializable representation of the decision event."""
+        payload: Dict[str, Any] = {
+            "id": self.event_id,
+            "event": self.event,
+            "timestamp": self.timestamp,
+            "bar_time": self.bar_time,
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "symbol": self.symbol,
+            "signal_type": self.signal_type,
+        }
+        if self.signal_direction is not None:
+            payload["direction"] = self.signal_direction
+        if self.signal_price is not None:
+            payload["price"] = round(self.signal_price, 4)
+        if self.rule_id is not None:
+            payload["rule_id"] = self.rule_id
+        if self.decision is not None:
+            payload["decision"] = self.decision
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        if self.trade_id is not None:
+            payload["trade_id"] = self.trade_id
+        if self.conditions is not None:
+            payload["conditions"] = self.conditions
+        if self.metadata is not None:
+            payload["metadata"] = self.metadata
+        return payload
+
+
+@dataclass
 class Leg:
     """Take-profit leg metadata."""
 

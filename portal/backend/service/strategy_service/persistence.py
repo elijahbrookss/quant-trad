@@ -19,11 +19,10 @@ def delete_strategy(strategy_id: str) -> None:
     storage.delete_strategy(strategy_id)
 
 
-def upsert_strategy_indicator(strategy_id: str, indicator_id: str, snapshot: Mapping[str, Any]) -> None:
+def upsert_strategy_indicator(strategy_id: str, indicator_id: str) -> None:
     storage.upsert_strategy_indicator(
         strategy_id=strategy_id,
         indicator_id=indicator_id,
-        snapshot=snapshot,
     )
 
 

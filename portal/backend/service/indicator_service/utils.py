@@ -41,32 +41,66 @@ def get_indicator_entry(
     persist_backfill: bool = False,
     ctx: IndicatorServiceContext = _context,
 ):
-    return ctx.cache_manager.get_entry(
-        inst_id,
-        fallback_context=fallback_context,
-        persist_backfill=persist_backfill,
+    """Build indicator entry directly from DB without caching.
+
+    This ensures we always use fresh parameters from the database,
+    avoiding stale cached instances with outdated configuration.
+    """
+    from dataclasses import dataclass
+    from typing import Any
+
+    @dataclass
+    class IndicatorEntry:
+        """Temporary container for indicator metadata and instance."""
+        meta: Dict[str, Any]
+        instance: Any
+        updated_at: Optional[str] = None
+
+    # Load fresh record from DB
+    record = ctx.repository.get(inst_id)
+    if not record:
+        raise KeyError("Indicator not found")
+
+    # Backfill context fields if needed (symbol, start, end, interval)
+    if fallback_context:
+        params = dict(record.get("params") or {})
+        context_keys = ("symbol", "start", "end", "interval")
+        missing = [key for key in context_keys if not params.get(key)]
+
+        if missing:
+            for key in missing:
+                value = fallback_context.get(key)
+                if value is not None and (not isinstance(value, str) or value.strip()):
+                    params[key] = value
+
+            # Update in-memory record (don't persist context fields to DB)
+            record = dict(record)
+            record["params"] = params
+
+    # Build meta and instance fresh from DB record
+    meta = ctx.factory.build_meta_from_record(record)
+
+    # Allow fallback context to supply runtime provider overrides
+    fb = fallback_context or {}
+    fb_ds = fb.get("datasource")
+    fb_ex = fb.get("exchange")
+    instance = ctx.factory.build_indicator_instance(meta, datasource=fb_ds, exchange=fb_ex)
+
+    return IndicatorEntry(
+        meta=meta,
+        instance=instance,
+        updated_at=str(record.get("updated_at") or "")
     )
 
 
-def refresh_strategy_links(
-    inst_id: str, meta: Mapping[str, Any], *, ctx: IndicatorServiceContext = _context
-) -> None:
-    strategies = ctx.repository.strategies_for_indicator(inst_id)
-    if not strategies:
-        return
-    snapshot = deepcopy(meta)
-    for strategy in strategies:
-        strategy_id = strategy.get("id")
-        if not strategy_id:
-            continue
-        ctx.repository.upsert_strategy_indicator(
-            strategy_id=strategy_id,
-            indicator_id=inst_id,
-            snapshot=snapshot,
-        )
+# REMOVED: refresh_strategy_links function
+# Strategies now load indicators fresh from DB, no snapshot refresh needed
 
 
-_RUNTIME_PARAM_KEYS = {"datasource", "exchange"}
+# Runtime params that should NOT be stored in indicator config
+# - datasource, exchange: stored in separate fields at top level
+# - symbol, start, end, interval: DataContext fields (runtime context, not config)
+_RUNTIME_PARAM_KEYS = {"datasource", "exchange", "symbol", "start", "end", "interval"}
 
 
 def purge_breakout_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
@@ -167,7 +201,14 @@ def normalize_exchange(
 def resolve_data_provider(
     datasource: Optional[str], *, exchange: Optional[str] = None, ctx: IndicatorServiceContext = _context
 ):
-    ds = normalize_datasource(datasource, ctx=ctx) or DataSource.ALPACA.value
+    """Resolve data provider from datasource/exchange.
+
+    No defaults: datasource must be explicitly provided.
+    Fails loudly if datasource is missing.
+    """
+    ds = normalize_datasource(datasource, ctx=ctx)
+    if not ds:
+        raise ValueError("datasource is required to resolve data provider")
     ex = normalize_exchange(exchange, ctx=ctx)
     return ctx.resolver.resolve(ds, exchange=ex)
 
@@ -178,19 +219,35 @@ def pull_datasource_exchange(
     fallback_meta: Optional[Mapping[str, Any]] = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Tuple[Optional[str], Optional[str]]:
+    """Extract datasource/exchange from params with fallback to meta.
+
+    Allows fallback to stored meta values, but NO hardcoded defaults.
+    If datasource is missing from both params and meta, this will return None
+    and the caller should handle the error.
+    """
     defaults = fallback_meta or {}
     datasource = normalize_datasource(params.pop("datasource", defaults.get("datasource")), ctx=ctx)
     exchange = normalize_exchange(params.pop("exchange", defaults.get("exchange")), ctx=ctx)
-    if exchange and not datasource:
-        datasource = DataSource.CCXT.value
+    # No implicit defaults: caller must provide datasource explicitly
     return datasource, exchange
 
 
 def extract_ctor_params(inst) -> Dict[str, Any]:
+    """Extract constructor params from indicator instance.
+
+    IMPORTANT: Filters out DataContext fields (symbol, start, end, interval) which are
+    runtime context, not indicator configuration. These should not be persisted.
+    """
+    # DataContext fields that should NOT be stored in indicator params
+    CONTEXT_FIELDS = {"symbol", "start", "end", "interval"}
+
     sig = inspect.signature(inst.__class__.__init__)
     out: Dict[str, Any] = {}
     for name, param in sig.parameters.items():
         if name in ("self", "df"):
+            continue
+        # Skip DataContext fields - they're runtime context, not config
+        if name in CONTEXT_FIELDS:
             continue
         if not hasattr(inst, name):
             continue
@@ -239,7 +296,7 @@ __all__ = [
     "normalize_exchange",
     "pull_datasource_exchange",
     "purge_breakout_cache",
-    "refresh_strategy_links",
+    # REMOVED: "refresh_strategy_links" - no longer needed
     "resolve_data_provider",
     "sanitize_json",
     "scrub_runtime_params",

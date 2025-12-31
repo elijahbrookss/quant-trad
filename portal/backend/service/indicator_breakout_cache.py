@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from signals.rules.market_profile import (
     _BREAKOUT_READY_FLAG,
 )
 from signals.rules.pivot import PivotBreakoutConfig, _PIVOT_BREAKOUT_READY_FLAG
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,10 @@ class IndicatorBreakoutCache:
         symbol: Optional[str] = None,
         provider: Any = None,
         data_ctx: Optional[DataContext] = None,
+        use_merged_value_areas: Any = None,
+        merge_threshold: Any = None,
+        min_merge_sessions: Any = None,
+        extend_value_area_to_chart_end: Any = None,
     ) -> MarketProfileIndicator:
         """
         Clone market profile indicator for overlay rendering.
@@ -112,23 +119,70 @@ class IndicatorBreakoutCache:
         Returns:
             Cloned MarketProfileIndicator sharing the same profiles
         """
-        params = resolve_market_profile_params(indicator)
-        indicator_symbol = getattr(indicator, "symbol", None)
+        # Log override values to diagnose param resolution
+        logger.debug(
+            "event=resolve_market_profile_params_called "
+            "use_merged_override=%s merge_threshold_override=%s min_merge_sessions_override=%s "
+            "indicator_use_merged=%s indicator_threshold=%s indicator_min_sessions=%s",
+            use_merged_value_areas,
+            merge_threshold,
+            min_merge_sessions,
+            getattr(indicator, "use_merged_value_areas", "<missing>"),
+            getattr(indicator, "merge_threshold", "<missing>"),
+            getattr(indicator, "min_merge_sessions", "<missing>"),
+        )
 
-        if symbol and indicator_symbol and symbol != indicator_symbol:
-            if provider is None or data_ctx is None:
-                raise ValueError("Market profile overlay requires provider and data_ctx for symbol mismatch.")
+        params = resolve_market_profile_params(
+            indicator,
+            use_merged_value_areas=use_merged_value_areas,
+            merge_threshold=merge_threshold,
+            min_merge_sessions=min_merge_sessions,
+        )
+
+        logger.info(
+            "event=resolve_market_profile_params_result "
+            "resolved_use_merged=%s resolved_threshold=%s resolved_min_sessions=%s",
+            params.use_merged_value_areas,
+            params.merge_threshold,
+            params.min_merge_sessions,
+        )
+
+        extend_to_end = True if extend_value_area_to_chart_end is None else bool(extend_value_area_to_chart_end)
+
+        # For multi-instrument strategies: if provider and data_ctx are provided,
+        # create a fresh indicator instance with the correct symbol's data
+        if provider is not None and data_ctx is not None and symbol:
+            # Extract all required params from base indicator - MUST be present (no fallbacks/defaults)
+            if not hasattr(indicator, "days_back"):
+                raise ValueError(
+                    f"Market Profile indicator missing 'days_back' attribute - "
+                    f"indicator may not have been loaded with stored params from database"
+                )
+            days_back = indicator.days_back
+
+            # bin_size can be None (auto-inferred), but if present on base indicator, use it
+            bin_size = getattr(indicator, "bin_size", None)
+
+            logger.info(
+                "event=market_profile_fresh_instance symbol=%s creating_symbol_specific_instance=True "
+                "bin_size=%s days_back=%s use_merged_value_areas=%s merge_threshold=%s min_merge_sessions=%s",
+                symbol,
+                bin_size,
+                days_back,
+                params.use_merged_value_areas,
+                params.merge_threshold,
+                params.min_merge_sessions,
+            )
             runtime = MarketProfileIndicator.from_context(
                 provider=provider,
                 ctx=data_ctx,
-                bin_size=getattr(indicator, "bin_size", None),
+                bin_size=bin_size,
                 use_merged_value_areas=params.use_merged_value_areas,
                 merge_threshold=params.merge_threshold,
                 min_merge_sessions=params.min_merge_sessions,
-                extend_value_area_to_chart_end=True,
-                days_back=getattr(indicator, "days_back", MarketProfileIndicator.DEFAULT_DAYS_BACK),
+                extend_value_area_to_chart_end=extend_to_end,
+                days_back=days_back,
             )
-            setattr(runtime, "symbol", symbol)
             if interval is not None:
                 setattr(runtime, "interval", interval)
             return runtime
@@ -139,7 +193,7 @@ class IndicatorBreakoutCache:
             use_merged_value_areas=params.use_merged_value_areas,
             merge_threshold=params.merge_threshold,
             min_merge_sessions=params.min_merge_sessions,
-            extend_value_area_to_chart_end=True
+            extend_value_area_to_chart_end=extend_to_end,
         )
 
         # Set runtime attributes for metadata
