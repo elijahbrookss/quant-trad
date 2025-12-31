@@ -13,7 +13,10 @@ const normalizeDateValue = (value) => {
 }
 
 export function useBotCreateForm(initialForm = buildDefaultForm()) {
-  const [form, setForm] = useState(initialForm)
+  const [form, setForm] = useState(() => ({
+    ...initialForm,
+    wallet_balances: normalizeWalletRows(initialForm.wallet_balances),
+  }))
 
   const { walletConfig, walletError } = useMemo(() => {
     const rows = normalizeWalletRows(form.wallet_balances)
@@ -107,7 +110,8 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
   }, [])
 
   const resetForm = useCallback((overrides = {}) => {
-    setForm({ ...buildDefaultForm(), ...overrides })
+    const next = { ...buildDefaultForm(), ...overrides }
+    setForm({ ...next, wallet_balances: normalizeWalletRows(next.wallet_balances) })
   }, [])
 
   return {

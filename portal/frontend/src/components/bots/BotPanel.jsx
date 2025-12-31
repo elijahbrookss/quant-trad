@@ -173,25 +173,37 @@ export function BotPanel() {
   }, [logger])
 
   useEffect(() => {
-    loadBots()
     loadStrategies()
     logger.info('bot_panel_mounted')
-  }, [loadBots, loadStrategies, logger])
+  }, [loadStrategies, logger])
 
   useEffect(() => {
     logger.info('bot_create_modal_state', { open: createOpen })
   }, [createOpen, logger])
 
   useEffect(() => {
+    if (createOpen) {
+      logger.debug('bot_panel_tick_paused', { reason: 'create_modal_open' })
+      return undefined
+    }
+    logger.debug('bot_panel_tick_started')
     const timer = setInterval(() => setNowEpochMs(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [])
+    return () => {
+      clearInterval(timer)
+      logger.debug('bot_panel_tick_stopped')
+    }
+  }, [createOpen, logger])
 
   useEffect(() => () => {
     if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
   }, [])
 
-  const botStreamState = useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots })
+  const { state: botStreamState, reconnect: reconnectBotStream } = useBotStream({
+    mergeBots,
+    upsertBot,
+    applyRuntime,
+    loadBots,
+  })
 
   const closeCreateModal = useCallback(() => {
     setCreateOpen(false)
@@ -459,7 +471,14 @@ export function BotPanel() {
             </label>
             <button
               type="button"
-              onClick={() => loadBots()}
+              onClick={() => {
+                if (botStreamState === 'open') {
+                  logger.info('bot_stream_refresh_requested')
+                  reconnectBotStream()
+                  return
+                }
+                loadBots()
+              }}
               className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
               disabled={loading}
             >

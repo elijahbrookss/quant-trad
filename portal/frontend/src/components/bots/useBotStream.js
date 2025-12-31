@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createLogger } from '../../utils/logger.js'
 import { openBotsStream } from '../../adapters/bot.adapter.js'
 
 /**
@@ -7,7 +8,9 @@ import { openBotsStream } from '../../adapters/bot.adapter.js'
  */
 export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
   const [botStreamState, setBotStreamState] = useState('idle')
+  const [connectKey, setConnectKey] = useState(0)
   const botStreamRef = useRef(null)
+  const loggerRef = useRef(createLogger('BotStream'))
   const mergeBotsRef = useRef(mergeBots)
   const upsertBotRef = useRef(upsertBot)
   const applyRuntimeRef = useRef(applyRuntime)
@@ -32,12 +35,12 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
 
       const source = openBotsStream()
       if (!source) {
-        console.info('[BotPanel] bot stream unavailable, skipping SSE attach')
+        loggerRef.current.info('bot_stream_unavailable')
         setBotStreamState('error')
         return
       }
 
-      console.info('[BotPanel] connecting bot stream')
+      loggerRef.current.info('bot_stream_connecting')
       botStreamRef.current = source
       setBotStreamState('connecting')
 
@@ -63,7 +66,7 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
           }
           setBotStreamState('open')
         } catch (err) {
-          console.warn('[BotPanel] bot stream payload parse failed', err)
+          loggerRef.current.warn('bot_stream_payload_parse_failed', { message: err?.message }, err)
         }
       }
 
@@ -77,12 +80,12 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
             setBotStreamState('open')
           }
         } catch (err) {
-          console.warn('[BotPanel] bot runtime payload parse failed', err)
+          loggerRef.current.warn('bot_stream_runtime_parse_failed', { message: err?.message }, err)
         }
       }
 
       const handleError = (event) => {
-        console.info('[BotPanel] bot stream errored, scheduling retry', event?.message)
+        loggerRef.current.warn('bot_stream_error', { message: event?.message })
         setBotStreamState('error')
         retryTimer = setTimeout(connectStream, 2500)
       }
@@ -92,7 +95,10 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
       source.addEventListener('update', handlePayload)
       source.addEventListener('bot_runtime', handleRuntime)
       source.onerror = handleError
-      source.onopen = () => setBotStreamState('open')
+      source.onopen = () => {
+        loggerRef.current.info('bot_stream_open')
+        setBotStreamState('open')
+      }
     }
 
     connectStream()
@@ -100,12 +106,12 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
     return () => {
       if (retryTimer) clearTimeout(retryTimer)
       if (botStreamRef.current) {
-        console.info('[BotPanel] closing bot stream')
+        loggerRef.current.info('bot_stream_closed')
         botStreamRef.current.close()
         botStreamRef.current = null
       }
     }
-  }, []) // No dependencies - using refs instead
+  }, [connectKey])
 
   useEffect(() => {
     if (botStreamState === 'open') return undefined
@@ -114,6 +120,9 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
     return () => clearInterval(id)
   }, [botStreamState])
 
-  return botStreamState
-}
+  const reconnect = useCallback(() => {
+    setConnectKey((prev) => prev + 1)
+  }, [])
 
+  return { state: botStreamState, reconnect }
+}

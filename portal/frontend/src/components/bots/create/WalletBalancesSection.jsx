@@ -21,7 +21,7 @@ export function WalletBalancesSection({
       </div>
       <div className="space-y-2">
         {(walletBalances || []).map((row, index) => (
-          <div key={`${index}-${row.currency || 'currency'}`} className="flex flex-wrap items-center gap-2">
+          <div key={row.id || `wallet-${index}`} className="flex flex-wrap items-center gap-2">
             <input
               type="text"
               value={row.currency}
