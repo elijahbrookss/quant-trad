@@ -10,8 +10,11 @@ import {
   resumeBot as resumeBotApi,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
+import { createLogger } from '../../utils/logger.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
-import { BotCreateModal, buildDefaultForm } from './BotCreateForm.jsx'
+import { BotCreateModal } from './create/BotCreateModal.jsx'
+import { buildDefaultForm } from './create/botCreateFormDefaults.js'
+import { useBotCreateForm } from './create/useBotCreateForm.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 
@@ -20,7 +23,18 @@ const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').t
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
-  const [form, setForm] = useState(buildDefaultForm())
+  const {
+    form,
+    walletConfig,
+    walletError,
+    handleChange,
+    handleBacktestRangeChange,
+    handleStrategyToggle,
+    handleWalletBalanceChange,
+    handleWalletBalanceAdd,
+    handleWalletBalanceRemove,
+    resetForm,
+  } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [lensBot, setLensBot] = useState(null)
@@ -31,6 +45,8 @@ export function BotPanel() {
   const [pendingDelete, setPendingDelete] = useState(null)
   const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
+  const [nowEpochMs, setNowEpochMs] = useState(() => Date.now())
+  const logger = useMemo(() => createLogger('BotPanel'), [])
   const runtimeQueueRef = useRef(new Map())
   const runtimeFrame = useRef(null)
   const formatPlaybackValue = useCallback((value) => {
@@ -88,7 +104,7 @@ export function BotPanel() {
       if (!payload?.id) return
       mergeBots([payload])
     },
-    [mergeBots],
+    [logger, mergeBots],
   )
 
   const flushRuntimeQueue = useCallback(() => {
@@ -125,10 +141,13 @@ export function BotPanel() {
     async (withSpinner = true) => {
       if (withSpinner) setLoading(true)
       setError(null)
+      logger.info('bots_load_start', { with_spinner: withSpinner })
       try {
         const data = await listBots()
+        logger.info('bots_load_success', { count: Array.isArray(data) ? data.length : 0 })
         mergeBots(data)
       } catch (err) {
+        logger.error('bots_load_failed', { message: err?.message }, err)
         setError(err?.message || 'Unable to load bots')
       } finally {
         if (withSpinner) setLoading(false)
@@ -140,21 +159,33 @@ export function BotPanel() {
   const loadStrategies = useCallback(async () => {
     setStrategiesLoading(true)
     setStrategyError(null)
+    logger.info('strategies_load_start')
     try {
       const data = await fetchStrategies()
       setStrategies(data)
+      logger.info('strategies_load_success', { count: Array.isArray(data) ? data.length : 0 })
     } catch (err) {
+      logger.error('strategies_load_failed', { message: err?.message }, err)
       setStrategyError(err?.message || 'Unable to load strategies')
     } finally {
       setStrategiesLoading(false)
     }
-  }, [])
+  }, [logger])
 
   useEffect(() => {
     loadBots()
     loadStrategies()
-    console.info('[BotPanel] mounted, loading bots and strategies')
-  }, [loadBots, loadStrategies])
+    logger.info('bot_panel_mounted')
+  }, [loadBots, loadStrategies, logger])
+
+  useEffect(() => {
+    logger.info('bot_create_modal_state', { open: createOpen })
+  }, [createOpen, logger])
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowEpochMs(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => () => {
     if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
@@ -162,48 +193,10 @@ export function BotPanel() {
 
   const botStreamState = useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots })
 
-  const handleChange = (event) => {
-    const { name, value } = event.target
-    setForm((prev) => {
-      const next = { ...prev, [name]: value }
-      if (name === 'run_type' && value !== 'backtest') {
-        next.backtest_start = ''
-        next.backtest_end = ''
-      }
-      return next
-    })
-  }
-
   const closeCreateModal = useCallback(() => {
     setCreateOpen(false)
     setCreateError(null)
   }, [])
-
-  const handleBacktestRangeChange = useCallback((range) => {
-    const [start, end] = Array.isArray(range) ? range : []
-    const normalize = (value) => {
-      if (!(value instanceof Date)) return ''
-      const time = value.getTime()
-      return Number.isNaN(time) ? '' : new Date(time).toISOString()
-    }
-    let norm_start = normalize(start)
-    let norm_end = normalize(end)
-    
-    setForm((prev) => ({
-      ...prev,
-      backtest_start: norm_start,
-      backtest_end: norm_end,
-    }))
-  }, [])
-
-  const handleStrategyToggle = (strategyId) => {
-    setForm((prev) => {
-      const next = prev.strategy_ids.includes(strategyId)
-        ? prev.strategy_ids.filter((id) => id !== strategyId)
-        : [...prev.strategy_ids, strategyId]
-      return { ...prev, strategy_ids: next }
-    })
-  }
 
   const handleCreate = async (event) => {
     event.preventDefault()
@@ -218,24 +211,34 @@ export function BotPanel() {
       setCreateError('Provide both a start and end date for backtests.')
       return
     }
+    if (walletError || !walletConfig) {
+      setCreateError(walletError || 'Wallet config is required.')
+      return
+    }
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
+    logger.info('bot_create_request', {
+      run_type: form.run_type,
+      strategy_count: form.strategy_ids.length,
+      strategy_ids: form.strategy_ids,
+      backtest_start: startISO,
+      backtest_end: endISO,
+    })
     try {
+      const { wallet_balances, ...rest } = form
       const payloadBody = {
-        ...form,
+        ...rest,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
+        wallet_config: walletConfig,
       }
       const payload = await createBot(payloadBody)
-      console.info('[BotPanel] bot created', { id: payload?.id })
+      logger.info('bot_create_success', { bot_id: payload?.id })
       upsertBot(payload)
-      setForm((prev) => ({
-        ...buildDefaultForm(),
-        strategy_ids: prev.strategy_ids,
-        run_type: prev.run_type,
-      }))
+      resetForm({ strategy_ids: form.strategy_ids, run_type: form.run_type })
       closeCreateModal()
     } catch (err) {
+      logger.error('bot_create_failed', { message: err?.message }, err)
       setCreateError(err?.message || 'Unable to create bot')
     }
   }
@@ -247,7 +250,7 @@ export function BotPanel() {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
-    console.info('[BotPanel] start requested', { botId })
+    logger.info('bot_start_requested', { bot_id: botId })
     setPendingStart(botId)
     setBots((prev) =>
       prev.map((bot) =>
@@ -264,6 +267,7 @@ export function BotPanel() {
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_start_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to start bot')
     } finally {
       setPendingStart(null)
@@ -272,36 +276,39 @@ export function BotPanel() {
 
   const handleStop = async (botId) => {
     setError(null)
-    console.info('[BotPanel] stop requested', { botId })
+    logger.info('bot_stop_requested', { bot_id: botId })
     try {
       const payload = await stopBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_stop_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to stop bot')
     }
   }
 
   const handlePause = async (botId) => {
     setError(null)
-    console.info('[BotPanel] pause requested', { botId })
+    logger.info('bot_pause_requested', { bot_id: botId })
     try {
       const payload = await pauseBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_pause_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to pause bot')
     }
   }
 
   const handleResume = async (botId) => {
     setError(null)
-    console.info('[BotPanel] resume requested', { botId })
+    logger.info('bot_resume_requested', { bot_id: botId })
     try {
       const payload = await resumeBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_resume_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to resume bot')
     }
   }
@@ -310,12 +317,13 @@ export function BotPanel() {
     if (!botId) return
     if (!window.confirm('Delete this bot? This cannot be undone.')) return
     setError(null)
-    console.info('[BotPanel] delete requested', { botId })
+    logger.info('bot_delete_requested', { bot_id: botId })
     setPendingDelete(botId)
     try {
       await deleteBotApi(botId)
       setBots((prev) => prev.filter((bot) => bot.id !== botId))
     } catch (err) {
+      logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to delete bot')
     } finally {
       setPendingDelete(null)
@@ -427,7 +435,7 @@ export function BotPanel() {
             <button
               type="button"
               onClick={() => {
-                console.info('[BotPanel] open create bot modal')
+                logger.info('bot_create_modal_open')
                 setCreateError(null)
                 setCreateOpen(true)
               }}
@@ -481,6 +489,7 @@ export function BotPanel() {
                 strategyLookup={strategyLookup}
                 describeRange={describeRange}
                 statusBadge={statusBadge}
+                nowEpochMs={nowEpochMs}
                 onStart={handleStart}
                 onStop={handleStop}
                 onPause={handlePause}
@@ -502,10 +511,14 @@ export function BotPanel() {
           strategies={sortedStrategies}
           strategiesLoading={strategiesLoading}
           strategyError={strategyError}
+          walletError={walletError}
           onSubmit={handleCreate}
           onChange={handleChange}
           onBacktestRangeChange={handleBacktestRangeChange}
           onStrategyToggle={handleStrategyToggle}
+          onWalletBalanceChange={handleWalletBalanceChange}
+          onWalletBalanceAdd={handleWalletBalanceAdd}
+          onWalletBalanceRemove={handleWalletBalanceRemove}
           error={createError}
         />
       </section>

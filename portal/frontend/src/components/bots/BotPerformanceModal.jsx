@@ -154,9 +154,16 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
         : null
       const openContractsCount = openContracts || contractsTotal || 0
       const fmtPrice = (value) => (Number.isFinite(value) ? Number(value).toFixed(2) : '—')
+      const fmtSize = (value) => {
+        if (!Number.isFinite(value) || value <= 0) return '—'
+        if (value >= 100) return value.toFixed(0)
+        if (value >= 10) return value.toFixed(1)
+        if (value >= 1) return value.toFixed(2)
+        return value.toFixed(4)
+      }
       return {
         directionLabel,
-        sizeLabel: `${Math.max(1, openContractsCount || contractsTotal || 1)}x`,
+        sizeLabel: `${fmtSize(openContractsCount)}x`,
         entry: fmtPrice(entryPrice),
         stop: fmtPrice(stopPrice),
         target: fmtPrice(tpPrice),

@@ -320,9 +320,11 @@ class BotRecord(Base):
     backtest_start = Column(DateTime, nullable=True)
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
+    wallet_config = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
     last_stats = Column(JSON, nullable=False, default=dict)
+    last_run_artifact = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -340,9 +342,11 @@ class BotRecord(Base):
             "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
+            "wallet_config": dict(self.wallet_config or {}),
             "status": self.status,
             "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
             "last_stats": dict(self.last_stats or {}),
+            "last_run_artifact": dict(self.last_run_artifact or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

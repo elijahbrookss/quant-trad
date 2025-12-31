@@ -19,6 +19,7 @@ export const BotCard = memo(function BotCard({
   strategyLookup,
   describeRange,
   statusBadge,
+  nowEpochMs,
   onStart,
   onStop,
   onPause,
@@ -54,6 +55,7 @@ export const BotCard = memo(function BotCard({
   const statsEntries = buildStats(bot)
   const runTypeLabel = (bot.run_type || 'backtest').replace('_', ' ')
   const runTypePill = runTypeLabel.toUpperCase()
+  const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
 
   return (
     <article className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950/90 via-slate-950/40 to-slate-900/30 p-5 shadow-lg shadow-black/30">
@@ -75,7 +77,15 @@ export const BotCard = memo(function BotCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start text-xs text-slate-300">{statusBadge(runtimeStatus)}</div>
+        <div className="flex flex-wrap items-center gap-2 self-start text-xs text-slate-300">
+          {statusBadge(runtimeStatus)}
+          {runDurationLabel ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-slate-300">
+              <span className="text-slate-500">Run time</span>
+              <span className="text-white">{runDurationLabel}</span>
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -144,6 +154,25 @@ export const BotCard = memo(function BotCard({
     </article>
   )
 })
+
+function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
+  if (!bot?.runtime?.started_at) return null
+  if (!['running', 'paused', 'starting'].includes(status)) return null
+  const startMs = Date.parse(bot.runtime.started_at)
+  if (!Number.isFinite(startMs)) return null
+  const elapsedSeconds = Math.max(0, Math.floor((nowEpochMs - startMs) / 1000))
+  const hours = Math.floor(elapsedSeconds / 3600)
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60)
+  const seconds = elapsedSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  }
+  return `${seconds}s`
+}
 
 function describeBotMeta(bot, strategyLookup, key) {
   if (!bot) return null

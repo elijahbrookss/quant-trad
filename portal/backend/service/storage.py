@@ -419,16 +419,33 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 record.playback_speed = 10.0
             if "risk" in payload:
                 record.risk = dict(payload.get("risk") or {})
+            if "wallet_config" in payload:
+                record.wallet_config = dict(payload.get("wallet_config") or {})
             record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
             record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
             record.status = payload.get("status") or record.status
             record.last_run_at = _parse_optional_timestamp(payload.get("last_run_at")) or record.last_run_at
             record.last_stats = dict(payload.get("last_stats") or record.last_stats or {})
+            if "last_run_artifact" in payload:
+                record.last_run_artifact = dict(payload.get("last_run_artifact") or {})
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
     except SQLAlchemyError as exc:
         logger.warning("bot_persist_failed | id=%s | error=%s", bot_id, exc)
+
+
+def update_bot_run_artifact(bot_id: str, artifact: Dict[str, Any]) -> None:
+    """Persist last run artifact on the bot record (fail loud)."""
+
+    if not db.available:
+        raise RuntimeError("Database not available for run artifact persistence")
+    with db.session() as session:
+        record = session.get(BotRecord, bot_id)
+        if record is None:
+            raise KeyError(f"Bot {bot_id} was not found")
+        record.last_run_artifact = dict(artifact or {})
+        record.updated_at = _utcnow()
 
 
 def delete_bot(bot_id: str) -> None:

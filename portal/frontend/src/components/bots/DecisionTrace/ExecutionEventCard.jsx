@@ -11,6 +11,7 @@ export default function ExecutionEventCard({ event, onClick }) {
   const eventTime = event.event_time || event.bar_time || event.timestamp;
   const label = formatEventLabel(event.event || event.type || 'execution');
   const detail = describeLog(event);
+  const rejectionReason = event.reason ? String(event.reason).replace(/_/g, ' ') : null;
 
   const metaParts = [
     event.trade_id ? `Trade ${event.trade_id.slice(0, 8)}` : null,
@@ -30,6 +31,12 @@ export default function ExecutionEventCard({ event, onClick }) {
           <span className="label">Detail</span>
           <span className="value">{detail}</span>
         </div>
+        {rejectionReason ? (
+          <div className="decision-row">
+            <span className="label">Reason</span>
+            <span className="value">{rejectionReason}</span>
+          </div>
+        ) : null}
         {metaParts.length ? (
           <div className="decision-meta">
             {metaParts.map((part) => (

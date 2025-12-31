@@ -43,6 +43,7 @@ export function describeLog(entry) {
     const price = Number(entry.price)
     parts.push(Number.isFinite(price) ? `@ ${price.toFixed(4)}` : `@ ${entry.price}`)
   }
+  if (entry.reason) parts.push(String(entry.reason).replace(/_/g, ' '))
   if (entry.targets && Array.isArray(entry.targets)) {
     parts.push(`targets: ${entry.targets.map((t) => t.name).join(', ')}`)
   }
@@ -53,6 +54,20 @@ export function isTradeLog(entry) {
   if (!entry) return false
   if (entry.trade_id) return true
   const type = (entry.event || entry.type || '').toLowerCase()
-  const keywords = ['entry', 'exit', 'close', 'target', 'stop', 'tp', 'sl', 'fill', 'order', 'open', 'trade']
+  const keywords = [
+    'entry',
+    'exit',
+    'close',
+    'target',
+    'stop',
+    'tp',
+    'sl',
+    'fill',
+    'order',
+    'open',
+    'trade',
+    'execution',
+    'rejected',
+  ]
   return keywords.some((keyword) => type.includes(keyword))
 }

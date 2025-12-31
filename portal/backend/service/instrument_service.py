@@ -64,6 +64,40 @@ def list_instruments() -> List[Dict[str, Any]]:
     return load_instruments()
 
 
+def instrument_health_report(
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return a spot metadata health report for stored instruments."""
+
+    report: List[Dict[str, Any]] = []
+    for record in list_instruments():
+        if datasource and str(record.get("datasource") or "").upper() != str(datasource).upper():
+            continue
+        if exchange and str(record.get("exchange") or "").upper() != str(exchange).upper():
+            continue
+        instrument_type = str(record.get("instrument_type") or "").lower()
+        if instrument_type != "spot":
+            continue
+        issues = _spot_issues_from_record(record)
+        report.append(
+            {
+                "id": record.get("id"),
+                "symbol": record.get("symbol"),
+                "datasource": record.get("datasource"),
+                "exchange": record.get("exchange"),
+                "issues": issues,
+            }
+        )
+    incomplete = [entry for entry in report if entry["issues"]]
+    return {
+        "total_spot": len(report),
+        "incomplete": len(incomplete),
+        "complete": len(report) - len(incomplete),
+        "details": report,
+    }
+
+
 def get_instrument_record(instrument_id: str) -> Dict[str, Any]:
     """Return a single instrument row or raise if missing."""
 
@@ -212,6 +246,23 @@ def _tick_from_precision(value: object) -> Optional[float]:
     return float(numeric)
 
 
+def _step_from_precision(value: object) -> Optional[float]:
+    """Return a quantity step derived from CCXT amount precision metadata."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and float(value).is_integer():
+        integer = int(float(value))
+        if integer >= 0:
+            return float(10 ** (-integer))
+    numeric = _coerce_float(value)
+    if numeric in (None, 0):
+        return None
+    if numeric < 1:
+        return float(numeric)
+    return None
+
+
 def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
     precision = market.get("precision") or {}
     limits = market.get("limits") or {}
@@ -229,6 +280,83 @@ def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
     return price_precision if price_precision not in (None, 0) else None
 
 
+def _spot_contract_from_market(market: Mapping[str, Any]) -> Dict[str, Any]:
+    precision = market.get("precision") or {}
+    limits = market.get("limits") or {}
+    amount_limits = limits.get("amount") if isinstance(limits.get("amount"), Mapping) else {}
+    cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
+
+    tick_size = _tick_from_market(market)
+    qty_step = _step_from_precision(precision.get("amount"))
+    min_qty = _coerce_float(amount_limits.get("min"))
+    min_notional = _coerce_float(cost_limits.get("min"))
+
+    return {
+        "tick_size": tick_size,
+        "qty_step": qty_step,
+        "min_qty": min_qty,
+        "min_notional": min_notional,
+        "base_currency": market.get("base"),
+        "quote_currency": market.get("quote") or market.get("settle"),
+    }
+
+
+def _validate_spot_payload(payload: Mapping[str, Any]) -> List[str]:
+    issues: List[str] = []
+    if not payload.get("tick_size"):
+        issues.append("missing_tick_size")
+    if not payload.get("min_order_size"):
+        issues.append("missing_min_qty")
+
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    qty_step = metadata.get("qty_step")
+    if not qty_step:
+        issues.append("missing_qty_step")
+    min_notional = metadata.get("min_notional")
+    if not min_notional:
+        issues.append("missing_min_notional")
+
+    if not payload.get("quote_currency"):
+        issues.append("missing_quote_currency")
+    if payload.get("maker_fee_rate") is None:
+        issues.append("missing_maker_fee")
+    if payload.get("taker_fee_rate") is None:
+        issues.append("missing_taker_fee")
+    return issues
+
+
+def _spot_issues_from_record(record: Mapping[str, Any]) -> List[str]:
+    issues: List[str] = []
+    if not record.get("tick_size"):
+        issues.append("missing_tick_size")
+    if not record.get("min_order_size"):
+        issues.append("missing_min_qty")
+    if not record.get("quote_currency"):
+        issues.append("missing_quote_currency")
+    if record.get("maker_fee_rate") is None:
+        issues.append("missing_maker_fee")
+    if record.get("taker_fee_rate") is None:
+        issues.append("missing_taker_fee")
+
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    qty_step = metadata.get("qty_step")
+    if not qty_step:
+        precision = metadata.get("precision") if isinstance(metadata.get("precision"), Mapping) else {}
+        qty_step = _step_from_precision(precision.get("amount"))
+    if not qty_step:
+        issues.append("missing_qty_step")
+
+    min_notional = metadata.get("min_notional")
+    if not min_notional:
+        limits = metadata.get("limits") if isinstance(metadata.get("limits"), Mapping) else {}
+        cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
+        min_notional = _coerce_float(cost_limits.get("min"))
+    if not min_notional:
+        issues.append("missing_min_notional")
+
+    return issues
+
+
 def _instrument_payload_from_market(
     *,
     datasource: Optional[str],
@@ -238,11 +366,6 @@ def _instrument_payload_from_market(
 ) -> Dict[str, Any]:
     """Translate a CCXT market entry into our instrument schema."""
 
-    tick_size = _tick_from_market(market)
-    contract_size = _coerce_float(market.get("contractSize")) or 1.0
-    min_amount = _coerce_float(((market.get("limits") or {}).get("amount") or {}).get("min"))
-    maker_fee = _coerce_float(market.get("maker"))
-    taker_fee = _coerce_float(market.get("taker"))
     instrument_type = market.get("type")
     if not instrument_type:
         if market.get("spot"):
@@ -251,15 +374,29 @@ def _instrument_payload_from_market(
             instrument_type = "swap"
         elif market.get("future"):
             instrument_type = "future"
+    instrument_type = str(instrument_type or "").lower() or None
+
+    spot_contract = _spot_contract_from_market(market)
+    tick_size = spot_contract.get("tick_size")
+    min_amount = spot_contract.get("min_qty")
+    maker_fee = _coerce_float(market.get("maker"))
+    taker_fee = _coerce_float(market.get("taker"))
+
+    is_spot = instrument_type == "spot"
+    contract_size = 1.0 if is_spot else (_coerce_float(market.get("contractSize")) or 1.0)
     tick_value = None
     if tick_size is not None and contract_size is not None:
         tick_value = tick_size * contract_size
+
     metadata = {
         "ccxt_symbol": market.get("symbol"),
         "ccxt_id": market.get("id"),
         "precision": market.get("precision"),
         "limits": market.get("limits"),
         "info": market.get("info"),
+        "qty_step": spot_contract.get("qty_step"),
+        "min_notional": spot_contract.get("min_notional"),
+        "base_currency": spot_contract.get("base_currency"),
     }
     payload = {
         "symbol": _normalize_symbol(symbol),
@@ -270,7 +407,7 @@ def _instrument_payload_from_market(
         "tick_value": tick_value,
         "contract_size": contract_size,
         "min_order_size": min_amount,
-        "quote_currency": market.get("quote") or market.get("settle"),
+        "quote_currency": spot_contract.get("quote_currency"),
         "maker_fee_rate": maker_fee,
         "taker_fee_rate": taker_fee,
         "metadata": metadata,
@@ -396,6 +533,17 @@ def auto_sync_instrument(
         symbol=normalized_symbol,
         market=market,
     )
+    if str(payload.get("instrument_type") or "").lower() == "spot":
+        issues = _validate_spot_payload(payload)
+        if issues:
+            logger.error(
+                "instrument_spot_incomplete | datasource=%s exchange=%s symbol=%s issues=%s",
+                datasource_id,
+                exchange_id,
+                normalized_symbol,
+                ",".join(issues),
+            )
+            return None, f"Spot instrument metadata incomplete: {', '.join(issues)}"
     record = upsert_instrument(payload)
     logger.info(
         "instrument_autosynced | datasource=%s exchange=%s symbol=%s",

@@ -44,6 +44,13 @@ async def list_instruments() -> List[Dict[str, Any]]:
     return instrument_service.list_instruments()
 
 
+@router.get("/health")
+async def instrument_health(datasource: Optional[str] = None, exchange: Optional[str] = None) -> Dict[str, Any]:
+    """Return spot instrument metadata health report."""
+
+    return instrument_service.instrument_health_report(datasource=datasource, exchange=exchange)
+
+
 @router.post("/", response_model=InstrumentResponse, status_code=201)
 async def create_instrument(payload: InstrumentPayload) -> Dict[str, Any]:
     """Create a new instrument definition."""

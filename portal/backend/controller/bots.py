@@ -62,6 +62,7 @@ class BotBase(BaseModel):
     playback_speed: float = Field(default=10.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
+    wallet_config: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BotCreateRequest(BotBase):
@@ -82,6 +83,7 @@ class BotUpdateRequest(BaseModel):
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
+    wallet_config: Optional[Dict[str, Any]] = None
 
 
 class BotResponse(BotBase):
@@ -91,6 +93,7 @@ class BotResponse(BotBase):
     status: str
     last_run_at: Optional[str] = None
     last_stats: Dict[str, Any] = Field(default_factory=dict)
+    last_run_artifact: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     runtime: Optional[Dict[str, Any]] = None

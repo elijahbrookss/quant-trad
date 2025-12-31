@@ -32,6 +32,8 @@ from .reporting import (
 from .chart_state import ChartStateBuilder
 from .intrabar import IntrabarManager
 from .series_builder import SeriesBuilder, StrategySeries
+from .run_context import RunContext
+from .wallet import project_wallet
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,7 @@ class BotRuntime:
         self._primary_series_key: Optional[str] = None
         self._total_bars: int = 0
         self._prepared: bool = False
+        self._run_context: Optional[RunContext] = None
         self._chart_overlays: List[Dict[str, Any]] = []
         self._last_stats: Dict[str, Any] = {}
         self._next_bar_at: Optional[datetime] = None
@@ -113,6 +116,7 @@ class BotRuntime:
             timeframe_seconds=_timeframe_to_seconds,
             strategy_key_fn=self._strategy_key,
         )
+        self._run_started_at: Optional[datetime] = None
         self._chart_state_builder = ChartStateBuilder(
             normalise_epoch_fn=self._normalise_epoch,
             log_sequence_fn=self._log_candle_sequence,
@@ -578,6 +582,8 @@ class BotRuntime:
             self._logs.clear()
             self._decision_events.clear()
             self._intrabar_manager.clear_cache()
+            self._run_started_at = None
+            self._run_context = None
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -617,8 +623,12 @@ class BotRuntime:
         self._stop.clear()
         self._pause_event.set()
         self._paused = False
+        self._run_started_at = datetime.now(timezone.utc)
+        self._run_context = self._build_run_context()
         with self._lock:
-            self.state.update({"status": "starting", "paused": False})
+            self.state.update(
+                {"status": "starting", "paused": False, "started_at": _isoformat(self._run_started_at)}
+            )
         self._thread = threading.Thread(target=self._run, name=f"bot-{self.bot_id}", daemon=True)
         self._thread.start()
         self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
@@ -667,6 +677,8 @@ class BotRuntime:
                 self.state.update({"status": status})
         self._push_update(status)
         self._persist_runtime_state(status)
+        if status in {"completed", "stopped"}:
+            self._persist_run_artifact(status)
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
@@ -727,8 +739,10 @@ class BotRuntime:
                 # Signal was rejected (no trade opened)
                 # Determine rejection reason
                 rejection_reason = "Active trade already open"
+                rejection_meta: Optional[Dict[str, Any]] = None
                 if series.risk_engine.active_trade is None:
-                    rejection_reason = "Risk engine declined entry"
+                    rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
+                    rejection_meta = series.risk_engine.last_rejection_detail
 
                 self._log_decision_event(
                     event="signal_rejected",
@@ -740,6 +754,7 @@ class BotRuntime:
                     rule_id=None,
                     decision="rejected",
                     reason=rejection_reason,
+                    **(rejection_meta or {}),
                     trade_id=None,
                 )
 
@@ -990,6 +1005,47 @@ class BotRuntime:
 
         with self._lock:
             self._decision_events.append(decision_event.serialize())
+            if self._run_context is not None:
+                self._run_context.decision_trace.append(decision_event.serialize())
+
+    def _build_run_context(self) -> RunContext:
+        wallet_config = self.config.get("wallet_config")
+        if not isinstance(wallet_config, dict):
+            raise ValueError("wallet_config is required to start a bot run")
+        balances = wallet_config.get("balances")
+        if not isinstance(balances, dict) or not balances:
+            raise ValueError("wallet_config.balances is required to start a bot run")
+        run_context = RunContext(bot_id=self.bot_id)
+        run_context.wallet_ledger.deposit(balances)
+        for series in self._series:
+            series.risk_engine.attach_wallet(run_context.wallet_ledger)
+        return run_context
+
+    def _persist_run_artifact(self, status: str) -> None:
+        if self._run_context is None:
+            return
+        from .. import storage
+
+        artifact = self._run_artifact_payload(status)
+        storage.update_bot_run_artifact(self.bot_id, artifact)
+
+    def _run_artifact_payload(self, status: str) -> Dict[str, Any]:
+        if self._run_context is None:
+            raise ValueError("Run context is required to build artifact payload")
+        self._run_context.status = status
+        self._run_context.ended_at = _isoformat(datetime.now(timezone.utc))
+        wallet_state = project_wallet(self._run_context.wallet_ledger.events())
+        return {
+            "run_id": self._run_context.run_id,
+            "bot_id": self.bot_id,
+            "started_at": self._run_context.started_at,
+            "ended_at": self._run_context.ended_at,
+            "status": status,
+            "wallet_start": dict(self.config.get("wallet_config") or {}),
+            "wallet_end": {"balances": wallet_state.balances},
+            "wallet_ledger": [event.__dict__ for event in self._run_context.wallet_ledger.events()],
+            "decision_trace": list(self._run_context.decision_trace),
+        }
 
     def logs(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Return up to *limit* recent log entries."""
@@ -1125,6 +1181,8 @@ class BotRuntime:
             payload["next_bar_at"] = _isoformat(self._next_bar_at)
         if "next_bar_in_seconds" not in payload:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
+        if "started_at" not in payload and self._run_started_at is not None:
+            payload["started_at"] = _isoformat(self._run_started_at)
         return payload
 
     def snapshot(self) -> Dict[str, object]:

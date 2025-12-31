@@ -16,6 +16,7 @@ class InstrumentConfig:
     contract_size: float
     tick_value: float
     risk_multiplier: float
+    instrument_type: Optional[str] = None
     min_qty: Optional[float] = None
     qty_step: Optional[float] = None
     supports_fractional: bool = False
@@ -35,10 +36,15 @@ class InstrumentConfig:
                 "No default tick_size is provided to ensure accurate pricing."
             )
 
-        contract_size = coerce_float(instrument.get("contract_size"), 1.0) or 1.0
-        tick_value = coerce_float(instrument.get("tick_value"))
-        if tick_value in (None, 0):
-            tick_value = tick_size * contract_size
+        instrument_type = str(instrument.get("instrument_type") or "").lower() or None
+        if instrument_type == "spot":
+            contract_size = 1.0
+            tick_value = tick_size
+        else:
+            contract_size = coerce_float(instrument.get("contract_size"), 1.0) or 1.0
+            tick_value = coerce_float(instrument.get("tick_value"))
+            if tick_value in (None, 0):
+                tick_value = tick_size * contract_size
 
         min_qty = coerce_float(
             instrument.get("min_qty")
@@ -64,6 +70,7 @@ class InstrumentConfig:
             maker_fee_rate=coerce_float(instrument.get("maker_fee_rate"), 0.0) or 0.0,
             taker_fee_rate=coerce_float(instrument.get("taker_fee_rate"), 0.0) or 0.0,
             quote_currency=str(quote_value).upper(),
+            instrument_type=instrument_type,
         )
 
     def apply_quantity_constraints(self, qty: float) -> float:
@@ -85,6 +92,8 @@ class InstrumentConfig:
     def point_value(self) -> float:
         """Return the value of a one point move for this instrument."""
 
+        if str(self.instrument_type or "").lower() == "spot":
+            return float(self.tick_size)
         if self.tick_value not in (None, 0):
             return float(self.tick_value)
         if self.contract_size not in (None, 0):

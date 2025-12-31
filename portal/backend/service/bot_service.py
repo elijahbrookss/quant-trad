@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME: Dict[str, BotRuntime] = {}
 _BOT_STREAM_MANAGER = BotStreamManager()
+MIN_STARTING_WALLET = 10.0
 
 
 def _broadcast_bot_stream(event: str, payload: Mapping[str, Any]) -> None:
@@ -100,6 +101,33 @@ def _validate_backtest_window(record: Mapping[str, object]) -> None:
         return
     if not record.get("backtest_start") or not record.get("backtest_end"):
         raise ValueError("Backtests require both start and end timestamps.")
+
+
+def _validate_wallet_config(wallet_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(wallet_config, Mapping):
+        raise ValueError("wallet_config is required and must be an object")
+    balances = wallet_config.get("balances")
+    if not isinstance(balances, Mapping) or not balances:
+        raise ValueError("wallet_config.balances is required and cannot be empty")
+    normalized: Dict[str, float] = {}
+    total = 0.0
+    for currency, amount in balances.items():
+        code = str(currency).strip().upper()
+        if not code:
+            raise ValueError("wallet_config.balances contains an empty currency key")
+        try:
+            numeric = float(amount)
+        except (TypeError, ValueError):
+            raise ValueError(f"wallet_config.balances[{code}] must be numeric")
+        if numeric < 0:
+            raise ValueError(f"wallet_config.balances[{code}] must be non-negative")
+        normalized[code] = numeric
+        total += numeric
+    if total < MIN_STARTING_WALLET:
+        raise ValueError(
+            f"wallet_config balances must sum to at least {MIN_STARTING_WALLET}"
+        )
+    return {"balances": normalized}
 
 
 def _validate_strategy_ids(
@@ -194,6 +222,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
     playback_input = payload.get("playback_speed")
     if playback_input is None:
         playback_input = payload.get("fetch_seconds")
+    wallet_config = _validate_wallet_config(payload.get("wallet_config"))
 
     record = {
         "id": bot_id,
@@ -208,6 +237,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "backtest_start": _coerce_isoformat(payload.get("backtest_start")),
         "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
         "risk": {},
+        "wallet_config": wallet_config,
         "status": "idle",
         "last_stats": {},
     }
@@ -250,6 +280,8 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         record["backtest_start"] = _coerce_isoformat(payload.get("backtest_start"))
     if "backtest_end" in payload:
         record["backtest_end"] = _coerce_isoformat(payload.get("backtest_end"))
+    if "wallet_config" in payload and payload["wallet_config"] is not None:
+        record["wallet_config"] = _validate_wallet_config(payload.get("wallet_config"))
     _validate_backtest_window(record)
     upsert_bot(record)
     runtime = _RUNTIME.get(bot_id)
@@ -278,6 +310,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     if bot_id not in bots:
         raise KeyError(f"Bot {bot_id} was not found")
     bot = bots[bot_id]
+    bot["wallet_config"] = _validate_wallet_config(bot.get("wallet_config"))
     strategy_ids = bot.get("strategy_ids") or ([bot.get("strategy_id")] if bot.get("strategy_id") else [])
     bot["strategy_ids"] = _validate_strategy_ids(strategy_ids)
     bot["strategy_id"] = bot["strategy_ids"][0]

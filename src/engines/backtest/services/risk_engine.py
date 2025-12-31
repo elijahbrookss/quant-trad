@@ -130,6 +130,7 @@ class LadderRiskEngine:
             direction=direction,
             stop_price=target_result.stop_price,
             tick_size=self.tick_size,
+            instrument_type=self.instrument.get("instrument_type"),
             legs=target_result.legs,
             breakeven_trigger_ticks=0.0,
             tick_value=self.tick_value,
