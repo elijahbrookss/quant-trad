@@ -1,6 +1,6 @@
 import pytest
 
-from portal.backend.service.bot_runtime.wallet import WalletLedger, project_wallet, wallet_can_apply
+from engines.bot_runtime.core.wallet import WalletLedger, project_wallet, wallet_can_apply
 
 
 def test_wallet_buy_and_sell_projection():

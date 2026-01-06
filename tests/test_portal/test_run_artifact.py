@@ -1,5 +1,5 @@
-from portal.backend.service.bot_runtime.run_context import RunContext
-from portal.backend.service.bot_runtime.runtime import BotRuntime
+from portal.backend.service.bots.bot_runtime.runtime.run_context import RunContext
+from portal.backend.service.bots.bot_runtime.runtime import BotRuntime
 
 
 def test_run_artifact_payload_contains_wallet_and_trace():

@@ -8,8 +8,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import provider_service
-from ..service.strategy_service import facade as strategy_service
+from ..service.market import instrument_service
+from ..service.providers import provider_service
+from ..service.strategies.strategy_service import facade as strategy_service
 
 
 router = APIRouter()
@@ -267,7 +268,7 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
                 # Persist a minimal instrument record so frontend can reference it later.
                 # Include any provided datasource/exchange so subsequent lookups can match.
                 try:
-                    from ..service.storage import upsert_instrument as _upsert_instrument
+                    from ..service.storage.storage import upsert_instrument as _upsert_instrument
 
                     inst_rec = _upsert_instrument({
                         "symbol": symbol,

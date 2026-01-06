@@ -1,0 +1,52 @@
+"""Strategy service package exposing a thin facade and helper modules."""
+
+from strategies import evaluator, markers
+from . import persistence
+from .facade import (  # noqa: F401
+    StrategyDefinition,
+    StrategyRegistry,
+    StrategyRule,
+    RuleCondition,
+    create_rule,
+    create_strategy,
+    delete_rule,
+    delete_strategy,
+    delete_symbol_preset_service,
+    generate_strategy_signals,
+    get_strategy,
+    list_atm_templates,
+    list_strategies,
+    list_symbol_presets_service,
+    register_indicator,
+    save_atm_template,
+    save_symbol_preset_service,
+    unregister_indicator,
+    update_rule,
+    update_strategy,
+)
+
+__all__ = [
+    "evaluator",
+    "markers",
+    "persistence",
+    "StrategyDefinition",
+    "StrategyRegistry",
+    "StrategyRule",
+    "RuleCondition",
+    "create_rule",
+    "create_strategy",
+    "delete_rule",
+    "delete_strategy",
+    "delete_symbol_preset_service",
+    "generate_strategy_signals",
+    "get_strategy",
+    "list_atm_templates",
+    "list_strategies",
+    "list_symbol_presets_service",
+    "register_indicator",
+    "save_atm_template",
+    "save_symbol_preset_service",
+    "unregister_indicator",
+    "update_rule",
+    "update_strategy",
+]

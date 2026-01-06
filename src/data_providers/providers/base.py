@@ -14,7 +14,7 @@ from core.chart_plotter import ChartPlotter
 from core.logger import logger
 from indicators.config import DataContext
 from ..config.runtime import ProviderRuntimeConfig, runtime_config_from_env
-from ..services.persistence import DataPersistenceService
+from ..services.persistence import DataPersistence, NullPersistence
 from ..utils import ohlcv as utils
 
 
@@ -79,11 +79,11 @@ class BaseDataProvider(ProviderInterface):
     def __init__(
         self,
         *,
-        persistence: Optional[DataPersistenceService] = None,
+        persistence: Optional[DataPersistence] = None,
         settings: Optional[ProviderRuntimeConfig] = None,
     ) -> None:
         self._settings = settings or runtime_config_from_env()
-        self._persistence = persistence or DataPersistenceService(self._settings.persistence)
+        self._persistence = persistence or NullPersistence()
 
     @staticmethod
     def _normalize_metadata(

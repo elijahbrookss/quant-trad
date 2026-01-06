@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import instrument_service
+from ..service.market import instrument_service
 
 router = APIRouter()
 

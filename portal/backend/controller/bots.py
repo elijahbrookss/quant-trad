@@ -13,7 +13,7 @@ from datetime import datetime
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..service import bot_service
+from ..service.bots import bot_service
 
 
 router = APIRouter()

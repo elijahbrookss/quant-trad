@@ -2,9 +2,9 @@ from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from ..service.candle_service import fetch_ohlcv
-from ..service.provider_service import translate_market
-from ..service.data_provider_resolver import DataProviderResolver
+from ..service.market.candle_service import fetch_ohlcv
+from ..service.providers.provider_service import translate_market
+from ..service.providers.data_provider_resolver import DataProviderResolver
 import pandas as pd
 from datetime import datetime, timezone
 import logging

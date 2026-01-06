@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 from core.logger import logger
 
 from ..config import runtime_config_from_env
-from ..services import DataPersistenceService
+from ..services import DataPersistence, NullPersistence
 from ..registry import (
     exchange_slug_for_venue,
     get_provider_config,
@@ -23,13 +23,25 @@ from .yahoo import YahooFinanceProvider
 
 _PROVIDER_CACHE: Dict[Tuple[str, str], BaseDataProvider] = {}
 _RUNTIME_CONFIG = runtime_config_from_env()
-_PERSISTENCE: DataPersistenceService | None = None
+_PERSISTENCE: DataPersistence | None = None
+_PERSISTENCE_FACTORY = None
 
 
-def _get_persistence() -> DataPersistenceService:
+def configure_persistence_factory(factory):
+    """Provide a service-layer persistence builder for provider instances."""
+
+    global _PERSISTENCE_FACTORY, _PERSISTENCE
+    _PERSISTENCE_FACTORY = factory
+    _PERSISTENCE = None
+
+
+def _get_persistence() -> DataPersistence:
     global _PERSISTENCE
     if _PERSISTENCE is None:
-        _PERSISTENCE = DataPersistenceService(_RUNTIME_CONFIG.persistence)
+        if _PERSISTENCE_FACTORY is None:
+            _PERSISTENCE = NullPersistence()
+        else:
+            _PERSISTENCE = _PERSISTENCE_FACTORY()
     return _PERSISTENCE
 
 

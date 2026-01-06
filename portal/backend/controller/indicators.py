@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from portal.backend.service.indicator_service import (
+from portal.backend.service.indicators.indicator_service import (
     bulk_delete_instances,
     bulk_set_enabled,
     create_instance,

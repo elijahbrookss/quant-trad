@@ -3,7 +3,7 @@ import pytest
 pd = pytest.importorskip("pandas")
 
 from indicators.market_profile import MarketProfileIndicator
-from portal.backend.service.indicator_service import (
+from portal.backend.service.indicators.indicator_service import (
     _build_market_profile_overlay_indicator,
     _extract_ctor_params,
 )

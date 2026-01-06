@@ -13,7 +13,7 @@ from .providers import (
     ProviderInterface,
     YahooFinanceProvider,
 )
-from .services import DataPersistenceService
+from .services import DataPersistence, NullPersistence
 from .utils import (
     collect_missing_ranges,
     compute_tr_atr,
@@ -26,7 +26,8 @@ __all__ = [
     "AlpacaProvider",
     "BaseDataProvider",
     "CCXTProvider",
-    "DataPersistenceService",
+    "DataPersistence",
+    "NullPersistence",
     "get_provider",
     "DataSource",
     "InstrumentMetadata",
