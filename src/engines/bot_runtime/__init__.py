@@ -1,5 +1,6 @@
 """Bot runtime engine (core domain + execution primitives)."""
 
+from .adapters import BacktestAdapter, PerpExecutionAdapter
 from .core import (
     Candle,
     LadderPosition,
@@ -33,6 +34,8 @@ __all__ = [
     "SpotExecutionModel",
     "ExecutionAdapter",
     "SpotExecutionAdapter",
+    "BacktestAdapter",
+    "PerpExecutionAdapter",
     "WalletEvent",
     "WalletLedger",
     "WalletState",

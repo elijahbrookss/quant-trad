@@ -47,7 +47,7 @@ PROVIDER_CONFIGS: List[ProviderConfig] = [
     ProviderConfig(
         id="CCXT",
         label="CCXT (multi-exchange)",
-        supported_venues=["KRAKEN_PRO", "BINANCE_US"],
+        supported_venues=["KRAKEN_PRO", "BINANCE_US", "COINBASE"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
     ),
 ]
@@ -59,6 +59,7 @@ VENUE_CONFIGS: List[VenueConfig] = [
     VenueConfig(id="INTERACTIVE_BROKERS", label="Interactive Brokers", provider_id="INTERACTIVE_BROKERS", adapter_id=None),
     VenueConfig(id="KRAKEN_PRO", label="Kraken Pro", provider_id="CCXT", adapter_id="kraken", asset_class="crypto"),
     VenueConfig(id="BINANCE_US", label="Binance US", provider_id="CCXT", adapter_id="binanceus", asset_class="crypto"),
+    VenueConfig(id="COINBASE", label="Coinbase Advanced", provider_id="CCXT", adapter_id="coinbase", asset_class="crypto"),
 ]
 
 

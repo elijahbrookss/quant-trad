@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _RUNTIME: Dict[str, BotRuntime] = {}
 _BOT_STREAM_MANAGER = BotStreamManager()
 MIN_STARTING_WALLET = 10.0
+_DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
 
 
 def _broadcast_bot_stream(event: str, payload: Mapping[str, Any]) -> None:
@@ -91,6 +92,39 @@ def _coerce_isoformat(value: Optional[object]) -> Optional[str]:
         return parsed.replace(tzinfo=None).isoformat() + "Z"
     except ValueError:
         return text
+
+
+def _normalize_instrument_policy(value: Optional[object]) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text == "spot":
+        return "spot"
+    if text in _DERIVATIVE_TYPES:
+        return "derivatives"
+    raise ValueError(f"Unsupported instrument_type '{value}'")
+
+
+def _instrument_policy_from_bot(bot: Mapping[str, object]) -> Optional[str]:
+    direct = bot.get("instrument_type")
+    if direct:
+        return _normalize_instrument_policy(direct)
+    risk = bot.get("risk")
+    if isinstance(risk, Mapping):
+        return _normalize_instrument_policy(risk.get("instrument_type"))
+    return None
+
+
+def _apply_instrument_policy(record: Dict[str, object], value: Optional[object]) -> None:
+    policy = _normalize_instrument_policy(value)
+    if policy is None:
+        return
+    record["instrument_type"] = policy
+    risk = dict(record.get("risk") or {})
+    risk["instrument_type"] = policy
+    record["risk"] = risk
 
 
 def _validate_backtest_window(record: Mapping[str, object]) -> None:
@@ -183,6 +217,45 @@ def _validate_strategy_existence(bot: Dict[str, object]) -> None:
     logger.debug("[BotService] Validated %d strategy IDs (DB-based loading)", len(ids))
 
 
+def _validate_instrument_policy(bot: Mapping[str, object]) -> None:
+    """Validate instrument type policy against attached strategy instruments."""
+
+    policy = _instrument_policy_from_bot(bot)
+    if not policy:
+        return
+    from .bot_runtime.strategy import StrategyLoader
+    from ..market import instrument_service
+
+    strategy_ids = bot.get("strategy_ids") or []
+    for strategy_id in strategy_ids:
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        for link in strategy.instrument_links:
+            snapshot = link.instrument_snapshot or {}
+            instrument_type = str(snapshot.get("instrument_type") or "").lower()
+            symbol = snapshot.get("symbol") or link.symbol
+            if not instrument_type:
+                resolved = instrument_service.resolve_instrument(
+                    strategy.datasource,
+                    strategy.exchange,
+                    symbol or "",
+                )
+                instrument_type = str((resolved or {}).get("instrument_type") or "").lower()
+            if not instrument_type:
+                raise ValueError(
+                    f"Instrument type missing for {symbol or link.instrument_id}. "
+                    "Validate the instrument before running this bot."
+                )
+            is_spot = instrument_type == "spot"
+            if policy == "derivatives" and is_spot:
+                raise ValueError(
+                    f"Derivatives-only bot cannot run on spot instrument {symbol or link.instrument_id}."
+                )
+            if policy == "spot" and not is_spot:
+                raise ValueError(
+                    f"Spot-only bot cannot run on derivatives instrument {symbol or link.instrument_id}."
+                )
+
+
 def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
     """Return a cached runtime for the bot, creating one if required."""
 
@@ -205,6 +278,7 @@ def list_bots() -> List[Dict[str, object]]:
 
     bots = load_bots()
     for bot in bots:
+        bot["instrument_type"] = _instrument_policy_from_bot(bot)
         runtime = _RUNTIME.get(bot["id"])
         if runtime:
             bot["runtime"] = runtime.snapshot()
@@ -236,11 +310,12 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "playback_speed": _coerce_playback_speed(playback_input),
         "backtest_start": _coerce_isoformat(payload.get("backtest_start")),
         "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
-        "risk": {},
+        "risk": dict(payload.get("risk") or {}),
         "wallet_config": wallet_config,
         "status": "idle",
         "last_stats": {},
     }
+    _apply_instrument_policy(record, payload.get("instrument_type"))
     _validate_backtest_window(record)
     upsert_bot(record)
     logger.info("[BotService] bot created", extra={"bot_id": bot_id, "run_type": run_type})
@@ -263,6 +338,8 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         record["strategy_id"] = strategy_ids[0]
     if "name" in payload and payload["name"] is not None:
         record["name"] = payload["name"]
+    if "instrument_type" in payload:
+        _apply_instrument_policy(record, payload.get("instrument_type"))
     if "run_type" in payload and payload["run_type"] is not None:
         record["run_type"] = str(payload["run_type"]).lower()
     if "mode" in payload and payload["mode"] is not None:
@@ -316,6 +393,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["strategy_id"] = bot["strategy_ids"][0]
     _validate_backtest_window(bot)
     _validate_strategy_existence(bot)
+    _validate_instrument_policy(bot)
 
     logger.info(
         "[BotService] starting bot with strategies",
@@ -391,6 +469,7 @@ def get_bot(bot_id: str) -> Dict[str, object]:
 
     for bot in load_bots():
         if bot["id"] == bot_id:
+            bot["instrument_type"] = _instrument_policy_from_bot(bot)
             runtime = _RUNTIME.get(bot_id)
             if runtime:
                 bot["runtime"] = runtime.snapshot()

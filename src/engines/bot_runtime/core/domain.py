@@ -8,12 +8,12 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import risk as risk_math
 from atm import merge_templates
-from .execution import FillRejection, FillResult, SpotExecutionConstraints, SpotExecutionModel
-from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter
+from .execution import FillRejection, FillResult
+from .execution_adapter import ExecutionAdapter
 from utils.log_context import build_log_context, merge_log_context, with_log_context
 from .wallet import WalletLedger
 from .wallet_gateway import LedgerWalletGateway, WalletGateway
@@ -27,6 +27,9 @@ _TIMEFRAME_MULTIPLIERS = {
     "d": 60 * 60 * 24,
     "w": 60 * 60 * 24 * 7,
 }
+
+if TYPE_CHECKING:
+    from .execution import SpotExecutionModel
 
 
 def isoformat(value: Optional[datetime]) -> Optional[str]:
@@ -278,7 +281,7 @@ class LadderPosition:
     stop_price: float
     tick_size: float
     instrument_type: Optional[str] = None
-    execution_model: Optional[SpotExecutionModel] = None
+    execution_model: Optional["SpotExecutionModel"] = None
     execution_adapter: Optional[ExecutionAdapter] = None
     wallet_gateway: Optional[WalletGateway] = None
     base_currency: Optional[str] = None
@@ -899,17 +902,8 @@ class LadderRiskEngine:
             min_notional=self.min_notional,
         )
         logger.debug(with_log_context("ladder_risk_constraints", constraints_context))
-        self.execution_model = SpotExecutionModel(
-            SpotExecutionConstraints(
-                tick_size=self.tick_size,
-                qty_step=self.qty_step,
-                min_qty=self.min_qty,
-                min_notional=self.min_notional,
-            )
-        )
-        self.execution_adapter: Optional[ExecutionAdapter] = (
-            SpotExecutionAdapter(self.execution_model) if self.instrument_type == "spot" else None
-        )
+        self.execution_model = None
+        self.execution_adapter: Optional[ExecutionAdapter] = None
         self.last_rejection_reason: Optional[str] = None
         self.last_rejection_detail: Optional[Dict[str, Any]] = None
         self._wallet_ledger: Optional[WalletLedger] = None
@@ -942,6 +936,10 @@ class LadderRiskEngine:
     def attach_wallet(self, ledger: WalletLedger) -> None:
         self._wallet_ledger = ledger
         self._wallet_gateway = LedgerWalletGateway(ledger)
+
+    def attach_execution_adapter(self, adapter: ExecutionAdapter) -> None:
+        """Inject a run-type specific execution adapter (backtest/paper/live)."""
+        self.execution_adapter = adapter
 
     def _validate_template(self, template: Dict[str, Any]) -> None:
         """Validate that required fields are present in template - same for all modes."""
@@ -1416,13 +1414,8 @@ class LadderRiskEngine:
         fill_result: Optional[FillResult] = None
         base_currency = None
         quote_currency = None
-        if self.instrument_type == "spot":
-            if not self._wallet_gateway:
-                raise ValueError("Wallet gateway is required for spot execution")
-            base_currency, quote_currency = self._resolve_base_quote()
-            side = "buy" if direction == "long" else "sell"
-            if not self.execution_adapter:
-                raise ValueError("Execution adapter is required for spot execution")
+        side = "buy" if direction == "long" else "sell"
+        if self.execution_adapter:
             fill_result, rejection = self.execution_adapter.fill_market(
                 side=side,
                 requested_qty=requested_qty,
@@ -1445,6 +1438,15 @@ class LadderRiskEngine:
                 )
                 logger.warning(with_log_context("spot_entry_rejected", context))
                 return None
+
+        if self.instrument_type == "spot":
+            if not self.execution_adapter:
+                raise ValueError("Execution adapter is required for spot execution")
+            if not self._wallet_gateway:
+                raise ValueError("Wallet gateway is required for spot execution")
+            if not fill_result:
+                raise ValueError("Execution adapter did not return a fill for spot execution")
+            base_currency, quote_currency = self._resolve_base_quote()
             allowed, reason, payload = self._wallet_gateway.can_apply(
                 side=side,
                 base_currency=base_currency,

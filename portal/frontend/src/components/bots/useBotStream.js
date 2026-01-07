@@ -6,13 +6,14 @@ import { openBotsStream } from '../../adapters/bot.adapter.js'
  * Subscribes to the bots SSE stream and falls back to polling when unavailable.
  * Consumers supply merge/upsert helpers so this hook stays presentationally agnostic.
  */
-export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
+export function useBotStream({ mergeBots, upsertBot, removeBot, applyRuntime, loadBots }) {
   const [botStreamState, setBotStreamState] = useState('idle')
   const [connectKey, setConnectKey] = useState(0)
   const botStreamRef = useRef(null)
   const loggerRef = useRef(createLogger('BotStream'))
   const mergeBotsRef = useRef(mergeBots)
   const upsertBotRef = useRef(upsertBot)
+  const removeBotRef = useRef(removeBot)
   const applyRuntimeRef = useRef(applyRuntime)
   const loadBotsRef = useRef(loadBots)
 
@@ -20,6 +21,7 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
   useEffect(() => {
     mergeBotsRef.current = mergeBots
     upsertBotRef.current = upsertBot
+    removeBotRef.current = removeBot
     applyRuntimeRef.current = applyRuntime
     loadBotsRef.current = loadBots
   })
@@ -46,11 +48,14 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
 
       const handlePayload = (event) => {
         try {
+          const eventType = event?.type
           const data = JSON.parse(event.data)
-          if (Array.isArray(data)) {
-            mergeBotsRef.current(data)
+          if (eventType === 'bot_deleted' && data?.bot_id) {
+            removeBotRef.current?.(data.bot_id)
+          } else if (Array.isArray(data)) {
+            mergeBotsRef.current(data, { replace: eventType === 'snapshot' })
           } else if (Array.isArray(data?.bots)) {
-            mergeBotsRef.current(data.bots)
+            mergeBotsRef.current(data.bots, { replace: eventType === 'snapshot' })
           } else if (data?.bot) {
             upsertBotRef.current(data.bot)
             if (data.bot?.id && data.bot?.runtime) {
@@ -93,6 +98,9 @@ export function useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots }) {
       source.onmessage = handlePayload
       source.addEventListener('snapshot', handlePayload)
       source.addEventListener('update', handlePayload)
+      source.addEventListener('bot', handlePayload)
+      source.addEventListener('bot_status', handlePayload)
+      source.addEventListener('bot_deleted', handlePayload)
       source.addEventListener('bot_runtime', handleRuntime)
       source.onerror = handleError
       source.onopen = () => {

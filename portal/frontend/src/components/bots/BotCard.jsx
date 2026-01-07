@@ -2,16 +2,6 @@ import { Play, Square, Eye, Trash2, Pause, RotateCw } from 'lucide-react'
 import { memo, useMemo } from 'react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
-const STATUS_ORDER = {
-  running: 0,
-  starting: 1,
-  paused: 2,
-  completed: 3,
-  idle: 4,
-  stopped: 5,
-  error: 6,
-}
-
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
 
 export const BotCard = memo(function BotCard({
@@ -56,6 +46,9 @@ export const BotCard = memo(function BotCard({
   const runTypeLabel = (bot.run_type || 'backtest').replace('_', ' ')
   const runTypePill = runTypeLabel.toUpperCase()
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
+  const walletEntries = useMemo(() => buildWalletEntries(bot), [bot])
+  const runType = (bot.run_type || 'backtest').toLowerCase()
+  const showWallet = walletEntries.length > 0 && ['backtest', 'paper', 'paper_trade'].includes(runType)
 
   return (
     <article className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-gradient-to-br from-slate-950/90 via-slate-950/40 to-slate-900/30 p-5 shadow-lg shadow-black/30">
@@ -75,6 +68,13 @@ export const BotCard = memo(function BotCard({
             {timeframeLabel ? <MetaPill label="Timeframe" value={timeframeLabel} /> : null}
             {symbolLabel ? <MetaPill label="Symbol" value={symbolLabel} /> : null}
           </div>
+          {showWallet ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+              {walletEntries.map((entry) => (
+                <MetaPill key={entry.label} label={entry.label} value={entry.value} />
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start text-xs text-slate-300">
@@ -267,11 +267,26 @@ function buildStats(bot) {
     .filter(Boolean)
 }
 
+function buildWalletEntries(bot) {
+  const balances = bot?.wallet_config?.balances
+  if (!balances || typeof balances !== 'object') return []
+  return Object.entries(balances)
+    .map(([currency, amount]) => {
+      const numeric = Number(amount)
+      const value = Number.isFinite(numeric)
+        ? numeric.toLocaleString(undefined, { maximumFractionDigits: 8 })
+        : amount
+      const label = currency ? currency.toUpperCase() : 'BAL'
+      return { label, value }
+    })
+    .filter((entry) => entry.value !== undefined && entry.value !== null)
+}
+
 export function sortBots(bots) {
   return [...bots].sort((a, b) => {
-    const sa = STATUS_ORDER[computeStatus(a)] ?? 10
-    const sb = STATUS_ORDER[computeStatus(b)] ?? 10
-    if (sa !== sb) return sa - sb
+    const aTime = Date.parse(a?.created_at || '') || 0
+    const bTime = Date.parse(b?.created_at || '') || 0
+    if (aTime !== bTime) return bTime - aTime
     return (a.name || '').localeCompare(b.name || '')
   })
 }

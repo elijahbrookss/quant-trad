@@ -64,20 +64,26 @@ export function BotPanel() {
   }, [])
 
   const mergeBots = useCallback(
-    (incoming) => {
+    (incoming, options = {}) => {
+      const { replace = false } = options || {}
       if (!Array.isArray(incoming)) return
       setBots((prev) => {
         const prevMap = new Map(prev.map((bot) => [bot.id, bot]))
+        const next = replace ? [] : [...prev]
+        const nextMap = new Map(next.map((bot) => [bot.id, bot]))
         let changed = false
-        const next = incoming.map((bot) => {
-          if (!bot?.id) return bot
-          const current = prevMap.get(bot.id)
+
+        for (const bot of incoming) {
+          if (!bot?.id) continue
+          const current = nextMap.get(bot.id) || prevMap.get(bot.id)
           if (!current) {
+            next.push(bot)
+            nextMap.set(bot.id, bot)
             changed = true
-            return bot
+            continue
           }
           const runtimeSame = shallowEqualRuntime(bot.runtime, current.runtime)
-          const payload = {
+          const merged = {
             ...current,
             ...bot,
             runtime: runtimeSame
@@ -88,12 +94,18 @@ export function BotPanel() {
             (key) => key !== 'runtime' && bot[key] !== current[key],
           )
           if (!nonRuntimeChanged && runtimeSame) {
-            return current
+            continue
           }
+          const index = next.findIndex((item) => item.id === merged.id)
+          if (index !== -1) {
+            next[index] = merged
+          } else {
+            next.push(merged)
+          }
+          nextMap.set(merged.id, merged)
           changed = true
-          return payload
-        })
-        return changed ? next : prev
+        }
+        return changed || replace ? next : prev
       })
     },
     [shallowEqualRuntime],
@@ -106,6 +118,11 @@ export function BotPanel() {
     },
     [logger, mergeBots],
   )
+
+  const removeBot = useCallback((botId) => {
+    if (!botId) return
+    setBots((prev) => prev.filter((bot) => bot.id !== botId))
+  }, [])
 
   const flushRuntimeQueue = useCallback(() => {
     setBots((prev) => {
@@ -145,7 +162,7 @@ export function BotPanel() {
       try {
         const data = await listBots()
         logger.info('bots_load_success', { count: Array.isArray(data) ? data.length : 0 })
-        mergeBots(data)
+        mergeBots(data, { replace: true })
       } catch (err) {
         logger.error('bots_load_failed', { message: err?.message }, err)
         setError(err?.message || 'Unable to load bots')
@@ -201,6 +218,7 @@ export function BotPanel() {
   const { state: botStreamState, reconnect: reconnectBotStream } = useBotStream({
     mergeBots,
     upsertBot,
+    removeBot,
     applyRuntime,
     loadBots,
   })

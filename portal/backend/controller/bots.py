@@ -63,6 +63,7 @@ class BotBase(BaseModel):
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     wallet_config: Dict[str, Any] = Field(default_factory=dict)
+    instrument_type: Optional[str] = None
 
 
 class BotCreateRequest(BotBase):
@@ -84,6 +85,7 @@ class BotUpdateRequest(BaseModel):
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
     wallet_config: Optional[Dict[str, Any]] = None
+    instrument_type: Optional[str] = None
 
 
 class BotResponse(BotBase):

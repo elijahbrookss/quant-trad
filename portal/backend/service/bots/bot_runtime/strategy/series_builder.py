@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ....risk.atm import merge_templates
+from engines.bot_runtime.adapters import BacktestAdapter, PerpExecutionAdapter
 from engines.bot_runtime.core.domain import (
     Candle,
     LadderRiskEngine,
@@ -533,6 +534,24 @@ class SeriesBuilder:
 
         # Step 5: Create risk engine and assemble series
         risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
+        if risk_engine.instrument_type == "spot":
+            risk_engine.attach_execution_adapter(
+                BacktestAdapter(
+                    tick_size=risk_engine.tick_size,
+                    qty_step=risk_engine.qty_step,
+                    min_qty=risk_engine.min_qty,
+                    min_notional=risk_engine.min_notional,
+                )
+            )
+        elif risk_engine.instrument_type:
+            risk_engine.attach_execution_adapter(
+                PerpExecutionAdapter(
+                    tick_size=risk_engine.tick_size,
+                    qty_step=risk_engine.qty_step,
+                    min_qty=risk_engine.min_qty,
+                    min_notional=risk_engine.min_notional,
+                )
+            )
 
         # Convert strategy to dict for backward compatibility with meta field
         series_meta = strategy.to_dict()
