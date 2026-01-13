@@ -20,6 +20,9 @@ from signals.rules.breakout import (
     update_breakout_state,
 )
 
+logger = logging.getLogger(__name__)
+_WARNED_FALLBACKS: set[str] = set()
+
 
 @dataclass(frozen=True)
 class PivotBreakoutConfig:
@@ -219,6 +222,9 @@ def _evaluate_level(
 
     def _get_series_value(series: Optional[pd.Series], position: int, fallback: float) -> float:
         if series is None:
+            if "pivot_series_fallback" not in _WARNED_FALLBACKS:
+                logger.warning("pivot_series_fallback | reason=series_none")
+                _WARNED_FALLBACKS.add("pivot_series_fallback")
             return fallback
         return float(series.iloc[position])
 

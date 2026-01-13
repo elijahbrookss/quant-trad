@@ -22,7 +22,6 @@ class LadderPosition:
     direction: str
     stop_price: float
     tick_size: float
-    instrument_type: Optional[str] = None
     legs: List[Leg] = field(default_factory=list)
     breakeven_trigger_ticks: float = 20.0
     tick_value: float = 1.0
@@ -298,8 +297,6 @@ class LadderPosition:
         if contracts <= 0:
             return 0.0
         direction = 1 if self.direction == "long" else -1
-        if str(self.instrument_type or "").lower() == "spot":
-            return (exit_price - self.entry_price) * direction * contracts
         ticks = ((exit_price - self.entry_price) / self.tick_size) * direction
         return ticks * self.tick_value * contracts
 
@@ -312,10 +309,7 @@ class LadderPosition:
     def _apply_fee(self, price: float, contracts: int) -> None:
         if contracts <= 0:
             return
-        if str(self.instrument_type or "").lower() == "spot":
-            notional = abs(price * contracts)
-        else:
-            notional = abs(price * self.contract_size * contracts)
+        notional = abs(price * self.contract_size * contracts)
         fee_rate = self.taker_fee_rate or 0.0
         fee = notional * fee_rate
         if fee:

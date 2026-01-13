@@ -38,12 +38,24 @@ class InstrumentMetadata:
     tick_size: Optional[float]
     contract_size: Optional[float]
     tick_value: Optional[float]
+    can_short: Optional[bool]
+    short_requires_borrow: Optional[bool]
+    has_funding: Optional[bool]
+    expiry_ts: Optional[dt.datetime]
+    base_currency: Optional[str]
+    quote_currency: Optional[str]
 
     def as_dict(self) -> dict:
         return {
             "tick_size": self.tick_size,
             "contract_size": self.contract_size,
             "tick_value": self.tick_value,
+            "can_short": self.can_short,
+            "short_requires_borrow": self.short_requires_borrow,
+            "has_funding": self.has_funding,
+            "expiry_ts": self.expiry_ts,
+            "base_currency": self.base_currency,
+            "quote_currency": self.quote_currency,
         }
 
 
@@ -91,6 +103,12 @@ class BaseDataProvider(ProviderInterface):
         tick_size: Optional[float] = None,
         contract_size: Optional[float] = None,
         tick_value: Optional[float] = None,
+        can_short: Optional[bool] = None,
+        short_requires_borrow: Optional[bool] = None,
+        has_funding: Optional[bool] = None,
+        expiry_ts: Optional[dt.datetime] = None,
+        base_currency: Optional[str] = None,
+        quote_currency: Optional[str] = None,
     ) -> InstrumentMetadata:
         """Derive a consistent metadata triple from the provided inputs."""
 
@@ -110,7 +128,31 @@ class BaseDataProvider(ProviderInterface):
         if ts is None and cs is not None and tv is not None and cs != 0:
             ts = tv / cs
 
-        return InstrumentMetadata(ts, cs, tv)
+        missing = []
+        if can_short is None:
+            missing.append("can_short")
+        if short_requires_borrow is None:
+            missing.append("short_requires_borrow")
+        if has_funding is None:
+            missing.append("has_funding")
+        if not base_currency:
+            missing.append("base_currency")
+        if not quote_currency:
+            missing.append("quote_currency")
+        if missing:
+            raise ValueError(f"Instrument metadata missing fields: {', '.join(missing)}")
+
+        return InstrumentMetadata(
+            ts,
+            cs,
+            tv,
+            can_short,
+            short_requires_borrow,
+            has_funding,
+            expiry_ts,
+            str(base_currency).upper() if base_currency else None,
+            str(quote_currency).upper() if quote_currency else None,
+        )
 
     def ensure_schema(self):
         self._persistence.ensure_schema()
@@ -280,6 +322,16 @@ class BaseDataProvider(ProviderInterface):
 
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
         ctx.validate()
+        exchange = getattr(self, "_exchange_id", None) or getattr(self, "exchange", None)
+        logger.info(
+            "candle_fetch_start | datasource=%s exchange=%s symbol=%s interval=%s start=%s end=%s",
+            self.get_datasource(),
+            exchange,
+            ctx.symbol,
+            ctx.interval,
+            ctx.start,
+            ctx.end,
+        )
 
         if not self._persistence.engine_available:
             logger.warning(
@@ -491,6 +543,28 @@ class BaseDataProvider(ProviderInterface):
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df.set_index("timestamp", inplace=True)
         df["timestamp"] = df.index
+        exchange = getattr(self, "_exchange_id", None) or getattr(self, "exchange", None)
+        row_count = len(df.index) if df is not None else 0
+        range_start = None
+        range_end = None
+        if df is not None and not df.empty and "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"], utc=True)
+                range_start = ts.min()
+                range_end = ts.max()
+            except Exception:
+                range_start = None
+                range_end = None
+        logger.info(
+            "candle_fetch_end | datasource=%s exchange=%s symbol=%s interval=%s rows=%s range_start=%s range_end=%s",
+            self.get_datasource(),
+            exchange,
+            ctx.symbol,
+            ctx.interval,
+            row_count,
+            range_start,
+            range_end,
+        )
         return df
 
     def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):

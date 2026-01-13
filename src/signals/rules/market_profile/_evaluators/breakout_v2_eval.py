@@ -92,6 +92,7 @@ def _make_breakout_meta(
         "VAL": val,
         "breakout_id": breakout_id,
         "formed_at": formed_at.to_pydatetime() if hasattr(formed_at, "to_pydatetime") else formed_at,
+        "known_at": formed_at.to_pydatetime() if hasattr(formed_at, "to_pydatetime") else formed_at,
         "session_count": session_count,
         "va_start": va_start,
         "va_end": va_end,

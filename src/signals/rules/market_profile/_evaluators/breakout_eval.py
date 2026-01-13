@@ -29,6 +29,7 @@ from signals.rules.pivot import _detect_retest as _pivot_detect_retest, _evaluat
 from signals.rules.patterns import SignalPattern, evaluate_signal_patterns
 
 log = logging.getLogger("MarketProfileRules")
+_WARNED_FALLBACKS: Set[str] = set()
 
 
 def _compute_confidence(distance_pct: float) -> float:
@@ -63,6 +64,16 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     val = clean_numeric(value_area.get("VAL"))
     if vah is None or val is None:
         log.debug("mp_brk | skip | reason=invalid_value_area_bounds | value_area=%s", value_area)
+        return []
+    session_count = int(value_area.get("session_count") or 1)
+    min_merge_sessions = int(value_area.get("min_merge_sessions") or 1)
+    if session_count < min_merge_sessions:
+        log.debug(
+            "mp_brk | skip | reason=insufficient_sessions | session=%s | sessions=%d | min_merge_sessions=%d",
+            value_area.get("value_area_id") or value_area.get("session_id"),
+            session_count,
+            min_merge_sessions,
+        )
         return []
 
     mode = str(context.get("mode", "backtest")).lower()
@@ -170,6 +181,19 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
     overall_start = time.perf_counter() if debug_enabled else None
     boundary_summaries: List[str] = []
 
+    formed_at = end_ts
+    eval_df = df
+    if formed_at is not None:
+        eval_df = df[df.index >= formed_at]
+        if eval_df.empty:
+            if debug_enabled:
+                log.debug(
+                    "mp_brk | no eligible bars after formed_at=%s | session=%s",
+                    formed_at,
+                    session_id,
+                )
+            return breakouts
+
     for level_type, level_price, level_kind in boundaries:
         candidate_prices = [float(level_price)]
         fallback_price: Optional[float] = None
@@ -177,6 +201,9 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
             fallback_price = clean_numeric(profile_for_session.get(level_type))
             if fallback_price is not None:
                 fallback_price = float(fallback_price)
+                if "mp_breakout_fallback_price" not in _WARNED_FALLBACKS:
+                    log.warning("market_profile_breakout_fallback_price | level=%s", level_type)
+                    _WARNED_FALLBACKS.add("mp_breakout_fallback_price")
                 if not candidate_prices or not math.isclose(
                     candidate_prices[0],
                     fallback_price,
@@ -199,7 +226,7 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
 
             eval_start = time.perf_counter() if debug_enabled else None
             metas = _pivot_evaluate_level(
-                df,
+                eval_df,
                 level,
                 config.confirmation_bars,
                 mode=mode,
@@ -290,6 +317,8 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
                         "value_area_end": end_ts.to_pydatetime() if end_ts is not None else None,
                         "session_start": start_ts.to_pydatetime() if start_ts is not None else None,
                         "session_end": end_ts.to_pydatetime() if end_ts is not None else None,
+                        "known_at": end_ts.to_pydatetime() if end_ts is not None else None,
+                        "formed_at": end_ts.to_pydatetime() if end_ts is not None else None,
                         "value_area_start_index": start_index,
                         "value_area_end_index": end_index,
                         "value_area_range": value_area_range,

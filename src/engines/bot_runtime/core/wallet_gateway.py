@@ -19,6 +19,7 @@ class WalletGateway(Protocol):
         qty: float,
         notional: float,
         fee: float,
+        short_requires_borrow: bool,
     ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         ...
 
@@ -64,6 +65,7 @@ class LedgerWalletGateway:
         qty: float,
         notional: float,
         fee: float,
+        short_requires_borrow: bool,
     ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         state = self._ledger.project()
         return wallet_can_apply(
@@ -74,6 +76,7 @@ class LedgerWalletGateway:
             qty=qty,
             notional=notional,
             fee=fee,
+            short_requires_borrow=short_requires_borrow,
         )
 
     def apply_fill(

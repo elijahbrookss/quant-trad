@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 from ..service.market import instrument_service
 
@@ -23,7 +24,12 @@ class InstrumentPayload(BaseModel):
     tick_value: Optional[float] = None
     contract_size: Optional[float] = Field(default=None, gt=0)
     min_order_size: Optional[float] = Field(default=None, gt=0)
+    base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
+    can_short: Optional[bool] = None
+    short_requires_borrow: Optional[bool] = None
+    has_funding: Optional[bool] = None
+    expiry_ts: Optional[datetime] = None
     maker_fee_rate: Optional[float] = Field(default=None, ge=0)
     taker_fee_rate: Optional[float] = Field(default=None, ge=0)
     metadata: Dict[str, Any] = Field(default_factory=dict)

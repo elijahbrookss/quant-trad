@@ -15,6 +15,7 @@ from core.logger import logger
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
 from indicators.registry import indicator
+from indicators.runtime.overlay_cache_registry import overlay_cacheable
 
 from .domain import Profile, ValueArea
 from ._internal.computation import build_tpo_histogram, extract_value_area
@@ -22,6 +23,7 @@ from ._internal.bin_size import select_bin_size, infer_precision_from_step
 from ._internal.merging import merge_profiles
 
 
+@overlay_cacheable("market_profile")
 @indicator(name="market_profile", inputs=["ohlc"], outputs=["profiles"])
 class MarketProfileIndicator(ComputeIndicator):
     """
@@ -291,6 +293,7 @@ class MarketProfileIndicator(ComputeIndicator):
             if self.use_merged_value_areas
             else self._profiles
         )
+        raw_profiles = self._profiles
 
         logger.info(
             "Market Profile to_lightweight: total_profiles=%d | use_merged=%s | plot_df_rows=%d | plot_df_range=%s to %s",
@@ -302,6 +305,7 @@ class MarketProfileIndicator(ComputeIndicator):
         )
 
         boxes: List[Dict[str, Any]] = []
+        profiles_payload: List[Dict[str, Any]] = []
 
         # Get chart boundaries for visual clamping
         chart_start = pd.Timestamp(plot_df.index.min()).tz_localize(None) if plot_df.index.min().tz is None else pd.Timestamp(plot_df.index.min())
@@ -348,6 +352,19 @@ class MarketProfileIndicator(ComputeIndicator):
                     profile.vah,
                 )
 
+        for profile in raw_profiles:
+            profiles_payload.append(
+                {
+                    "start": int(pd.Timestamp(profile.start).timestamp()),
+                    "end": int(pd.Timestamp(profile.end).timestamp()),
+                    "VAH": float(profile.vah),
+                    "VAL": float(profile.val),
+                    "POC": float(profile.poc),
+                    "session_count": int(getattr(profile, "session_count", 1) or 1),
+                    "precision": int(getattr(profile, "precision", 4) or 4),
+                }
+            )
+
         logger.info(
             "Market Profile overlays: %d boxes rendered | chart_range=%s to %s",
             len(boxes),
@@ -360,6 +377,13 @@ class MarketProfileIndicator(ComputeIndicator):
             "price_lines": [],
             "markers": [],
             "boxes": boxes,
+            "profiles": profiles_payload,
+            "profile_params": {
+                "use_merged_value_areas": bool(self.use_merged_value_areas),
+                "merge_threshold": float(self.merge_threshold),
+                "min_merge_sessions": int(self.min_merge_sessions),
+                "extend_value_area_to_chart_end": bool(self.extend_value_area_to_chart_end),
+            },
         }
 
     def _compute_daily_profiles(self) -> List[Profile]:

@@ -130,7 +130,6 @@ class LadderRiskEngine:
             direction=direction,
             stop_price=target_result.stop_price,
             tick_size=self.tick_size,
-            instrument_type=self.instrument.get("instrument_type"),
             legs=target_result.legs,
             breakeven_trigger_ticks=0.0,
             tick_value=self.tick_value,
@@ -153,6 +152,12 @@ class LadderRiskEngine:
 
     def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
         if direction is None or self.active_trade is not None:
+            return None
+        if direction == "short" and not self.instrument_config.can_short:
+            logger.warning(
+                "short_entry_rejected | symbol=%s | reason=CAN_SHORT_DISABLED",
+                self.instrument.get("symbol"),
+            )
             return None
         self.active_trade = self._new_position(candle, direction)
         self.trades.append(self.active_trade)

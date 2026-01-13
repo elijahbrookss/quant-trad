@@ -107,6 +107,10 @@ def purge_breakout_cache(inst_id: str, *, ctx: IndicatorServiceContext = _contex
     ctx.breakout_cache.purge_indicator(inst_id)
 
 
+def purge_overlay_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
+    ctx.overlay_cache.purge_indicator(inst_id)
+
+
 def scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if not isinstance(params, Mapping):
         return {}
@@ -296,6 +300,7 @@ __all__ = [
     "normalize_exchange",
     "pull_datasource_exchange",
     "purge_breakout_cache",
+    "purge_overlay_cache",
     # REMOVED: "refresh_strategy_links" - no longer needed
     "resolve_data_provider",
     "sanitize_json",

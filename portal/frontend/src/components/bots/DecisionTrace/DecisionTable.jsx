@@ -45,6 +45,14 @@ const formatDecisionDetail = (decision) => {
   return decision.reason || 'Awaiting decision';
 };
 
+const formatPnl = (value, currency) => {
+  if (value === undefined || value === null) return '—';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return '—';
+  const formatted = numeric.toFixed(2);
+  return currency ? `${formatted} ${currency}` : formatted;
+};
+
 const formatExecutionLabel = (event) => {
   if (event.event) return event.event.replace(/_/g, ' ');
   if (event.type) return event.type.replace(/_/g, ' ');
@@ -55,29 +63,37 @@ export default function DecisionTable({ decisions, executionEvents, onRowClick }
   const entries = useMemo(() => {
     const decisionRows = decisions.map((decision) => ({
       kind: 'decision',
-      time: decision.bar_time,
+      time: decision.trade_time || decision.chart_time || decision.bar_time || decision.timestamp,
+      chartTime: decision.chart_time || decision.bar_time,
+      createdAt: decision.created_at || decision.timestamp,
       symbol: decision.symbol,
       direction: decision.direction,
       label: formatDecisionLabel(decision),
       detail: `${formatSignalSummary(decision)}${formatSignalSummary(decision) ? ' • ' : ''}${formatDecisionDetail(decision)}`,
       tradeId: decision.trade_id,
       price: decision.price,
+      pnl: decision?.metadata?.net_pnl ?? decision?.metadata?.pnl ?? null,
+      currency: decision?.metadata?.currency ?? null,
     }));
 
     const executionRows = executionEvents.map((event) => ({
       kind: 'execution',
-      time: event.event_time || event.bar_time || event.timestamp,
+      time: event.trade_time || event.event_time || event.bar_time || event.timestamp,
+      chartTime: event.chart_time || event.bar_time || event.event_time || event.timestamp,
+      createdAt: event.created_at || event.timestamp,
       symbol: event.symbol,
       direction: event.direction,
       label: formatExecutionLabel(event),
       detail: describeLog(event),
       tradeId: event.trade_id,
       price: event.price,
+      pnl: event.pnl ?? event.net_pnl ?? event.gross_pnl ?? null,
+      currency: event.currency ?? event.quote_currency ?? null,
     }));
 
     return [...decisionRows, ...executionRows]
       .filter((row) => row.time)
-      .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+      .sort((a, b) => new Date(b.createdAt || b.time).getTime() - new Date(a.createdAt || a.time).getTime());
   }, [decisions, executionEvents]);
 
   const [page, setPage] = useState(0);
@@ -124,12 +140,14 @@ export default function DecisionTable({ decisions, executionEvents, onRowClick }
         <table>
           <thead>
             <tr>
-              <th>Time</th>
+              <th>Trade time</th>
               <th>Symbol</th>
               <th>Direction</th>
               <th>Event</th>
               <th>Detail</th>
+              <th>P/L</th>
               <th>Trade</th>
+              <th>Created</th>
             </tr>
           </thead>
           <tbody>
@@ -138,7 +156,7 @@ export default function DecisionTable({ decisions, executionEvents, onRowClick }
                 <tr
                   key={`${row.kind}-${row.time}-${idx}`}
                   className={row.kind}
-                  onClick={() => onRowClick?.(row.time, row.price, row.symbol)}
+                  onClick={() => onRowClick?.(row.chartTime || row.time, row.price, row.symbol)}
                 >
                   <td>{formatDateTime(row.time)}</td>
                   <td>{row.symbol || '—'}</td>
@@ -151,12 +169,14 @@ export default function DecisionTable({ decisions, executionEvents, onRowClick }
                   </td>
                   <td>{row.label}</td>
                   <td>{row.detail || '—'}</td>
+                  <td>{formatPnl(row.pnl, row.currency)}</td>
                   <td>{row.tradeId ? row.tradeId.slice(0, 8) : '—'}</td>
+                  <td>{formatDateTime(row.createdAt)}</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colSpan={6} className="decision-table-empty">
+                <td colSpan={8} className="decision-table-empty">
                   No decision events yet.
                 </td>
               </tr>

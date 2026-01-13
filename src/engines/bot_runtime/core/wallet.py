@@ -121,6 +121,7 @@ def wallet_can_apply(
     qty: float,
     notional: float,
     fee: float,
+    short_requires_borrow: bool,
 ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     base = str(base_currency).upper()
     quote = str(quote_currency).upper()
@@ -143,18 +144,20 @@ def wallet_can_apply(
                 },
             )
         return True, None, {}
-    required_qty = float(qty)
-    if available_base + 1e-12 < required_qty:
-        return (
-            False,
-            "WALLET_INSUFFICIENT_QTY",
-            {
-                "available": available_base,
-                "required": required_qty,
-                "currency": base,
-                "qty": qty,
-            },
-        )
+    if short_requires_borrow:
+        required_qty = float(qty)
+        if available_base + 1e-12 < required_qty:
+            return (
+                False,
+                "WALLET_INSUFFICIENT_QTY",
+                {
+                    "available": available_base,
+                    "required": required_qty,
+                    "currency": base,
+                    "qty": qty,
+                },
+            )
+        return True, None, {}
     return True, None, {}
 
 

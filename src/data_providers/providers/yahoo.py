@@ -70,7 +70,29 @@ class YahooFinanceProvider(BaseDataProvider):
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         """Return spot metadata expressed per share/coin."""
 
-        return self._normalize_metadata(tick_size=0.01, contract_size=1.0)
+        ticker, fast_info = self._lookup(symbol)
+        info = {}
+        try:
+            info = ticker.get_info() or {}
+        except Exception:
+            info = {}
+
+        can_short = info.get("shortable")
+        has_funding = info.get("has_funding")
+        currency = info.get("currency")
+        if not currency:
+            raise ValueError(f"Yahoo Finance metadata missing currency for '{symbol}'")
+
+        return self._normalize_metadata(
+            tick_size=0.01,
+            contract_size=1.0,
+            can_short=can_short if isinstance(can_short, bool) else None,
+            short_requires_borrow=bool(can_short) if isinstance(can_short, bool) else None,
+            has_funding=has_funding if isinstance(has_funding, bool) else None,
+            expiry_ts=None,
+            base_currency=symbol,
+            quote_currency=currency,
+        )
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Confirm Yahoo Finance recognizes the symbol by probing for data."""

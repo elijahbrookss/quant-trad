@@ -10,6 +10,8 @@
 - Market Profile must NEVER appear in front of price
 - Logs must tell the story of the userflow
 - Duplicate logic = refactor signal
+- Avoid indicator-specific logic in engine/runtime; use registries or adapters.
+- AVOID ADDING FALLBACKS / DEFAULTS
 
 
 This repository uses a distributed agent-context model.

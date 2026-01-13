@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import logging
 from typing import Iterable
+
+logger = logging.getLogger(__name__)
+_WARNED_DEFAULTS: set[str] = set()
 
 
 def _iter_lines(path: Path) -> Iterable[str]:
@@ -37,6 +41,9 @@ def load_dotenv(path: str | os.PathLike[str] | None = None) -> bool:
             continue
         value = value.strip().strip('"').strip("'")
         value = os.path.expandvars(value)
+        if key not in os.environ and key not in _WARNED_DEFAULTS:
+            logger.warning("dotenv_default_applied | key=%s", key)
+            _WARNED_DEFAULTS.add(key)
         os.environ.setdefault(key, value)
         loaded = True
     return loaded

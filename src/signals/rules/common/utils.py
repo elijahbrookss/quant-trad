@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Mapping, Optional, Tuple
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+_WARNED_FALLBACKS: set[str] = set()
 
 
 def as_timestamp(value: Any, tz: Optional[str]) -> Optional[pd.Timestamp]:
@@ -88,9 +92,15 @@ def clean_numeric(value: Any, default: Optional[float] = None) -> Optional[float
     try:
         numeric = float(value)
     except (TypeError, ValueError):
+        if default is not None and "clean_numeric_invalid" not in _WARNED_FALLBACKS:
+            logger.warning("signal_numeric_fallback | helper=clean_numeric | reason=invalid")
+            _WARNED_FALLBACKS.add("clean_numeric_invalid")
         return default
 
     if math.isnan(numeric) or math.isinf(numeric):
+        if default is not None and "clean_numeric_nonfinite" not in _WARNED_FALLBACKS:
+            logger.warning("signal_numeric_fallback | helper=clean_numeric | reason=nonfinite")
+            _WARNED_FALLBACKS.add("clean_numeric_nonfinite")
         return default
 
     return numeric

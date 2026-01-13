@@ -269,6 +269,10 @@ class InstrumentRecord(Base):
     contract_size = Column(Float, nullable=True)
     min_order_size = Column(Float, nullable=True)
     quote_currency = Column(String(16), nullable=True)
+    can_short = Column(Boolean, nullable=False, default=False)
+    short_requires_borrow = Column(Boolean, nullable=False, default=False)
+    has_funding = Column(Boolean, nullable=False, default=False)
+    expiry_ts = Column(DateTime(timezone=True), nullable=True)
     maker_fee_rate = Column(Float, nullable=True)
     taker_fee_rate = Column(Float, nullable=True)
     # ``metadata`` is reserved by SQLAlchemy declarative models, so we expose the
@@ -300,6 +304,10 @@ class InstrumentRecord(Base):
             "quote_currency": self.quote_currency,
             "maker_fee_rate": self.maker_fee_rate,
             "taker_fee_rate": self.taker_fee_rate,
+            "can_short": bool(self.can_short),
+            "short_requires_borrow": bool(self.short_requires_borrow),
+            "has_funding": bool(self.has_funding),
+            "expiry_ts": (self.expiry_ts.isoformat() + "Z") if self.expiry_ts else None,
             "metadata": dict(self.extra_metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",

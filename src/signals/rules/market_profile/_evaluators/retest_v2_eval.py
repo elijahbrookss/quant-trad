@@ -102,6 +102,20 @@ def detect_retests_v2(
         boundary = breakout.get("boundary")
         direction = str(breakout.get("direction", "")).lower()
         break_idx = breakout.get("bar_index")
+        formed_at = breakout.get("formed_at")
+        if formed_at is not None:
+            try:
+                formed_ts = pd.Timestamp(formed_at)
+                formed_idx = df.index.get_indexer([formed_ts], method="nearest")
+                if formed_idx.size and formed_idx[0] >= 0:
+                    if not isinstance(break_idx, int) or formed_idx[0] > break_idx:
+                        break_idx = int(formed_idx[0])
+            except Exception:
+                log.debug(
+                    "Retest v2 | formed_at_unresolved | breakout[%d] | formed_at=%s",
+                    b_idx,
+                    formed_at,
+                )
 
         if boundary not in {"VAH", "VAL"} or direction not in {"above", "below"}:
             log.debug(
@@ -268,6 +282,8 @@ def detect_retests_v2(
                         "VAL": val,
                         "level_price": level_price,
                         "break_time": breakout.get("break_time"),
+                        "formed_at": breakout.get("formed_at"),
+                        "known_at": breakout.get("formed_at"),
                         "retest_time": retest_time.to_pydatetime() if hasattr(retest_time, "to_pydatetime") else retest_time,
                         "time": retest_time.to_pydatetime() if hasattr(retest_time, "to_pydatetime") else retest_time,
                         "trigger_time": retest_time.to_pydatetime() if hasattr(retest_time, "to_pydatetime") else retest_time,

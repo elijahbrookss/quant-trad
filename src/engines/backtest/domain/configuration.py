@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..utils import coerce_float
@@ -16,13 +17,16 @@ class InstrumentConfig:
     contract_size: float
     tick_value: float
     risk_multiplier: float
-    instrument_type: Optional[str] = None
     min_qty: Optional[float] = None
     qty_step: Optional[float] = None
     supports_fractional: bool = False
     maker_fee_rate: float = 0.0
     taker_fee_rate: float = 0.0
     quote_currency: str = "USD"
+    can_short: bool = False
+    short_requires_borrow: bool = False
+    has_funding: bool = False
+    expiry_ts: Optional[datetime] = None
 
     @classmethod
     def from_dict(cls, instrument: Optional[Dict[str, Any]]) -> "InstrumentConfig":
@@ -36,15 +40,14 @@ class InstrumentConfig:
                 "No default tick_size is provided to ensure accurate pricing."
             )
 
-        instrument_type = str(instrument.get("instrument_type") or "").lower() or None
-        if instrument_type == "spot":
-            contract_size = 1.0
-            tick_value = tick_size
-        else:
-            contract_size = coerce_float(instrument.get("contract_size"), 1.0) or 1.0
-            tick_value = coerce_float(instrument.get("tick_value"))
-            if tick_value in (None, 0):
-                tick_value = tick_size * contract_size
+        contract_size = coerce_float(instrument.get("contract_size"))
+        tick_value = coerce_float(instrument.get("tick_value"))
+        if tick_value in (None, 0):
+            if contract_size in (None, 0):
+                raise ValueError("Instrument configuration must include contract_size or tick_value.")
+            tick_value = tick_size * contract_size
+        if contract_size in (None, 0) and tick_value not in (None, 0):
+            contract_size = tick_value / tick_size
 
         min_qty = coerce_float(
             instrument.get("min_qty")
@@ -57,6 +60,18 @@ class InstrumentConfig:
             or instrument.get("step_size")
         )
         quote_value = instrument.get("quote_currency") or "USD"
+        can_short = instrument.get("can_short")
+        short_requires_borrow = instrument.get("short_requires_borrow")
+        has_funding = instrument.get("has_funding")
+        if can_short is None or short_requires_borrow is None or has_funding is None:
+            missing = []
+            if can_short is None:
+                missing.append("can_short")
+            if short_requires_borrow is None:
+                missing.append("short_requires_borrow")
+            if has_funding is None:
+                missing.append("has_funding")
+            raise ValueError(f"Instrument configuration missing fields: {', '.join(missing)}")
         return cls(
             tick_size=float(tick_size),
             contract_size=float(contract_size),
@@ -70,7 +85,10 @@ class InstrumentConfig:
             maker_fee_rate=coerce_float(instrument.get("maker_fee_rate"), 0.0) or 0.0,
             taker_fee_rate=coerce_float(instrument.get("taker_fee_rate"), 0.0) or 0.0,
             quote_currency=str(quote_value).upper(),
-            instrument_type=instrument_type,
+            can_short=bool(can_short),
+            short_requires_borrow=bool(short_requires_borrow),
+            has_funding=bool(has_funding),
+            expiry_ts=instrument.get("expiry_ts"),
         )
 
     def apply_quantity_constraints(self, qty: float) -> float:
@@ -92,8 +110,6 @@ class InstrumentConfig:
     def point_value(self) -> float:
         """Return the value of a one point move for this instrument."""
 
-        if str(self.instrument_type or "").lower() == "spot":
-            return float(self.tick_size)
         if self.tick_value not in (None, 0):
             return float(self.tick_value)
         if self.contract_size not in (None, 0):

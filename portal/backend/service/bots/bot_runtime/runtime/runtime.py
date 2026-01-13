@@ -37,12 +37,16 @@ from .runtime_policy import RuntimeModePolicy
 from ..strategy.series_builder import SeriesBuilder, StrategySeries
 from .run_context import RunContext
 from engines.bot_runtime.core.wallet import project_wallet
+from ....indicators.indicator_service.context import IndicatorServiceContext, _context as indicator_context
+from indicators.runtime.indicator_overlay_cache import default_overlay_cache
+from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SIM_LOOKBACK_DAYS = 7
 MAX_LOG_ENTRIES = 500
 INTRABAR_BASE_SECONDS = 0.4
+WALK_FORWARD_SAMPLE_INTERVAL = 50
 
 
 @dataclass
@@ -116,7 +120,21 @@ class BotRuntime:
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._prepare_error: Optional[Dict[str, Any]] = None
-        self._series_builder = SeriesBuilder(self.bot_id, self.config, self.run_type, self._log_candle_sequence)
+        overlay_cache = default_overlay_cache()
+        for indicator_type in get_overlay_cache_types():
+            overlay_cache.enable_type(indicator_type)
+        self._overlay_cache = overlay_cache
+        self._indicator_ctx = IndicatorServiceContext.fork_with_overlay_cache(
+            indicator_context,
+            overlay_cache,
+        )
+        self._series_builder = SeriesBuilder(
+            self.bot_id,
+            self.config,
+            self.run_type,
+            self._log_candle_sequence,
+            indicator_ctx=self._indicator_ctx,
+        )
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
             build_candles=SeriesBuilder._build_candles,
@@ -447,6 +465,41 @@ class BotRuntime:
             parts.append(str(timeframe))
         return ":".join(parts)
 
+    @staticmethod
+    def _trade_entry_time(series: StrategySeries, trade_id: Optional[str]) -> Optional[str]:
+        if not trade_id:
+            return None
+        engine = getattr(series, "risk_engine", None)
+        trades = getattr(engine, "trades", None) if engine else None
+        if not trades:
+            return None
+        for trade in trades:
+            if getattr(trade, "trade_id", None) == trade_id:
+                entry_time = getattr(trade, "entry_time", None)
+                return _isoformat(entry_time)
+        return None
+
+    def _active_trade_for_symbol(
+        self,
+        symbol: Optional[str],
+        *,
+        skip_series: Optional[StrategySeries] = None,
+    ) -> Optional[object]:
+        if not symbol:
+            return None
+        symbol_key = str(symbol).upper()
+        for state in self._series_states:
+            series = state.series
+            if skip_series is not None and series is skip_series:
+                continue
+            if str(series.symbol or "").upper() != symbol_key:
+                continue
+            engine = getattr(series, "risk_engine", None)
+            trade = getattr(engine, "active_trade", None) if engine else None
+            if trade and getattr(trade, "is_active", lambda: True)():
+                return trade
+        return None
+
     def _snapshot_candle_for_state(self, base: Candle, snapshot: Mapping[str, Any]) -> Candle:
         open_price = _coerce_float(snapshot.get("open"), base.open) or base.open
         high_price = _coerce_float(snapshot.get("high"), max(base.high, open_price)) or max(base.high, open_price)
@@ -541,6 +594,7 @@ class BotRuntime:
             state.next_step_at = None
         else:
             self._schedule_next_step(state, self._bar_interval())
+        self._log_overlay_summary(state, candle)
         self._update_state(self._state_candle_for(state.series, candle))
         self._push_update("bar")
 
@@ -559,6 +613,83 @@ class BotRuntime:
             return candle
         primary_candle = self._primary_state_candle()
         return primary_candle or candle
+
+    def _log_overlay_summary(self, state: SeriesExecutionState, candle: Candle) -> None:
+        series = state.series
+        overlays = list(series.overlays or [])
+        if series.trade_overlay:
+            overlays.append(series.trade_overlay)
+        current_epoch = int(candle.time.timestamp())
+        visible = self._chart_state_builder.visible_overlays(
+            overlays,
+            str(self.state.get("status") or "").lower(),
+            current_epoch,
+        )
+        summary = self._overlay_summary(visible)
+        instrument = series.instrument or {}
+        context = self._series_log_context(
+            series,
+            instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
+            bar_index=state.bar_index,
+            bar_time=_isoformat(candle.time),
+            overlays=summary.get("total_overlays"),
+            overlay_types=summary.get("type_counts"),
+            overlay_payloads=summary.get("payload_counts"),
+            overlay_profiles=summary.get("profile_counts"),
+            overlay_profile_params=summary.get("profile_params_present"),
+            overlay_transform=summary.get("transform_counts"),
+        )
+        logger.info(with_log_context("instrument_overlay_summary", context))
+
+    @staticmethod
+    def _overlay_summary(overlays: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        type_counts: Dict[str, int] = {}
+        payload_counts = {
+            "boxes": 0,
+            "markers": 0,
+            "price_lines": 0,
+            "polylines": 0,
+            "segments": 0,
+            "bubbles": 0,
+        }
+        profile_counts: Dict[str, int] = {}
+        profile_params_present: Dict[str, int] = {}
+        transform_counts: Dict[str, Dict[str, int]] = {
+            "known_profiles": {},
+            "merged_profiles": {},
+        }
+        for overlay in overlays or []:
+            if not isinstance(overlay, Mapping):
+                continue
+            overlay_type = str(overlay.get("type") or "unknown")
+            type_counts[overlay_type] = type_counts.get(overlay_type, 0) + 1
+            payload = overlay.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            profiles = payload.get("profiles")
+            if isinstance(profiles, list):
+                profile_counts[overlay_type] = profile_counts.get(overlay_type, 0) + len(profiles)
+            if "profile_params" in payload:
+                profile_params_present[overlay_type] = profile_params_present.get(overlay_type, 0) + 1
+            transform_summary = payload.get("transform_summary")
+            if isinstance(transform_summary, Mapping):
+                for key in ("known_profiles", "merged_profiles"):
+                    value = transform_summary.get(key)
+                    if isinstance(value, (int, float)):
+                        bucket = transform_counts[key]
+                        bucket[overlay_type] = bucket.get(overlay_type, 0) + int(value)
+            for key in payload_counts.keys():
+                entries = payload.get(key)
+                if isinstance(entries, list):
+                    payload_counts[key] += len(entries)
+        return {
+            "total_overlays": len(overlays or []),
+            "type_counts": type_counts,
+            "payload_counts": payload_counts,
+            "profile_counts": profile_counts,
+            "profile_params_present": profile_params_present,
+            "transform_counts": transform_counts,
+        }
 
     @staticmethod
     def _normalise_epoch(value: Any) -> Optional[int]:
@@ -597,6 +728,7 @@ class BotRuntime:
         self._pause_event.set()
         self._paused = False
         self._series_builder.reset()
+        self._overlay_cache.clear()
 
     def needs_reset(self) -> bool:
         """Return True when the runtime finished and can be rerun."""
@@ -678,6 +810,22 @@ class BotRuntime:
             status = "completed"
         self._next_bar_at = None
         self._log_event(status, message=f"Bot runtime {status}")
+        if status in {"completed", "stopped"}:
+            duration_seconds = None
+            if self._run_started_at is not None:
+                duration_seconds = (datetime.now(timezone.utc) - self._run_started_at).total_seconds()
+            summary = self._aggregate_stats()
+            drawdown = self._max_drawdown_from_trades()
+            context = self._runtime_log_context(
+                status=status,
+                trades=summary.get("completed_trades"),
+                gross_pnl=summary.get("gross_pnl"),
+                net_pnl=summary.get("net_pnl"),
+                fees=summary.get("fees_paid"),
+                drawdown=drawdown,
+                duration_seconds=duration_seconds,
+            )
+            logger.info(with_log_context("bot_run_end_summary", context))
         # Update state with last candle from first series (backward compatibility)
         if self._series and self._series[0].candles:
             self._update_state(self._series[0].candles[-1], status=status)
@@ -712,6 +860,14 @@ class BotRuntime:
             signals_pending=signals_pending,
         )
         logger.debug(with_log_context("apply_bar", context))
+        if state.bar_index % WALK_FORWARD_SAMPLE_INTERVAL == 0:
+            info_context = self._series_log_context(
+                series,
+                bar_index=state.bar_index,
+                bar_time=isoformat(candle.time),
+                status=self.state.get("status"),
+            )
+            logger.info(with_log_context("walk_forward_step", info_context))
 
         direction = self._next_signal_for(series, epoch)
 
@@ -726,7 +882,13 @@ class BotRuntime:
             logger.debug(with_log_context("signal_consumed", context))
 
         # Attempt to create trade from signal
-        new_trade = series.risk_engine.maybe_enter(candle, direction)
+        blocking_trade = None
+        if direction is not None:
+            blocking_trade = self._active_trade_for_symbol(series.symbol, skip_series=series)
+
+        new_trade = None
+        if direction is not None and blocking_trade is None:
+            new_trade = series.risk_engine.maybe_enter(candle, direction)
 
         # Log decision event
         if direction is not None:
@@ -743,13 +905,20 @@ class BotRuntime:
                     decision="accepted",
                     reason=None,
                     trade_id=new_trade.trade_id,
+                    trade_time=_isoformat(new_trade.entry_time),
                 )
             else:
                 # Signal was rejected (no trade opened)
                 # Determine rejection reason
                 rejection_reason = "Active trade already open"
                 rejection_meta: Optional[Dict[str, Any]] = None
-                if series.risk_engine.active_trade is None:
+                if blocking_trade is not None:
+                    rejection_reason = "Active trade already open for symbol"
+                    rejection_meta = {
+                        "active_trade_id": getattr(blocking_trade, "trade_id", None),
+                        "blocked_symbol": series.symbol,
+                    }
+                elif series.risk_engine.active_trade is None:
                     rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
                     rejection_meta = series.risk_engine.last_rejection_detail
 
@@ -783,11 +952,13 @@ class BotRuntime:
                 targets=targets,
                 bar_index=state.bar_index,
                 contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
+                trade_time=_isoformat(new_trade.entry_time),
             )
             self._persist_trade_entry(series, new_trade)
             self._update_trade_overlay(series)
         trade_events = self._prime_intrabar_or_step_bar(state, candle)
         for event in trade_events:
+            trade_time = self._trade_entry_time(series, event.get("trade_id"))
             self._log_event(
                 event.get("type", "event"),
                 series,
@@ -798,6 +969,12 @@ class BotRuntime:
                 event_time=event.get("time"),
                 bar_index=state.bar_index,
                 contracts=event.get("contracts"),
+                pnl=event.get("pnl"),
+                net_pnl=event.get("net_pnl"),
+                gross_pnl=event.get("gross_pnl"),
+                fees_paid=event.get("fees_paid"),
+                currency=event.get("currency"),
+                trade_time=trade_time,
             )
             self._persist_trade_event(series, event)
         self._update_trade_overlay(series)
@@ -815,7 +992,24 @@ class BotRuntime:
         speed = self.playback_speed or 0.0
         if speed <= 0:
             return 0.0
+        if self._has_open_trades():
+            override = self.config.get("playback_speed_open_trade")
+            if override is not None:
+                try:
+                    speed = float(override)
+                except (TypeError, ValueError):
+                    speed = self.playback_speed or 0.0
+            elif speed > 1.0:
+                speed = 1.0
         return max(base_seconds / speed, 0.02)
+
+    def _has_open_trades(self) -> bool:
+        for series in self._series or []:
+            if getattr(series, "risk_engine", None) is None:
+                continue
+            if getattr(series.risk_engine, "active_trade", None) is not None:
+                return True
+        return False
 
     def _pace(self, interval: float, update_next_bar: bool = False) -> None:
         if interval <= 0:
@@ -951,6 +1145,34 @@ class BotRuntime:
             summary["quote_currency"] = currency
         return summary
 
+    def _max_drawdown_from_trades(self) -> float:
+        trades = self._aggregate_trades()
+        closed = []
+        for trade in trades:
+            closed_at = trade.get("closed_at")
+            net_pnl = trade.get("net_pnl")
+            if not closed_at or net_pnl is None:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(str(closed_at))
+            except ValueError:
+                continue
+            closed.append((timestamp, float(net_pnl)))
+        if not closed:
+            return 0.0
+        closed.sort(key=lambda item: item[0])
+        equity = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for _, pnl in closed:
+            equity += pnl
+            if equity > peak:
+                peak = equity
+            drawdown = peak - equity
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+        return round(max_drawdown, 4)
+
     def _log_event(
         self,
         event: str,
@@ -958,16 +1180,19 @@ class BotRuntime:
         candle: Optional[Candle] = None,
         **fields: object,
     ) -> None:
+        created_at = _isoformat(datetime.now(timezone.utc))
         entry: Dict[str, object] = {
             "id": str(uuid.uuid4()),
             "event": event,
-            "timestamp": _isoformat(datetime.now(timezone.utc)),
+            "timestamp": created_at,
+            "created_at": created_at,
         }
         if series is not None:
             entry["strategy_id"] = series.strategy_id
             entry["symbol"] = series.symbol
         if candle is not None:
             entry["bar_time"] = _isoformat(candle.time)
+            entry["chart_time"] = entry["bar_time"]
             entry.setdefault("price", round(candle.close, 4))
         for key, value in fields.items():
             if value is not None:
@@ -989,6 +1214,7 @@ class BotRuntime:
         decision: Optional[str] = None,
         reason: Optional[str] = None,
         trade_id: Optional[str] = None,
+        trade_time: Optional[str] = None,
         conditions: Optional[List[Dict[str, Any]]] = None,
         **metadata: object,
     ) -> None:
@@ -1000,6 +1226,8 @@ class BotRuntime:
             event=event,
             timestamp=_isoformat(datetime.now(timezone.utc)),
             bar_time=_isoformat(candle.time),
+            chart_time=_isoformat(candle.time),
+            trade_time=trade_time,
             strategy_id=series.strategy_id,
             strategy_name=series.name or series.strategy_id,
             symbol=series.symbol,
@@ -1012,6 +1240,7 @@ class BotRuntime:
             trade_id=trade_id,
             conditions=conditions,
             metadata=dict(metadata) if metadata else None,
+            created_at=_isoformat(datetime.now(timezone.utc)),
         )
 
         payload = decision_event.serialize()

@@ -47,6 +47,7 @@ def test_wallet_can_apply_rejections():
         qty=0.01,
         notional=100,
         fee=0.1,
+        short_requires_borrow=True,
     )
     assert not allowed
     assert reason == "WALLET_INSUFFICIENT_CASH"
@@ -59,6 +60,7 @@ def test_wallet_can_apply_rejections():
         qty=0.5,
         notional=100,
         fee=0.1,
+        short_requires_borrow=True,
     )
     assert not allowed
     assert reason == "WALLET_INSUFFICIENT_QTY"

@@ -20,6 +20,7 @@ const markerForTrade = (trade) => {
   const entryPrice = toFiniteNumber(trade?.entry_price)
   if (!entryTime) return []
   const isLong = trade.direction === 'long'
+  const createdAt = trade?.created_at
 
   // Entry marker (square - yellow/gold)
   const entryMarker = Number.isFinite(entryPrice)
@@ -31,6 +32,7 @@ const markerForTrade = (trade) => {
         color: 'rgba(245,158,11,0.9)',
         text: `Entry ${Number(trade.legs?.length || 0)}x`,
         kind: 'entry',
+        tooltip: createdAt ? { entries: [`Created: ${createdAt}`] } : undefined,
       }
     : {
         time: entryTime,
@@ -39,10 +41,24 @@ const markerForTrade = (trade) => {
         color: 'rgba(245,158,11,0.9)',
         text: `Entry ${Number(trade.legs?.length || 0)}x`,
         kind: 'entry',
+        tooltip: createdAt ? { entries: [`Created: ${createdAt}`] } : undefined,
       }
   const grouped = new Map()
   const targetSummary = []
   const stopSummary = []
+
+  const formatDelta = (entry, exit) => {
+    const start = toFiniteNumber(entry)
+    const end = toFiniteNumber(exit)
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null
+    const delta = end - start
+    const percent = start ? (delta / start) * 100 : null
+    const sign = delta >= 0 ? '+' : ''
+    const deltaLabel = `${sign}${delta.toFixed(2)}`
+    const percentLabel = Number.isFinite(percent) ? `${sign}${percent.toFixed(2)}%` : null
+    return { delta, percent, label: percentLabel ? `${deltaLabel} (${percentLabel})` : deltaLabel }
+  }
+
   for (const leg of trade.legs || []) {
     if (!leg?.exit_time || !leg?.status) continue
     const ts = Math.floor(new Date(leg.exit_time).getTime() / 1000)
@@ -58,6 +74,8 @@ const markerForTrade = (trade) => {
         ...targets.map((leg) => ({
           name: leg.name || 'TP',
           price: leg.target_price || leg.exit_price,
+          delta: formatDelta(entryPrice, leg.exit_price || leg.target_price),
+          created_at: leg.exit_created_at,
         })),
       )
     }
@@ -66,6 +84,8 @@ const markerForTrade = (trade) => {
         ...stops.map((leg) => ({
           name: leg.name || 'SL',
           price: leg.target_price || leg.exit_price || leg.stop_price,
+          delta: formatDelta(entryPrice, leg.exit_price || leg.stop_price),
+          created_at: leg.exit_created_at,
         })),
       )
     }
@@ -75,8 +95,11 @@ const markerForTrade = (trade) => {
       .map((leg) => toFiniteNumber(leg.exit_price || leg.target_price || leg.stop_price))
       .filter(Number.isFinite)
     const avgExitPrice = exitPrices.length > 0 ? exitPrices.reduce((a, b) => a + b, 0) / exitPrices.length : null
+    const avgDelta = formatDelta(entryPrice, avgExitPrice)
 
     const isStop = stops.length > 0
+    const hasSingle = targets.length + stops.length === 1
+    const deltaLabel = avgDelta ? ` Δ ${avgDelta.label}` : ''
     const exitMarker = Number.isFinite(avgExitPrice)
       ? {
           time,
@@ -84,20 +107,48 @@ const markerForTrade = (trade) => {
           price: avgExitPrice,
           shape: isStop ? 'square' : 'circle',
           color: isStop ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
-          text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
-            stops.length ? `SL x${stops.length}` : ''
-          }`,
+          text: hasSingle
+            ? `${isStop ? 'SL' : 'TP'}${avgDelta ? deltaLabel : ''}`
+            : `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
+                stops.length ? `SL x${stops.length}` : ''
+              }`,
           kind: isStop ? 'stop' : 'target',
+          tooltip: {
+            entries: legs
+              .map((leg) => {
+                const exitPrice = leg.exit_price || leg.target_price || leg.stop_price
+                const delta = formatDelta(entryPrice, exitPrice)
+                const label = `${leg.name || (leg.status === 'target' ? 'TP' : 'SL')}: ${exitPrice ?? '—'}${
+                  delta ? ` • Δ ${delta.label}` : ''
+                }`
+                return leg.exit_created_at ? `${label} • Created: ${leg.exit_created_at}` : label
+              })
+              .filter(Boolean),
+          },
         }
       : {
           time,
           position: isLong ? 'aboveBar' : 'belowBar',
           shape: isStop ? 'square' : 'circle',
           color: isStop ? 'rgba(248,113,113,0.82)' : 'rgba(34,211,238,0.82)',
-          text: `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
-            stops.length ? `SL x${stops.length}` : ''
-          }`,
+          text: hasSingle
+            ? `${isStop ? 'SL' : 'TP'}${avgDelta ? deltaLabel : ''}`
+            : `${targets.length ? `TP x${targets.length}` : ''}${targets.length && stops.length ? ' / ' : ''}${
+                stops.length ? `SL x${stops.length}` : ''
+              }`,
           kind: isStop ? 'stop' : 'target',
+          tooltip: {
+            entries: legs
+              .map((leg) => {
+                const exitPrice = leg.exit_price || leg.target_price || leg.stop_price
+                const delta = formatDelta(entryPrice, exitPrice)
+                const label = `${leg.name || (leg.status === 'target' ? 'TP' : 'SL')}: ${exitPrice ?? '—'}${
+                  delta ? ` • Δ ${delta.label}` : ''
+                }`
+                return leg.exit_created_at ? `${label} • Created: ${leg.exit_created_at}` : label
+              })
+              .filter(Boolean),
+          },
         }
 
     exitMarkers.push(exitMarker)
@@ -115,8 +166,16 @@ const markerForTrade = (trade) => {
         kind: 'tp-sl-summary',
         tooltip: {
           entries: [
-            ...targetSummary.map((entry) => `${entry.name}: ${entry.price ?? '—'}`),
-            ...stopSummary.map((entry) => `${entry.name}: ${entry.price ?? '—'}`),
+            ...targetSummary.map((entry) => {
+              const deltaLabel = entry.delta ? ` • Δ ${entry.delta.label}` : ''
+              const baseLabel = `${entry.name}: ${entry.price ?? '—'}${deltaLabel}`
+              return entry.created_at ? `${baseLabel} • Created: ${entry.created_at}` : baseLabel
+            }),
+            ...stopSummary.map((entry) => {
+              const deltaLabel = entry.delta ? ` • Δ ${entry.delta.label}` : ''
+              const baseLabel = `${entry.name}: ${entry.price ?? '—'}${deltaLabel}`
+              return entry.created_at ? `${baseLabel} • Created: ${entry.created_at}` : baseLabel
+            }),
           ],
         },
       }
@@ -230,7 +289,7 @@ export const useTradeMarkers = (trades = [], candleLookup = new Map(), candleDat
       const entries = markerForTrade(trade)
       markers.push(...entries)
       entries
-        .filter((entry) => entry?.kind === 'tp-sl-summary' && Array.isArray(entry?.tooltip?.entries))
+        .filter((entry) => Array.isArray(entry?.tooltip?.entries))
         .forEach((entry) => {
           tooltips.push({ time: entry.time, entries: entry.tooltip.entries })
         })

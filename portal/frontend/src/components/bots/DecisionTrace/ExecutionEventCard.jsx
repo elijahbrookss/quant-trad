@@ -8,7 +8,7 @@ const formatEventLabel = (value) => {
 };
 
 export default function ExecutionEventCard({ event, onClick }) {
-  const eventTime = event.event_time || event.bar_time || event.timestamp;
+  const eventTime = event.trade_time || event.event_time || event.bar_time || event.timestamp;
   const label = formatEventLabel(event.event || event.type || 'execution');
   const detail = describeLog(event);
   const rejectionReason = event.reason ? String(event.reason).replace(/_/g, ' ') : null;
@@ -53,12 +53,17 @@ ExecutionEventCard.propTypes = {
   event: PropTypes.shape({
     event: PropTypes.string,
     type: PropTypes.string,
+    trade_time: PropTypes.string,
     event_time: PropTypes.string,
     bar_time: PropTypes.string,
+    chart_time: PropTypes.string,
     timestamp: PropTypes.string,
+    created_at: PropTypes.string,
     trade_id: PropTypes.string,
     symbol: PropTypes.string,
     leg: PropTypes.string,
+    pnl: PropTypes.number,
+    currency: PropTypes.string,
   }).isRequired,
   onClick: PropTypes.func,
 };

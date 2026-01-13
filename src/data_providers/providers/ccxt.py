@@ -29,6 +29,7 @@ class CCXTProvider(BaseDataProvider):
         self._exchange_id = exchange_id.lower()
         self._sandbox = sandbox if sandbox is not None else self._sandbox_flag()
         self._exchange = self._build_exchange()
+        self._ohlcv_limit_warned = False
 
     def get_datasource(self) -> str:
         # Store the actual exchange identifier in the datasource column so downstream
@@ -82,23 +83,140 @@ class CCXTProvider(BaseDataProvider):
         precision = market.get("precision") or {}
         limits = market.get("limits") or {}
         price_limits = limits.get("price") or {}
+        info = market.get("info") if isinstance(market.get("info"), dict) else {}
+        details = info.get("future_product_details") if isinstance(info.get("future_product_details"), dict) else {}
+
+        precision_tick = None
+        precision_price = precision.get("price")
+        if precision_price is not None:
+            try:
+                precision_tick = float(precision_price)
+                if isinstance(precision_price, int) or (
+                    isinstance(precision_price, float) and precision_price.is_integer() and precision_price >= 1
+                ):
+                    precision_tick = 10 ** (-int(precision_price))
+            except (TypeError, ValueError):
+                precision_tick = None
 
         tick_size = (
             market.get("tickSize")
+            or info.get("price_increment")
+            or info.get("quote_increment")
             or price_limits.get("min")
-            or precision.get("price")
+            or precision_tick
         )
-        tick_value = market.get("tickValue")
+        if tick_size is not None:
+            try:
+                tick_size = float(tick_size)
+            except (TypeError, ValueError):
+                tick_size = None
 
-        contract_size = market.get("contractSize")
+        tick_value = market.get("tickValue")
+        if tick_value is not None:
+            try:
+                tick_value = float(tick_value)
+            except (TypeError, ValueError):
+                tick_value = None
+
+        contract_size = market.get("contractSize") or details.get("contract_size")
+        if contract_size is not None:
+            try:
+                contract_size = float(contract_size)
+            except (TypeError, ValueError):
+                contract_size = None
         if contract_size is None and instrument_type == InstrumentType.SPOT:
             contract_size = 1.0
+
+        can_short = None
+        if isinstance(market.get("short"), bool):
+            can_short = bool(market.get("short"))
+        elif market.get("contract") or market.get("future") or market.get("swap") or market.get("spot") is False:
+            can_short = True
+        elif instrument_type == InstrumentType.SPOT:
+            can_short = False
+
+        market_type = str(market.get("type") or "").lower()
+        has_funding = bool(market.get("swap") or market_type == "swap")
+        if not has_funding and any(key in info for key in ("funding_rate", "funding_time", "funding_interval")):
+            has_funding = True
+
+        expiry_ts = self._coerce_expiry(
+            market.get("expiryDatetime")
+            or market.get("expiry")
+            or market.get("expiration")
+            or info.get("contract_expiry")
+            or details.get("contract_expiry")
+        )
+
+        base_currency = self._resolve_base_currency(market, info, details)
+        quote_currency = self._resolve_quote_currency(market, info, details)
+
+        short_requires_borrow = bool(instrument_type == InstrumentType.SPOT and can_short)
 
         return self._normalize_metadata(
             tick_size=tick_size,
             contract_size=contract_size,
             tick_value=tick_value,
+            can_short=can_short,
+            short_requires_borrow=short_requires_borrow,
+            has_funding=has_funding,
+            expiry_ts=expiry_ts,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
         )
+
+    @staticmethod
+    def _coerce_expiry(value: Any) -> Optional[dt.datetime]:
+        if value is None:
+            return None
+        if isinstance(value, dt.datetime):
+            return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp = timestamp / 1000.0
+            return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+    @staticmethod
+    def _resolve_base_currency(market: Dict[str, Any], info: Dict[str, Any], details: Dict[str, Any]) -> Optional[str]:
+        for key in ("base", "baseId"):
+            value = market.get(key)
+            if value:
+                return str(value).upper()
+        for key in ("base_currency_id", "base_display_symbol"):
+            value = info.get(key)
+            if value:
+                return str(value).upper()
+        value = details.get("contract_root_unit")
+        if value:
+            return str(value).upper()
+        return None
+
+    @staticmethod
+    def _resolve_quote_currency(market: Dict[str, Any], info: Dict[str, Any], details: Dict[str, Any]) -> Optional[str]:
+        for key in ("quote", "settle", "quoteId", "settleId"):
+            value = market.get(key)
+            if value:
+                return str(value).upper()
+        for key in ("quote_currency_id", "quote_display_symbol"):
+            value = info.get(key)
+            if value:
+                return str(value).upper()
+        for key in ("quote_currency_id", "quote_display_symbol"):
+            value = details.get(key)
+            if value:
+                return str(value).upper()
+        return None
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Ensure CCXT has metadata for the requested symbol."""
@@ -178,6 +296,13 @@ class CCXTProvider(BaseDataProvider):
 
         if candidates:
             return max(1, min(max(candidates), 5000))
+
+        if not self._ohlcv_limit_warned:
+            logger.warning(
+                "ccxt_ohlcv_limit_default | exchange=%s | limit=1000",
+                self._exchange_id,
+            )
+            self._ohlcv_limit_warned = True
 
         return 1000
 

@@ -265,18 +265,7 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
                 except Exception:
                     inst_rec = None
             if not inst_rec:
-                # Persist a minimal instrument record so frontend can reference it later.
-                # Include any provided datasource/exchange so subsequent lookups can match.
-                try:
-                    from ..service.storage.storage import upsert_instrument as _upsert_instrument
-
-                    inst_rec = _upsert_instrument({
-                        "symbol": symbol,
-                        "datasource": payload.get("datasource"),
-                        "exchange": payload.get("exchange"),
-                    })
-                except Exception:
-                    inst_rec = None
+                inst_rec = None
 
             # If we persisted a minimal instrument (or found one without tick metadata),
             # attempt to enrich it immediately so the UI can display tick/contract data

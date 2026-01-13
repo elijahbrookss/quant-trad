@@ -4,12 +4,20 @@ const fieldLabels = [
   { key: 'contract_size', label: 'Contract size' },
   { key: 'tick_value', label: 'Tick value' },
   { key: 'currency', label: 'Currency' },
+  { key: 'can_short', label: 'Can short' },
+  { key: 'has_funding', label: 'Has funding' },
+  { key: 'expiry_ts', label: 'Expiry' },
   { key: 'provider_id', label: 'Provider' },
   { key: 'venue_id', label: 'Venue' },
 ]
 
-function formatValue(value) {
+function formatValue(value, key) {
   if (value === undefined || value === null || value === '') return '—'
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (key === 'expiry_ts') {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.valueOf()) ? '—' : parsed.toLocaleString()
+  }
   if (typeof value === 'number') return Number.isFinite(value) ? value.toString() : '—'
   return String(value)
 }
@@ -50,7 +58,11 @@ export function InstrumentDetailsPanel({
         {fieldLabels.map((field) => (
           <div key={field.key} className="rounded-lg border border-white/5 bg-white/5 px-3 py-2">
             <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">{field.label}</p>
-            <p className="truncate text-sm text-white">{formatValue(metadata[field.key])}</p>
+            <p className="truncate text-sm text-white">
+              {field.key === 'currency'
+                ? formatValue(metadata.currency || metadata.quote_currency, field.key)
+                : formatValue(metadata[field.key], field.key)}
+            </p>
           </div>
         ))}
       </div>

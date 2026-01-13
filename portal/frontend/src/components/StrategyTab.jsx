@@ -27,6 +27,7 @@ import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 import { TimeframeSelect } from './ChartComponent/TimeframeSelectComponent.jsx'
 import { DEFAULT_DATASOURCE } from '../constants/datasources.js'
 import { StrategyGrid, OverviewTab, InstrumentsTab, ATMTab, RulesTab, SignalsTab } from './strategy'
+import { Input, Select } from './ui'
 
 const STRATEGY_FORM_DEFAULT = {
   name: '',
@@ -64,9 +65,15 @@ const INSTRUMENT_FORM_DEFAULT = {
   tick_value: '',
   contract_size: '',
   min_order_size: '',
+  base_currency: '',
   quote_currency: '',
   maker_fee_rate: '',
   taker_fee_rate: '',
+  can_short: false,
+  short_requires_borrow: false,
+  has_funding: false,
+  expiry_ts: '',
+  instrument_type: '',
 }
 
 const EMPTY_LIST = Object.freeze([])
@@ -772,6 +779,34 @@ function StrategyFormModal({
     return errors
   }, [form.atm_template])
 
+  const stripInstrumentTemplateFields = useCallback((template) => {
+    if (!template) return template
+    const cleaned = { ...template }
+    const fields = [
+      'tick_size',
+      'tick_value',
+      'contract_size',
+      'maker_fee_rate',
+      'taker_fee_rate',
+      'quote_currency',
+    ]
+    fields.forEach((field) => {
+      delete cleaned[field]
+    })
+    if (cleaned._meta && typeof cleaned._meta === 'object') {
+      const meta = { ...cleaned._meta }
+      fields.forEach((field) => {
+        delete meta[`${field}_override`]
+      })
+      if (Object.keys(meta).length === 0) {
+        delete cleaned._meta
+      } else {
+        cleaned._meta = meta
+      }
+    }
+    return cleaned
+  }, [])
+
   const handleSubmit = async (event) => {
     event.preventDefault()
     if (currentStep < 2) return
@@ -825,7 +860,7 @@ function StrategyFormModal({
       base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : null,
       global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : null,
       risk_overrides: riskOverrides,
-      atm_template: cloneATMTemplate({
+      atm_template: stripInstrumentTemplateFields(cloneATMTemplate({
         ...form.atm_template,
         name: templateName,
         initial_stop: {
@@ -839,7 +874,7 @@ function StrategyFormModal({
           base_risk_per_trade: Number.isFinite(baseRiskValue) ? baseRiskValue : form.atm_template?.risk?.base_risk_per_trade,
           global_risk_multiplier: Number.isFinite(globalRisk) ? globalRisk : form.atm_template?.risk?.global_risk_multiplier,
         },
-      }),
+      })),
     }
     const savingStartedAt = Date.now()
     const MIN_SAVING_DURATION_MS = 800
@@ -1967,9 +2002,16 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
       setLocalError(null)
       return
     }
+    const seed = { ...(initialValues || {}) }
+    if (seed.expiry_ts) {
+      const parsed = new Date(seed.expiry_ts)
+      seed.expiry_ts = Number.isNaN(parsed.valueOf()) ? '' : parsed.toISOString().slice(0, 16)
+    }
+    seed.can_short = Boolean(seed.can_short)
+    seed.has_funding = Boolean(seed.has_funding)
     setForm({
       ...INSTRUMENT_FORM_DEFAULT,
-      ...(initialValues || {}),
+      ...seed,
     })
     setLocalError(null)
   }, [open, initialValues])
@@ -1979,6 +2021,11 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
   const handleChange = (field) => (event) => {
     const value = event?.target ? event.target.value : event
     setForm((prev) => ({ ...prev, [field]: value ?? '' }))
+  }
+
+  const handleToggle = (field) => (event) => {
+    const checked = event?.target ? event.target.checked : Boolean(event)
+    setForm((prev) => ({ ...prev, [field]: checked }))
   }
 
   const handleSubmit = async (event) => {
@@ -1991,7 +2038,13 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
       venue_id: venueId ? venueId.toUpperCase() : null,
       datasource: providerId || null,
       exchange: venueId || null,
+      instrument_type: (form.instrument_type || '').trim().toLowerCase() || null,
+      base_currency: (form.base_currency || '').trim().toUpperCase() || null,
       quote_currency: (form.quote_currency || '').trim().toUpperCase() || null,
+      can_short: Boolean(form.can_short),
+      short_requires_borrow: Boolean(form.short_requires_borrow),
+      has_funding: Boolean(form.has_funding),
+      expiry_ts: form.expiry_ts ? new Date(form.expiry_ts).toISOString() : null,
     }
     const numericFields = [
       'tick_size',
@@ -2071,6 +2124,70 @@ function InstrumentFormModal({ open, initialValues, onSubmit, onCancel, submitti
                 placeholder="e.g. USDT"
               />
             </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Base currency</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm uppercase tracking-[0.2em] focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.base_currency}
+                onChange={handleChange('base_currency')}
+                placeholder="e.g. BTC"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Instrument type</label>
+              <input
+                className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm uppercase tracking-[0.2em] focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                value={form.instrument_type}
+                onChange={handleChange('instrument_type')}
+                placeholder="e.g. spot, future, swap"
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border border-white/20 bg-black/60"
+                checked={form.can_short}
+                onChange={handleToggle('can_short')}
+              />
+              Can short
+            </label>
+            <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border border-white/20 bg-black/60"
+                checked={form.has_funding}
+                onChange={handleToggle('has_funding')}
+              />
+              Has funding
+            </label>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border border-white/20 bg-black/60"
+                checked={form.short_requires_borrow}
+                onChange={handleToggle('short_requires_borrow')}
+              />
+              Short requires borrow
+            </label>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Expiry timestamp</label>
+            <input
+              type="datetime-local"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              value={form.expiry_ts}
+              onChange={handleChange('expiry_ts')}
+            />
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
@@ -2184,6 +2301,11 @@ const StrategyDetails = ({
   signalInstrumentId,
   setSignalInstrumentId,
   onAddInstrument = () => {},
+  onRefreshInstrumentMetadata,
+  instrumentRefreshStatus,
+  atmTemplates,
+  onQuickUpdate,
+  quickUpdateStatus,
 }) => {
   const hasStrategy = Boolean(strategy)
   const strategyInstruments = Array.isArray(strategy?.instruments) ? strategy.instruments : EMPTY_LIST
@@ -2220,6 +2342,131 @@ const StrategyDetails = ({
       ? `${formatNumber(atmTemplate.stop_r_multiple)}R stop`
       : 'No stop'
   const atmBadge = `ATM: ${atmTargets.length || 0} target${atmTargets.length === 1 ? '' : 's'}, ${atmStopLabel}`
+
+  const [quickBaseRisk, setQuickBaseRisk] = useState('')
+  const [quickTemplateId, setQuickTemplateId] = useState('')
+  const [quickSymbol, setQuickSymbol] = useState('')
+  const [quickError, setQuickError] = useState(null)
+
+  useEffect(() => {
+    const currentRisk = strategy?.base_risk_per_trade
+    setQuickBaseRisk(currentRisk === null || currentRisk === undefined ? '' : String(currentRisk))
+    setQuickTemplateId(strategy?.atm_template_id || '')
+    setQuickSymbol('')
+    setQuickError(null)
+  }, [strategy?.id, strategy?.base_risk_per_trade, strategy?.atm_template_id])
+
+  const atmTemplateOptions = useMemo(() => {
+    const options = []
+    const seen = new Set()
+    if (strategy?.atm_template_id) {
+      const label = strategy?.atm_template?.name?.trim() || 'Current ATM template'
+      options.push({ value: strategy.atm_template_id, label })
+      seen.add(strategy.atm_template_id)
+    }
+    ;(atmTemplates || []).forEach((template) => {
+      if (!template?.id || seen.has(template.id)) return
+      options.push({ value: template.id, label: template.name || template.id })
+      seen.add(template.id)
+    })
+    return options
+  }, [atmTemplates, strategy?.atm_template, strategy?.atm_template_id])
+
+  const normalizeSymbol = useCallback((value) => {
+    if (!value) return ''
+    return String(value).trim().toUpperCase().replace(/\s+/g, '')
+  }, [])
+
+  const handleQuickBaseRiskSave = useCallback(async () => {
+    if (!onQuickUpdate) return
+    const normalized = quickBaseRisk === '' ? null : Number(quickBaseRisk)
+    if (quickBaseRisk !== '' && !Number.isFinite(normalized)) {
+      setQuickError('Base risk must be a number.')
+      return
+    }
+    const current = strategy?.base_risk_per_trade ?? null
+    if ((current === null && normalized === null) || Number(current) === Number(normalized)) {
+      setQuickError(null)
+      return
+    }
+    setQuickError(null)
+    await onQuickUpdate({ base_risk_per_trade: normalized })
+  }, [onQuickUpdate, quickBaseRisk, strategy?.base_risk_per_trade])
+
+  const handleTemplateChange = useCallback(
+    async (event) => {
+      if (!onQuickUpdate) return
+      const next = event.target.value || null
+      if ((strategy?.atm_template_id || null) === (next || null)) {
+        return
+      }
+      setQuickTemplateId(next || '')
+      setQuickError(null)
+      await onQuickUpdate({ atm_template_id: next || null })
+    },
+    [onQuickUpdate, strategy?.atm_template_id],
+  )
+
+  const buildSlotPayload = useCallback((slots) => {
+    return (slots || [])
+      .map((slot) => ({
+        symbol: normalizeSymbol(slot.symbol),
+        enabled: slot.enabled !== false,
+        ...(slot.risk_multiplier !== null && slot.risk_multiplier !== undefined
+          ? { risk_multiplier: slot.risk_multiplier }
+          : {}),
+      }))
+      .filter((slot) => slot.symbol)
+  }, [normalizeSymbol])
+
+  const handleQuickAddSymbol = useCallback(async () => {
+    if (!onQuickUpdate) return
+    const normalized = normalizeSymbol(quickSymbol)
+    if (!normalized) {
+      setQuickError('Enter a symbol to add.')
+      return
+    }
+    const currentSlots = buildSlotPayload(strategy?.instrument_slots)
+    if (currentSlots.some((slot) => slot.symbol === normalized)) {
+      setQuickError('Symbol already added.')
+      return
+    }
+    setQuickError(null)
+    await onQuickUpdate({
+      instrument_slots: [...currentSlots, { symbol: normalized, enabled: true }],
+    })
+    setQuickSymbol('')
+  }, [onQuickUpdate, normalizeSymbol, quickSymbol, strategy?.instrument_slots, buildSlotPayload])
+
+  const handleQuickRemoveSymbol = useCallback(
+    async (symbol) => {
+      if (!onQuickUpdate) return
+      const normalized = normalizeSymbol(symbol)
+      const currentSlots = buildSlotPayload(strategy?.instrument_slots)
+      const nextSlots = currentSlots.filter((slot) => slot.symbol !== normalized)
+      if (!nextSlots.length) {
+        setQuickError('At least one instrument is required.')
+        return
+      }
+      setQuickError(null)
+      const nextRiskOverrides = { ...(strategy?.risk_overrides || {}) }
+      delete nextRiskOverrides[normalized]
+      await onQuickUpdate({
+        instrument_slots: nextSlots,
+        risk_overrides: nextRiskOverrides,
+      })
+    },
+    [onQuickUpdate, normalizeSymbol, strategy?.instrument_slots, strategy?.risk_overrides, buildSlotPayload],
+  )
+
+  const handleQuickSymbolKey = useCallback(
+    async (event) => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      await handleQuickAddSymbol()
+    },
+    [handleQuickAddSymbol],
+  )
 
   const [activeTab, setActiveTab] = useState('overview')
 
@@ -2302,6 +2549,82 @@ const StrategyDetails = ({
         </div>
       </div>
 
+      <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Quick edits</p>
+          <div className="text-xs text-slate-500">
+            {quickUpdateStatus?.saving
+              ? 'Saving...'
+              : quickUpdateStatus?.error
+                ? quickUpdateStatus.error
+                : quickUpdateStatus?.savedAt
+                  ? 'Saved'
+                  : ''}
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 lg:grid-cols-3">
+          <div className="flex flex-col gap-2">
+            <Input
+              label="Base Risk Per Trade"
+              type="number"
+              min="0"
+              step="0.01"
+              value={quickBaseRisk}
+              onChange={(event) => setQuickBaseRisk(event.target.value)}
+              onBlur={handleQuickBaseRiskSave}
+            />
+            <ActionButton
+              type="button"
+              variant="ghost"
+              className="self-start"
+              onClick={handleQuickBaseRiskSave}
+              disabled={quickUpdateStatus?.saving}
+            >
+              Apply risk
+            </ActionButton>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Select
+              label="ATM Template"
+              value={quickTemplateId}
+              options={atmTemplateOptions}
+              placeholder="Select template"
+              onChange={handleTemplateChange}
+            />
+            <p className="text-[11px] text-slate-500">Switches the strategy to a saved ATM template.</p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Instruments</label>
+            <div className="flex flex-wrap gap-2">
+              {(strategy?.instrument_slots || []).map((slot) => (
+                <button
+                  key={`quick-slot-${slot.symbol}`}
+                  type="button"
+                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200"
+                  onClick={() => handleQuickRemoveSymbol(slot.symbol)}
+                >
+                  {slot.symbol}
+                  <span className="text-slate-400">✕</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Input
+                label="Add symbol"
+                placeholder="BTCUSD"
+                value={quickSymbol}
+                onChange={(event) => setQuickSymbol(event.target.value)}
+                onKeyDown={handleQuickSymbolKey}
+              />
+              <ActionButton type="button" onClick={handleQuickAddSymbol} disabled={quickUpdateStatus?.saving}>
+                Add
+              </ActionButton>
+            </div>
+            {quickError ? <p className="text-[11px] text-rose-400">{quickError}</p> : null}
+          </div>
+        </div>
+      </div>
+
       {Array.isArray(strategy.missing_indicators) && strategy.missing_indicators.length > 0 && (
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100">
           <p className="font-semibold text-amber-200">{strategy.missing_indicators.length} indicator(s) unavailable</p>
@@ -2362,6 +2685,8 @@ const StrategyDetails = ({
             instrumentMap={instrumentMap}
             instrumentMessages={instrumentMessages}
             onAddInstrument={handleAddInstrument}
+            onRefreshMetadata={onRefreshInstrumentMetadata}
+            refreshStatus={instrumentRefreshStatus}
             ActionButton={ActionButton}
           />
         </TabPanel>
@@ -2428,6 +2753,8 @@ const StrategyTab = ({ chartId }) => {
   const [instrumentModal, setInstrumentModal] = useState({ open: false, defaults: null })
   const [savingInstrument, setSavingInstrument] = useState(false)
   const [instrumentError, setInstrumentError] = useState(null)
+  const [instrumentRefreshStatus, setInstrumentRefreshStatus] = useState({})
+  const [quickUpdateStatus, setQuickUpdateStatus] = useState({ saving: false, error: null, savedAt: null })
   const [signalWindow, setSignalWindow] = useState(() => {
     const end = new Date()
     const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -2457,6 +2784,10 @@ const StrategyTab = ({ chartId }) => {
     })
     return map
   }, [selectedStrategyInstruments])
+
+  useEffect(() => {
+    setQuickUpdateStatus({ saving: false, error: null, savedAt: null })
+  }, [selectedStrategy?.id])
 
   const atmTemplateKey = useCallback((template) => {
     try {
@@ -2644,6 +2975,49 @@ const StrategyTab = ({ chartId }) => {
     }
   }, [selectedId, error])
 
+  const refreshInstrumentMetadata = useCallback(
+    async (symbol) => {
+      if (!selectedStrategy || !symbol) return
+      const providerId = (selectedStrategy.datasource || '').trim().toUpperCase()
+      const venueId = (selectedStrategy.exchange || '').trim().toUpperCase()
+      const symbolKey = String(symbol).trim().toUpperCase()
+      if (!providerId || !venueId) {
+        warn('instrument_metadata_refresh_missing_provider', { symbol })
+        return
+      }
+      setInstrumentRefreshStatus((prev) => ({
+        ...prev,
+        [symbolKey]: { loading: true },
+      }))
+      try {
+        const response = await fetchTickMetadata({
+          symbol: symbolKey,
+          provider_id: providerId,
+          venue_id: venueId,
+          timeframe: selectedStrategy.timeframe,
+          refresh: true,
+        })
+        if (response?.errors) {
+          const firstError = Object.values(response.errors).find(Boolean)
+          throw new Error(firstError || 'Tick metadata unavailable')
+        }
+        await refreshStrategies()
+        info('instrument_metadata_refreshed', { symbol, provider_id: providerId, venue_id: venueId })
+        setInstrumentRefreshStatus((prev) => ({
+          ...prev,
+          [symbolKey]: { loading: false },
+        }))
+      } catch (err) {
+        error('instrument_metadata_refresh_failed', err)
+        setInstrumentRefreshStatus((prev) => ({
+          ...prev,
+          [symbolKey]: { loading: false },
+        }))
+      }
+    },
+    [selectedStrategy, refreshStrategies, info, warn, error],
+  )
+
   const refreshATMTemplates = useCallback(async () => {
     try {
       const payload = await fetchATMTemplates()
@@ -2728,6 +3102,23 @@ const StrategyTab = ({ chartId }) => {
       setSavingStrategy(false)
     }
   }
+
+  const handleQuickUpdate = useCallback(
+    async (patch) => {
+      if (!selectedStrategy) return
+      setQuickUpdateStatus({ saving: true, error: null, savedAt: null })
+      try {
+        await updateStrategy(selectedStrategy.id, patch)
+        await refreshStrategies()
+        setQuickUpdateStatus({ saving: false, error: null, savedAt: Date.now() })
+        info('strategy_quick_updated', { strategyId: selectedStrategy.id, fields: Object.keys(patch || {}) })
+      } catch (err) {
+        setQuickUpdateStatus({ saving: false, error: err?.message || 'Quick update failed', savedAt: null })
+        error('strategy_quick_update_failed', err)
+      }
+    },
+    [selectedStrategy, refreshStrategies, info, error],
+  )
 
   const handleInstrumentSubmit = async (payload) => {
     setSavingInstrument(true)
@@ -2997,6 +3388,11 @@ const StrategyTab = ({ chartId }) => {
               signalInstrumentId={signalInstrumentId}
               setSignalInstrumentId={setSignalInstrumentId}
               onAddInstrument={(defaults) => openInstrumentModal(defaults)}
+              onRefreshInstrumentMetadata={refreshInstrumentMetadata}
+              instrumentRefreshStatus={instrumentRefreshStatus}
+              atmTemplates={atmTemplates}
+              onQuickUpdate={handleQuickUpdate}
+              quickUpdateStatus={quickUpdateStatus}
             />
           ) : (
             <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-10 text-center text-sm text-slate-400">

@@ -137,40 +137,11 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     setStreamStatus('connecting')
     const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
 
-    let pendingUpdate = null
-    let throttleTimer = null
-    let lastIntrabarUpdate = 0
-    const INTRABAR_THROTTLE_MS = 150
-
-    const flushUpdate = () => {
-      if (pendingUpdate) {
-        applyPayload(pendingUpdate)
-        pendingUpdate = null
-        lastIntrabarUpdate = Date.now()
-      }
-      throttleTimer = null
-    }
-
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
         logCandleDiagnostics(event.type || 'message', data?.series, bot?.id)
-
-        if (event.type === 'intrabar') {
-          pendingUpdate = data
-          if (!throttleTimer) {
-            const timeSinceLastUpdate = Date.now() - lastIntrabarUpdate
-            const delay = Math.max(0, INTRABAR_THROTTLE_MS - timeSinceLastUpdate)
-            throttleTimer = setTimeout(flushUpdate, delay)
-          }
-        } else {
-          if (throttleTimer) {
-            clearTimeout(throttleTimer)
-            throttleTimer = null
-            pendingUpdate = null
-          }
-          applyPayload(data)
-        }
+        applyPayload(data)
         setStreamStatus('open')
       } catch (err) {
         console.error('bot stream parse failed', err)
@@ -187,9 +158,6 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     return () => {
       for (const evt of events) {
         source.removeEventListener(evt, handler)
-      }
-      if (throttleTimer) {
-        clearTimeout(throttleTimer)
       }
       source.close()
       streamRef.current = null

@@ -109,8 +109,23 @@ class AlpacaProvider(BaseDataProvider):
 
         # US equities trade in $0.01 increments; one share is one trading unit.
         # Validation happens inside ``_get_asset`` to ensure the symbol exists.
-        self._get_asset(symbol)
-        return self._normalize_metadata(tick_size=0.01, contract_size=1.0)
+        asset = self._get_asset(symbol)
+        shortable = getattr(asset, "shortable", None)
+        currency = getattr(asset, "currency", None)
+        if shortable is None:
+            raise ValueError(f"Alpaca asset metadata missing shortable flag for '{symbol}'")
+        if not currency:
+            raise ValueError(f"Alpaca asset metadata missing currency for '{symbol}'")
+        return self._normalize_metadata(
+            tick_size=0.01,
+            contract_size=1.0,
+            can_short=bool(shortable),
+            short_requires_borrow=bool(shortable),
+            has_funding=False,
+            expiry_ts=None,
+            base_currency=symbol,
+            quote_currency=currency,
+        )
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Confirm the symbol exists via Alpaca's asset lookup."""

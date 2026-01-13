@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import logging
+from signals.overlays.transformers import apply_overlay_transform
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,10 @@ class ChartStateBuilder:
             return overlays_list
         visible: List[Dict[str, Any]] = []
         for overlay in overlays_list:
-            trimmed = self._trim_overlay_to_epoch(overlay, current_epoch)
+            transformed = apply_overlay_transform(overlay, current_epoch)
+            if transformed is None:
+                continue
+            trimmed = self._trim_overlay_to_epoch(transformed, current_epoch)
             if trimmed and self._overlay_is_ready(trimmed, current_epoch):
                 visible.append(trimmed)
         return visible
@@ -88,30 +92,15 @@ class ChartStateBuilder:
     def _overlay_is_ready(self, overlay: Mapping[str, Any], current_epoch: int) -> bool:
         if not isinstance(overlay, Mapping):
             return False
-        overlay_type = str(overlay.get("type") or "").lower()
-        if overlay_type not in {"market_profile", "mpf"}:
-            return True
+        known_at = self._first_epoch_from(overlay, ("known_at", "knownAt"))
+        if known_at is not None and current_epoch < known_at:
+            return False
         payload = overlay.get("payload")
-        if not isinstance(payload, Mapping):
-            return True
-        boxes = payload.get("boxes")
-        if not isinstance(boxes, list) or not boxes:
-            return True
-        latest_needed: Optional[int] = None
-        for box in boxes:
-            if not isinstance(box, Mapping):
-                continue
-            end_epoch = self._first_epoch_from(
-                box,
-                ("end", "end_date", "endDate"),
-            ) or self._normalise_epoch(box.get("x2"))
-            if end_epoch is None:
-                continue
-            if latest_needed is None or end_epoch > latest_needed:
-                latest_needed = end_epoch
-        if latest_needed is None:
-            return True
-        return current_epoch >= latest_needed
+        if isinstance(payload, Mapping):
+            payload_known_at = self._first_epoch_from(payload, ("known_at", "knownAt"))
+            if payload_known_at is not None and current_epoch < payload_known_at:
+                return False
+        return True
 
     def _trim_overlay_to_epoch(self, overlay: Any, current_epoch: int) -> Optional[Dict[str, Any]]:
         if not isinstance(overlay, Mapping):
@@ -200,6 +189,8 @@ class ChartStateBuilder:
     def _trim_time_entry(self, entry: Any, current_epoch: int, keys: Tuple[str, ...]) -> Optional[Any]:
         if not isinstance(entry, Mapping):
             return None
+        if not self._entry_known_at_visible(entry, current_epoch):
+            return None
         epoch = self._first_epoch_from(entry, keys)
         if epoch is not None and epoch > current_epoch:
             return None
@@ -207,6 +198,8 @@ class ChartStateBuilder:
 
     def _trim_box_entry(self, entry: Any, current_epoch: int) -> Optional[Any]:
         if not isinstance(entry, Mapping):
+            return None
+        if not self._entry_known_at_visible(entry, current_epoch):
             return None
         start_epoch = self._first_epoch_from(entry, ("start", "start_date", "startDate", "x1"))
         # Filter boxes that haven't started yet
@@ -237,6 +230,8 @@ class ChartStateBuilder:
     def _trim_segment_entry(self, entry: Any, current_epoch: int) -> Optional[Any]:
         if not isinstance(entry, Mapping):
             return None
+        if not self._entry_known_at_visible(entry, current_epoch):
+            return None
         start_epoch = self._first_epoch_from(entry, ("x1", "start", "start_date", "startDate"))
         if start_epoch is not None and start_epoch > current_epoch:
             return None
@@ -250,6 +245,8 @@ class ChartStateBuilder:
     def _trim_polyline_entry(self, entry: Any, current_epoch: int) -> Optional[Any]:
         if not isinstance(entry, Mapping):
             return entry
+        if not self._entry_known_at_visible(entry, current_epoch):
+            return None
         points = entry.get("points")
         if not isinstance(points, list):
             return entry
@@ -257,6 +254,9 @@ class ChartStateBuilder:
         changed = False
         for point in points:
             if not isinstance(point, Mapping):
+                continue
+            if not self._entry_known_at_visible(point, current_epoch):
+                changed = True
                 continue
             epoch = self._normalise_epoch(point.get("time"))
             if epoch is not None and epoch > current_epoch:
@@ -279,3 +279,9 @@ class ChartStateBuilder:
             if epoch is not None:
                 return epoch
         return None
+
+    def _entry_known_at_visible(self, entry: Mapping[str, Any], current_epoch: int) -> bool:
+        known_at = self._first_epoch_from(entry, ("known_at", "knownAt"))
+        if known_at is None:
+            return True
+        return known_at <= current_epoch

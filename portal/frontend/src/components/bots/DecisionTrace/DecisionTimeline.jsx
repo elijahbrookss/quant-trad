@@ -15,13 +15,15 @@ export default function DecisionTimeline({ decisions = [], trades = [], executio
   const timelineEntries = useMemo(() => {
     const decisionEntries = decisions.map((decision) => ({
       kind: decision.decision === 'accepted' ? 'accepted' : decision.decision === 'rejected' ? 'rejected' : 'signal',
-      time: decision.bar_time,
+      time: decision.trade_time || decision.chart_time || decision.bar_time || decision.timestamp,
+      chartTime: decision.chart_time || decision.bar_time,
       decision,
     }));
 
     const executionEntries = executionEvents.map((event) => ({
       kind: 'execution',
-      time: event.event_time || event.bar_time || event.timestamp,
+      time: event.trade_time || event.event_time || event.bar_time || event.timestamp,
+      chartTime: event.chart_time || event.bar_time || event.event_time || event.timestamp,
       event,
     }));
 
@@ -48,7 +50,7 @@ export default function DecisionTimeline({ decisions = [], trades = [], executio
                 decision={decision}
                 trade={trade}
                 onClick={() =>
-                  onEventClick && onEventClick(decision.bar_time, decision.price, decision.symbol)
+                  onEventClick && onEventClick(entry.chartTime || entry.time, decision.price, decision.symbol)
                 }
               />
             );
@@ -61,7 +63,7 @@ export default function DecisionTimeline({ decisions = [], trades = [], executio
                 key={decision.id || `decision-${idx}`}
                 decision={decision}
                 onClick={() =>
-                  onEventClick && onEventClick(decision.bar_time, decision.price, decision.symbol)
+                  onEventClick && onEventClick(entry.chartTime || entry.time, decision.price, decision.symbol)
                 }
               />
             );
@@ -73,7 +75,7 @@ export default function DecisionTimeline({ decisions = [], trades = [], executio
               <ExecutionEventCard
                 key={event.id || `execution-${idx}`}
                 event={event}
-                onClick={() => onEventClick && onEventClick(entry.time, event.price, event.symbol)}
+                onClick={() => onEventClick && onEventClick(entry.chartTime || entry.time, event.price, event.symbol)}
               />
             );
           }
@@ -84,7 +86,7 @@ export default function DecisionTimeline({ decisions = [], trades = [], executio
               key={decision.id || `signal-${idx}`}
               decision={decision}
               onClick={() =>
-                onEventClick && onEventClick(decision.bar_time, decision.price, decision.symbol)
+                onEventClick && onEventClick(entry.chartTime || entry.time, decision.price, decision.symbol)
               }
             />
           );

@@ -233,6 +233,14 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
             record.contract_size = meta.get("contract_size")
             record.min_order_size = meta.get("min_order_size")
             record.quote_currency = meta.get("quote_currency")
+            if "can_short" in meta:
+                record.can_short = bool(meta.get("can_short"))
+            if "short_requires_borrow" in meta:
+                record.short_requires_borrow = bool(meta.get("short_requires_borrow"))
+            if "has_funding" in meta:
+                record.has_funding = bool(meta.get("has_funding"))
+            if "expiry_ts" in meta:
+                record.expiry_ts = meta.get("expiry_ts")
             record.maker_fee_rate = meta.get("maker_fee_rate")
             record.taker_fee_rate = meta.get("taker_fee_rate")
             record.extra_metadata = dict(meta.get("metadata") or {})

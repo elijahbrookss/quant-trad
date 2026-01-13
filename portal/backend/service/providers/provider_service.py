@@ -117,7 +117,13 @@ def venue_from_exchange_slug(exchange: Optional[str]) -> Optional[str]:
     return None
 
 
-def tick_metadata(provider_id: Optional[str], venue_id: Optional[str], symbol: Optional[str], timeframe: Optional[str] = None) -> Dict[str, Any]:
+def tick_metadata(
+    provider_id: Optional[str],
+    venue_id: Optional[str],
+    symbol: Optional[str],
+    timeframe: Optional[str] = None,
+    refresh: bool = False,
+) -> Dict[str, Any]:
     """Return tick metadata for the given market selection."""
 
     _, errors, normalized = validate_provider_venue(provider_id, venue_id)
@@ -133,14 +139,15 @@ def tick_metadata(provider_id: Optional[str], venue_id: Optional[str], symbol: O
     error: Optional[str] = None
     # Always re-validate Alpaca instruments so asset-class checks (e.g., futures vs. equities)
     # surface immediately during the symbol step.
-    force_validate = (datasource or "").upper() == "ALPACA"
-    if not instrument or force_validate:
+    force_validate = (datasource or "").upper() in {"ALPACA", "CCXT"}
+    if refresh or not instrument or force_validate:
         instrument, error = instrument_service.validate_instrument(
             datasource,
             exchange,
             normalized_symbol,
             provider_id=normalized.get("provider_id"),
             venue_id=normalized.get("venue_id"),
+            force_refresh=refresh,
         )
 
     if error:
@@ -152,6 +159,13 @@ def tick_metadata(provider_id: Optional[str], venue_id: Optional[str], symbol: O
         "tick_size": instrument.get("tick_size"),
         "tick_value": instrument.get("tick_value"),
         "contract_size": instrument.get("contract_size"),
+        "can_short": instrument.get("can_short"),
+        "short_requires_borrow": instrument.get("short_requires_borrow"),
+        "has_funding": instrument.get("has_funding"),
+        "expiry_ts": instrument.get("expiry_ts"),
+        "currency": instrument.get("quote_currency"),
+        "quote_currency": instrument.get("quote_currency"),
+        "base_currency": (instrument.get("metadata") or {}).get("base_currency"),
     }
     if instrument.get("instrument_type"):
         metadata["instrument_type"] = instrument.get("instrument_type")

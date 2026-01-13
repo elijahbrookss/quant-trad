@@ -205,6 +205,11 @@ class IndicatorInstanceUpdater:
         meta = build_meta_from_record(record, ctx=self._ctx)
         if type_str != meta["type"]:
             raise ValueError("Cannot change indicator type; create a new instance instead")
+        logger.info(
+            "event=indicator_update_start indicator_id=%s type=%s",
+            inst_id,
+            type_str,
+        )
 
         # Check if only color/name changed (no params change)
         # This avoids expensive rebuild when user just updates color
@@ -236,6 +241,11 @@ class IndicatorInstanceUpdater:
                 else meta_payload
             )
             # Cache removed: instances are now built fresh from DB on each access
+            logger.info(
+                "event=indicator_update_complete indicator_id=%s type=%s mode=color_only",
+                inst_id,
+                type_str,
+            )
             return persisted_meta
 
         # Full rebuild path: params changed
@@ -264,6 +274,11 @@ class IndicatorInstanceUpdater:
         )
         persisted_meta = self._persist_and_cache(inst_id, instance, meta_payload)
         # REMOVED: refresh_strategy_links call - strategies load indicators fresh from DB
+        logger.info(
+            "event=indicator_update_complete indicator_id=%s type=%s mode=rebuild",
+            inst_id,
+            type_str,
+        )
         return persisted_meta
 
     def _get_cached_instance(self, inst_id: str):
@@ -365,6 +380,8 @@ class IndicatorInstanceUpdater:
     ) -> Dict[str, Any]:
         purge_breakout_cache = self._ctx.breakout_cache.purge_indicator
         purge_breakout_cache(inst_id)
+        purge_overlay_cache = self._ctx.overlay_cache.purge_indicator
+        purge_overlay_cache(inst_id)
         meta_payload = dict(meta)
         meta_payload["params"] = runtime_params
         if name:

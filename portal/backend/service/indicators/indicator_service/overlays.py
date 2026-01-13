@@ -13,6 +13,7 @@ from .utils import (
     normalize_exchange,
     resolve_data_provider,
     sanitize_json,
+    scrub_runtime_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,9 +52,26 @@ class IndicatorOverlayBuilder:
             entry.meta.get("type"),
         )
         sym = self._resolve_symbol(entry, symbol)
-        provider, data_ctx = self._prepare_provider(
+        provider, data_ctx, effective_datasource, effective_exchange = self._prepare_provider(
             entry.meta, sym, start, end, interval, datasource, exchange
         )
+        cache_enabled = self._ctx.overlay_cache.is_enabled(entry.meta.get("type"))
+        cached_payload = self._maybe_fetch_cached(
+            inst_id,
+            entry,
+            sym,
+            interval,
+            data_ctx.start,
+            data_ctx.end,
+            effective_datasource,
+            effective_exchange,
+            overlay_options,
+        )
+        if cached_payload is not None:
+            logger.info("event=overlay_cache_hit indicator_id=%s", inst_id)
+            return cached_payload
+        if cache_enabled:
+            logger.info("event=overlay_cache_miss indicator_id=%s", inst_id)
         logger.info(
             "event=overlay_provider_prepared indicator_id=%s data_start=%s data_end=%s",
             inst_id,
@@ -91,6 +109,18 @@ class IndicatorOverlayBuilder:
         )
         self._validate_payload(payload)
         self._log_counts(inst_id, payload, raw_payload)
+        self._maybe_store_cached(
+            inst_id,
+            entry,
+            sym,
+            interval,
+            data_ctx.start,
+            data_ctx.end,
+            effective_datasource,
+            effective_exchange,
+            overlay_options,
+            payload,
+        )
         logger.info(
             "event=overlay_build_complete indicator_id=%s",
             inst_id,
@@ -208,7 +238,76 @@ class IndicatorOverlayBuilder:
                 )
 
         data_ctx = DataContext(symbol=symbol, start=effective_start, end=end, interval=interval)
-        return provider, data_ctx
+        return provider, data_ctx, effective_datasource, effective_exchange
+
+    def _maybe_fetch_cached(
+        self,
+        inst_id: str,
+        entry: Any,
+        symbol: str,
+        interval: str,
+        start: str,
+        end: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        overlay_options: Optional[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        cache = self._ctx.overlay_cache
+        indicator_type = entry.meta.get("type") if entry else None
+        if not cache or not cache.is_enabled(indicator_type):
+            return None
+        signature = cache.build_signature(
+            scrub_runtime_params(entry.meta.get("params") or {}),
+            overlay_options,
+        )
+        cache_key = cache.build_cache_key(
+            inst_id,
+            str(indicator_type),
+            symbol,
+            interval,
+            start,
+            end,
+            datasource=datasource,
+            exchange=exchange,
+            signature=signature,
+            updated_at=getattr(entry, "updated_at", ""),
+        )
+        return cache.get(cache_key)
+
+    def _maybe_store_cached(
+        self,
+        inst_id: str,
+        entry: Any,
+        symbol: str,
+        interval: str,
+        start: str,
+        end: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        overlay_options: Optional[Mapping[str, Any]],
+        payload: Mapping[str, Any],
+    ) -> None:
+        cache = self._ctx.overlay_cache
+        indicator_type = entry.meta.get("type") if entry else None
+        if not cache or not cache.is_enabled(indicator_type):
+            return
+        signature = cache.build_signature(
+            scrub_runtime_params(entry.meta.get("params") or {}),
+            overlay_options,
+        )
+        cache_key = cache.build_cache_key(
+            inst_id,
+            str(indicator_type),
+            symbol,
+            interval,
+            start,
+            end,
+            datasource=datasource,
+            exchange=exchange,
+            signature=signature,
+            updated_at=getattr(entry, "updated_at", ""),
+        )
+        cache.set(cache_key, payload)
 
     def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):
         logger.info(

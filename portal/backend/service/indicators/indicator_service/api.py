@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -15,8 +16,11 @@ from .utils import (
     ensure_color,
     load_indicator_record,
     purge_breakout_cache,
+    purge_overlay_cache,
 )
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
+
+logger = logging.getLogger(__name__)
 
 
 def list_types(*, ctx: IndicatorServiceContext = _context) -> List[str]:
@@ -82,6 +86,8 @@ def delete_instance(inst_id: str, *, ctx: IndicatorServiceContext = _context) ->
     load_indicator_record(inst_id, ctx=ctx)
     # Cache removed: no eviction needed
     purge_breakout_cache(inst_id, ctx=ctx)
+    purge_overlay_cache(inst_id, ctx=ctx)
+    logger.info("event=indicator_delete indicator_id=%s", inst_id)
     ctx.repository.delete(inst_id)
 
 
@@ -128,6 +134,11 @@ def bulk_delete_instances(inst_ids: Sequence[str], *, ctx: IndicatorServiceConte
         except KeyError:
             continue
     return removed
+
+
+def clear_overlay_cache(*, ctx: IndicatorServiceContext = _context) -> None:
+    ctx.overlay_cache.clear()
+    logger.info("event=indicator_overlay_cache_cleared")
 
 
 def create_instance(
@@ -339,6 +350,7 @@ __all__ = [
     "set_instance_enabled",
     "bulk_set_enabled",
     "bulk_delete_instances",
+    "clear_overlay_cache",
     "list_instances_meta",
     "get_instance_meta",
     "list_indicator_strategies",

@@ -70,6 +70,13 @@ def _detect_value_area_retest(
         )
         return None
 
+    formed_at = breakout_meta.get("formed_at") or breakout_meta.get("session_end") or breakout_meta.get("value_area_end")
+    formed_at_ts = normalise_meta_timestamp(formed_at, getattr(df.index, "tz", None))
+    if formed_at_ts is not None:
+        formed_idx = resolve_index_position(df.index, formed_at_ts)
+        if isinstance(formed_idx, int) and formed_idx > start_idx:
+            start_idx = formed_idx
+
     slice_start = 0
     value_area_start_index = breakout_meta.get("value_area_start_index")
     if isinstance(value_area_start_index, int):
@@ -238,6 +245,12 @@ def _detect_value_area_retest(
     metadata["pattern_id"] = canonical_pattern
     metadata["rule_aliases"] = sorted(alias_values)
     metadata["pattern_aliases"] = sorted(alias_values)
+    formed_at = breakout_meta.get("formed_at") or breakout_meta.get("session_end") or breakout_meta.get("value_area_end")
+    if formed_at is not None:
+        metadata["formed_at"] = formed_at
+        metadata["known_at"] = formed_at
+        enriched["formed_at"] = formed_at
+        enriched["known_at"] = formed_at
     enriched["metadata"] = metadata
 
     return enriched
@@ -336,5 +349,3 @@ RETEST_PATTERN = SignalPattern(
     evaluator=_value_area_retest_evaluator,
     rule_id="market_profile_retest",
 )
-
-

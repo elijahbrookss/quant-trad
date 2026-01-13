@@ -59,7 +59,12 @@ def merge_profiles(
     merged = []
     i, n = 0, len(profiles)
 
-    logger.info("Starting merge of value areas: threshold=%.2f, min_merge=%d", threshold, min_sessions)
+    logger.info(
+        "event=market_profile_merge_start threshold=%.2f min_merge_sessions=%d profiles=%d",
+        threshold,
+        min_sessions,
+        len(profiles),
+    )
 
     while i < n:
         base = profiles[i]
@@ -71,16 +76,30 @@ def merge_profiles(
         count = 1
         j = i + 1
 
-        logger.debug("Merging from profile %d (start: %s)", i, start_ts)
+        logger.debug(
+            "event=market_profile_merge_group_start index=%d start=%s",
+            i,
+            start_ts,
+        )
 
         # Merge consecutive profiles that overlap
         while j < n:
             next_prof = profiles[j]
             overlap = calculate_overlap(merged_val, merged_vah, next_prof.val, next_prof.vah)
-            logger.debug("Checking overlap with profile %d: overlap=%.2f (threshold=%.2f)", j, overlap, threshold)
+            logger.debug(
+                "event=market_profile_merge_overlap_check index=%d overlap=%.2f threshold=%.2f",
+                j,
+                overlap,
+                threshold,
+            )
 
             if overlap < threshold:
-                logger.debug("Overlap below threshold, stopping merge at profile %d", j)
+                logger.debug(
+                    "event=market_profile_merge_overlap_stop index=%d overlap=%.2f threshold=%.2f",
+                    j,
+                    overlap,
+                    threshold,
+                )
                 break
 
             # Expand boundaries
@@ -106,13 +125,28 @@ def merge_profiles(
             merged.append(merged_profile)
 
             logger.info(
-                "Merged %d profiles: [%s → %s], VAL=%.{prec}f, VAH=%.{prec}f, avg POC=%.{prec}f".replace("{prec}", str(base.precision)),
-                count, start_ts, end_ts, merged_val, merged_vah, avg_poc
+                "event=market_profile_merge_group_complete sessions=%d start=%s end=%s val=%.{prec}f vah=%.{prec}f poc=%.{prec}f".replace(
+                    "{prec}",
+                    str(base.precision),
+                ),
+                count,
+                start_ts,
+                end_ts,
+                merged_val,
+                merged_vah,
+                avg_poc,
             )
         else:
-            logger.debug("Merge group too small (%d < %d), skipping", count, min_sessions)
+            logger.debug(
+                "event=market_profile_merge_group_skipped sessions=%d min_merge_sessions=%d",
+                count,
+                min_sessions,
+            )
 
         i = j
 
-    logger.info("Completed merging. Total merged profiles: %d", len(merged))
+    logger.info(
+        "event=market_profile_merge_complete merged_profiles=%d",
+        len(merged),
+    )
     return merged

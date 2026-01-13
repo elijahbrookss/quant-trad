@@ -43,6 +43,14 @@ export function describeLog(entry) {
     const price = Number(entry.price)
     parts.push(Number.isFinite(price) ? `@ ${price.toFixed(4)}` : `@ ${entry.price}`)
   }
+  if (entry.pnl !== undefined && entry.pnl !== null) {
+    const pnlValue = Number(entry.pnl)
+    if (Number.isFinite(pnlValue)) {
+      const formatted = pnlValue.toFixed(2)
+      const suffix = entry.currency ? ` ${entry.currency}` : ''
+      parts.push(`pnl: ${formatted}${suffix}`)
+    }
+  }
   if (entry.reason) parts.push(String(entry.reason).replace(/_/g, ' '))
   if (entry.targets && Array.isArray(entry.targets)) {
     parts.push(`targets: ${entry.targets.map((t) => t.name).join(', ')}`)

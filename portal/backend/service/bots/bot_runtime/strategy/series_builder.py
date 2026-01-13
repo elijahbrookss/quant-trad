@@ -7,10 +7,11 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ....risk.atm import merge_templates
-from engines.bot_runtime.adapters import BacktestAdapter, PerpExecutionAdapter
+from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
 from engines.bot_runtime.core.domain import (
     Candle,
     LadderRiskEngine,
@@ -61,11 +62,13 @@ class SeriesBuilder:
         config: Mapping[str, Any],
         run_type: str,
         log_candle_sequence: Optional[callable] = None,
+        indicator_ctx: Optional[Any] = None,
     ):
         self.bot_id = bot_id
         self.config = config
         self.run_type = run_type
         self._log_candle_sequence = log_candle_sequence
+        self._indicator_ctx = indicator_ctx
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
@@ -298,6 +301,13 @@ class SeriesBuilder:
                 instrument_payload = evaluation
             # Log what we got back
             chart_markers = instrument_payload.get("chart_markers", {}) if isinstance(instrument_payload, dict) else {}
+            if isinstance(instrument_payload, dict):
+                walk_forward_markers = self._build_walk_forward_markers(
+                    strategy,
+                    instrument_payload.get("indicator_results") or {},
+                )
+                if walk_forward_markers is not None:
+                    chart_markers = walk_forward_markers
             result_context = self._strategy_log_context(
                 strategy,
                 buy_markers=len(chart_markers.get("buy", [])),
@@ -312,6 +322,181 @@ class SeriesBuilder:
 
         return instrument_payload if isinstance(instrument_payload, dict) else evaluation
 
+    def _build_walk_forward_markers(
+        self,
+        strategy: Any,
+        indicator_payloads: Mapping[str, Any],
+    ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+        if not isinstance(indicator_payloads, Mapping):
+            return None
+        from strategies import evaluator, markers
+
+        signals_by_indicator: Dict[str, List[Dict[str, Any]]] = {}
+        all_epochs: Set[int] = set()
+        for indicator_id, payload in indicator_payloads.items():
+            if not isinstance(payload, Mapping):
+                continue
+            signals = payload.get("signals")
+            if not isinstance(signals, Sequence):
+                continue
+            cleaned: List[Dict[str, Any]] = []
+            for signal in signals:
+                if not isinstance(signal, Mapping):
+                    continue
+                epoch = evaluator._extract_signal_epoch(signal)
+                if epoch is None:
+                    continue
+                cleaned.append(dict(signal))
+                all_epochs.add(epoch)
+            if cleaned:
+                cleaned.sort(key=lambda entry: evaluator._extract_signal_epoch(entry) or 0)
+                signals_by_indicator[str(indicator_id)] = cleaned
+
+        if not all_epochs:
+            return {"buy": [], "sell": []}
+
+        sorted_epochs = sorted(all_epochs)
+        buy_results: List[Dict[str, Any]] = []
+        sell_results: List[Dict[str, Any]] = []
+        emitted: Set[Tuple[str, int, Optional[str]]] = set()
+
+        for epoch in sorted_epochs:
+            filtered_payloads: Dict[str, Dict[str, Any]] = {}
+            for indicator_id, signals in signals_by_indicator.items():
+                filtered = [
+                    signal
+                    for signal in signals
+                    if (evaluator._extract_signal_epoch(signal) or 0) <= epoch
+                    and self._signal_known_at_epoch(signal) <= epoch
+                ]
+                payload = indicator_payloads.get(indicator_id) or {}
+                if isinstance(payload, Mapping):
+                    payload_copy = dict(payload)
+                else:
+                    payload_copy = {}
+                payload_copy["signals"] = filtered
+                filtered_payloads[indicator_id] = payload_copy
+
+            for rule in getattr(strategy, "rules", {}).values():
+                result = self._evaluate_rule_payload(rule, filtered_payloads)
+                if not result:
+                    continue
+                if not result.get("matched"):
+                    continue
+                terminal_signal = result.get("signal")
+                if not isinstance(terminal_signal, Mapping):
+                    continue
+                terminal_epoch = evaluator._extract_signal_epoch(terminal_signal)
+                if terminal_epoch is None or terminal_epoch != epoch:
+                    continue
+                dedupe_key = (result.get("rule_id") or "", terminal_epoch, result.get("direction"))
+                if dedupe_key in emitted:
+                    continue
+                emitted.add(dedupe_key)
+                payload = dict(result)
+                payload["signals"] = [terminal_signal]
+                if result.get("action") == "buy":
+                    buy_results.append(payload)
+                elif result.get("action") == "sell":
+                    sell_results.append(payload)
+
+        return markers.build_chart_markers(buy_results, sell_results)
+
+    @staticmethod
+    def _evaluate_rule_payload(
+        rule_payload: Any,
+        indicator_payloads: Mapping[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        from strategies import evaluator
+
+        if hasattr(rule_payload, "evaluate"):
+            return rule_payload.evaluate(indicator_payloads)
+        if not isinstance(rule_payload, Mapping):
+            return None
+
+        matched = False
+        reason: Optional[str] = None
+        condition_results: List[Dict[str, Any]] = []
+        trigger_signals: List[Dict[str, Any]] = []
+
+        enabled = rule_payload.get("enabled", True)
+        conditions = rule_payload.get("conditions") or []
+        if not enabled:
+            reason = "Rule disabled"
+        elif not conditions:
+            reason = "Rule has no conditions"
+        else:
+            match_results: List[bool] = []
+            for condition in conditions:
+                if not isinstance(condition, Mapping):
+                    continue
+                condition_obj = SimpleNamespace(
+                    indicator_id=condition.get("indicator_id"),
+                    signal_type=condition.get("signal_type"),
+                    rule_id=condition.get("rule_id"),
+                    direction=condition.get("direction"),
+                )
+                result = evaluator._evaluate_condition(condition_obj, indicator_payloads)
+                condition_results.append(result)
+                match_results.append(result.get("matched"))
+                if result.get("matched"):
+                    signals = result.get("signals") or []
+                    if signals:
+                        trigger_signals.extend(signals)
+                    elif result.get("signal"):
+                        trigger_signals.append(result.get("signal"))
+
+            match_mode = str(rule_payload.get("match") or "all").lower()
+            if match_mode == "any":
+                matched = any(match_results)
+            else:
+                matched = bool(match_results) and all(match_results)
+
+            if not matched and not reason:
+                reason = "No matching signals"
+
+        direction = None
+        if trigger_signals:
+            direction = evaluator._infer_signal_direction(trigger_signals[-1])
+
+        return {
+            "rule_id": rule_payload.get("id"),
+            "rule_name": rule_payload.get("name"),
+            "action": rule_payload.get("action"),
+            "matched": matched,
+            "conditions": condition_results,
+            "signals": trigger_signals if matched else [],
+            "direction": direction,
+            "reason": reason,
+        }
+
+    @staticmethod
+    def _signal_known_at_epoch(signal: Mapping[str, Any]) -> int:
+        from strategies import evaluator
+
+        metadata = signal.get("metadata") if isinstance(signal, Mapping) else None
+        candidates = []
+        if isinstance(metadata, Mapping):
+            for key in (
+                "known_at",
+                "formed_at",
+                "session_end",
+                "value_area_end",
+                "profile_end",
+                "va_end",
+            ):
+                if key in metadata:
+                    candidates.append(metadata.get(key))
+        if "known_at" in signal:
+            candidates.append(signal.get("known_at"))
+        if "formed_at" in signal:
+            candidates.append(signal.get("formed_at"))
+        for value in candidates:
+            epoch = evaluator._iso_to_epoch_seconds(value)
+            if epoch is not None:
+                return epoch
+        return 0
+
     def _build_atm_template_with_instrument(
         self,
         strategy: Strategy,
@@ -322,15 +507,16 @@ class SeriesBuilder:
         template_meta = atm_template.get("_meta") if isinstance(atm_template.get("_meta"), dict) else {}
 
         def _apply_instrument_field(field: str) -> None:
-            """Apply instrument field to template if not overridden."""
-            if template_meta.get(f"{field}_override"):
-                return
+            """Always apply instrument field to template to avoid stale overrides."""
             if not instrument:
                 return
             value = instrument.get(field)
             if value is None:
+                atm_template.pop(field, None)
+                template_meta.pop(f"{field}_override", None)
                 return
             atm_template[field] = value
+            template_meta.pop(f"{field}_override", None)
 
         # Apply instrument fields to template
         for field_name in (
@@ -342,6 +528,17 @@ class SeriesBuilder:
             "quote_currency",
         ):
             _apply_instrument_field(field_name)
+
+        risk = atm_template.get("risk") if isinstance(atm_template.get("risk"), dict) else {}
+        if strategy.base_risk_per_trade is not None:
+            risk["base_risk_per_trade"] = strategy.base_risk_per_trade
+        if strategy.global_risk_multiplier is not None:
+            risk["global_risk_multiplier"] = strategy.global_risk_multiplier
+        if risk:
+            atm_template["risk"] = risk
+
+        if template_meta:
+            atm_template["_meta"] = template_meta
 
         return atm_template
 
@@ -534,24 +731,7 @@ class SeriesBuilder:
 
         # Step 5: Create risk engine and assemble series
         risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
-        if risk_engine.instrument_type == "spot":
-            risk_engine.attach_execution_adapter(
-                BacktestAdapter(
-                    tick_size=risk_engine.tick_size,
-                    qty_step=risk_engine.qty_step,
-                    min_qty=risk_engine.min_qty,
-                    min_notional=risk_engine.min_notional,
-                )
-            )
-        elif risk_engine.instrument_type:
-            risk_engine.attach_execution_adapter(
-                PerpExecutionAdapter(
-                    tick_size=risk_engine.tick_size,
-                    qty_step=risk_engine.qty_step,
-                    min_qty=risk_engine.min_qty,
-                    min_notional=risk_engine.min_notional,
-                )
-            )
+        self._attach_execution_adapter(risk_engine, instrument)
 
         # Convert strategy to dict for backward compatibility with meta field
         series_meta = strategy.to_dict()
@@ -567,6 +747,16 @@ class SeriesBuilder:
         )
         logger.info(with_log_context("bot_runtime_series_ready", ready_context))
 
+        overlay_entries = self._indicator_overlay_entries(
+            series_meta,  # Use dict for backward compatibility
+            start_iso,
+            end_iso,
+            timeframe,
+            symbol,
+            datasource,
+            exchange,
+        )
+        overlays = overlays + overlay_entries
         return StrategySeries(
             strategy_id=strategy.id,
             name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
@@ -576,16 +766,7 @@ class SeriesBuilder:
             exchange=exchange,
             candles=candles,
             signals=signals,
-            overlays=overlays
-            + self._indicator_overlay_entries(
-                series_meta,  # Use dict for backward compatibility
-                start_iso,
-                end_iso,
-                timeframe,
-                symbol,
-                datasource,
-                exchange,
-            ),
+            overlays=overlays,
             risk_engine=risk_engine,
             window_start=start_iso,
             window_end=end_iso,
@@ -593,6 +774,101 @@ class SeriesBuilder:
             instrument=instrument,
             atm_template=atm_template,
         )
+
+    @staticmethod
+    def _overlay_summary(overlays: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        type_counts: Dict[str, int] = {}
+        payload_counts = {
+            "boxes": 0,
+            "markers": 0,
+            "price_lines": 0,
+            "polylines": 0,
+            "segments": 0,
+            "bubbles": 0,
+        }
+        profile_counts: Dict[str, int] = {}
+        profile_params_present: Dict[str, int] = {}
+        for overlay in overlays or []:
+            if not isinstance(overlay, Mapping):
+                continue
+            overlay_type = str(overlay.get("type") or "unknown")
+            type_counts[overlay_type] = type_counts.get(overlay_type, 0) + 1
+            payload = overlay.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            profiles = payload.get("profiles")
+            if isinstance(profiles, list):
+                profile_counts[overlay_type] = profile_counts.get(overlay_type, 0) + len(profiles)
+            if "profile_params" in payload:
+                profile_params_present[overlay_type] = profile_params_present.get(overlay_type, 0) + 1
+            for key in payload_counts.keys():
+                entries = payload.get(key)
+                if isinstance(entries, list):
+                    payload_counts[key] += len(entries)
+        return {
+            "total_overlays": len(overlays or []),
+            "type_counts": type_counts,
+            "payload_counts": payload_counts,
+            "profile_counts": profile_counts,
+            "profile_params_present": profile_params_present,
+        }
+
+    def _attach_execution_adapter(self, risk_engine: LadderRiskEngine, instrument: Optional[Dict[str, Any]]) -> None:
+        if not instrument:
+            raise ValueError("Instrument metadata is required to attach execution adapter.")
+        short_requires_borrow = instrument.get("short_requires_borrow")
+        if short_requires_borrow is None:
+            raise ValueError("Instrument metadata missing short_requires_borrow for execution adapter selection.")
+
+        adapter = self._adapter_for_run_type(
+            short_requires_borrow=bool(short_requires_borrow),
+            tick_size=risk_engine.tick_size,
+            qty_step=risk_engine.qty_step,
+            min_qty=risk_engine.min_qty,
+            min_notional=risk_engine.min_notional,
+            contract_size=risk_engine.contract_size,
+        )
+        risk_engine.attach_execution_adapter(adapter)
+
+    def _adapter_for_run_type(
+        self,
+        *,
+        short_requires_borrow: bool,
+        tick_size: float,
+        qty_step: Optional[float],
+        min_qty: Optional[float],
+        min_notional: Optional[float],
+        contract_size: float,
+    ):
+        if self.run_type == "backtest":
+            return BacktestAdapter(
+                tick_size=tick_size,
+                qty_step=qty_step,
+                min_qty=min_qty,
+                min_notional=min_notional,
+                contract_size=contract_size,
+                short_requires_borrow=short_requires_borrow,
+            )
+        if self.run_type == "paper":
+            return PaperAdapter(
+                tick_size=tick_size,
+                qty_step=qty_step,
+                min_qty=min_qty,
+                min_notional=min_notional,
+                contract_size=contract_size,
+                short_requires_borrow=short_requires_borrow,
+            )
+        if self.run_type == "live":
+            spot_adapter = self.config.get("spot_execution_adapter")
+            derivatives_adapter = self.config.get("derivatives_execution_adapter")
+            if not spot_adapter and not derivatives_adapter:
+                raise ValueError("Live execution requires spot_execution_adapter or derivatives_execution_adapter.")
+            return LiveAdapter(
+                short_requires_borrow=short_requires_borrow,
+                spot_adapter=spot_adapter,
+                derivatives_adapter=derivatives_adapter,
+            )
+        raise ValueError(f"Unsupported run_type '{self.run_type}' for execution adapter selection.")
 
     def _instrument_for(
         self,
@@ -648,7 +924,12 @@ class SeriesBuilder:
 
             # Load fresh indicator metadata from DB (no snapshots)
             try:
-                indicator_meta = indicator_service.get_instance_meta(indicator_id)
+                if self._indicator_ctx is None:
+                    indicator_meta = indicator_service.get_instance_meta(indicator_id)
+                else:
+                    indicator_meta = indicator_service.get_instance_meta(
+                        indicator_id, ctx=self._indicator_ctx
+                    )
             except KeyError:
                 context = self._runtime_log_context(indicator_id=indicator_id)
                 logger.warning(with_log_context("bot_overlay_indicator_not_found", context))
@@ -739,16 +1020,29 @@ class SeriesBuilder:
             )
             logger.info(with_log_context("bot_overlay_request", request_context))
             try:
-                payload = indicator_service.overlays_for_instance(
-                    indicator_id,
-                    start=start_iso,
-                    end=end_iso,
-                    interval=str(interval),
-                    symbol=window_symbol,
-                    datasource=ds,
-                    exchange=ex,
-                    overlay_options=overlay_options or None,
-                )
+                if self._indicator_ctx is None:
+                    payload = indicator_service.overlays_for_instance(
+                        indicator_id,
+                        start=start_iso,
+                        end=end_iso,
+                        interval=str(interval),
+                        symbol=window_symbol,
+                        datasource=ds,
+                        exchange=ex,
+                        overlay_options=overlay_options or None,
+                    )
+                else:
+                    payload = indicator_service.overlays_for_instance(
+                        indicator_id,
+                        start=start_iso,
+                        end=end_iso,
+                        interval=str(interval),
+                        symbol=window_symbol,
+                        datasource=ds,
+                        exchange=ex,
+                        overlay_options=overlay_options or None,
+                        ctx=self._indicator_ctx,
+                    )
                 received_context = self._runtime_log_context(
                     indicator_id=indicator_id,
                     boxes=len(payload.get("boxes", [])),
@@ -856,10 +1150,36 @@ class SeriesBuilder:
         logger.debug(with_log_context("build_signals_from_markers", context))
         for entry in buy_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
+            known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
+            if epoch is not None and known_at is not None and known_at > epoch:
+                logger.debug(
+                    with_log_context(
+                        "signal_known_at_delay",
+                        build_log_context(
+                            original_epoch=epoch,
+                            known_at=known_at,
+                            direction="long",
+                        ),
+                    )
+                )
+                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="long"))
         for entry in sell_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
+            known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
+            if epoch is not None and known_at is not None and known_at > epoch:
+                logger.debug(
+                    with_log_context(
+                        "signal_known_at_delay",
+                        build_log_context(
+                            original_epoch=epoch,
+                            known_at=known_at,
+                            direction="short",
+                        ),
+                    )
+                )
+                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="short"))
         queued.sort(key=lambda signal: signal.epoch)

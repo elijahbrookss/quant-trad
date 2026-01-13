@@ -53,6 +53,7 @@ def _build_markers_for_results(
             if not isinstance(signal, Mapping):
                 continue
             epoch = evaluator._extract_signal_epoch(signal)
+            known_at = _extract_known_at_epoch(signal)
             price = _extract_signal_price(signal)
             if epoch is None or price is None:
                 continue
@@ -74,10 +75,38 @@ def _build_markers_for_results(
                     "direction": direction,
                     "rule_id": res.get("rule_id"),
                     "position": "belowBar" if action == "buy" else "aboveBar",
+                    "known_at": known_at,
                 }
             )
 
     return markers
+
+
+def _extract_known_at_epoch(signal: Mapping[str, Any]) -> Optional[int]:
+    if not isinstance(signal, Mapping):
+        return None
+    metadata = signal.get("metadata")
+    candidates = []
+    if isinstance(metadata, Mapping):
+        for key in (
+            "known_at",
+            "formed_at",
+            "session_end",
+            "value_area_end",
+            "profile_end",
+            "va_end",
+        ):
+            if key in metadata:
+                candidates.append(metadata.get(key))
+    if "known_at" in signal:
+        candidates.append(signal.get("known_at"))
+    if "formed_at" in signal:
+        candidates.append(signal.get("formed_at"))
+    for value in candidates:
+        epoch = evaluator._iso_to_epoch_seconds(value)
+        if epoch is not None:
+            return epoch
+    return None
 
 
 def build_chart_markers(buy_signals: Sequence[Mapping[str, Any]], sell_signals: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
