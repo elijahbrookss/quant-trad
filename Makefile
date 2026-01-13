@@ -251,6 +251,21 @@ clean: ## Remove caches/build artifacts
 	@rm -rf .coverage htmlcov dist build $(PID_DIR) $(LOG_DIR) 2>/dev/null || true
 	@echo "🧹 Cleaned"
 
+## ============================ GRAFANA =================================== ##
+.PHONY: grafana-backup grafana-restore grafana-list
+grafana-backup: ## Backup all Grafana dashboards to JSON files
+	@echo "📊 Backing up Grafana dashboards..."
+	@bash scripts/backup-grafana-dashboards.sh
+
+grafana-restore: ## Restart Grafana to reload provisioned dashboards
+	@echo "🔄 Restarting Grafana to reload dashboards..."
+	@$(COMPOSE_CMD) --profile observability restart grafana
+	@echo "✅ Grafana restarted - dashboards will be provisioned from JSON files"
+
+grafana-list: ## List all current Grafana dashboards
+	@echo "📋 Current Grafana dashboards:"
+	@curl -s -u admin:admin http://localhost:3000/api/search?type=dash-db | jq -r '.[] | "  - \(.title) (uid: \(.uid))"' || echo "⚠️  Could not connect to Grafana"
+
 ## ============================= AUTOMATION ============================== ##
 .PHONY: changelog-pr
 changelog-pr: ## Generate changelog using the first open PR for the current branch (requires gh CLI)
