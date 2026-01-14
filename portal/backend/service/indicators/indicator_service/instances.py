@@ -382,6 +382,8 @@ class IndicatorInstanceUpdater:
         purge_breakout_cache(inst_id)
         purge_overlay_cache = self._ctx.overlay_cache.purge_indicator
         purge_overlay_cache(inst_id)
+        purge_incremental_cache = self._ctx.incremental_cache.purge_indicator
+        purge_incremental_cache(inst_id)
         meta_payload = dict(meta)
         meta_payload["params"] = runtime_params
         if name:

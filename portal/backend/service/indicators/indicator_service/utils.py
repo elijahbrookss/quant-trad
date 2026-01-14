@@ -111,6 +111,10 @@ def purge_overlay_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context
     ctx.overlay_cache.purge_indicator(inst_id)
 
 
+def purge_incremental_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
+    ctx.incremental_cache.purge_indicator(inst_id)
+
+
 def scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if not isinstance(params, Mapping):
         return {}

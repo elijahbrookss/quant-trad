@@ -1,138 +1,181 @@
-# Quant-Trad
+# quant-trad
 
-A practical quantitative trading bot with modular data pipelines, indicators, and strategy orchestration. This README focuses on getting the stack running quickly and keeping day-to-day workflows consistent.
+A modular quantitative trading platform for automated strategy development, backtesting, and live execution across equities, futures, and crypto markets.
 
-## Prerequisites
+## What is this?
 
-Install the following tools before you start:
+**quant-trad** is a framework for building and running algorithmic trading strategies with:
 
-- Python 3.10 or newer
-- Docker Desktop (or Docker Engine + Docker Compose plugin)
-- GNU Make
+- **Multi-asset support** - Trade equities (Alpaca), futures/options (Interactive Brokers), and crypto (CCXT exchanges)
+- **Modular indicators** - Composable technical indicators with incremental caching for performance
+- **Signal-driven architecture** - Define trading rules as signals that trigger on market conditions
+- **Walk-forward backtesting** - Test strategies on historical data with realistic execution simulation
+- **Live execution** - Deploy validated strategies to paper or live trading accounts
+- **Observability stack** - Grafana dashboards, Loki logs, and TimescaleDB for performance tracking
 
-## Initial Setup
+This is a **work in progress** but contributions are welcome from frontier developers comfortable with evolving APIs.
 
-1. Clone the repository and enter the project directory.
-   ```bash
-   git clone https://github.com/elijahbrookss/quant-trad.git
-   cd quant-trad
-   ```
-2. Create your secrets file from the provided template and add credentials (see [Secrets](#secrets)).
-   ```bash
-   cp secrets.env.example secrets.env
-   ```
+## Quick Start
 
-## Local (non-Docker) workflow
-
-Use this flow when you want to develop against the Python sources directly on your machine.
+**Prerequisites:** Docker, Python 3.10+, Make
 
 ```bash
-# Install Python and frontend dependencies in a virtual environment
-make local-setup
+# Clone and setup
+git clone https://github.com/elijahbrookss/quant-trad.git
+cd quant-trad
+cp secrets.env.example secrets.env  # Add your API keys
 
-# Start TimescaleDB + pgAdmin in Docker
-make local-db-up
+# Start the stack
+make build up
 
-# Launch the FastAPI backend and Vite frontend locally
-make api-start
-make frontend-start
+# View logs
+make logs SERVICE=backend
 ```
 
-Services run on:
-
-- API: http://localhost:8000
+**Services:**
 - Frontend: http://localhost:5173
-- TimescaleDB: `localhost:15432` (configurable via `TSDB_PORT`)
+- Backend API: http://localhost:8000
+- Grafana: http://localhost:3000
+- pgAdmin: http://localhost:8080
 
-When you are done, stop everything with:
+## Core Concepts
 
-```bash
-make frontend-stop
-make api-stop
-make local-db-stop
-```
+### 1. **Indicators**
+Technical indicators compute market signals from OHLCV data. They support:
+- **Incremental caching** - Reuse computed results across runs (e.g., cache daily profiles, only compute new days)
+- **Overlay rendering** - Generate chart overlays (boxes, markers, lines) for visualization
+- **Composition** - Combine simple indicators into complex strategies
 
-`make local-up` and `make local-stop` are convenience shortcuts that bundle the commands above.
+Example indicators: Market Profile (TPO), VWAP, Moving Averages, RSI
 
-## Docker Compose workflow
+### 2. **Signals**
+Signals represent trading events triggered by indicator conditions:
+- `breakout` - Price breaks through a key level
+- `retest` - Price returns to test a previous breakout level
+- `reversal` - Trend change detected
+- Custom signal types for strategy-specific logic
 
-Run the entire stack in containers when you want an isolated environment:
+### 3. **Strategies**
+Strategies orchestrate indicators and signals into complete trading systems:
+- Define entry/exit rules
+- Manage position sizing and risk
+- Handle multi-timeframe analysis
+- Track performance metrics
 
-```bash
-# Start backend, frontend, TimescaleDB, pgAdmin, Grafana, and Loki
-make stack-up                # or STACK_PROFILES=core/database/observability make stack-up
+### 4. **Data Providers**
+Pluggable data sources for market data:
+- **Alpaca** - Equities and crypto (US markets)
+- **Interactive Brokers** - Futures, options, global equities
+- **CCXT** - 100+ cryptocurrency exchanges
+- **TimescaleDB** - Local OHLCV storage with time-series optimization
 
-# Tail container logs as needed
-make stack-logs              # optional helper defined in the Makefile
+## Development Workflow
 
-# Stop or tear down the stack
-make stack-stop              # keep containers
-make stack-down              # remove containers
-```
-
-Docker Compose publishes the services on the same ports listed in the local workflow. Override `TSDB_PORT` if you need a different TimescaleDB port on the host.
-
-The core profile now bundles an Interactive Brokers (IBKR) gateway container that runs IB Gateway in headless mode using Xvfb and IBC. When you start the stack the backend can immediately reach `ibkr-gateway.quanttrad` on the internal network; no local TWS instance is required. The container exposes port `4002` for paper trading and `4001` for live trading, forwarding credentials and login automation parameters from `secrets.env`.
-
-The image is built locally from an Ubuntu base—no external container registry access is required. During the build Docker downloads the IBC bundle and the IB Gateway installer from their public release URLs; the defaults track IBC `3.19.1` and IB Gateway `10.25.2`. If Interactive Brokers publishes a newer build (or retires the defaults) override the URLs and versions via the optional environment variables surfaced in `docker/docker-compose.yml` (for example `IBKR_GATEWAY_DOWNLOAD_URL` or `IBKR_IBC_VERSION`) before running `make stack-build`.
-
-> **Weekly 2FA reminder** – IBKR still requires a mobile approval every seven days. Launch the mobile app and confirm the login prompt after the container boots or restarts, otherwise historical and live data requests will fail.
-
-### When to rebuild containers
-
-Use the rebuild flow whenever you need fresh Docker images that include new dependencies or base image updates:
-
-```bash
-make stack-rebuild           # rebuild images with --no-cache and restart
-```
-
-Trigger this after changing `requirements.txt`, updating frontend dependencies in `package.json`, or modifying Dockerfiles. For routine code edits that do not touch dependencies or build configuration, a normal `make stack-restart` is usually sufficient.
-
-## Secrets
-
-`secrets.env` is not committed to version control but is required for anything that touches live market data.
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `ALPACA_API_KEY` | ✅ | Alpaca trading API key for equities data/execution |
-| `ALPACA_SECRET_KEY` | ✅ | Alpaca secret key |
-| `CCXT_API_KEY` | Optional | Shared CCXT API key for crypto exchanges |
-| `CCXT_API_SECRET` | Optional | Shared CCXT secret |
-| `CCXT_PASSWORD` | Optional | Some exchanges (e.g., BitMEX) require an API password |
-| `CCXT_<EXCHANGE>_*` | Optional | Exchange-specific overrides (e.g., `CCXT_BINANCE_API_KEY`) |
-| `IB_HOST` | Optional | Hostname or IP for the Interactive Brokers gateway (defaults to `ibkr-gateway.quanttrad`) |
-| `IB_PORT` | Optional | IBKR API port (defaults to `4002` when using the managed gateway) |
-| `IB_CLIENT_ID` | Optional | Client identifier used when establishing the IBKR session |
-| `IBKR_TWS_USERNAME` | Optional | Username forwarded to the managed IB Gateway container |
-| `IBKR_TWS_PASSWORD` | Optional | Password forwarded to the managed IB Gateway container |
-| `IBKR_TRADING_MODE` | Optional | `paper` or `live`; forwarded to the Gateway container and backend |
-| `IBKR_READONLY_API` | Optional | `yes`/`no` toggle passed to the gateway controller (defaults to `yes`) |
-| `IBKR_ACCEPT_INCOMING_ACTION` | Optional | Duplicate session handling strategy (`accept` by default) |
-| `IBKR_EXISTING_SESSION_ACTION` | Optional | Action when another session is active (`primary` by default) |
-| `IBKR_GATEWAY_PORT` | Optional | Host port to expose for the paper gateway (defaults to `4002`) |
-| `IBKR_GATEWAY_LIVE_PORT` | Optional | Host port to expose for the live gateway (defaults to `4001`) |
-
-The file is mounted into the backend container automatically when you use Docker Compose.
-
-## Running tests and checks
+This project uses **Docker-based development** for consistency:
 
 ```bash
-# Full suite
-make test
+# Daily workflow
+make build up          # Build images and start stack
+make logs              # Watch all logs
+make restart BUILD=1   # Rebuild and restart
+make down              # Stop everything
 
-# Narrow scope
-make test-unit
-make test-integration
+# Testing
+make test              # Run test suite
+make fmt               # Format code
+make lint              # Check code quality
+
+# Database
+make ps                # Show running containers
 ```
 
-## Useful Make targets
+For detailed commands: `make help`
 
-| Target | Purpose |
-| --- | --- |
-| `make deps` | Install Python dependencies into `.venv` |
-| `make reset-venv` | Recreate the virtual environment |
-| `make db_cli` | Open a psql shell against TimescaleDB |
-| `make stack-ps` | Show running containers |
-| `make stack-restart` | Restart the selected Docker profiles |
+## Project Structure
 
-For more commands, run `make help`.
+```
+quant-trad/
+├── src/
+│   ├── indicators/          # Technical indicators with caching
+│   ├── signals/             # Signal generation and overlays
+│   ├── strategies/          # Trading strategy implementations
+│   ├── data_providers/      # Market data integrations
+│   └── core/                # Shared utilities
+├── portal/
+│   ├── backend/             # FastAPI application
+│   └── frontend/            # React/Vite UI
+├── docker/                  # Docker Compose services
+├── tests/                   # Test suite
+└── docs/                    # Additional documentation
+```
+
+## Configuration
+
+Create `secrets.env` with your API credentials:
+
+```bash
+# Required for equities
+ALPACA_API_KEY=your_key
+ALPACA_SECRET_KEY=your_secret
+
+# Optional: Interactive Brokers
+IBKR_TWS_USERNAME=your_username
+IBKR_TWS_PASSWORD=your_password
+IBKR_TRADING_MODE=paper  # or 'live'
+
+# Optional: Crypto exchanges (CCXT)
+CCXT_BINANCE_API_KEY=your_key
+CCXT_BINANCE_API_SECRET=your_secret
+```
+
+See [secrets.env.example](secrets.env.example) for all options.
+
+## Documentation
+
+For detailed guides on architecture, indicator development, backtesting, and deployment:
+
+**📚 [quant-trad.gitbook.io/docs](https://quant-trad.gitbook.io/docs/)**
+
+Topics covered:
+- Indicator caching system
+- Signal overlay rendering
+- Walk-forward backtesting methodology
+- Strategy development guide
+- Data provider integration
+- Production deployment
+
+## Contributing
+
+Contributions are welcome! This project is in active development and APIs may change.
+
+**Good first contributions:**
+- New indicator implementations
+- Data provider integrations
+- Strategy templates
+- Documentation improvements
+- Bug fixes and tests
+
+Before contributing:
+1. Read the [GitBook docs](https://quant-trad.gitbook.io/docs/) to understand the architecture
+2. Check existing issues and PRs
+3. Open an issue to discuss major changes
+4. Follow the existing code style (`make fmt lint`)
+5. Add tests for new features (`make test`)
+
+## Status
+
+⚠️ **Active Development** - APIs are stabilizing but expect breaking changes. Not recommended for production trading without thorough testing.
+
+Current focus areas:
+- Strategy backtesting framework
+- Real-time signal processing
+- Performance optimization (caching, database queries)
+- Production deployment tooling
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details
+
+---
+
+**Questions?** Check the [GitBook docs](https://quant-trad.gitbook.io/docs/) or open an issue.

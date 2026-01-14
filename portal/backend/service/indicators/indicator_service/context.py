@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ...providers.data_provider_resolver import DataProviderResolver, default_resolver
 from indicators.runtime.indicator_breakout_cache import IndicatorBreakoutCache, default_breakout_cache
 from indicators.runtime.indicator_overlay_cache import IndicatorOverlayCache, default_overlay_cache
+from indicators.runtime.incremental_cache import IncrementalCache, default_incremental_cache
 from ..indicator_factory import IndicatorFactory
 from ..indicator_repository import IndicatorRepository, default_repository
 from indicators.runtime.indicator_signal_runner import IndicatorSignalRunner, default_signal_runner
@@ -24,6 +25,7 @@ class IndicatorServiceContext:
     signal_runner: IndicatorSignalRunner
     breakout_cache: IndicatorBreakoutCache
     overlay_cache: IndicatorOverlayCache
+    incremental_cache: IncrementalCache
 
     @classmethod
     def default(cls) -> "IndicatorServiceContext":
@@ -39,6 +41,7 @@ class IndicatorServiceContext:
             signal_runner=default_signal_runner(),
             breakout_cache=default_breakout_cache(),
             overlay_cache=default_overlay_cache(),
+            incremental_cache=default_incremental_cache(),
         )
 
         # Inject context back into factory so it can attach signal catalogs
@@ -60,6 +63,7 @@ class IndicatorServiceContext:
             signal_runner=base.signal_runner,
             breakout_cache=base.breakout_cache,
             overlay_cache=overlay_cache,
+            incremental_cache=base.incremental_cache,
         )
         factory._ctx = context
         return context

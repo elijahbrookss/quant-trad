@@ -619,6 +619,11 @@ def market_profile_overlay_transformer(
     min_merge_sessions = params.get("min_merge_sessions")
     extend_to_end = bool(params.get("extend_value_area_to_chart_end"))
 
+    # Extract metadata for logging context
+    bot_id = overlay.get("bot_id") or payload.get("bot_id")
+    symbol = overlay.get("symbol") or payload.get("symbol")
+    strategy_id = overlay.get("strategy_id") or payload.get("strategy_id")
+
     known_profiles = []
     for entry in profiles:
         if not isinstance(entry, Mapping):
@@ -673,7 +678,12 @@ def market_profile_overlay_transformer(
             trimmed["payload"] = payload_copy
             return trimmed
         merged_profiles = merge_profiles(
-            known_profiles, float(merge_threshold), int(min_merge_sessions)
+            known_profiles,
+            float(merge_threshold),
+            int(min_merge_sessions),
+            bot_id=bot_id,
+            symbol=symbol,
+            strategy_id=strategy_id,
         )
     else:
         merged_profiles = known_profiles

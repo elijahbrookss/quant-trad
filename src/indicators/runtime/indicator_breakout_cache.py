@@ -102,6 +102,10 @@ class IndicatorBreakoutCache:
         merge_threshold: Any = None,
         min_merge_sessions: Any = None,
         extend_value_area_to_chart_end: Any = None,
+        profile_cache: Any = None,
+        inst_id: Optional[str] = None,
+        bot_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
     ) -> MarketProfileIndicator:
         """
         Clone market profile indicator for overlay rendering.
@@ -165,24 +169,47 @@ class IndicatorBreakoutCache:
 
             logger.info(
                 "event=market_profile_fresh_instance symbol=%s creating_symbol_specific_instance=True "
-                "bin_size=%s days_back=%s use_merged_value_areas=%s merge_threshold=%s min_merge_sessions=%s",
+                "bin_size=%s days_back=%s use_merged_value_areas=%s merge_threshold=%s min_merge_sessions=%s "
+                "incremental_cache=%s inst_id=%s",
                 symbol,
                 bin_size,
                 days_back,
                 params.use_merged_value_areas,
                 params.merge_threshold,
                 params.min_merge_sessions,
+                profile_cache is not None,
+                inst_id,
             )
-            runtime = MarketProfileIndicator.from_context(
-                provider=provider,
-                ctx=data_ctx,
-                bin_size=bin_size,
-                use_merged_value_areas=params.use_merged_value_areas,
-                merge_threshold=params.merge_threshold,
-                min_merge_sessions=params.min_merge_sessions,
-                extend_value_area_to_chart_end=extend_to_end,
-                days_back=days_back,
-            )
+
+            # Use incremental cache if available
+            if profile_cache is not None and inst_id is not None:
+                runtime = MarketProfileIndicator.from_context_with_incremental_cache(
+                    provider=provider,
+                    ctx=data_ctx,
+                    cache=profile_cache,
+                    inst_id=inst_id,
+                    bin_size=bin_size,
+                    use_merged_value_areas=params.use_merged_value_areas,
+                    merge_threshold=params.merge_threshold,
+                    min_merge_sessions=params.min_merge_sessions,
+                    extend_value_area_to_chart_end=extend_to_end,
+                    days_back=days_back,
+                    bot_id=bot_id,
+                    strategy_id=strategy_id,
+                )
+            else:
+                runtime = MarketProfileIndicator.from_context(
+                    provider=provider,
+                    ctx=data_ctx,
+                    bin_size=bin_size,
+                    use_merged_value_areas=params.use_merged_value_areas,
+                    merge_threshold=params.merge_threshold,
+                    min_merge_sessions=params.min_merge_sessions,
+                    extend_value_area_to_chart_end=extend_to_end,
+                    days_back=days_back,
+                    bot_id=bot_id,
+                    strategy_id=strategy_id,
+                )
             if interval is not None:
                 setattr(runtime, "interval", interval)
             return runtime

@@ -5,6 +5,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
+from indicators.runtime.incremental_cache_registry import is_incremental_cacheable
 
 from .context import IndicatorServiceContext, _context
 from .utils import (
@@ -93,6 +94,7 @@ class IndicatorOverlayBuilder:
             overlay_options,
             provider=provider,
             data_ctx=data_ctx,
+            indicator_type=entry.meta.get("type"),
         )
         logger.info(
             "event=overlay_indicator_built indicator_id=%s indicator_type=%s",
@@ -334,26 +336,46 @@ class IndicatorOverlayBuilder:
         *,
         provider=None,
         data_ctx: Optional[DataContext] = None,
+        indicator_type: Optional[str] = None,
     ):
+        """
+        Build an overlay-ready indicator instance.
+
+        For incremental-cacheable indicators with provider/data_ctx, creates a fresh instance
+        using cached data. Otherwise, returns the base instance.
+        """
         options = dict(overlay_options or {})
-        if isinstance(instance, MarketProfileIndicator) and hasattr(instance, "to_lightweight"):
-            mp_overrides = self._market_profile_overrides(options)
-            clone = self._ctx.breakout_cache.build_market_profile_overlay_indicator(
-                instance,
-                df,
-                interval=interval,
-                symbol=symbol,
-                provider=provider,
-                data_ctx=data_ctx,
-                **mp_overrides,
-            )
-            logger.debug(
-                "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s",
-                inst_id,
-                symbol,
-                interval,
-            )
-            return clone
+
+        # Check if this indicator supports incremental caching and needs a fresh instance
+        if (
+            indicator_type
+            and is_incremental_cacheable(indicator_type)
+            and provider is not None
+            and data_ctx is not None
+        ):
+            # Use the breakout cache to build the overlay indicator
+            # (it handles both breakout signals and incremental caching)
+            if isinstance(instance, MarketProfileIndicator) and hasattr(instance, "to_lightweight"):
+                mp_overrides = self._market_profile_overrides(options)
+                clone = self._ctx.breakout_cache.build_market_profile_overlay_indicator(
+                    instance,
+                    df,
+                    interval=interval,
+                    symbol=symbol,
+                    provider=provider,
+                    data_ctx=data_ctx,
+                    profile_cache=self._ctx.incremental_cache,
+                    inst_id=inst_id,
+                    **mp_overrides,
+                )
+                logger.debug(
+                    "event=indicator_overlay_runtime_clone indicator=%s symbol=%s interval=%s incremental_cacheable=True",
+                    inst_id,
+                    symbol,
+                    interval,
+                )
+                return clone
+
         return instance
 
     @staticmethod
