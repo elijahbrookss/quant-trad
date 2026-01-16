@@ -42,7 +42,7 @@ def load_dotenv(path: str | os.PathLike[str] | None = None) -> bool:
         value = value.strip().strip('"').strip("'")
         value = os.path.expandvars(value)
         if key not in os.environ and key not in _WARNED_DEFAULTS:
-            logger.warning("dotenv_default_applied | key=%s", key)
+            logger.debug("dotenv_default_applied | key=%s", key)
             _WARNED_DEFAULTS.add(key)
         os.environ.setdefault(key, value)
         loaded = True

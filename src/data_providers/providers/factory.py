@@ -17,6 +17,7 @@ from ..registry import (
 from .alpaca import AlpacaProvider
 from .base import BaseDataProvider, DataSource
 from .ccxt import CCXTProvider
+from .coinbase import CoinbaseProvider
 from .interactive_brokers import InteractiveBrokersProvider
 from .yahoo import YahooFinanceProvider
 
@@ -96,6 +97,8 @@ def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = No
         if not slug:
             raise ValueError("CCXT provider requires a venue/exchange identifier")
         instance = CCXTProvider(slug, persistence=persistence, settings=_RUNTIME_CONFIG)
+    elif provider == DataSource.COINBASE.value or provider == "COINBASE":
+        instance = CoinbaseProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
     else:
         raise ValueError(f"No provider implementation for {provider}")
 

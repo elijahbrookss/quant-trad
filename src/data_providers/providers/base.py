@@ -23,6 +23,7 @@ class DataSource(str, Enum):
     ALPACA = "ALPACA"
     IBKR = "IBKR"
     CCXT = "CCXT"
+    COINBASE = "COINBASE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -38,24 +39,38 @@ class InstrumentMetadata:
     tick_size: Optional[float]
     contract_size: Optional[float]
     tick_value: Optional[float]
+    min_order_size: Optional[float]
+    maker_fee_rate: Optional[float]
+    taker_fee_rate: Optional[float]
+    margin_rates: Optional[dict]
     can_short: Optional[bool]
     short_requires_borrow: Optional[bool]
     has_funding: Optional[bool]
     expiry_ts: Optional[dt.datetime]
     base_currency: Optional[str]
     quote_currency: Optional[str]
+    metadata: Optional[dict]
 
     def as_dict(self) -> dict:
-        return {
+        expiry_value = self.expiry_ts.isoformat() if self.expiry_ts else None
+        instrument_fields = {
             "tick_size": self.tick_size,
             "contract_size": self.contract_size,
             "tick_value": self.tick_value,
+            "min_order_size": self.min_order_size,
+            "maker_fee_rate": self.maker_fee_rate,
+            "taker_fee_rate": self.taker_fee_rate,
+            "margin_rates": dict(self.margin_rates or {}),
             "can_short": self.can_short,
             "short_requires_borrow": self.short_requires_borrow,
             "has_funding": self.has_funding,
-            "expiry_ts": self.expiry_ts,
+            "expiry_ts": expiry_value,
             "base_currency": self.base_currency,
             "quote_currency": self.quote_currency,
+        }
+        return {
+            "instrument_fields": instrument_fields,
+            "provider_metadata": dict(self.metadata or {}),
         }
 
 
@@ -103,12 +118,17 @@ class BaseDataProvider(ProviderInterface):
         tick_size: Optional[float] = None,
         contract_size: Optional[float] = None,
         tick_value: Optional[float] = None,
+        min_order_size: Optional[float] = None,
+        maker_fee_rate: Optional[float] = None,
+        taker_fee_rate: Optional[float] = None,
+        margin_rates: Optional[dict] = None,
         can_short: Optional[bool] = None,
         short_requires_borrow: Optional[bool] = None,
         has_funding: Optional[bool] = None,
         expiry_ts: Optional[dt.datetime] = None,
         base_currency: Optional[str] = None,
         quote_currency: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> InstrumentMetadata:
         """Derive a consistent metadata triple from the provided inputs."""
 
@@ -146,12 +166,17 @@ class BaseDataProvider(ProviderInterface):
             ts,
             cs,
             tv,
+            float(min_order_size) if min_order_size is not None else None,
+            float(maker_fee_rate) if maker_fee_rate is not None else None,
+            float(taker_fee_rate) if taker_fee_rate is not None else None,
+            dict(margin_rates or {}),
             can_short,
             short_requires_borrow,
             has_funding,
             expiry_ts,
             str(base_currency).upper() if base_currency else None,
             str(quote_currency).upper() if quote_currency else None,
+            dict(metadata or {}),
         )
 
     def ensure_schema(self):
