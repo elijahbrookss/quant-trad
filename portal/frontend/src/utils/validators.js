@@ -161,6 +161,31 @@ export function validateInstrument(instrument) {
     }
   }
 
+  // Validate fee rates (must be decimals, not percentages)
+  if (instrument.maker_fee_rate != null) {
+    const makerFee = Number(instrument.maker_fee_rate)
+    if (!Number.isFinite(makerFee)) {
+      errors.maker_fee_rate = 'Maker fee must be a valid number'
+    } else if (makerFee < 0) {
+      errors.maker_fee_rate = 'Maker fee cannot be negative'
+    } else if (makerFee > 0.01) {
+      // Warning: fees > 1% are extremely high
+      errors.maker_fee_rate = `Maker fee ${(makerFee * 100).toFixed(2)}% is unusually high. Typical fees are 0.01-0.10%. Enter as decimal (e.g., 0.0004 for 0.04%)`
+    }
+  }
+
+  if (instrument.taker_fee_rate != null) {
+    const takerFee = Number(instrument.taker_fee_rate)
+    if (!Number.isFinite(takerFee)) {
+      errors.taker_fee_rate = 'Taker fee must be a valid number'
+    } else if (takerFee < 0) {
+      errors.taker_fee_rate = 'Taker fee cannot be negative'
+    } else if (takerFee > 0.01) {
+      // Warning: fees > 1% are extremely high
+      errors.taker_fee_rate = `Taker fee ${(takerFee * 100).toFixed(2)}% is unusually high. Typical fees are 0.01-0.10%. Enter as decimal (e.g., 0.0006 for 0.06%)`
+    }
+  }
+
   return errors
 }
 

@@ -1,4 +1,4 @@
-import { PlusCircle } from 'lucide-react'
+import { PlusCircle, Trash2 } from 'lucide-react'
 
 export function WalletBalancesSection({
   walletBalances,
@@ -10,13 +10,13 @@ export function WalletBalancesSection({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <label className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Wallet balances</label>
+        <label className="text-xs font-medium text-slate-400">Initial Balances</label>
         <button
           type="button"
           onClick={onWalletBalanceAdd}
-          className="inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300 hover:border-white/30"
+          className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950/50 px-2.5 py-1.5 text-xs font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-slate-300"
         >
-          <PlusCircle className="size-3" /> Add
+          <PlusCircle className="size-3.5" /> Add Currency
         </button>
       </div>
       <div className="space-y-2">
@@ -26,7 +26,7 @@ export function WalletBalancesSection({
               type="text"
               value={row.currency}
               onChange={(event) => onWalletBalanceChange(index, { currency: event.target.value })}
-              className="w-28 rounded-xl border border-white/10 bg-[#0f1524] px-3 py-2 text-xs uppercase tracking-[0.2em] text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+              className="w-28 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs font-medium uppercase text-slate-200 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
               placeholder="USDC"
             />
             <input
@@ -34,21 +34,26 @@ export function WalletBalancesSection({
               step="any"
               value={row.amount}
               onChange={(event) => onWalletBalanceChange(index, { amount: event.target.value })}
-              className="w-40 rounded-xl border border-white/10 bg-[#0f1524] px-3 py-2 text-xs text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
-              placeholder="500"
+              className="flex-1 min-w-[140px] rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs tabular-nums text-slate-200 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              placeholder="10000.00"
             />
             <button
               type="button"
               onClick={() => onWalletBalanceRemove(index)}
-              className="rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300 hover:border-white/30"
+              className="inline-flex items-center gap-1.5 rounded-md border border-rose-900/50 bg-rose-950/30 px-2.5 py-2 text-rose-300 transition-colors hover:border-rose-800/60 hover:bg-rose-950/50"
+              aria-label="Remove"
             >
-              Remove
+              <Trash2 className="size-3.5" />
             </button>
           </div>
         ))}
       </div>
-      <p className="text-[11px] text-slate-500">Provide starting balances (spot wallets are required).</p>
-      {walletError ? <p className="text-xs text-rose-300">{walletError}</p> : null}
+      <p className="text-xs text-slate-500">Starting wallet balances for backtest simulation</p>
+      {walletError ? (
+        <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 px-3 py-2 text-xs text-rose-300">
+          {walletError}
+        </div>
+      ) : null}
     </div>
   )
 }

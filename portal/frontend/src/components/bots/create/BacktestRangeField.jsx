@@ -2,14 +2,14 @@ import { DateRangePickerComponent } from '../../ChartComponent/DateTimePickerCom
 
 export function BacktestRangeField({ start, end, onChange }) {
   return (
-    <div className="flex flex-col gap-2">
-      <span className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Backtest range</span>
+    <div className="space-y-2">
+      <label className="text-xs font-medium text-slate-400">Backtest Range</label>
       <DateRangePickerComponent
-        className="rounded-xl border border-white/10 bg-[#0f1524]"
+        className="rounded-lg border border-slate-800 bg-slate-950/50"
         dateRange={[start ? new Date(start) : undefined, end ? new Date(end) : undefined]}
         setDateRange={onChange}
       />
-      <p className="text-[11px] text-slate-500">Provide start/end dates to walk through history.</p>
+      <p className="text-xs text-slate-500">Historical date range for backtest execution</p>
     </div>
   )
 }

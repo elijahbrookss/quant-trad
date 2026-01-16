@@ -25,6 +25,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
   const [activeSymbol, setActiveSymbol] = useState(null)
+  const [statsTab, setStatsTab] = useState('overview')
   const { getChart } = useChartState()
 
   const {
@@ -267,79 +268,236 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     [bot?.id, chartHandle, getChart, seriesBySymbol],
   )
 
+  // Aggregate stats across all symbols
+  const aggregateStats = useMemo(() => {
+    const stats = runtime?.stats || payload?.stats || {}
+    return {
+      net_pnl: stats.net_pnl,
+      total_trades: stats.total_trades,
+      wins: stats.wins,
+      losses: stats.losses,
+      win_rate: stats.win_rate,
+      avg_win: stats.avg_win,
+      avg_loss: stats.avg_loss,
+      largest_win: stats.largest_win,
+      largest_loss: stats.largest_loss,
+      total_fees: stats.total_fees,
+      max_drawdown: stats.max_drawdown,
+    }
+  }, [runtime?.stats, payload?.stats])
+
+  // Per-symbol stats
+  const symbolStats = useMemo(() => {
+    return seriesList.map((series) => ({
+      symbol: series.symbol,
+      net_pnl: series.stats?.net_pnl,
+      total_trades: series.stats?.total_trades,
+      wins: series.stats?.wins,
+      losses: series.stats?.losses,
+      win_rate: series.stats?.win_rate,
+      total_fees: series.stats?.total_fees,
+    })).filter((s) => s.symbol)
+  }, [seriesList])
+
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="relative flex h-full max-h-[90vh] w-full max-w-6xl flex-col gap-4 overflow-hidden rounded-3xl border border-white/10 bg-[#0e1016] p-6 shadow-2xl">
-        <header className="flex items-center justify-between gap-4 border-b border-white/5 pb-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Bot lens</p>
-            <h3 className="text-2xl font-semibold text-white">{bot?.name}</h3>
-            <p className="text-sm text-slate-400">Decision trace and execution context for this bot run.</p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="relative flex h-full max-h-[90vh] w-full max-w-6xl flex-col gap-5 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
+        <header className="flex items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-xl font-medium text-slate-50">{bot?.name}</h3>
+            <p className="mt-0.5 text-sm text-slate-400">Decision trace and execution context</p>
           </div>
           <button
             type="button"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-200 hover:border-white/30 hover:text-white"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/50 text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-300"
             onClick={onClose}
           >
-            <X className="size-5" />
+            <X className="size-4" />
           </button>
         </header>
 
-        <div className="flex flex-1 flex-col gap-6 overflow-auto">
-          <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+        <div className="flex flex-1 flex-col gap-5 overflow-auto">
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
-                <span className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Status</span>
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white">
-                  {statusDisplay || '—'}
-                </span>
-                <span className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Progress</span>
-                <span className="text-slate-200">{progressDisplay}</span>
-                <span className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Feed</span>
-                <span className="text-slate-200">{streamStatus}</span>
-                <span className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Sim Time</span>
-                <span className="text-slate-300">{simTimeLabel || '—'}</span>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Status:</span>
+                  <span className="font-medium text-slate-300">{statusDisplay || '—'}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Progress:</span>
+                  <span className="tabular-nums font-medium text-slate-300">{progressDisplay}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Feed:</span>
+                  <span className="font-medium text-slate-300">{streamStatus}</span>
+                </div>
+                {simTimeLabel ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium text-slate-500">Sim Time:</span>
+                    <span className="tabular-nums font-medium text-slate-300">{simTimeLabel}</span>
+                  </div>
+                ) : null}
               </div>
-              {(canPause || canResume || canRestart) && (
-                <div className="flex flex-wrap items-center gap-2">
-                  {canResume && (
-                    <button
-                      type="button"
-                      onClick={handleResume}
-                      disabled={action === 'resuming'}
-                      className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-sm text-emerald-200 hover:border-emerald-500/50 hover:bg-emerald-500/20 disabled:opacity-50"
-                    >
-                      {action === 'resuming' ? 'Resuming...' : 'Resume'}
-                    </button>
-                  )}
-                  {canPause && (
-                    <button
-                      type="button"
-                      onClick={handlePause}
-                      disabled={action === 'pausing'}
-                      className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-sm text-amber-200 hover:border-amber-500/50 hover:bg-amber-500/20 disabled:opacity-50"
-                    >
-                      {action === 'pausing' ? 'Pausing...' : 'Pause'}
-                    </button>
-                  )}
-                  {canRestart && (
-                    <button
-                      type="button"
-                      onClick={onRefresh}
-                      className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-1 text-sm text-blue-200 hover:border-blue-500/50 hover:bg-blue-500/20"
-                    >
-                      Restart
-                    </button>
-                  )}
+              <div className="flex flex-wrap items-center gap-2">
+                {(canPause || canResume || canRestart) && (
+                  <>
+                    {canResume && (
+                      <button
+                        type="button"
+                        onClick={handleResume}
+                        disabled={action === 'resuming'}
+                        className="rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:border-emerald-800/60 hover:bg-emerald-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {action === 'resuming' ? 'Resuming…' : 'Resume'}
+                      </button>
+                    )}
+                    {canPause && (
+                      <button
+                        type="button"
+                        onClick={handlePause}
+                        disabled={action === 'pausing'}
+                        className="rounded-md border border-amber-900/50 bg-amber-950/30 px-3 py-1.5 text-xs font-medium text-amber-300 transition-colors hover:border-amber-800/60 hover:bg-amber-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {action === 'pausing' ? 'Pausing…' : 'Pause'}
+                      </button>
+                    )}
+                    {canRestart && (
+                      <button
+                        type="button"
+                        onClick={onRefresh}
+                        className="rounded-md border border-sky-900/50 bg-sky-950/30 px-3 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:border-sky-800/60 hover:bg-sky-950/50"
+                      >
+                        Restart
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Performance Stats Tabs */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40">
+            {/* Tab Headers */}
+            <div className="flex items-center gap-1 border-b border-slate-800 px-3 py-2 bg-slate-950/50">
+              <button
+                type="button"
+                onClick={() => setStatsTab('overview')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'overview'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                Overview
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatsTab('symbols')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'symbols'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                By Symbol
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatsTab('risk')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'risk'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                Risk & Fees
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div className="p-4">
+              {statsTab === 'overview' && (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+                  <StatItem label="Net PNL" value={aggregateStats.net_pnl} format="currency" tone="pnl" />
+                  <StatItem label="Total Trades" value={aggregateStats.total_trades} format="number" />
+                  <StatItem label="Win Rate" value={aggregateStats.win_rate} format="percent" />
+                  <StatItem label="Wins" value={aggregateStats.wins} format="number" />
+                  <StatItem label="Losses" value={aggregateStats.losses} format="number" />
+                  <StatItem label="Avg Win" value={aggregateStats.avg_win} format="currency" tone="positive" />
+                  <StatItem label="Avg Loss" value={aggregateStats.avg_loss} format="currency" tone="negative" />
+                  <StatItem label="Best Trade" value={aggregateStats.largest_win} format="currency" tone="positive" />
+                  <StatItem label="Worst Trade" value={aggregateStats.largest_loss} format="currency" tone="negative" />
+                  <StatItem label="Total Fees" value={aggregateStats.total_fees} format="currency" />
+                  <StatItem label="Max Drawdown" value={aggregateStats.max_drawdown} format="currency" tone="negative" />
+                </div>
+              )}
+
+              {statsTab === 'symbols' && (
+                symbolStats.length > 0 ? (
+                  <div className="space-y-3">
+                    {symbolStats.map((stat) => (
+                      <div key={stat.symbol} className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium text-slate-300">{stat.symbol}</span>
+                          <span className={`text-sm font-medium tabular-nums ${
+                            Number(stat.net_pnl) > 0
+                              ? 'text-emerald-400'
+                              : Number(stat.net_pnl) < 0
+                                ? 'text-rose-400'
+                                : 'text-slate-400'
+                          }`}>
+                            {formatCurrency(stat.net_pnl)}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-xs sm:grid-cols-5">
+                          <div>
+                            <p className="text-slate-600">Trades</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.total_trades)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Win Rate</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatPercent(stat.win_rate)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Wins</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.wins)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Losses</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.losses)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Fees</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatCurrency(stat.total_fees)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">No per-symbol stats available</p>
+                )
+              )}
+
+              {statsTab === 'risk' && (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  <StatItem label="Total Fees Paid" value={aggregateStats.total_fees} format="currency" />
+                  <StatItem label="Max Drawdown" value={aggregateStats.max_drawdown} format="currency" tone="negative" />
+                  <StatItem label="Avg Win" value={aggregateStats.avg_win} format="currency" tone="positive" />
+                  <StatItem label="Avg Loss" value={aggregateStats.avg_loss} format="currency" tone="negative" />
+                  <StatItem label="Best Trade" value={aggregateStats.largest_win} format="currency" tone="positive" />
+                  <StatItem label="Worst Trade" value={aggregateStats.largest_loss} format="currency" tone="negative" />
                 </div>
               )}
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
-            <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Active trades</p>
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Active Trades</p>
             {openTrades.length ? (
               <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                 {openTrades.map((trade) => {
@@ -357,28 +515,26 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 })}
               </div>
             ) : (
-              <p className="mt-2 text-xs text-slate-400">No active trades right now.</p>
+              <p className="mt-2 text-sm text-slate-500">No active trades</p>
             )}
           </div>
 
           <section className="space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
-                Context Chart
-              </p>
-              {activeSymbol ? <span className="text-xs text-slate-400">{activeSymbol}</span> : null}
+              <p className="text-xs font-medium text-slate-400">Context Chart</p>
+              {activeSymbol ? <span className="text-xs font-medium text-slate-500">{activeSymbol}</span> : null}
             </div>
-            {seriesSymbols.length ? (
+            {seriesSymbols.length > 1 ? (
               <div className="flex flex-wrap items-center gap-2">
                 {seriesSymbols.map((symbol) => (
                   <button
                     key={`bot-series-${symbol}`}
                     type="button"
                     onClick={() => setActiveSymbol(symbol)}
-                    className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.3em] ${
+                    className={`rounded-md border px-2.5 py-1 text-xs font-medium uppercase tracking-wider transition-colors ${
                       symbol === activeSymbol
-                        ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-white'
-                        : 'border-white/10 bg-black/20 text-slate-300 hover:border-white/30 hover:text-white'
+                        ? 'border-slate-700 bg-slate-800/80 text-slate-200'
+                        : 'border-slate-800 bg-slate-950/50 text-slate-500 hover:border-slate-700 hover:bg-slate-950 hover:text-slate-400'
                     }`}
                   >
                     {symbol}
@@ -387,13 +543,13 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </div>
             ) : null}
 
-            <div className="relative min-h-[360px] rounded-2xl border border-white/10 bg-black/30 p-4">
+            <div className="relative min-h-[360px] rounded-lg border border-slate-800 bg-slate-900/40 p-4">
               <div
                 className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
                   bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
                 }`}
               >
-                <div className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-base font-semibold text-slate-100 shadow-sm animate-pulse">
+                <div className="animate-pulse rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-medium text-slate-200 shadow-sm">
                   {bootLineDisplay}
                 </div>
               </div>
@@ -404,11 +560,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               >
                 {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
                 {error ? (
-                  <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">
+                  <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-300">
                     {error}
                   </div>
                 ) : showInactiveState ? (
-                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
                     {idleMessage}
                   </div>
                 ) : chartHasData ? (
@@ -420,26 +576,22 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     playbackSpeed={playbackDraft}
                   />
                 ) : (
-                  <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
+                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
                     Awaiting the first candle…
                   </div>
                 )}
               </div>
               {bootLineVisible ? (
-                <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-xs text-slate-200">
+                <div className="pointer-events-none absolute right-4 top-4 rounded-md border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-sm">
                   Establishing live feed…
                 </div>
               ) : null}
             </div>
           </section>
 
-          <div className="rounded-3xl border border-white/5 bg-black/30 p-4">
-            <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">
-              Decision Trace
-            </p>
-            <p className="mt-1 text-sm text-slate-400">
-              Strategy signals, decisions, and execution events in chronological order.
-            </p>
+          <div className="space-y-1 border-t border-slate-800 pt-5">
+            <p className="text-xs font-medium text-slate-400">Decision Trace</p>
+            <p className="text-sm text-slate-500">Strategy signals, decisions, and execution events in chronological order</p>
           </div>
           <DecisionTrace
             decisions={payload?.decisions || []}
@@ -450,4 +602,62 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       </div>
     </div>
   )
+}
+
+// Helper component for stat items
+function StatItem({ label, value, format = 'number', tone = 'neutral' }) {
+  let formattedValue = '—'
+  if (value !== undefined && value !== null) {
+    const num = Number(value)
+    if (Number.isFinite(num)) {
+      if (format === 'currency') {
+        formattedValue = formatCurrency(num)
+      } else if (format === 'percent') {
+        formattedValue = formatPercent(num)
+      } else {
+        formattedValue = formatNumber(num)
+      }
+    }
+  }
+
+  let toneClass = 'text-slate-200'
+  if (tone === 'pnl') {
+    const num = Number(value)
+    if (num > 0) toneClass = 'text-emerald-400'
+    else if (num < 0) toneClass = 'text-rose-400'
+    else toneClass = 'text-slate-300'
+  } else if (tone === 'positive') {
+    toneClass = 'text-emerald-400'
+  } else if (tone === 'negative') {
+    toneClass = 'text-rose-400'
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-slate-600">{label}</p>
+      <p className={`truncate text-sm font-medium tabular-nums ${toneClass}`}>{formattedValue}</p>
+    </div>
+  )
+}
+
+// Formatting helpers
+function formatCurrency(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return num.toFixed(2)
+}
+
+function formatPercent(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return `${(num * 100).toFixed(1)}%`
+}
+
+function formatNumber(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return num.toString()
 }

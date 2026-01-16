@@ -19,6 +19,11 @@ export const InstrumentsTab = ({
     const parsed = new Date(value)
     return Number.isNaN(parsed.valueOf()) ? '—' : parsed.toLocaleString()
   }
+  const formatFeeRate = (value) => {
+    const rate = Number(value)
+    if (!Number.isFinite(rate)) return '—'
+    return `${(rate * 100).toFixed(3)}%`
+  }
   return (
     <>
       {instrumentMessages.length > 0 && (
@@ -98,8 +103,7 @@ export const InstrumentsTab = ({
                   <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
                     <dd className="text-base text-white">
-                      {record.maker_fee_rate != null ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%` : '—'} /{' '}
-                      {record.taker_fee_rate != null ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%` : '—'}
+                      {formatFeeRate(record.maker_fee_rate)} / {formatFeeRate(record.taker_fee_rate)}
                     </dd>
                   </div>
                   <div>
@@ -109,13 +113,13 @@ export const InstrumentsTab = ({
                   <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Base currency</dt>
                     <dd className="text-base text-white">
-                      {record.metadata?.base_currency || record.base_currency || '—'}
+                      {record.metadata?.instrument_fields?.base_currency || record.base_currency || '—'}
                     </dd>
                   </div>
                   <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Quote currency</dt>
                     <dd className="text-base text-white">
-                      {record.quote_currency || record.metadata?.quote_currency || '—'}
+                      {record.quote_currency || record.metadata?.instrument_fields?.quote_currency || '—'}
                     </dd>
                   </div>
                   <div>
