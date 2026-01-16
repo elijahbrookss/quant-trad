@@ -82,6 +82,17 @@ Log at INFO for:
 - Walk-forward:
   - step progress sampling (not every bar unless debugging): include `bar_time`, step index, state
 
+### Auth/Error Logging (Provider-Agnostic)
+- For provider request failures (4xx/5xx), include: `method`, `path`, `authenticated`, `status_code`, `request_id` (if present), and `content_type`.
+- For auth failures (401/403), include a non-sensitive credential identifier (e.g., API key suffix) and `www_authenticate` header when available.
+- Never log full tokens, secrets, or raw API keys.
+
+### Provider Framework Contract (No Core Edits)
+- Providers MUST be pluggable: adding a provider should not require edits in core service modules (e.g., instrument_service).
+- Use registration/registry patterns for provider discovery; avoid switch statements in core.
+- Keep provider-specific logic inside provider modules or adapters; core services should consume common interfaces only.
+- Prefer small, shared helpers in provider base/registry for repeated behaviors (logging, request context) instead of copying logic.
+
 ### Anti-Patterns (do not do these)
 - Logging without IDs (untraceable)
 - Logging giant payloads (entire DataFrames, full candle arrays)
