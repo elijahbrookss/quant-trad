@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -30,10 +31,12 @@ class IntrabarManager:
         self._strategy_key = strategy_key_fn
         self._cache: Dict[str, List[Candle]] = {}
         self._snapshots: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
 
     @property
     def snapshots(self) -> Dict[str, Dict[str, Any]]:
-        return self._snapshots
+        with self._lock:
+            return dict(self._snapshots)
 
     def intrabar_candles(self, series: Any, candle: Candle) -> List[Candle]:
         engine = getattr(series, "risk_engine", None)
@@ -48,10 +51,13 @@ class IntrabarManager:
         if start is None or end is None or end <= start:
             return []
         key = self._intrabar_cache_key(series, start, interval)
-        if key in self._cache:
-            return self._cache[key]
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return cached
         sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
-        self._cache[key] = sub_candles
+        with self._lock:
+            self._cache[key] = sub_candles
         return sub_candles
 
     def update_snapshot(self, series: Any, candle: Candle, minute_bar: Candle) -> Dict[str, Any]:
@@ -74,8 +80,14 @@ class IntrabarManager:
         return payload
 
     def clear_cache(self) -> None:
-        self._cache.clear()
-        self._snapshots.clear()
+        with self._lock:
+            self._cache.clear()
+            self._snapshots.clear()
+
+    def clear_snapshot(self, series: Any) -> None:
+        strategy_key = self._strategy_key(series)
+        with self._lock:
+            self._snapshots.pop(strategy_key, None)
 
     def _intrabar_interval_for(self, timeframe: Optional[str]) -> Optional[str]:
         base_seconds = self._timeframe_seconds(timeframe)
@@ -133,7 +145,8 @@ class IntrabarManager:
 
     def _ensure_intrabar_snapshot(self, series: Any, candle: Candle) -> Dict[str, Any]:
         strategy_key = self._strategy_key(series)
-        snapshot = self._snapshots.get(strategy_key)
+        with self._lock:
+            snapshot = self._snapshots.get(strategy_key)
         if snapshot:
             return snapshot
         open_price = coerce_float(candle.open, 0.0) or 0.0
@@ -146,7 +159,8 @@ class IntrabarManager:
             "close": open_price,
             "end": candle.end or candle.time,
         }
-        self._snapshots[strategy_key] = entry
+        with self._lock:
+            self._snapshots[strategy_key] = entry
         return entry
 
     def _update_intrabar_snapshot(

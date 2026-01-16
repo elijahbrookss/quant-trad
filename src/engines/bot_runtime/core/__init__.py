@@ -10,7 +10,7 @@ from .execution import (
     DerivativesExecutionModel,
 )
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
-from .wallet import WalletEvent, WalletLedger, WalletState, project_wallet, wallet_can_apply
+from .wallet import LockedWalletLedger, WalletEvent, WalletLedger, WalletState, project_wallet, wallet_can_apply
 from .wallet_gateway import LedgerWalletGateway, WalletGateway
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "SpotExecutionAdapter",
     "DerivativesExecutionAdapter",
     "WalletEvent",
+    "LockedWalletLedger",
     "WalletLedger",
     "WalletState",
     "project_wallet",

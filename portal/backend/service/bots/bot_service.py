@@ -399,9 +399,11 @@ def start_bot(bot_id: str) -> Dict[str, object]:
         "[BotService] starting bot with strategies",
         extra={"bot_id": bot_id, "strategy_ids": bot["strategy_ids"]},
     )
+    logger.info("[BotService] bot runtime start requested", extra={"bot_id": bot_id})
     runtime = _runtime_for(bot_id, bot)
     runtime.reset_if_finished()
     runtime.start()
+    logger.info("[BotService] bot runtime start dispatched", extra={"bot_id": bot_id})
     bot["status"] = "running"
     bot["last_run_at"] = _now_iso()
     bot["runtime"] = runtime.snapshot()

@@ -36,10 +36,11 @@ from utils.log_context import build_log_context, merge_log_context, series_log_c
 from .runtime_policy import RuntimeModePolicy
 from ..strategy.series_builder import SeriesBuilder, StrategySeries
 from .run_context import RunContext
-from engines.bot_runtime.core.wallet import project_wallet
+from engines.bot_runtime.core.wallet import LockedWalletLedger, project_wallet
 from ....indicators.indicator_service.context import IndicatorServiceContext, _context as indicator_context
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
+from .series_runner import InlineSeriesRunner, SeriesRunnerContext, ThreadedSeriesRunner
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,10 @@ class BotRuntime:
         self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
         self.state["playback_speed"] = self.playback_speed
         self._lock = threading.Lock()
+        self._series_update_lock = threading.RLock()
+        self._trade_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
+        self._runner = None
         self._stop = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()
@@ -110,6 +114,7 @@ class BotRuntime:
         self._next_bar_at: Optional[datetime] = None
         self._policy = RuntimeModePolicy.for_run_type(self.run_type)
         self._live_mode = self._policy.allow_live_refresh
+        self._series_runner_type = self._resolve_series_runner_type(self.config.get("series_runner"))
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._decision_events: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._event_sinks: List[RuntimeEventSink] = [
@@ -163,6 +168,68 @@ class BotRuntime:
             numeric = 10.0
         return numeric if numeric >= 0 else 0.0
 
+    @staticmethod
+    def _resolve_series_runner_type(value: Optional[object]) -> str:
+        if value is None:
+            return "threaded"
+        normalized = str(value).strip().lower()
+        if normalized in {"inline", "threaded"}:
+            return normalized
+        raise ValueError(f"Unknown series_runner '{value}'. Expected 'inline' or 'threaded'.")
+
+    def _build_series_runner(self) -> object:
+        ctx = SeriesRunnerContext(
+            stop_event=self._stop,
+            pause_event=self._pause_event,
+            live_mode=self._live_mode,
+            mode=self.mode,
+            due_series_states=self._due_series_states,
+            next_step_time=self._next_step_time,
+            step_series_state=self._step_series_state,
+            append_live_candles_if_needed=self._append_live_candles_if_needed,
+            append_live_candles_for_state=self._append_live_candles_for_state,
+            pace=self._pace,
+            series_states=self._active_series_states,
+            thread_name=self._series_thread_name,
+            log_debug=self._log_runner_debug,
+            log_info=self._log_runner_info,
+        )
+        if self._series_runner_type == "threaded":
+            return ThreadedSeriesRunner(ctx)
+        return InlineSeriesRunner(ctx)
+
+    def _series_thread_name(self, state: SeriesExecutionState, index: int) -> str:
+        series = state.series
+        symbol = getattr(series, "symbol", "series")
+        timeframe = getattr(series, "timeframe", "tf")
+        return f"bot-{self.bot_id}-{symbol}-{timeframe}-{index}"
+
+    def _log_runner_debug(
+        self,
+        message: str,
+        state: Optional[SeriesExecutionState],
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        context = self._runtime_log_context()
+        if state is not None:
+            context = merge_log_context(context, series_log_context(state.series))
+        if extra:
+            context = merge_log_context(context, extra)
+        logger.debug(with_log_context(message, context))
+
+    def _log_runner_info(
+        self,
+        message: str,
+        state: Optional[SeriesExecutionState],
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        context = self._runtime_log_context()
+        if state is not None:
+            context = merge_log_context(context, series_log_context(state.series))
+        if extra:
+            context = merge_log_context(context, extra)
+        logger.info(with_log_context(message, context))
+
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         run_id = self._run_context.run_id if self._run_context else None
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, run_id=run_id, **fields)
@@ -182,6 +249,8 @@ class BotRuntime:
                 self.state["playback_speed"] = self.playback_speed
         if "focus_symbol" in payload:
             self.focus_symbol = payload.get("focus_symbol") or None
+        if "series_runner" in payload:
+            self._series_runner_type = self._resolve_series_runner_type(payload.get("series_runner"))
 
     def _set_error_state(
         self,
@@ -247,11 +316,12 @@ class BotRuntime:
 
     def _rebuild_overlay_cache(self) -> None:
         overlays: List[Dict[str, Any]] = []
-        for series in self._series:
-            overlays.extend(series.overlays)
-            if series.trade_overlay:
-                overlays.append(series.trade_overlay)
-        self._chart_overlays = overlays
+        with self._series_update_lock:
+            for series in self._series:
+                overlays.extend(series.overlays)
+                if series.trade_overlay:
+                    overlays.append(series.trade_overlay)
+            self._chart_overlays = overlays
 
     def _build_series_states(self) -> None:
         self._series_states = []
@@ -271,7 +341,8 @@ class BotRuntime:
         return self._series_state_map.get(self._strategy_key(series))
 
     def _active_series_states(self) -> List[SeriesExecutionState]:
-        return [state for state in self._series_states if not state.done]
+        with self._series_update_lock:
+            return [state for state in self._series_states if not state.done]
 
     def _compute_progress(self) -> float:
         if not self._series_states:
@@ -287,12 +358,13 @@ class BotRuntime:
 
     def _refresh_next_bar_at(self) -> None:
         next_at: Optional[datetime] = None
-        for state in self._active_series_states():
-            candidate = state.next_step_at
-            if candidate is None:
-                continue
-            if next_at is None or candidate < next_at:
-                next_at = candidate
+        with self._series_update_lock:
+            for state in self._active_series_states():
+                candidate = state.next_step_at
+                if candidate is None:
+                    continue
+                if next_at is None or candidate < next_at:
+                    next_at = candidate
         self._next_bar_at = next_at
 
     def _bar_interval(self) -> float:
@@ -487,19 +559,20 @@ class BotRuntime:
     ) -> Optional[object]:
         if not instrument_id:
             return None
-        for state in self._series_states:
-            series = state.series
-            if skip_series is not None and series is skip_series:
-                continue
-            series_instrument_id = None
-            if isinstance(series.instrument, Mapping):
-                series_instrument_id = series.instrument.get("id")
-            if not series_instrument_id or series_instrument_id != instrument_id:
-                continue
-            engine = getattr(series, "risk_engine", None)
-            trade = getattr(engine, "active_trade", None) if engine else None
-            if trade and getattr(trade, "is_active", lambda: True)():
-                return trade
+        with self._series_update_lock:
+            for state in self._series_states:
+                series = state.series
+                if skip_series is not None and series is skip_series:
+                    continue
+                series_instrument_id = None
+                if isinstance(series.instrument, Mapping):
+                    series_instrument_id = series.instrument.get("id")
+                if not series_instrument_id or series_instrument_id != instrument_id:
+                    continue
+                engine = getattr(series, "risk_engine", None)
+                trade = getattr(engine, "active_trade", None) if engine else None
+                if trade and getattr(trade, "is_active", lambda: True)():
+                    return trade
         return None
 
     def _snapshot_candle_for_state(self, base: Candle, snapshot: Mapping[str, Any]) -> Candle:
@@ -571,7 +644,7 @@ class BotRuntime:
 
     def _finish_intrabar(self, state: SeriesExecutionState) -> None:
         if state.intrabar_candles:
-            self._intrabar_manager.snapshots.pop(self._strategy_key(state.series), None)
+            self._intrabar_manager.clear_snapshot(state.series)
         if state.intrabar_candles:
             context = self._series_log_context(state.series, steps=state.intrabar_index)
             logger.debug(with_log_context("intrabar_complete", context))
@@ -597,7 +670,8 @@ class BotRuntime:
         else:
             self._schedule_next_step(state, self._bar_interval())
         self._log_overlay_summary(state, candle)
-        self._update_state(self._state_candle_for(state.series, candle))
+        if self._should_update_state_for(state.series):
+            self._update_state(self._state_candle_for(state.series, candle))
         self._push_update("bar")
 
     def _primary_state_candle(self) -> Optional[Candle]:
@@ -615,6 +689,13 @@ class BotRuntime:
             return candle
         primary_candle = self._primary_state_candle()
         return primary_candle or candle
+
+    def _should_update_state_for(self, series: StrategySeries) -> bool:
+        if self.focus_symbol:
+            return getattr(series, "symbol", None) == self.focus_symbol
+        if self._primary_series_key:
+            return self._strategy_key(series) == self._primary_series_key
+        return True
 
     def _log_overlay_summary(self, state: SeriesExecutionState, candle: Candle) -> None:
         series = state.series
@@ -725,6 +806,7 @@ class BotRuntime:
             self._intrabar_manager.clear_cache()
             self._run_started_at = None
             self._run_context = None
+            self._runner = None
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -759,25 +841,61 @@ class BotRuntime:
     def start(self) -> None:
         """Start the execution loop in the background."""
 
+        logger.info(
+            with_log_context(
+                "bot_runtime_start_invoked",
+                self._runtime_log_context(
+                    mode=self.mode,
+                    run_type=self.run_type,
+                    series_runner=self._series_runner_type,
+                    thread_alive=bool(self._thread and self._thread.is_alive()),
+                ),
+            )
+        )
+        logger.info(with_log_context("bot_runtime_prepare_start", self._runtime_log_context()))
         self._ensure_prepared()
+        logger.info(with_log_context("bot_runtime_prepare_complete", self._runtime_log_context()))
         if self._thread and self._thread.is_alive():
+            logger.info(with_log_context("bot_runtime_start_ignored", self._runtime_log_context()))
             return
+        logger.info(with_log_context("bot_runtime_run_context_start", self._runtime_log_context()))
         self._stop.clear()
         self._pause_event.set()
         self._paused = False
         self._run_started_at = datetime.now(timezone.utc)
         self._run_context = self._build_run_context()
+        logger.info(with_log_context("bot_runtime_run_context_ready", self._runtime_log_context()))
         with self._lock:
             self.state.update(
                 {"status": "starting", "paused": False, "started_at": _isoformat(self._run_started_at)}
             )
+        logger.info(
+            with_log_context(
+                "bot_runtime_thread_starting",
+                self._runtime_log_context(
+                    mode=self.mode,
+                    run_type=self.run_type,
+                    series_runner=self._series_runner_type,
+                    series=len(self._series_states),
+                ),
+            )
+        )
         self._thread = threading.Thread(target=self._run, name=f"bot-{self.bot_id}", daemon=True)
         self._thread.start()
+        logger.info(
+            with_log_context(
+                "bot_runtime_thread_started_dispatch",
+                self._runtime_log_context(
+                    thread_alive=bool(self._thread and self._thread.is_alive()),
+                ),
+            )
+        )
         self._log_event("start", message="Bot runtime started", mode=self.mode, run_type=self.run_type)
         self._push_update("start")
 
     def _run(self) -> None:
         try:
+            logger.debug(with_log_context("bot_runtime_thread_started", self._runtime_log_context()))
             self._execute_loop()
         except Exception as exc:  # pragma: no cover - defensive logging
             context = self._runtime_log_context(error=str(exc))
@@ -789,23 +907,14 @@ class BotRuntime:
     def _execute_loop(self) -> None:
         self._ensure_prepared()
         status = "running"
-        self._log_event("running", message="Bot execution loop started")
-        while not self._stop.is_set():
-            if not self._pause_event.wait(timeout=0.2):
-                continue
-            now = datetime.now(timezone.utc)
-            due_states = self._due_series_states(now)
-            if not due_states:
-                if self._live_mode and self._append_live_candles_if_needed():
-                    continue
-                next_at = self._next_step_time()
-                if next_at:
-                    interval = max((next_at - now).total_seconds(), 0)
-                    self._pace(interval, update_next_bar=True)
-                    continue
-                break
-            for state in due_states:
-                self._step_series_state(state)
+        self._log_event(
+            "running",
+            message="Bot execution loop started",
+            series_runner=self._series_runner_type,
+            series_count=len(self._series_states),
+        )
+        self._runner = self._build_series_runner()
+        self._runner.run()
         if self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
@@ -885,6 +994,7 @@ class BotRuntime:
 
         # Attempt to create trade from signal
         blocking_trade = None
+        new_trade = None
         if direction is not None:
             instrument_id = None
             if isinstance(series.instrument, Mapping):
@@ -904,14 +1014,13 @@ class BotRuntime:
                 )
                 direction = None
             else:
-                blocking_trade = self._active_trade_for_instrument(
-                    instrument_id,
-                    skip_series=series,
-                )
-
-        new_trade = None
-        if direction is not None and blocking_trade is None:
-            new_trade = series.risk_engine.maybe_enter(candle, direction)
+                with self._trade_lock:
+                    blocking_trade = self._active_trade_for_instrument(
+                        instrument_id,
+                        skip_series=series,
+                    )
+                    if blocking_trade is None:
+                        new_trade = series.risk_engine.maybe_enter(candle, direction)
 
         # Log decision event
         if direction is not None:
@@ -1022,16 +1131,7 @@ class BotRuntime:
         speed = self.playback_speed or 0.0
         if speed <= 0:
             return 0.0
-        if self._has_open_trades():
-            override = self.config.get("playback_speed_open_trade")
-            if override is not None:
-                try:
-                    speed = float(override)
-                except (TypeError, ValueError):
-                    speed = self.playback_speed or 0.0
-            elif speed > 1.0:
-                speed = 1.0
-        return max(base_seconds / speed, 0.02)
+        return max(base_seconds / speed, 0.001)
 
     def _has_open_trades(self) -> bool:
         for series in self._series or []:
@@ -1069,24 +1169,46 @@ class BotRuntime:
     def _append_live_candles_if_needed(self) -> bool:
         updated = False
         end_iso = _isoformat(datetime.now(timezone.utc))
-        for series in self._series:
-            last_time = series.candles[-1].time if series.candles else None
-            if last_time is None:
-                continue
-            start_iso = _isoformat(last_time + timedelta(seconds=1))
-            if self._append_series_updates(series, start_iso, end_iso):
-                updated = True
+        with self._series_update_lock:
+            for series in self._series:
+                last_time = series.candles[-1].time if series.candles else None
+                if last_time is None:
+                    continue
+                start_iso = _isoformat(last_time + timedelta(seconds=1))
+                if self._append_series_updates(series, start_iso, end_iso):
+                    updated = True
         if updated:
-            # Recalculate total bars as max across all series
-            self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
-            for state in self._series_states:
-                state.total_bars = len(state.series.candles)
-                if state.done and state.bar_index < state.total_bars:
-                    state.done = False
+            with self._series_update_lock:
+                # Recalculate total bars as max across all series
+                self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
+                for state in self._series_states:
+                    state.total_bars = len(state.series.candles)
+                    if state.done and state.bar_index < state.total_bars:
+                        state.done = False
             self._rebuild_overlay_cache()
             self._log_event("live_refresh", message="Appended live candles")
             self._push_update("live_refresh")
         return updated
+
+    def _append_live_candles_for_state(self, state: SeriesExecutionState) -> bool:
+        end_iso = _isoformat(datetime.now(timezone.utc))
+        series = state.series
+        last_time = series.candles[-1].time if series.candles else None
+        if last_time is None:
+            return False
+        start_iso = _isoformat(last_time + timedelta(seconds=1))
+        with self._series_update_lock:
+            updated = self._append_series_updates(series, start_iso, end_iso)
+            if not updated:
+                return False
+            state.total_bars = len(series.candles)
+            if state.done and state.bar_index < state.total_bars:
+                state.done = False
+            self._total_bars = max(len(s.candles) for s in self._series) if self._series else 0
+        self._rebuild_overlay_cache()
+        self._log_event("live_refresh", message="Appended live candles")
+        self._push_update("live_refresh")
+        return True
 
     def _append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
         return self._series_builder.append_series_updates(series, start_iso, end_iso)
@@ -1114,6 +1236,8 @@ class BotRuntime:
     def stop(self) -> None:
         self._stop.set()
         self._pause_event.set()
+        if self._runner is not None:
+            self._runner.stop()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=0.2)
         with self._lock:
@@ -1288,10 +1412,26 @@ class BotRuntime:
         balances = wallet_config.get("balances")
         if not isinstance(balances, dict) or not balances:
             raise ValueError("wallet_config.balances is required to start a bot run")
+        logger.info(with_log_context("bot_runtime_run_context_wallet_init", self._runtime_log_context()))
         run_context = RunContext(bot_id=self.bot_id)
+        run_context.wallet_ledger = LockedWalletLedger()
+        logger.info(
+            with_log_context(
+                "bot_runtime_run_context_wallet_deposit",
+                self._runtime_log_context(balance_currencies=list(balances.keys())),
+            )
+        )
         run_context.wallet_ledger.deposit(balances)
+        logger.info(with_log_context("bot_runtime_run_context_wallet_deposit_done", self._runtime_log_context()))
+        logger.info(
+            with_log_context(
+                "bot_runtime_run_context_attach_wallet_start",
+                self._runtime_log_context(series=len(self._series)),
+            )
+        )
         for series in self._series:
             series.risk_engine.attach_wallet(run_context.wallet_ledger)
+        logger.info(with_log_context("bot_runtime_run_context_attach_wallet_done", self._runtime_log_context()))
         return run_context
 
     def _persist_run_artifact(self, status: str) -> None:
@@ -1415,7 +1555,8 @@ class BotRuntime:
 
     def _update_state(self, candle: Candle, status: str = "running") -> None:
         stats = self._aggregate_stats()
-        self._last_stats = stats
+        with self._lock:
+            self._last_stats = stats
         self._refresh_next_bar_at()
         progress = self._compute_progress()
         snapshot = {

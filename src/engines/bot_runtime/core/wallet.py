@@ -5,6 +5,7 @@ Supports both spot (full notional) and derivatives (margin-based) validation.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -60,6 +61,7 @@ class WalletLedger:
     def trade_fill(
         self,
         *,
+        event_type: str = "TRADE_FILL",
         side: str,
         base_currency: str,
         quote_currency: str,
@@ -70,9 +72,12 @@ class WalletLedger:
         symbol: Optional[str] = None,
         trade_id: Optional[str] = None,
         leg_id: Optional[str] = None,
+        position_direction: Optional[str] = None,
+        accounting_mode: Optional[str] = None,
+        realized_pnl: Optional[float] = None,
     ) -> WalletEvent:
         return self.append(
-            "TRADE_FILL",
+            event_type,
             {
                 "side": str(side),
                 "base_currency": str(base_currency).upper(),
@@ -84,6 +89,9 @@ class WalletLedger:
                 "symbol": symbol,
                 "trade_id": trade_id,
                 "leg_id": leg_id,
+                "position_direction": position_direction,
+                "accounting_mode": accounting_mode,
+                "realized_pnl": realized_pnl,
             },
         )
 
@@ -104,6 +112,140 @@ class WalletLedger:
         return project_wallet(self._events)
 
 
+class LockedWalletLedger(WalletLedger):
+    """Wallet ledger guarded by a lock for concurrent access."""
+
+    def __init__(self, lock: Optional[threading.RLock] = None) -> None:
+        super().__init__()
+        self._lock = lock or threading.RLock()
+
+    def events(self) -> List[WalletEvent]:
+        with self._lock:
+            return list(self._events)
+
+    def append(self, event_type: str, payload: Mapping[str, Any]) -> WalletEvent:
+        with self._lock:
+            return super().append(event_type, payload)
+
+    def deposit(self, balances: Mapping[str, float]) -> WalletEvent:
+        with self._lock:
+            return super().deposit(balances)
+
+    def trade_fill(
+        self,
+        *,
+        event_type: str = "TRADE_FILL",
+        side: str,
+        base_currency: str,
+        quote_currency: str,
+        qty: float,
+        price: float,
+        fee: float,
+        notional: float,
+        symbol: Optional[str] = None,
+        trade_id: Optional[str] = None,
+        leg_id: Optional[str] = None,
+        position_direction: Optional[str] = None,
+        accounting_mode: Optional[str] = None,
+        realized_pnl: Optional[float] = None,
+    ) -> WalletEvent:
+        with self._lock:
+            return super().trade_fill(
+                event_type=event_type,
+                side=side,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                qty=qty,
+                price=price,
+                fee=fee,
+                notional=notional,
+                symbol=symbol,
+                trade_id=trade_id,
+                leg_id=leg_id,
+                position_direction=position_direction,
+                accounting_mode=accounting_mode,
+                realized_pnl=realized_pnl,
+            )
+
+    def rejected(
+        self, reason: str, payload: Mapping[str, Any], trade_id: Optional[str] = None, leg_id: Optional[str] = None
+    ) -> WalletEvent:
+        with self._lock:
+            return super().rejected(reason, payload, trade_id=trade_id, leg_id=leg_id)
+
+    def project(self) -> WalletState:
+        with self._lock:
+            return super().project()
+
+
+def trace_wallet_balance(
+    events: Iterable[WalletEvent],
+    currency: str,
+    *,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    code = str(currency).upper()
+    balance = 0.0
+    trace: List[Dict[str, Any]] = []
+    for event in events:
+        payload = event.payload or {}
+        event_type = event.event_type
+        delta = 0.0
+        if event_type == "DEPOSIT":
+            balances = payload.get("balances") or {}
+            amount = balances.get(code)
+            if amount is not None:
+                delta = float(amount)
+        elif event_type in {"TRADE_FILL", "ENTRY_FILL", "EXIT_FILL"}:
+            side = str(payload.get("side") or "").lower()
+            base = str(payload.get("base_currency") or "").upper()
+            quote = str(payload.get("quote_currency") or "").upper()
+            qty = float(payload.get("qty") or 0.0)
+            notional = float(payload.get("notional") or 0.0)
+            fee = float(payload.get("fee") or 0.0)
+            accounting_mode = payload.get("accounting_mode")
+            realized_pnl = float(payload.get("realized_pnl") or 0.0)
+            if code == base:
+                if accounting_mode == "margin":
+                    delta = 0.0
+                elif side in {"buy", "long"}:
+                    delta = qty
+                elif side in {"sell", "short"}:
+                    delta = -qty
+            elif code == quote:
+                if accounting_mode == "margin":
+                    delta = realized_pnl - fee
+                elif side in {"buy", "long"}:
+                    delta = -notional - fee
+                elif side in {"sell", "short"}:
+                    delta = notional - fee
+        if delta != 0.0:
+            balance += delta
+            trace.append(
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "timestamp": event.timestamp,
+                    "delta": round(delta, 8),
+                    "balance": round(balance, 8),
+                    "symbol": payload.get("symbol"),
+                    "trade_id": payload.get("trade_id"),
+                    "leg_id": payload.get("leg_id"),
+                    "side": payload.get("side"),
+                    "base_currency": payload.get("base_currency"),
+                    "quote_currency": payload.get("quote_currency"),
+                    "notional": payload.get("notional"),
+                    "fee": payload.get("fee"),
+                    "position_direction": payload.get("position_direction"),
+                    "accounting_mode": payload.get("accounting_mode"),
+                    "realized_pnl": payload.get("realized_pnl"),
+                }
+            )
+    if limit <= 0:
+        return trace
+    return trace[-limit:]
+
+
 def project_wallet(events: Iterable[WalletEvent]) -> WalletState:
     balances: Dict[str, float] = {}
     for event in events:
@@ -113,14 +255,18 @@ def project_wallet(events: Iterable[WalletEvent]) -> WalletState:
             for currency, amount in (payload.get("balances") or {}).items():
                 code = str(currency).upper()
                 balances[code] = balances.get(code, 0.0) + float(amount)
-        elif event_type == "TRADE_FILL":
+        elif event_type in {"TRADE_FILL", "ENTRY_FILL", "EXIT_FILL"}:
             side = str(payload.get("side") or "").lower()
             base = str(payload.get("base_currency") or "").upper()
             quote = str(payload.get("quote_currency") or "").upper()
             qty = float(payload.get("qty") or 0.0)
             notional = float(payload.get("notional") or 0.0)
             fee = float(payload.get("fee") or 0.0)
-            if side in {"buy", "long"}:
+            accounting_mode = payload.get("accounting_mode")
+            if accounting_mode == "margin":
+                realized_pnl = float(payload.get("realized_pnl") or 0.0)
+                balances[quote] = balances.get(quote, 0.0) + realized_pnl - fee
+            elif side in {"buy", "long"}:
                 balances[base] = balances.get(base, 0.0) + qty
                 balances[quote] = balances.get(quote, 0.0) - notional - fee
             elif side in {"sell", "short"}:
@@ -499,7 +645,9 @@ __all__ = [
     "MarginSessionType",
     "WalletEvent",
     "WalletLedger",
+    "LockedWalletLedger",
     "WalletState",
     "project_wallet",
+    "trace_wallet_balance",
     "wallet_can_apply",
 ]
