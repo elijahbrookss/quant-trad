@@ -147,7 +147,38 @@ def list_strategy_instrument_symbols(strategy_id: str) -> List[str]:
                 continue
             seen.add(key)
             symbols.append(key)
-        return symbols
+    return symbols
+
+
+def list_strategy_instrument_links(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return instrument link rows with resolved symbols for a strategy."""
+
+    if not db.available:
+        return []
+    try:
+        with db.session() as session:
+            rows = session.execute(
+                select(
+                    StrategyInstrumentLink.instrument_id,
+                    InstrumentRecord.symbol,
+                ).join(
+                    InstrumentRecord,
+                    StrategyInstrumentLink.instrument_id == InstrumentRecord.id,
+                ).where(
+                    StrategyInstrumentLink.strategy_id == strategy_id,
+                )
+            ).all()
+            return [
+                {"instrument_id": instrument_id, "symbol": symbol}
+                for instrument_id, symbol in rows
+            ]
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "strategy_instrument_list_failed | strategy=%s | error=%s",
+            strategy_id,
+            exc,
+        )
+        return []
 
 
 def get_instrument(instrument_id: str) -> Optional[Dict[str, Any]]:
@@ -228,22 +259,12 @@ def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
             record.exchange = exchange
             record.symbol = symbol
             record.instrument_type = meta.get("instrument_type")
-            record.tick_size = meta.get("tick_size")
-            record.tick_value = meta.get("tick_value")
-            record.contract_size = meta.get("contract_size")
-            record.min_order_size = meta.get("min_order_size")
-            record.quote_currency = meta.get("quote_currency")
-            if "can_short" in meta:
-                record.can_short = bool(meta.get("can_short"))
-            if "short_requires_borrow" in meta:
-                record.short_requires_borrow = bool(meta.get("short_requires_borrow"))
-            if "has_funding" in meta:
-                record.has_funding = bool(meta.get("has_funding"))
-            if "expiry_ts" in meta:
-                record.expiry_ts = meta.get("expiry_ts")
-            record.maker_fee_rate = meta.get("maker_fee_rate")
-            record.taker_fee_rate = meta.get("taker_fee_rate")
-            record.extra_metadata = dict(meta.get("metadata") or {})
+            # Instrument field values now live in the metadata JSON payload.
+            # Merge metadata instead of replacing to preserve existing values
+            if "metadata" in meta:
+                existing_metadata = dict(record.extra_metadata or {})
+                existing_metadata.update(meta.get("metadata") or {})
+                record.extra_metadata = existing_metadata
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now
@@ -690,6 +711,40 @@ def delete_strategy_instrument(strategy_id: str, instrument_id: str) -> None:
             instrument_id,
             exc,
         )
+
+
+def delete_orphan_strategy_instrument_links(strategy_id: str) -> int:
+    """Remove strategy-instrument links where the instrument no longer exists."""
+
+    if not db.available:
+        return 0
+    try:
+        with db.session() as session:
+            orphan_links = session.execute(
+                select(StrategyInstrumentLink.instrument_id)
+                .outerjoin(
+                    InstrumentRecord,
+                    StrategyInstrumentLink.instrument_id == InstrumentRecord.id,
+                )
+                .where(
+                    StrategyInstrumentLink.strategy_id == strategy_id,
+                    InstrumentRecord.id.is_(None),
+                )
+            ).scalars().all()
+            if not orphan_links:
+                return 0
+            session.query(StrategyInstrumentLink).filter(
+                StrategyInstrumentLink.strategy_id == strategy_id,
+                StrategyInstrumentLink.instrument_id.in_(orphan_links),
+            ).delete(synchronize_session=False)
+            return len(orphan_links)
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "strategy_instrument_orphan_cleanup_failed | strategy=%s | error=%s",
+            strategy_id,
+            exc,
+        )
+        return 0
 
 
 def delete_strategy_indicator(strategy_id: str, indicator_id: str) -> None:

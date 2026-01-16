@@ -291,24 +291,28 @@ class InstrumentRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Return the instrument payload for API consumers."""
 
+        metadata = dict(self.extra_metadata or {})
+        instrument_fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), dict) else {}
         return {
             "id": self.id,
             "datasource": self.datasource,
             "exchange": self.exchange,
             "symbol": self.symbol,
             "instrument_type": self.instrument_type,
-            "tick_size": self.tick_size,
-            "tick_value": self.tick_value,
-            "contract_size": self.contract_size,
-            "min_order_size": self.min_order_size,
-            "quote_currency": self.quote_currency,
-            "maker_fee_rate": self.maker_fee_rate,
-            "taker_fee_rate": self.taker_fee_rate,
-            "can_short": bool(self.can_short),
-            "short_requires_borrow": bool(self.short_requires_borrow),
-            "has_funding": bool(self.has_funding),
-            "expiry_ts": (self.expiry_ts.isoformat() + "Z") if self.expiry_ts else None,
-            "metadata": dict(self.extra_metadata or {}),
+            "tick_size": instrument_fields.get("tick_size"),
+            "tick_value": instrument_fields.get("tick_value"),
+            "contract_size": instrument_fields.get("contract_size"),
+            "min_order_size": instrument_fields.get("min_order_size"),
+            "base_currency": instrument_fields.get("base_currency"),
+            "quote_currency": instrument_fields.get("quote_currency"),
+            "maker_fee_rate": instrument_fields.get("maker_fee_rate"),
+            "taker_fee_rate": instrument_fields.get("taker_fee_rate"),
+            "margin_rates": instrument_fields.get("margin_rates"),
+            "can_short": instrument_fields.get("can_short"),
+            "short_requires_borrow": instrument_fields.get("short_requires_borrow"),
+            "has_funding": instrument_fields.get("has_funding"),
+            "expiry_ts": instrument_fields.get("expiry_ts"),
+            "metadata": metadata,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

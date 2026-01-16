@@ -479,20 +479,22 @@ class BotRuntime:
                 return _isoformat(entry_time)
         return None
 
-    def _active_trade_for_symbol(
+    def _active_trade_for_instrument(
         self,
-        symbol: Optional[str],
+        instrument_id: Optional[str],
         *,
         skip_series: Optional[StrategySeries] = None,
     ) -> Optional[object]:
-        if not symbol:
+        if not instrument_id:
             return None
-        symbol_key = str(symbol).upper()
         for state in self._series_states:
             series = state.series
             if skip_series is not None and series is skip_series:
                 continue
-            if str(series.symbol or "").upper() != symbol_key:
+            series_instrument_id = None
+            if isinstance(series.instrument, Mapping):
+                series_instrument_id = series.instrument.get("id")
+            if not series_instrument_id or series_instrument_id != instrument_id:
                 continue
             engine = getattr(series, "risk_engine", None)
             trade = getattr(engine, "active_trade", None) if engine else None
@@ -884,7 +886,28 @@ class BotRuntime:
         # Attempt to create trade from signal
         blocking_trade = None
         if direction is not None:
-            blocking_trade = self._active_trade_for_symbol(series.symbol, skip_series=series)
+            instrument_id = None
+            if isinstance(series.instrument, Mapping):
+                instrument_id = series.instrument.get("id")
+            if not instrument_id:
+                self._log_decision_event(
+                    event="signal_rejected",
+                    series=series,
+                    candle=candle,
+                    signal_type="strategy_signal",
+                    signal_direction=direction,
+                    signal_price=candle.close,
+                    rule_id=None,
+                    decision="rejected",
+                    reason="instrument_id_missing",
+                    instrument_id=None,
+                )
+                direction = None
+            else:
+                blocking_trade = self._active_trade_for_instrument(
+                    instrument_id,
+                    skip_series=series,
+                )
 
         new_trade = None
         if direction is not None and blocking_trade is None:
@@ -912,15 +935,22 @@ class BotRuntime:
                 # Determine rejection reason
                 rejection_reason = "Active trade already open"
                 rejection_meta: Optional[Dict[str, Any]] = None
+                blocking_trade_id: Optional[str] = None
                 if blocking_trade is not None:
-                    rejection_reason = "Active trade already open for symbol"
+                    rejection_reason = "Active trade already open for instrument"
+                    blocked_instrument_id = None
+                    if isinstance(series.instrument, Mapping):
+                        blocked_instrument_id = series.instrument.get("id")
+                    blocking_trade_id = getattr(blocking_trade, "trade_id", None)
                     rejection_meta = {
-                        "active_trade_id": getattr(blocking_trade, "trade_id", None),
-                        "blocked_symbol": series.symbol,
+                        "active_trade_id": blocking_trade_id,
+                        "blocked_instrument_id": blocked_instrument_id,
                     }
                 elif series.risk_engine.active_trade is None:
                     rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
                     rejection_meta = series.risk_engine.last_rejection_detail
+                if rejection_meta and "reason" in rejection_meta:
+                    rejection_meta = {k: v for k, v in rejection_meta.items() if k != "reason"}
 
                 self._log_decision_event(
                     event="signal_rejected",
@@ -933,7 +963,7 @@ class BotRuntime:
                     decision="rejected",
                     reason=rejection_reason,
                     **(rejection_meta or {}),
-                    trade_id=None,
+                    trade_id=blocking_trade_id,
                 )
 
         if new_trade is not None:

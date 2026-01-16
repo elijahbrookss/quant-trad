@@ -4,17 +4,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
 
 from ..providers import persistence_bootstrap  # noqa: F401
-
-try:  # pragma: no cover - optional dependency wiring
-    import ccxt  # type: ignore
-except Exception:  # pragma: no cover - CCXT unavailable at runtime
-    ccxt = None  # type: ignore
 
 from ..storage.storage import (
     delete_instrument,
@@ -27,12 +21,6 @@ from ..storage.storage import (
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_exchange(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    text = str(value).strip().lower()
-    return text or None
 
 
 def _coerce_float(value: Optional[object]) -> Optional[float]:
@@ -82,16 +70,17 @@ def _coerce_datetime(value: Optional[object]) -> Optional[datetime]:
 
 def _missing_behavior_fields(payload: Mapping[str, Any]) -> List[str]:
     missing: List[str] = []
-    if payload.get("can_short") is None:
-        missing.append("can_short")
-    if payload.get("short_requires_borrow") is None:
-        missing.append("short_requires_borrow")
-    if payload.get("has_funding") is None:
-        missing.append("has_funding")
-    if not payload.get("quote_currency"):
-        missing.append("quote_currency")
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
-    if not (metadata.get("base_currency") or payload.get("base_currency")):
+    instrument_fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
+    if instrument_fields.get("can_short") is None:
+        missing.append("can_short")
+    if instrument_fields.get("short_requires_borrow") is None:
+        missing.append("short_requires_borrow")
+    if instrument_fields.get("has_funding") is None:
+        missing.append("has_funding")
+    if not instrument_fields.get("quote_currency"):
+        missing.append("quote_currency")
+    if not instrument_fields.get("base_currency"):
         missing.append("base_currency")
     return missing
 
@@ -167,29 +156,52 @@ def create_instrument(**payload: object) -> Dict[str, Any]:
     symbol = _normalize_symbol(payload.get("symbol"))
     if not symbol:
         raise ValueError("Instrument symbol is required")
+    metadata_input = payload.get("metadata") or {}
+    if isinstance(metadata_input, Mapping) and (
+        "instrument_fields" in metadata_input or "provider_metadata" in metadata_input
+    ):
+        metadata = dict(metadata_input)
+        instrument_fields = dict(metadata.get("instrument_fields") or {})
+        provider_metadata = dict(metadata.get("provider_metadata") or {})
+    else:
+        instrument_fields = {}
+        provider_metadata = dict(metadata_input) if isinstance(metadata_input, Mapping) else {}
+    for key, coercer in (
+        ("tick_size", _coerce_float),
+        ("tick_value", _coerce_float),
+        ("contract_size", _coerce_float),
+        ("min_order_size", _coerce_float),
+        ("maker_fee_rate", _coerce_float),
+        ("taker_fee_rate", _coerce_float),
+    ):
+        if key in payload:
+            instrument_fields[key] = coercer(payload.get(key))
+    if "margin_rates" in payload:
+        instrument_fields["margin_rates"] = payload.get("margin_rates")
+    if "quote_currency" in payload:
+        instrument_fields["quote_currency"] = (payload.get("quote_currency") or "").upper() or None
+    if "base_currency" in payload:
+        instrument_fields["base_currency"] = (payload.get("base_currency") or "").upper() or None
+    if "can_short" in payload:
+        instrument_fields["can_short"] = _coerce_bool(payload.get("can_short"))
+    if "short_requires_borrow" in payload:
+        instrument_fields["short_requires_borrow"] = _coerce_bool(payload.get("short_requires_borrow"))
+    if "has_funding" in payload:
+        instrument_fields["has_funding"] = _coerce_bool(payload.get("has_funding"))
+    if "expiry_ts" in payload:
+        expiry_ts = _coerce_datetime(payload.get("expiry_ts"))
+        instrument_fields["expiry_ts"] = expiry_ts.isoformat() if expiry_ts else None
+    metadata = {"instrument_fields": instrument_fields, "provider_metadata": provider_metadata}
+
     body = {
         "id": payload.get("id"),
         "symbol": symbol,
         "datasource": (payload.get("datasource") or "").strip() or None,
         "exchange": (payload.get("exchange") or "").strip() or None,
         "instrument_type": payload.get("instrument_type") or None,
-        "tick_size": _coerce_float(payload.get("tick_size")),
-        "tick_value": _coerce_float(payload.get("tick_value")),
-        "contract_size": _coerce_float(payload.get("contract_size")),
-        "min_order_size": _coerce_float(payload.get("min_order_size")),
-        "quote_currency": (payload.get("quote_currency") or "").upper() or None,
-        "can_short": _coerce_bool(payload.get("can_short")),
-        "short_requires_borrow": _coerce_bool(payload.get("short_requires_borrow")),
-        "has_funding": _coerce_bool(payload.get("has_funding")),
-        "expiry_ts": _coerce_datetime(payload.get("expiry_ts")),
-        "maker_fee_rate": _coerce_float(payload.get("maker_fee_rate")),
-        "taker_fee_rate": _coerce_float(payload.get("taker_fee_rate")),
-        "metadata": payload.get("metadata") or {},
+        "metadata": metadata,
     }
-    base_currency = (payload.get("base_currency") or "").upper() or None
-    if base_currency:
-        body["metadata"]["base_currency"] = base_currency
-    if body["tick_size"] is None and body["tick_value"] is None:
+    if instrument_fields.get("tick_size") is None and instrument_fields.get("tick_value") is None:
         raise ValueError("Specify at least a tick size or tick value for the instrument")
     missing = _missing_behavior_fields(body)
     if missing:
@@ -206,7 +218,6 @@ def update_instrument(instrument_id: str, **payload: object) -> Dict[str, Any]:
         "datasource",
         "exchange",
         "instrument_type",
-        "quote_currency",
     ):
         if key in payload and payload[key] is not None:
             value = payload[key]
@@ -214,35 +225,53 @@ def update_instrument(instrument_id: str, **payload: object) -> Dict[str, Any]:
                 updates[key] = value.strip() or None
             else:
                 updates[key] = value
-    for key in ("tick_size", "tick_value", "contract_size", "min_order_size", "maker_fee_rate", "taker_fee_rate"):
+    metadata = dict(record.get("metadata") or {})
+    instrument_fields = dict(metadata.get("instrument_fields") or {})
+    provider_metadata = dict(metadata.get("provider_metadata") or {})
+    for key in (
+        "tick_size",
+        "tick_value",
+        "contract_size",
+        "min_order_size",
+        "maker_fee_rate",
+        "taker_fee_rate",
+    ):
         if key in payload:
-            updates[key] = _coerce_float(payload.get(key))
+            instrument_fields[key] = _coerce_float(payload.get(key))
+    if "margin_rates" in payload:
+        instrument_fields["margin_rates"] = payload.get("margin_rates")
     if "symbol" in payload and payload["symbol"]:
         updates["symbol"] = _normalize_symbol(payload["symbol"])
     if "metadata" in payload and isinstance(payload["metadata"], dict):
-        updates["metadata"] = payload["metadata"]
+        incoming = payload["metadata"]
+        if "instrument_fields" in incoming or "provider_metadata" in incoming:
+            instrument_fields.update(incoming.get("instrument_fields") or {})
+            provider_metadata.update(incoming.get("provider_metadata") or {})
+        else:
+            provider_metadata.update(incoming)
     if "base_currency" in payload:
-        base_currency = (payload.get("base_currency") or "").upper() or None
-        updates.setdefault("metadata", {})
-        if base_currency:
-            updates["metadata"]["base_currency"] = base_currency
+        instrument_fields["base_currency"] = (payload.get("base_currency") or "").upper() or None
+    if "quote_currency" in payload:
+        instrument_fields["quote_currency"] = (payload.get("quote_currency") or "").upper() or None
     if "expiry_ts" in payload:
-        updates["expiry_ts"] = _coerce_datetime(payload.get("expiry_ts"))
+        expiry_ts = _coerce_datetime(payload.get("expiry_ts"))
+        instrument_fields["expiry_ts"] = expiry_ts.isoformat() if expiry_ts else None
     if "can_short" in payload:
         coerced = _coerce_bool(payload.get("can_short"))
         if coerced is None:
             raise ValueError("can_short must be a boolean value")
-        updates["can_short"] = coerced
+        instrument_fields["can_short"] = coerced
     if "short_requires_borrow" in payload:
         coerced = _coerce_bool(payload.get("short_requires_borrow"))
         if coerced is None:
             raise ValueError("short_requires_borrow must be a boolean value")
-        updates["short_requires_borrow"] = coerced
+        instrument_fields["short_requires_borrow"] = coerced
     if "has_funding" in payload:
         coerced = _coerce_bool(payload.get("has_funding"))
         if coerced is None:
             raise ValueError("has_funding must be a boolean value")
-        updates["has_funding"] = coerced
+        instrument_fields["has_funding"] = coerced
+    updates["metadata"] = {"instrument_fields": instrument_fields, "provider_metadata": provider_metadata}
     missing = _missing_behavior_fields(updates)
     if missing:
         raise ValueError(f"Instrument metadata missing fields: {', '.join(missing)}")
@@ -271,70 +300,6 @@ def instrument_index() -> Dict[str, Dict[str, Any]]:
     return index
 
 
-def _ccxt_client(exchange_id: str):  # pragma: no cover - exercised in runtime integration
-    if ccxt is None:
-        raise RuntimeError("ccxt is not installed; cannot auto-load market metadata")
-    if not hasattr(ccxt, exchange_id):
-        raise ValueError(f"Exchange '{exchange_id}' is not supported by ccxt")
-    exchange_cls = getattr(ccxt, exchange_id)
-    return exchange_cls({"enableRateLimit": True})
-
-
-@lru_cache(maxsize=8)
-def _load_markets(exchange_id: str) -> Dict[str, Any]:  # pragma: no cover - heavy network call
-    client = _ccxt_client(exchange_id)
-    markets = client.load_markets()
-    return markets or {}
-
-
-def _match_market_symbol(symbol: str, market: Mapping[str, Any]) -> bool:
-    """Return True if *market* matches *symbol* ignoring separators/case."""
-
-    target = symbol.replace("/", "").replace("-", "").upper()
-    candidates = []
-    for key in ("symbol", "id", "baseId", "quoteId"):
-        value = market.get(key)
-        if not value:
-            continue
-        tokens = [
-            str(value).upper(),
-            str(value).replace("/", "").replace("-", "").upper(),
-        ]
-        candidates.extend(tokens)
-    return target in candidates
-
-
-def _market_for_symbol(exchange_id: str, symbol: str) -> Dict[str, Any]:
-    """Return the CCXT market dict for *symbol* on *exchange_id*."""
-
-    markets = _load_markets(exchange_id)
-    if symbol in markets:
-        return markets[symbol]
-    normalized = symbol.replace("/", "").replace("-", "").upper()
-    for market in markets.values():
-        if not isinstance(market, dict):
-            continue
-        if _match_market_symbol(normalized, market):
-            return market
-    raise ValueError(f"Symbol {symbol} not found on {exchange_id}")
-
-
-def _tick_from_precision(value: object) -> Optional[float]:
-    """Return a tick increment derived from CCXT precision metadata."""
-
-    if value is None:
-        return None
-    # CCXT reports integers for decimal precision (e.g. 5 -> 0.00001)
-    if isinstance(value, (int, float)) and float(value).is_integer():
-        integer = int(float(value))
-        if integer >= 0:
-            return float(10 ** (-integer))
-    numeric = _coerce_float(value)
-    if numeric in (None, 0):
-        return None
-    return float(numeric)
-
-
 def _step_from_precision(value: object) -> Optional[float]:
     """Return a quantity step derived from CCXT amount precision metadata."""
 
@@ -352,112 +317,6 @@ def _step_from_precision(value: object) -> Optional[float]:
     return None
 
 
-def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
-    precision = market.get("precision") or {}
-    limits = market.get("limits") or {}
-    price_precision_raw = precision.get("price")
-    tick_size = _tick_from_precision(price_precision_raw)
-    if tick_size not in (None, 0):
-        return tick_size
-    price_precision = _coerce_float(price_precision_raw)
-    if price_precision not in (None, 0) and price_precision < 1:
-        return price_precision
-    price_limit = limits.get("price") if isinstance(limits.get("price"), Mapping) else {}
-    min_price = _coerce_float(price_limit.get("min"))
-    if min_price not in (None, 0):
-        return min_price
-    return price_precision if price_precision not in (None, 0) else None
-
-
-def _spot_contract_from_market(market: Mapping[str, Any]) -> Dict[str, Any]:
-    precision = market.get("precision") or {}
-    limits = market.get("limits") or {}
-    amount_limits = limits.get("amount") if isinstance(limits.get("amount"), Mapping) else {}
-    cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
-
-    tick_size = _tick_from_market(market)
-    qty_step = _step_from_precision(precision.get("amount"))
-    min_qty = _coerce_float(amount_limits.get("min"))
-    min_notional = _coerce_float(cost_limits.get("min"))
-
-    return {
-        "tick_size": tick_size,
-        "qty_step": qty_step,
-        "min_qty": min_qty,
-        "min_notional": min_notional,
-    }
-
-
-def _resolve_can_short(market: Mapping[str, Any]) -> bool:
-    direct = market.get("short")
-    if isinstance(direct, bool):
-        return direct
-    if market.get("contract") or market.get("future") or market.get("swap"):
-        return True
-    market_type = str(market.get("type") or "").lower()
-    if market_type in {"future", "swap"}:
-        return True
-    if market.get("spot") is False:
-        return True
-    return False
-
-
-def _resolve_has_funding(market: Mapping[str, Any]) -> bool:
-    if market.get("swap"):
-        return True
-    market_type = str(market.get("type") or "").lower()
-    if market_type == "swap":
-        return True
-    info = market.get("info") if isinstance(market.get("info"), Mapping) else {}
-    if any(key in info for key in ("funding_rate", "funding_time", "funding_interval")):
-        return True
-    details = info.get("future_product_details") if isinstance(info.get("future_product_details"), Mapping) else {}
-    if any(key in details for key in ("funding_rate", "funding_time", "funding_interval")):
-        return True
-    return False
-
-
-def _resolve_expiry_ts(market: Mapping[str, Any]) -> Optional[datetime]:
-    for key in ("expiry", "expiration", "expiryDatetime"):
-        parsed = _coerce_datetime(market.get(key))
-        if parsed:
-            return parsed
-    info = market.get("info") if isinstance(market.get("info"), Mapping) else {}
-    for key in ("expiry", "expiration", "expiry_datetime", "contract_expiry"):
-        parsed = _coerce_datetime(info.get(key))
-        if parsed:
-            return parsed
-    details = info.get("future_product_details") if isinstance(info.get("future_product_details"), Mapping) else {}
-    parsed = _coerce_datetime(details.get("contract_expiry"))
-    if parsed:
-        return parsed
-    return None
-
-
-def _validate_spot_payload(payload: Mapping[str, Any]) -> List[str]:
-    issues: List[str] = []
-    if not payload.get("tick_size"):
-        issues.append("missing_tick_size")
-    if not payload.get("min_order_size"):
-        issues.append("missing_min_qty")
-
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
-    qty_step = metadata.get("qty_step")
-    if not qty_step:
-        issues.append("missing_qty_step")
-    min_notional = metadata.get("min_notional")
-    if not min_notional:
-        issues.append("missing_min_notional")
-
-    if not payload.get("quote_currency"):
-        issues.append("missing_quote_currency")
-    if payload.get("maker_fee_rate") is None:
-        issues.append("missing_maker_fee")
-    if payload.get("taker_fee_rate") is None:
-        issues.append("missing_taker_fee")
-    return issues
-
-
 def _spot_issues_from_record(record: Mapping[str, Any]) -> List[str]:
     issues: List[str] = []
     if not record.get("tick_size"):
@@ -472,83 +331,35 @@ def _spot_issues_from_record(record: Mapping[str, Any]) -> List[str]:
         issues.append("missing_taker_fee")
 
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
-    qty_step = metadata.get("qty_step")
+    provider_metadata = (
+        metadata.get("provider_metadata")
+        if isinstance(metadata.get("provider_metadata"), Mapping)
+        else metadata
+    )
+    qty_step = provider_metadata.get("qty_step") if isinstance(provider_metadata, Mapping) else None
     if not qty_step:
-        precision = metadata.get("precision") if isinstance(metadata.get("precision"), Mapping) else {}
+        precision = (
+            provider_metadata.get("precision")
+            if isinstance(provider_metadata, Mapping) and isinstance(provider_metadata.get("precision"), Mapping)
+            else {}
+        )
         qty_step = _step_from_precision(precision.get("amount"))
     if not qty_step:
         issues.append("missing_qty_step")
 
-    min_notional = metadata.get("min_notional")
+    min_notional = provider_metadata.get("min_notional") if isinstance(provider_metadata, Mapping) else None
     if not min_notional:
-        limits = metadata.get("limits") if isinstance(metadata.get("limits"), Mapping) else {}
+        limits = (
+            provider_metadata.get("limits")
+            if isinstance(provider_metadata, Mapping) and isinstance(provider_metadata.get("limits"), Mapping)
+            else {}
+        )
         cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
         min_notional = _coerce_float(cost_limits.get("min"))
     if not min_notional:
         issues.append("missing_min_notional")
 
     return issues
-
-
-def _instrument_payload_from_market(
-    *,
-    datasource: Optional[str],
-    exchange: Optional[str],
-    symbol: str,
-    market: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Translate a CCXT market entry into our instrument schema."""
-
-    instrument_type = market.get("type")
-    if not instrument_type:
-        if market.get("spot"):
-            instrument_type = "spot"
-        elif market.get("swap"):
-            instrument_type = "swap"
-        elif market.get("future"):
-            instrument_type = "future"
-    instrument_type = str(instrument_type or "").lower() or None
-
-    spot_contract = _spot_contract_from_market(market)
-    tick_size = spot_contract.get("tick_size")
-    min_amount = spot_contract.get("min_qty")
-    maker_fee = _coerce_float(market.get("maker"))
-    taker_fee = _coerce_float(market.get("taker"))
-
-    is_spot = instrument_type == "spot"
-    contract_size = 1.0 if is_spot else (_coerce_float(market.get("contractSize")) or 1.0)
-    tick_value = None
-    if tick_size is not None and contract_size is not None:
-        tick_value = tick_size * contract_size
-
-    metadata = {
-        "ccxt_symbol": market.get("symbol"),
-        "ccxt_id": market.get("id"),
-        "precision": market.get("precision"),
-        "limits": market.get("limits"),
-        "info": market.get("info"),
-        "qty_step": spot_contract.get("qty_step"),
-        "min_notional": spot_contract.get("min_notional"),
-        "base_currency": None,
-    }
-    payload = {
-        "symbol": _normalize_symbol(symbol),
-        "datasource": datasource,
-        "exchange": exchange,
-        "instrument_type": instrument_type,
-        "tick_size": tick_size,
-        "tick_value": tick_value,
-        "contract_size": contract_size,
-        "min_order_size": min_amount,
-        "quote_currency": None,
-        "can_short": _resolve_can_short(market),
-        "has_funding": _resolve_has_funding(market),
-        "expiry_ts": _resolve_expiry_ts(market),
-        "maker_fee_rate": maker_fee,
-        "taker_fee_rate": taker_fee,
-        "metadata": metadata,
-    }
-    return payload
 
 
 def validate_instrument(
@@ -569,16 +380,6 @@ def validate_instrument(
     datasource_id = (datasource or provider_id or "").strip()
     exchange_id = (exchange or venue_id or "").strip()
 
-    if datasource_id.upper() == "CCXT":
-        record, error = auto_sync_instrument(
-            datasource_id,
-            exchange_id,
-            normalized_symbol,
-            force_refresh=force_refresh,
-        )
-        if record or error:
-            return record, error
-
     try:
         provider = get_provider(datasource_id, venue=exchange_id or venue_id, exchange=exchange_id)
     except Exception as exc:  # pragma: no cover - runtime resolution
@@ -592,37 +393,45 @@ def validate_instrument(
         return None, f"Provider lookup failed: {exc}"
 
     venue_arg = exchange_id or venue_id or ""
+    def _sanitize_provider_error(message: str) -> str:
+        if not message:
+            return "Instrument validation failed"
+        # Strip verbose provider payloads before returning to the frontend.
+        for token in (" | payload=", " | mapped="):
+            if token in message:
+                message = message.split(token, 1)[0]
+        return message
+
     try:
         provider.validate_symbol(venue_arg, normalized_symbol)
         instrument_type = provider.validate_instrument_type(venue_arg, normalized_symbol)
         metadata = provider.get_instrument_metadata(venue_arg, normalized_symbol)
     except Exception as exc:  # pragma: no cover - provider integration
+        error_type = type(exc).__name__
+        status_code = getattr(exc, "status_code", None)
         logger.warning(
-            "instrument_validation_failed | provider=%s venue=%s symbol=%s error=%s",
+            "instrument_validation_failed | provider=%s venue=%s symbol=%s error=%s | error_type=%s | status_code=%s",
             datasource_id,
             venue_arg,
             normalized_symbol,
             exc,
+            error_type,
+            status_code,
         )
-        return None, f"Instrument validation failed: {exc}"
+        sanitized = _sanitize_provider_error(str(exc))
+        return None, f"Instrument validation failed: {sanitized}"
 
     if metadata is None or (metadata.tick_size is None and metadata.tick_value is None):
         return None, "Provider did not return tick metadata for this symbol"
 
     resolved_type = getattr(instrument_type, "value", instrument_type)
+    metadata_payload = metadata.as_dict()
     payload = {
         "symbol": normalized_symbol,
         "datasource": getattr(provider, "get_datasource", lambda: datasource_id)(),
         "exchange": exchange_id or venue_id,
         "instrument_type": resolved_type,
-        "tick_size": metadata.tick_size,
-        "tick_value": metadata.tick_value,
-        "contract_size": metadata.contract_size,
-        "quote_currency": metadata.quote_currency,
-        "can_short": metadata.can_short,
-        "short_requires_borrow": metadata.short_requires_borrow,
-        "has_funding": metadata.has_funding,
-        "expiry_ts": metadata.expiry_ts,
+        "metadata": metadata_payload,
     }
 
     missing = _missing_behavior_fields(payload)
@@ -641,100 +450,4 @@ def validate_instrument(
         )
         return None, f"Unable to persist instrument metadata: {exc}"
 
-    return record, None
-
-
-def auto_sync_instrument(
-    datasource: Optional[str],
-    exchange: Optional[str],
-    symbol: Optional[str],
-    *,
-    force_refresh: bool = False,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Ensure an instrument exists for the datasource/exchange/symbol combo."""
-
-    normalized_symbol = _normalize_symbol(symbol)
-    if not normalized_symbol:
-        return None, "Symbol is required for instrument metadata"
-
-    existing = resolve_instrument(datasource, exchange, normalized_symbol)
-    # If an existing instrument is present and already has tick metadata, reuse it.
-    # Otherwise continue to auto-fetch market metadata to enrich the record.
-    if existing and not force_refresh:
-        has_tick = (existing.get("tick_size") not in (None, 0)) or (existing.get("tick_value") not in (None, 0))
-        if has_tick:
-            return existing, None
-
-    exchange_id = _normalize_exchange(exchange)
-    datasource_id = (datasource or "").strip().upper()
-    if datasource_id != "CCXT":
-        return None, "Automatic metadata is currently available only for CCXT datasources"
-    if not exchange_id:
-        return None, "Specify an exchange to auto-fetch CCXT market metadata"
-
-    try:
-        market = _market_for_symbol(exchange_id, normalized_symbol)
-    except Exception as exc:  # pragma: no cover - network edge cases
-        logger.warning(
-            "instrument_market_lookup_failed | exchange=%s symbol=%s error=%s",
-            exchange_id,
-            normalized_symbol,
-            exc,
-        )
-        return None, f"Unable to load CCXT market metadata: {exc}"
-
-    payload = _instrument_payload_from_market(
-        datasource=datasource_id,
-        exchange=exchange_id,
-        symbol=normalized_symbol,
-        market=market,
-    )
-    try:
-        provider = get_provider(datasource_id, venue=exchange_id, exchange=exchange_id)
-        meta = provider.get_instrument_metadata(exchange_id, normalized_symbol)
-        payload.update(
-            {
-                "tick_size": meta.tick_size,
-                "tick_value": meta.tick_value,
-                "contract_size": meta.contract_size,
-                "can_short": meta.can_short,
-                "short_requires_borrow": meta.short_requires_borrow,
-                "has_funding": meta.has_funding,
-                "expiry_ts": meta.expiry_ts,
-                "quote_currency": meta.quote_currency,
-            }
-        )
-        if payload.get("metadata") is None:
-            payload["metadata"] = {}
-        payload["metadata"]["base_currency"] = meta.base_currency
-    except Exception as exc:  # pragma: no cover - provider edge cases
-        logger.warning(
-            "instrument_provider_metadata_failed | provider=%s exchange=%s symbol=%s error=%s",
-            datasource_id,
-            exchange_id,
-            normalized_symbol,
-            exc,
-        )
-        return None, f"Unable to derive provider metadata: {exc}"
-    missing = _missing_behavior_fields(payload)
-    if missing:
-        return None, f"Instrument metadata missing fields: {', '.join(missing)}"
-    if str(payload.get("instrument_type") or "").lower() == "spot":
-        issues = _validate_spot_payload(payload)
-        if issues:
-            logger.error(
-                "instrument_spot_incomplete | datasource=%s exchange=%s symbol=%s issues=%s",
-                datasource_id,
-                exchange_id,
-                normalized_symbol,
-                ",".join(issues),
-            )
-            return None, f"Spot instrument metadata incomplete: {', '.join(issues)}"
-    record = upsert_instrument(payload)
-    logger.info(
-        "instrument_autosynced | datasource=%s exchange=%s symbol=%s",
-        datasource_id,
-        exchange_id,
-        normalized_symbol,
-    )
     return record, None

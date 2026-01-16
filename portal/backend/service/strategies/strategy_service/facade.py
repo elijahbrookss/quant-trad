@@ -616,11 +616,19 @@ class StrategyRegistry:
 
         record.instrument_messages = []
         for slot in record.instruments:
-            _, error = instrument_service.validate_instrument(
+            instrument_rec, error = instrument_service.validate_instrument(
                 record.datasource,
                 record.exchange,
                 slot.symbol,
             )
+            if instrument_rec:
+                inst_id = str(instrument_rec.get("id") or "").strip()
+                if inst_id:
+                    slot.metadata = {
+                        **(slot.metadata or {}),
+                        "instrument_id": inst_id,
+                        **instrument_rec,
+                    }
             if error:
                 record.instrument_messages.append(
                     {

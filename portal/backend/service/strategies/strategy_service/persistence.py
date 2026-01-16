@@ -46,6 +46,14 @@ def list_strategy_instrument_symbols(strategy_id: str) -> list[str]:
     return storage.list_strategy_instrument_symbols(strategy_id)
 
 
+def list_strategy_instrument_links(strategy_id: str) -> list[Dict[str, Any]]:
+    return storage.list_strategy_instrument_links(strategy_id)
+
+
+def delete_orphan_strategy_instrument_links(strategy_id: str) -> int:
+    return storage.delete_orphan_strategy_instrument_links(strategy_id)
+
+
 def upsert_strategy_rule(payload: Mapping[str, Any]) -> None:
     storage.upsert_strategy_rule(payload)
 
@@ -95,4 +103,6 @@ __all__ = [
     "upsert_strategy_instrument",
     "delete_strategy_instrument",
     "list_strategy_instrument_symbols",
+    "list_strategy_instrument_links",
+    "delete_orphan_strategy_instrument_links",
 ]

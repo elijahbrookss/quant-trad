@@ -1065,6 +1065,9 @@ class SeriesBuilder:
                     "payload": payload,
                     "color": color,
                     "source": "indicator",
+                    "bot_id": self.bot_id,
+                    "strategy_id": strategy_meta.get("id"),
+                    "symbol": window_symbol,
                 }
             )
             appended_context = self._runtime_log_context(

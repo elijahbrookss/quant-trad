@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
 from data_providers.registry import (
@@ -123,6 +123,7 @@ def tick_metadata(
     symbol: Optional[str],
     timeframe: Optional[str] = None,
     refresh: bool = False,
+    strategy_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return tick metadata for the given market selection."""
 
@@ -155,6 +156,34 @@ def tick_metadata(
     if not instrument:
         return {"errors": {"symbol": "Tick metadata not found for this symbol."}}
 
+    if strategy_id and instrument.get("id"):
+        try:
+            from ..strategies.strategy_service import persistence as strategy_persistence
+
+            removed_orphans = strategy_persistence.delete_orphan_strategy_instrument_links(strategy_id)
+            if removed_orphans:
+                logger.info(
+                    "strategy_instrument_orphans_removed | strategy=%s | removed=%s",
+                    strategy_id,
+                    removed_orphans,
+                )
+            links = strategy_persistence.list_strategy_instrument_links(strategy_id)
+            for link in links:
+                if (link.get("symbol") or "").upper() == normalized_symbol and link.get("instrument_id") != instrument.get("id"):
+                    strategy_persistence.delete_strategy_instrument(strategy_id, link.get("instrument_id"))
+            strategy_persistence.upsert_strategy_instrument(
+                strategy_id=strategy_id,
+                instrument_id=instrument.get("id"),
+                snapshot=instrument,
+            )
+        except Exception as exc:
+            logger.warning(
+                "strategy_instrument_link_refresh_failed | strategy=%s symbol=%s error=%s",
+                strategy_id,
+                normalized_symbol,
+                exc,
+            )
+
     metadata = {
         "tick_size": instrument.get("tick_size"),
         "tick_value": instrument.get("tick_value"),
@@ -163,9 +192,10 @@ def tick_metadata(
         "short_requires_borrow": instrument.get("short_requires_borrow"),
         "has_funding": instrument.get("has_funding"),
         "expiry_ts": instrument.get("expiry_ts"),
+        "margin_rates": instrument.get("margin_rates"),
         "currency": instrument.get("quote_currency"),
         "quote_currency": instrument.get("quote_currency"),
-        "base_currency": (instrument.get("metadata") or {}).get("base_currency"),
+        "base_currency": instrument.get("base_currency"),
     }
     if instrument.get("instrument_type"):
         metadata["instrument_type"] = instrument.get("instrument_type")

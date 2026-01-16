@@ -18,6 +18,7 @@ class ProviderVenueRequest(BaseModel):
     symbol: Optional[str] = None
     timeframe: Optional[str] = None
     refresh: Optional[bool] = None
+    strategy_id: Optional[str] = None
 
 
 @router.get("/")
@@ -50,6 +51,7 @@ async def tick_metadata(body: ProviderVenueRequest) -> Dict[str, Any]:
             body.symbol,
             timeframe=body.timeframe,
             refresh=bool(body.refresh),
+            strategy_id=body.strategy_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
