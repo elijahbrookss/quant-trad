@@ -96,6 +96,11 @@ _ensure_python:
 _ensure_dirs:
 	@mkdir -p $(PID_DIR) $(LOG_DIR)
 
+## ============================ COINBASE ============================ ##
+.PHONY: coinbase-jwt
+coinbase-jwt: ## Generate Coinbase JWT (reads secrets.env)
+	@$(PYTHON) scripts/coinbase_jwt.py --path /api/v3/brokerage/products
+
 
 ## ============================== DOCKER ================================== ##
 .PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild
