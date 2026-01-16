@@ -21,6 +21,8 @@ class PaperAdapter(ExecutionAdapter):
         min_notional: float,
         contract_size: float,
         short_requires_borrow: bool,
+        max_qty: Optional[float] = None,
+        amount_precision: Optional[int] = None,
         slippage_bps: float = 0.0,
     ) -> None:
         self._delegate = BacktestAdapter(
@@ -30,6 +32,8 @@ class PaperAdapter(ExecutionAdapter):
             min_notional=min_notional,
             contract_size=contract_size,
             short_requires_borrow=short_requires_borrow,
+            max_qty=max_qty,
+            amount_precision=amount_precision,
             slippage_bps=slippage_bps,
         )
 

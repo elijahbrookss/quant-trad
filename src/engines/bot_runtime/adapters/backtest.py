@@ -27,6 +27,8 @@ class BacktestAdapter(ExecutionAdapter):
         min_notional: float,
         contract_size: float,
         short_requires_borrow: bool,
+        max_qty: Optional[float] = None,
+        amount_precision: Optional[int] = None,
         slippage_bps: float = 0.0,
     ) -> None:
         if short_requires_borrow:
@@ -36,6 +38,8 @@ class BacktestAdapter(ExecutionAdapter):
                     qty_step=qty_step,
                     min_qty=min_qty,
                     min_notional=min_notional,
+                    max_qty=max_qty,
+                    precision=amount_precision,
                 ),
                 slippage_bps=slippage_bps,
             )
@@ -47,6 +51,8 @@ class BacktestAdapter(ExecutionAdapter):
                     min_qty=min_qty,
                     min_notional=min_notional,
                     contract_size=contract_size,
+                    max_qty=max_qty,
+                    precision=amount_precision,
                 ),
                 slippage_bps=slippage_bps,
             )

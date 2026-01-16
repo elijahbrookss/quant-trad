@@ -15,6 +15,8 @@ from atm import merge_templates
 from .execution import FillRejection, FillResult
 from .execution_adapter import ExecutionAdapter
 from utils.log_context import build_log_context, merge_log_context, with_log_context
+from .amount_constraints import normalize_qty_with_constraints, resolve_amount_constraints
+from .margin import calculate_max_qty_by_margin, resolve_instrument_type, InstrumentType
 from .wallet import WalletLedger
 from .wallet_gateway import LedgerWalletGateway, WalletGateway
 
@@ -302,6 +304,7 @@ class LadderPosition:
     taker_fee_rate: float = 0.0
     quote_currency: str = "USD"
     short_requires_borrow: bool = False
+    instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
     trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -372,9 +375,12 @@ class LadderPosition:
             base_currency=self.base_currency or "",
             quote_currency=self.quote_currency_code or "",
             qty=fill.filled_qty,
+            qty_raw=fill.metadata.get("qty_raw") if isinstance(fill.metadata, dict) else None,
+            qty_final=fill.metadata.get("qty_final") if isinstance(fill.metadata, dict) else None,
             notional=fill.notional,
             fee=fill.fee,
             short_requires_borrow=bool(self.short_requires_borrow),
+            instrument=self.instrument,
         )
 
     def _update_excursions(self, candle: Candle) -> None:
@@ -443,8 +449,10 @@ class LadderPosition:
                     continue
                 allowed, reason, payload = self._wallet_can_apply_fill(fill_result, side=side)
                 if not allowed:
+                    # CRITICAL: Position exits must ALWAYS execute to close positions
+                    # Log the wallet insufficient balance but force the execution anyway
                     if self.wallet_gateway:
-                        self.wallet_gateway.reject(reason, payload)
+                        self.wallet_gateway.reject(reason, payload, trade_id=self.trade_id, leg_id=leg.leg_id)
                     context = merge_log_context(
                         build_log_context(
                             trade_id=self.trade_id,
@@ -457,29 +465,26 @@ class LadderPosition:
                         build_log_context(
                             available=payload.get("available"),
                             required=payload.get("required"),
+                            required_used=payload.get("required_used"),
+                            required_full_notional=payload.get("required_full_notional"),
+                            available_collateral=payload.get("available_collateral"),
                             currency=payload.get("currency"),
                             qty=payload.get("qty"),
+                            qty_raw=payload.get("qty_raw"),
+                            qty_final=payload.get("qty_final"),
                             notional=payload.get("notional"),
                             fee=payload.get("fee"),
+                            margin_total_required=payload.get("margin_total_required"),
+                            margin_calc_type=payload.get("margin_calc_type"),
+                            margin_method=payload.get("margin_method"),
+                            margin_session=payload.get("margin_session"),
+                            margin_leg=payload.get("margin_leg"),
+                            margin_rate_source_path=payload.get("margin_rate_source_path"),
+                            shortfall=payload.get("shortfall"),
                         ),
                     )
-                    logger.warning(with_log_context("wallet_exit_rejected", context))
-                    events.append(
-                        {
-                            "type": "execution_rejected",
-                            "leg": leg.name,
-                            "leg_id": leg.leg_id,
-                            "trade_id": self.trade_id,
-                            "price": round(leg.target_price, 4),
-                            "time": isoformat(candle.time),
-                            "reason": reason,
-                            "currency": self.quote_currency,
-                            "contracts": leg.contracts,
-                            "ticks": leg.ticks,
-                            "direction": self.direction,
-                        }
-                    )
-                    continue
+                    logger.warning(with_log_context("wallet_exit_forced_despite_insufficient_balance", context))
+                    # Note: We do NOT continue here - we force the exit execution below
 
             exit_price = fill_result.fill_price if fill_result else leg.target_price
             exit_qty = fill_result.filled_qty if fill_result else leg.contracts
@@ -634,8 +639,10 @@ class LadderPosition:
                         continue
                     allowed, reason, payload = self._wallet_can_apply_fill(fill_result, side=side)
                     if not allowed:
+                        # CRITICAL: Stop losses must ALWAYS execute to close positions
+                        # Log the wallet insufficient balance but force the execution anyway
                         if self.wallet_gateway:
-                            self.wallet_gateway.reject(reason, payload)
+                            self.wallet_gateway.reject(reason, payload, trade_id=self.trade_id, leg_id=leg.leg_id)
                         context = merge_log_context(
                             build_log_context(
                                 trade_id=self.trade_id,
@@ -648,29 +655,26 @@ class LadderPosition:
                             build_log_context(
                                 available=payload.get("available"),
                                 required=payload.get("required"),
+                                required_used=payload.get("required_used"),
+                                required_full_notional=payload.get("required_full_notional"),
+                                available_collateral=payload.get("available_collateral"),
                                 currency=payload.get("currency"),
                                 qty=payload.get("qty"),
+                                qty_raw=payload.get("qty_raw"),
+                                qty_final=payload.get("qty_final"),
                                 notional=payload.get("notional"),
                                 fee=payload.get("fee"),
+                                margin_total_required=payload.get("margin_total_required"),
+                                margin_calc_type=payload.get("margin_calc_type"),
+                                margin_method=payload.get("margin_method"),
+                                margin_session=payload.get("margin_session"),
+                                margin_leg=payload.get("margin_leg"),
+                                margin_rate_source_path=payload.get("margin_rate_source_path"),
+                                shortfall=payload.get("shortfall"),
                             ),
                         )
-                        logger.warning(with_log_context("wallet_stop_rejected", context))
-                        events.append(
-                            {
-                                "type": "execution_rejected",
-                                "trade_id": self.trade_id,
-                                "price": round(self.stop_price, 4),
-                                "time": isoformat(candle.time),
-                                "currency": self.quote_currency,
-                                "leg": leg.name,
-                                "leg_id": leg.leg_id,
-                                "contracts": leg.contracts,
-                                "ticks": tick_distance,
-                                "direction": self.direction,
-                                "reason": reason,
-                            }
-                        )
-                        continue
+                        logger.warning(with_log_context("wallet_stop_forced_despite_insufficient_balance", context))
+                        # Note: We do NOT continue here - we force the stop execution below
 
                 exit_price = fill_result.fill_price if fill_result else self.stop_price
                 exit_qty = fill_result.filled_qty if fill_result else leg.contracts
@@ -905,12 +909,29 @@ class LadderRiskEngine:
         )
         self.global_risk_multiplier = coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
         self.instrument_risk_multiplier = coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
-        self.min_qty, self.qty_step, self.min_notional = self._resolve_quantity_constraints(self.instrument)
+        try:
+            self.amount_constraints = resolve_amount_constraints(self.instrument)
+        except ValueError as exc:
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="AMOUNT_CONSTRAINT_CONFLICT",
+                error=str(exc),
+            )
+            logger.error(with_log_context("ladder_risk_configuration_failed", context))
+            raise
+        self.min_qty = self.amount_constraints.min_qty
+        self.max_qty = self.amount_constraints.max_qty
+        self.qty_step = self.amount_constraints.qty_step
+        self.min_notional = self.amount_constraints.min_notional
+        self.amount_precision = self.amount_constraints.precision
         constraints_context = build_log_context(
             symbol=self.instrument.get("symbol"),
             min_qty=self.min_qty,
+            max_qty=self.max_qty,
             qty_step=self.qty_step,
             min_notional=self.min_notional,
+            amount_precision=self.amount_precision,
+            qty_step_source=self.amount_constraints.step_source,
         )
         logger.debug(with_log_context("ladder_risk_constraints", constraints_context))
         self.execution_model = None
@@ -1159,45 +1180,6 @@ class LadderRiskEngine:
             return candle.close - stop_distance
         return candle.close + stop_distance
 
-    def _step_from_precision(self, value: Optional[object]) -> Optional[float]:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)) and float(value).is_integer():
-            integer = int(float(value))
-            if integer >= 0:
-                return float(10 ** (-integer))
-        numeric = coerce_float(value)
-        if numeric in (None, 0):
-            return None
-        return float(numeric) if 0 < float(numeric) < 1 else None
-
-    def _resolve_quantity_constraints(self, instrument: Mapping[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-        min_qty = coerce_float(
-            instrument.get("min_qty")
-            or instrument.get("min_order_size")
-            or instrument.get("min_quantity")
-        )
-        qty_step = coerce_float(
-            instrument.get("qty_step")
-            or instrument.get("order_step")
-            or instrument.get("step_size")
-            or instrument.get("lot_size")
-        )
-        min_notional = coerce_float(instrument.get("min_notional") or instrument.get("min_cost"))
-        metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
-        if isinstance(metadata, Mapping):
-            limits = metadata.get("limits") if isinstance(metadata.get("limits"), Mapping) else {}
-            amount_limits = limits.get("amount") if isinstance(limits.get("amount"), Mapping) else {}
-            cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
-            if min_qty in (None, 0):
-                min_qty = coerce_float(amount_limits.get("min"))
-            if min_notional in (None, 0):
-                min_notional = coerce_float(cost_limits.get("min"))
-            precision = metadata.get("precision") if isinstance(metadata.get("precision"), Mapping) else {}
-            if qty_step in (None, 0):
-                qty_step = self._step_from_precision(precision.get("amount"))
-        return min_qty, qty_step, min_notional
-
     def _floor_to_step(self, qty: float, step: float) -> float:
         if step in (None, 0):
             return qty
@@ -1207,48 +1189,6 @@ class LadderRiskEngine:
         if step in (None, 0):
             return qty
         return math.ceil((qty - 1e-12) / step) * step
-
-    def _apply_quantity_constraints(
-        self,
-        raw_qty: float,
-        *,
-        price: float,
-    ) -> Tuple[Optional[float], Optional[str]]:
-        if raw_qty <= 0:
-            return None, "risk_qty_nonpositive"
-
-        qty_step = self.qty_step
-        min_qty = self.min_qty
-        min_notional = self.min_notional
-
-        min_qty_aligned = min_qty
-        if min_qty not in (None, 0) and qty_step not in (None, 0):
-            min_qty_aligned = self._ceil_to_step(min_qty, qty_step)
-
-        if min_qty_aligned not in (None, 0) and raw_qty < float(min_qty_aligned) - 1e-12:
-            return None, "risk_below_min_qty"
-
-        qty = raw_qty
-        if qty_step not in (None, 0):
-            qty = self._floor_to_step(raw_qty, qty_step)
-            if qty <= 0:
-                return None, "risk_below_step_size"
-
-        if min_qty_aligned not in (None, 0) and qty < float(min_qty_aligned) - 1e-12:
-            if raw_qty >= float(min_qty_aligned):
-                qty = float(min_qty_aligned)
-            else:
-                return None, "risk_below_min_qty"
-
-        if min_notional not in (None, 0):
-            notional = abs(price * self.contract_size * qty)
-            if notional < float(min_notional) - 1e-12:
-                return None, "risk_below_min_notional"
-
-        if qty <= 0:
-            return None, "risk_qty_nonpositive"
-
-        return qty, None
 
     def _calculate_total_contracts(self, r_ticks: float) -> float:
         """Calculate total contracts based on base_risk_per_trade and R value.
@@ -1296,25 +1236,133 @@ class LadderRiskEngine:
         logger.info(with_log_context("position_sizing", sizing_context))
         return float(contracts)
 
+    def _cap_qty_by_margin(
+        self,
+        risk_qty: float,
+        price: float,
+        direction: str,
+    ) -> Tuple[float, bool, Optional[Dict[str, Any]]]:
+        """Cap risk-based qty by available margin for futures/derivatives.
+
+        For spot instruments, returns risk_qty unchanged.
+        For futures/swaps, calculates max qty allowed by wallet margin and caps.
+
+        Args:
+            risk_qty: Qty calculated from risk-based sizing
+            price: Current price
+            direction: "long" or "short"
+
+        Returns:
+            Tuple of (final_qty, was_capped, margin_info)
+        """
+        if not self._wallet_gateway:
+            return risk_qty, False, None
+
+        inst_type = resolve_instrument_type(self.instrument)
+
+        # Only apply margin cap for futures/swaps
+        if inst_type not in (InstrumentType.FUTURE, InstrumentType.SWAP):
+            return risk_qty, False, None
+
+        # Get available collateral from wallet (for backtest, same as cash balance)
+        wallet_state = self._wallet_gateway.project()
+        quote = self.quote_currency.upper()
+        available_collateral = wallet_state.balances.get(quote, 0.0)
+
+        if available_collateral <= 0:
+            return 0.0, True, {"reason": "no_available_collateral", "available": 0.0}
+
+        try:
+            margin_result = calculate_max_qty_by_margin(
+                available_collateral=available_collateral,
+                price=price,
+                contract_size=self.contract_size,
+                direction=direction,
+                instrument=self.instrument,
+                fee_rate=self.taker_fee or 0.0,  # Use taker (worst case) for conservative sizing
+                safety_multiplier=1.05,
+                qty_step=self.qty_step,
+                min_order_size=self.min_qty,
+            )
+        except ValueError as exc:
+            # Instrument misconfigured - fail loud
+            return 0.0, True, {"reason": "margin_calculation_failed", "error": str(exc)}
+
+        max_qty = margin_result.max_qty
+        was_capped = risk_qty > max_qty
+
+        margin_info = {
+            "risk_qty": risk_qty,
+            "max_qty_by_margin": max_qty,
+            "was_capped": was_capped,
+            "available_collateral": available_collateral,
+            "cost_per_contract": margin_result.cost_per_contract,
+            "margin_per_contract": margin_result.margin_per_contract,
+            "fee_per_contract": margin_result.fee_per_contract,
+            "margin_rate": margin_result.margin_rate,
+            "calculation_method": margin_result.calculation_method,
+        }
+
+        final_qty = min(risk_qty, max_qty) if was_capped else risk_qty
+
+        if was_capped:
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                risk_qty=round(risk_qty, 6),
+                max_qty_by_margin=round(max_qty, 6),
+                final_qty=round(final_qty, 6),
+                available_collateral=round(available_collateral, 2),
+                cost_per_contract=round(margin_result.cost_per_contract, 4),
+                margin_rate=round(margin_result.margin_rate, 6),
+            )
+            logger.info(with_log_context("qty_capped_by_margin", context))
+
+        return final_qty, was_capped, margin_info
+
     def _resolve_base_quote(self) -> Tuple[str, str]:
-        metadata = self.instrument.get("metadata") if isinstance(self.instrument.get("metadata"), Mapping) else {}
-        base = metadata.get("base_currency") or metadata.get("base") or None
-        quote = self.instrument.get("quote_currency") or metadata.get("quote_currency") or metadata.get("quote")
+        base = self.instrument.get("base_currency")
+        quote = self.instrument.get("quote_currency")
         symbol = str(self.instrument.get("symbol") or "")
-        if not base:
-            if "/" in symbol:
-                parts = symbol.split("/")
-                if len(parts) == 2:
-                    base = parts[0]
-                    quote = quote or parts[1]
-            elif "-" in symbol:
-                parts = symbol.split("-")
-                if len(parts) == 2:
-                    base = parts[0]
-                    quote = quote or parts[1]
         if not base or not quote:
+            context = build_log_context(
+                symbol=symbol,
+                base_currency=base,
+                quote_currency=quote,
+                instrument=self.instrument,
+            )
+            logger.error(with_log_context("instrument_base_quote_missing", context))
             raise ValueError(f"Cannot resolve base/quote currencies for instrument {symbol}")
         return str(base).upper(), str(quote).upper()
+
+    def _is_discrete_contracts(self) -> bool:
+        step = self.qty_step
+        if step in (None, 0):
+            return False
+        if step < 1:
+            return False
+        return abs(step - round(step)) <= 1e-9
+
+    def _allocate_tp_contracts(
+        self,
+        *,
+        qty_final: float,
+        tp_leg_count: int,
+    ) -> Tuple[List[float], List[int]]:
+        if tp_leg_count <= 0:
+            return [], []
+        step = self.qty_step if self.qty_step not in (None, 0) else 1.0
+        total_units = int(math.floor((qty_final + 1e-12) / step))
+        if total_units <= 0:
+            return [0.0 for _ in range(tp_leg_count)], list(range(1, tp_leg_count + 1))
+        if total_units < tp_leg_count:
+            units = [1] * total_units + [0] * (tp_leg_count - total_units)
+        else:
+            base = total_units // tp_leg_count
+            remainder = total_units % tp_leg_count
+            units = [base + (1 if idx < remainder else 0) for idx in range(tp_leg_count)]
+        contracts = [float(unit) * float(step) for unit in units]
+        dropped = [idx + 1 for idx, qty in enumerate(contracts) if qty <= 0]
+        return contracts, dropped
 
     def _build_legs(
         self,
@@ -1322,6 +1370,11 @@ class LadderRiskEngine:
         direction: str,
         r_ticks: Optional[float],
         total_contracts: float,
+        *,
+        qty_raw: Optional[float] = None,
+        qty_final: Optional[float] = None,
+        order_intent_id: Optional[str] = None,
+        side: Optional[str] = None,
     ) -> List[Leg]:
         """Build take-profit legs from template configuration.
 
@@ -1330,8 +1383,12 @@ class LadderRiskEngine:
             direction: Trade direction ('long' or 'short')
             r_ticks: Stop distance in ticks
             total_contracts: Total number of contracts to distribute across legs
+            qty_raw: Raw qty before normalization (for logging)
+            qty_final: Normalized qty used for allocation (for logging)
+            order_intent_id: Correlation id for log tracing
+            side: Order side for log context
         """
-        legs: List[Leg] = []
+        leg_specs: List[Dict[str, Any]] = []
 
         for idx, order in enumerate(self.orders):
             ticks = order.get("ticks")
@@ -1357,56 +1414,107 @@ class LadderRiskEngine:
             if target_price is None:
                 continue
 
-            # Calculate contracts for this leg based on size_fraction
-            size_fraction = coerce_float(order.get("size_fraction"))
-            if size_fraction is not None and 0 < size_fraction <= 1:
-                leg_contracts = float(total_contracts) * float(size_fraction)
+            leg_specs.append(
+                {
+                    "name": order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
+                    "ticks": target_ticks or 0,
+                    "target_price": target_price,
+                    "leg_id": order.get("id") or order.get("label") or f"tp-{idx + 1}",
+                    "order": order,
+                }
+            )
+
+        qty_raw_value = float(qty_raw) if qty_raw is not None else float(total_contracts)
+        qty_final_value = float(qty_final) if qty_final is not None else float(total_contracts)
+        tp_leg_count = len(leg_specs)
+
+        contracts_by_leg: List[float] = []
+        dropped_legs: List[int] = []
+
+        if self._is_discrete_contracts():
+            contracts_by_leg, dropped_legs = self._allocate_tp_contracts(
+                qty_final=qty_final_value,
+                tp_leg_count=tp_leg_count,
+            )
+        else:
+            for spec in leg_specs:
+                size_fraction = coerce_float(spec["order"].get("size_fraction"))
+                if size_fraction is not None and 0 < size_fraction <= 1:
+                    leg_contracts = float(qty_final_value) * float(size_fraction)
+                else:
+                    leg_contracts = float(qty_final_value) / float(tp_leg_count or 1)
+                contracts_by_leg.append(leg_contracts)
+
+            step = self.qty_step
+            if step not in (None, 0):
+                rounded: List[float] = []
+                for qty in contracts_by_leg:
+                    rounded_qty = float(int((qty + 1e-12) / step)) * float(step)
+                    rounded.append(rounded_qty)
+                total_allocated = sum(rounded)
+                remainder = qty_final_value - total_allocated
+                if remainder > 0:
+                    extra = float(int((remainder + 1e-12) / step)) * float(step)
+                    if extra > 0:
+                        rounded[-1] += extra
+                contracts_by_leg = rounded
+
+            dropped_legs = [idx + 1 for idx, qty in enumerate(contracts_by_leg) if qty <= 0]
+
+        if dropped_legs:
+            if qty_final_value < tp_leg_count:
+                drop_reason = "INSUFFICIENT_CONTRACTS_FOR_LEGS"
+                drop_explain = f"qty_final {qty_final_value} < tp_leg_count {tp_leg_count}; dropped legs {dropped_legs}"
+            elif qty_final_value < qty_raw_value:
+                drop_reason = "QTY_NORMALIZED_DOWN"
+                drop_explain = f"qty normalized down from {qty_raw_value} to {qty_final_value}; dropped legs {dropped_legs}"
             else:
-                # Equal distribution if no size_fraction specified
-                leg_contracts = float(total_contracts) / float(len(self.orders) or 1)
+                drop_reason = "INSUFFICIENT_CONTRACTS_FOR_LEGS"
+                drop_explain = f"tp allocation dropped legs {dropped_legs}"
+        else:
+            drop_reason = "NONE"
+            drop_explain = "no legs dropped"
 
-            if leg_contracts <= 0:
+        context = build_log_context(
+            symbol=self.instrument.get("symbol"),
+            order_intent_id=order_intent_id,
+            side=side,
+            qty_raw=qty_raw_value,
+            qty_final=qty_final_value,
+            qty_step=self.qty_step,
+            min_order_size=self.min_qty,
+            tp_leg_count=tp_leg_count,
+            tp_contracts=contracts_by_leg,
+            dropped_legs=dropped_legs,
+            drop_reason=drop_reason,
+            drop_explain=drop_explain,
+        )
+        logger.info(with_log_context("tp_leg_allocation_finalized", context))
+
+        legs: List[Leg] = []
+        for spec, contracts in zip(leg_specs, contracts_by_leg):
+            if contracts <= 0:
                 continue
-
             legs.append(
                 Leg(
-                    name=order.get("label") or f"TP{target_ticks or ticks or idx + 1}",
-                    ticks=target_ticks or 0,
-                    target_price=target_price,
-                    contracts=leg_contracts,
-                    leg_id=order.get("id") or order.get("label") or f"tp-{idx + 1}",
+                    name=spec["name"],
+                    ticks=spec["ticks"],
+                    target_price=spec["target_price"],
+                    contracts=contracts,
+                    leg_id=spec["leg_id"],
                 )
             )
 
-        step = self.qty_step
-        if step in (None, 0):
-            return legs
-
-        rounded: List[Leg] = []
-        for leg in legs:
-            qty = float(int((leg.contracts + 1e-12) / step)) * float(step)
-            if qty <= 0:
-                continue
-            leg.contracts = qty
-            rounded.append(leg)
-
-        if not rounded:
+        if not legs:
             return []
-
-        total_allocated = sum(leg.contracts for leg in rounded)
-        remainder = total_contracts - total_allocated
-        if remainder > 0:
-            extra = float(int((remainder + 1e-12) / step)) * float(step)
-            if extra > 0:
-                rounded[-1].contracts += extra
 
         min_qty = self.min_qty
         if min_qty not in (None, 0):
-            for leg in rounded:
+            for leg in legs:
                 if leg.contracts < float(min_qty):
                     return []
 
-        return rounded
+        return legs
 
     def _new_position(self, candle: Candle, direction: str) -> Optional[LadderPosition]:
         """Create a new ladder position from current candle and signal direction."""
@@ -1419,7 +1527,57 @@ class LadderRiskEngine:
             r_value = float(self.stop_r_multiple) * float(r_value)
 
         # Calculate position size based on risk (raw qty before exchange constraints)
-        requested_qty = self._calculate_total_contracts(r_ticks)
+        risk_based_qty = self._calculate_total_contracts(r_ticks)
+
+        # Cap qty by available margin for futures/derivatives
+        # This prevents wallet rejection by sizing within margin constraints upfront
+        capped_qty, was_margin_capped, margin_info = self._cap_qty_by_margin(
+            risk_qty=risk_based_qty,
+            price=candle.close,
+            direction=direction,
+        )
+
+        # Check for margin calculation failure
+        if margin_info and margin_info.get("reason") == "margin_calculation_failed":
+            self.last_rejection_reason = "MARGIN_CALCULATION_FAILED"
+            self.last_rejection_detail = margin_info
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="MARGIN_CALCULATION_FAILED",
+                error=margin_info.get("error"),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return None
+
+        if capped_qty <= 0:
+            self.last_rejection_reason = "QTY_CAPPED_TO_ZERO"
+            self.last_rejection_detail = margin_info or {"risk_qty": risk_based_qty}
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="QTY_CAPPED_TO_ZERO",
+                risk_qty=risk_based_qty,
+                available_cash=margin_info.get("available_cash") if margin_info else None,
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return None
+
+        order_intent_id = str(uuid.uuid4())
+        qty_raw = capped_qty
+        requested_qty = capped_qty
+        normalization = normalize_qty_with_constraints(self.amount_constraints, requested_qty)
+        if not normalization.ok:
+            self.last_rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
+            self.last_rejection_detail = normalization.to_log_dict()
+            context = merge_log_context(
+                build_log_context(
+                    symbol=self.instrument.get("symbol"),
+                    reason=self.last_rejection_reason,
+                ),
+                build_log_context(**normalization.to_log_dict()),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return None
+        requested_qty = float(normalization.qty_final)
 
         fill_result: Optional[FillResult] = None
         base_currency = None
@@ -1459,9 +1617,12 @@ class LadderRiskEngine:
                 base_currency=base_currency,
                 quote_currency=quote_currency,
                 qty=fill_result.filled_qty,
+                qty_raw=qty_raw,
+                qty_final=fill_result.filled_qty,
                 notional=fill_result.notional,
                 fee=fill_result.fee,
                 short_requires_borrow=bool(self.short_requires_borrow),
+                instrument=self.instrument,
             )
             if not allowed:
                 self._wallet_gateway.reject(reason, payload)
@@ -1477,9 +1638,27 @@ class LadderRiskEngine:
                     build_log_context(
                         available=payload.get("available"),
                         required=payload.get("required"),
+                        required_used=payload.get("required_used"),
+                        required_full_notional=payload.get("required_full_notional"),
+                        available_collateral=payload.get("available_collateral"),
                         currency=payload.get("currency"),
                         notional=payload.get("notional"),
                         fee=payload.get("fee"),
+                        qty_raw=payload.get("qty_raw"),
+                        qty_final=payload.get("qty_final"),
+                        instrument_type=payload.get("instrument_type"),
+                        margin_rate=payload.get("margin_rate"),
+                        required_margin=payload.get("required_margin"),
+                        fee_buffer=payload.get("fee_buffer"),
+                        safety_buffer=payload.get("safety_buffer"),
+                        margin_method=payload.get("margin_method"),
+                        margin_session=payload.get("margin_session"),
+                        margin_leg=payload.get("margin_leg"),
+                        margin_rate_source_path=payload.get("margin_rate_source_path"),
+                        margin_total_required=payload.get("margin_total_required"),
+                        margin_calc_type=payload.get("margin_calc_type"),
+                        shortfall=payload.get("shortfall"),
+                        margin_error=payload.get("margin_error"),
                     ),
                 )
                 logger.warning(with_log_context("wallet_entry_rejected", context))
@@ -1499,7 +1678,16 @@ class LadderRiskEngine:
 
         # Build position components
         stop_price = self._calculate_stop_price(candle, direction, r_ticks)
-        legs = self._build_legs(candle, direction, r_ticks, total_contracts)
+        legs = self._build_legs(
+            candle,
+            direction,
+            r_ticks,
+            total_contracts,
+            qty_raw=qty_raw,
+            qty_final=total_contracts,
+            order_intent_id=order_intent_id,
+            side=side,
+        )
         if not legs:
             rounded_qty = (
                 self._floor_to_step(requested_qty, self.qty_step)
@@ -1556,6 +1744,7 @@ class LadderRiskEngine:
             taker_fee_rate=self.taker_fee,
             quote_currency=self.quote_currency,
             short_requires_borrow=bool(self.short_requires_borrow),
+            instrument=self.instrument if use_wallet_execution else None,
             atr_at_entry=atr_at_entry,
             r_multiple_at_entry=self.r_multiple,
             r_value=r_value,

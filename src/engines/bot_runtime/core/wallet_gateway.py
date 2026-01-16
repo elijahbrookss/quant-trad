@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 
+from .margin import MarginSessionType
 from .wallet import WalletLedger, WalletState, wallet_can_apply
 
 
@@ -17,9 +18,13 @@ class WalletGateway(Protocol):
         base_currency: str,
         quote_currency: str,
         qty: float,
+        qty_raw: Optional[float] = None,
+        qty_final: Optional[float] = None,
         notional: float,
         fee: float,
         short_requires_borrow: bool,
+        instrument: Optional[Mapping[str, Any]] = None,
+        margin_session: Optional[MarginSessionType] = None,
     ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         ...
 
@@ -63,9 +68,13 @@ class LedgerWalletGateway:
         base_currency: str,
         quote_currency: str,
         qty: float,
+        qty_raw: Optional[float] = None,
+        qty_final: Optional[float] = None,
         notional: float,
         fee: float,
         short_requires_borrow: bool,
+        instrument: Optional[Mapping[str, Any]] = None,
+        margin_session: Optional[MarginSessionType] = None,
     ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         state = self._ledger.project()
         return wallet_can_apply(
@@ -74,9 +83,13 @@ class LedgerWalletGateway:
             base_currency=base_currency,
             quote_currency=quote_currency,
             qty=qty,
+            qty_raw=qty_raw,
+            qty_final=qty_final,
             notional=notional,
             fee=fee,
             short_requires_borrow=short_requires_borrow,
+            instrument=instrument,
+            margin_session=margin_session,
         )
 
     def apply_fill(
@@ -106,8 +119,10 @@ class LedgerWalletGateway:
             leg_id=leg_id,
         )
 
-    def reject(self, reason: str, payload: Mapping[str, Any]) -> None:
-        self._ledger.rejected(reason, payload)
+    def reject(
+        self, reason: str, payload: Mapping[str, Any], trade_id: Optional[str] = None, leg_id: Optional[str] = None
+    ) -> None:
+        self._ledger.rejected(reason, payload, trade_id=trade_id, leg_id=leg_id)
 
     def project(self) -> WalletState:
         return self._ledger.project()

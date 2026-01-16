@@ -10,6 +10,7 @@ from typing import List
 from ..domain import Profile, ValueArea
 
 logger = logging.getLogger(__name__)
+_LAST_MERGE_SIGNATURE = {}
 
 
 def calculate_overlap(val1: float, vah1: float, val2: float, vah2: float) -> float:
@@ -75,13 +76,18 @@ def merge_profiles(
         log_labels.append(f"strategy_id={strategy_id}")
     label_str = " ".join(log_labels) + " " if log_labels else ""
 
-    logger.info(
-        "event=market_profile_merge_start %sthreshold=%.2f min_merge_sessions=%d profiles=%d",
-        label_str,
-        threshold,
-        min_sessions,
-        len(profiles),
-    )
+    log_key = (bot_id, strategy_id, symbol)
+    log_signature = (threshold, min_sessions, len(profiles), profiles[-1].end)
+    should_log = _LAST_MERGE_SIGNATURE.get(log_key) != log_signature
+    if should_log:
+        _LAST_MERGE_SIGNATURE[log_key] = log_signature
+        logger.info(
+            "event=market_profile_merge_start %sthreshold=%.2f min_merge_sessions=%d profiles=%d",
+            label_str,
+            threshold,
+            min_sessions,
+            len(profiles),
+        )
 
     while i < n:
         base = profiles[i]
@@ -123,25 +129,27 @@ def merge_profiles(
             )
             merged.append(merged_profile)
 
-            logger.info(
-                "event=market_profile_merge_group_complete %ssessions=%d start=%s end=%s val=%.{prec}f vah=%.{prec}f poc=%.{prec}f".replace(
-                    "{prec}",
-                    str(base.precision),
-                ),
-                label_str,
-                count,
-                start_ts,
-                end_ts,
-                merged_val,
-                merged_vah,
-                avg_poc,
-            )
+            if should_log:
+                logger.info(
+                    "event=market_profile_merge_group_complete %ssessions=%d start=%s end=%s val=%.{prec}f vah=%.{prec}f poc=%.{prec}f".replace(
+                        "{prec}",
+                        str(base.precision),
+                    ),
+                    label_str,
+                    count,
+                    start_ts,
+                    end_ts,
+                    merged_val,
+                    merged_vah,
+                    avg_poc,
+                )
 
         i = j
 
-    logger.info(
-        "event=market_profile_merge_complete %smerged_profiles=%d",
-        label_str,
-        len(merged),
-    )
+    if should_log:
+        logger.info(
+            "event=market_profile_merge_complete %smerged_profiles=%d",
+            label_str,
+            len(merged),
+        )
     return merged
