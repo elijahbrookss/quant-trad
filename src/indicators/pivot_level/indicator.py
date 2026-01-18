@@ -310,6 +310,7 @@ class PivotLevelIndicator(ComputeIndicator):
             start=start_dt.isoformat(),
             end=ctx.end,
             interval=timeframe,
+            instrument_id=ctx.instrument_id,
         )
 
         df = provider.get_ohlcv(level_ctx)
