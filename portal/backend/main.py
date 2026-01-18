@@ -7,6 +7,7 @@ from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots.bot_watchdog import get_watchdog
@@ -53,6 +54,11 @@ app = FastAPI(
     description="FastAPI for OHLCV and signal services",
     version="0.1.0",
 )
+
+
+# NOTE: Normalizing duplicate "/api/api" prefixes is a frontend/proxy
+# responsibility; middleware-based rewrites were removed to avoid hiding
+# client configuration issues.
 
 _configure_logging()
 logger = logging.getLogger(__name__)
