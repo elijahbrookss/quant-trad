@@ -103,7 +103,7 @@ coinbase-jwt: ## Generate Coinbase JWT (reads secrets.env)
 
 
 ## ============================== DOCKER ================================== ##
-.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild
+.PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild fetch-ddl
 
 stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "► Starting stack [$(STACK_PROFILE_DISPLAY)]"
@@ -151,6 +151,9 @@ stack-build: ## Build images for selected profiles
 stack-rebuild: ## Rebuild images (no cache) and restart selected profiles
 	@$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) build --no-cache
 	@$(MAKE) stack-up STACK_PROFILES=$(STACK_PROFILES)
+
+fetch-ddl: ## Copy TSDB schema DDL to clipboard
+	@COMPOSE_FILE="$(COMPOSE_FILE)" TSDB_SERVICE=tsdb bash scripts/fetch-tsdb-ddl.sh
 
 ## =============================== QUALITY ================================ ##
 .PHONY: fmt lint typecheck test cov clean
