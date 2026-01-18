@@ -86,8 +86,24 @@ class Database:
 
     def _apply_schema_migrations(self) -> None:
         """Perform lightweight in-place migrations for existing installations."""
-        # No migrations needed - clean schema
-        pass
+        if not self._engine:
+            return
+        inspector = inspect(self._engine)
+        if "portal_bot_runs" not in inspector.get_table_names():
+            Base.metadata.tables["portal_bot_runs"].create(self._engine, checkfirst=True)
+        if "portal_bot_trades" in inspector.get_table_names():
+            columns = {col["name"] for col in inspector.get_columns("portal_bot_trades")}
+            if "run_id" not in columns:
+                with self._engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE portal_bot_trades ADD COLUMN run_id VARCHAR(64)"))
+        if "portal_bots" in inspector.get_table_names():
+            columns = {col["name"] for col in inspector.get_columns("portal_bots")}
+            if "runner_id" not in columns:
+                with self._engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE portal_bots ADD COLUMN runner_id VARCHAR(128)"))
+            if "heartbeat_at" not in columns:
+                with self._engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE portal_bots ADD COLUMN heartbeat_at TIMESTAMP"))
 
     @property
     def available(self) -> bool:
