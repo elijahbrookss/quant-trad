@@ -16,7 +16,7 @@ export const normalizeWalletRow = (row = {}) => ({
 export function buildDefaultForm() {
   return {
     name: '',
-    mode: 'walk-forward',
+    mode: 'instant',
     run_type: 'backtest',
     backtest_start: '',
     backtest_end: '',

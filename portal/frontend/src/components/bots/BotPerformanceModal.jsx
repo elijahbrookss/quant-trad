@@ -21,6 +21,22 @@ const BOOTLINE_POOL = {
   ],
 }
 
+const PHASE_LABELS = {
+  prepare: 'Preparing bot runtime',
+  prepare_series: 'Building strategy series',
+  prepared: 'Series ready',
+  prepare_runtime: 'Initializing runtime context',
+  start_threads: 'Starting series threads',
+  running: 'Running bot',
+}
+
+const STATUS_LABELS = {
+  initialising: 'Preparing bot runtime',
+  starting: 'Starting series threads',
+  running: 'Running bot',
+  crashed: 'Bot crashed',
+}
+
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
@@ -32,15 +48,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     action,
     error,
     handlePause,
-    handlePlaybackInput,
     handleFocusSymbolChange,
     handleResume,
     loading,
     payload,
-    playbackDraft,
-    playbackLabel,
     runtimeStatus,
-    speedSaving,
     streamEligible,
     streamStatus,
   } = useBotPerformance({ bot, open, onRefresh })
@@ -87,19 +99,48 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
   const runtimeInitialising = runtimeStatus === 'initialising'
+  const chartMode = bot?.run_type === 'backtest' ? payload?.runtime?.mode : undefined
+  const chartPlaybackSpeed = 1
 
+  const phaseLabel = PHASE_LABELS[runtime?.phase] || null
+  const statusLabel = STATUS_LABELS[runtimeStatus] || null
   const bootStage = useMemo(() => {
+    if (phaseLabel || statusLabel) return 'runtime'
     if (runtimeInitialising || isBootingStatus) return 'runtime'
     if (streamStatus === 'connecting') return 'datasource'
     if (!strategiesReady) return 'strategy'
     if (!atmReady) return 'strategy'
     return 'generic'
-  }, [runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
+  }, [phaseLabel, statusLabel, runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
 
   const lastCandle = useMemo(() => {
     if (!Array.isArray(activeSeries?.candles) || activeSeries.candles.length === 0) return null
     return activeSeries.candles[activeSeries.candles.length - 1]
   }, [activeSeries?.candles])
+
+  // Build a map of latest prices and bar times per symbol for active trade chips
+  const latestDataBySymbol = useMemo(() => {
+    const dataMap = new Map()
+    for (const series of seriesList) {
+      if (!series?.symbol) continue
+      const candles = series.candles
+      if (!Array.isArray(candles) || candles.length === 0) continue
+      const lastCandle = candles[candles.length - 1]
+      // Use close price, or if intrabar data exists, use the most recent price
+      const price = lastCandle?.close ?? lastCandle?.price ?? lastCandle?.c
+      // Get the bar time - convert from epoch seconds if needed
+      let barTime = lastCandle?.time ?? lastCandle?.t ?? lastCandle?.timestamp
+      if (typeof barTime === 'number' && barTime < 1e12) {
+        // Likely epoch seconds, convert to ms
+        barTime = barTime * 1000
+      }
+      dataMap.set(series.symbol, {
+        price: Number.isFinite(Number(price)) ? Number(price) : null,
+        barTime: barTime ?? null,
+      })
+    }
+    return dataMap
+  }, [seriesList])
 
   const simTimeLabel = useMemo(() => {
     const epoch = toSec(lastCandle?.time)
@@ -198,6 +239,15 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       setBootDots(1)
       return undefined
     }
+    if (phaseLabel || statusLabel) {
+      setBootLine(phaseLabel || statusLabel || '')
+      const dotsTimer = setInterval(() => {
+        setBootDots((value) => (value % 3) + 1)
+      }, 480)
+      return () => {
+        clearInterval(dotsTimer)
+      }
+    }
     const stagePool = BOOTLINE_POOL[bootStage] || []
     const genericPool = BOOTLINE_POOL.generic
     const choosePhrase = () => {
@@ -221,11 +271,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       clearInterval(phraseTimer)
       clearInterval(dotsTimer)
     }
-  }, [bootStage, isBooting])
+  }, [bootStage, isBooting, phaseLabel, statusLabel])
 
   const bootLineDisplay = useMemo(() => {
-    return `${bootLine}${'.'.repeat(Math.max(1, bootDots))}`
-  }, [bootDots, bootLine])
+    const label = phaseLabel || statusLabel || bootLine
+    return `${label}${'.'.repeat(Math.max(1, bootDots))}`
+  }, [bootDots, bootLine, phaseLabel, statusLabel])
 
   useEffect(() => {
     const handler = (event) => {
@@ -241,9 +292,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const progressDisplay =
     typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
-  const playbackDisabled = isBooting
   const isWalkForward = (bot?.mode || '').toLowerCase() === 'walk-forward'
-  const isCompleted = runtimeStatus === 'completed' || runtimeStatus === 'stopped'
+  const isCompleted = ['completed', 'stopped', 'crashed'].includes(runtimeStatus)
   const canPause = runtimeStatus === 'running' && isWalkForward
   const canResume = runtimeStatus === 'paused'
   const canRestart = isCompleted && isWalkForward
@@ -303,7 +353,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-      <div className="relative flex h-full max-h-[90vh] w-full max-w-6xl flex-col gap-5 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
+      <div className="relative flex h-full max-h-[90vh] w-full max-w-[1400px] flex-col gap-5 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
         <header className="flex items-center justify-between gap-4 border-b border-slate-800 pb-4">
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-xl font-medium text-slate-50">{bot?.name}</h3>
@@ -503,10 +553,14 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                 {openTrades.map((trade) => {
                   const chip = buildTradeChip(trade)
                   if (!chip) return null
+                  const latestData = latestDataBySymbol.get(trade.symbol)
                   return (
                     <ActiveTradeChip
                       key={trade.trade_id || `${trade.symbol}-${trade.entry_time}`}
                       chip={chip}
+                      trade={trade}
+                      currentPrice={latestData?.price}
+                      latestBarTime={latestData?.barTime}
                       isActiveSymbol={trade.symbol === activeSymbol}
                       visible
                       onHover={(hovering) => handleTradeHover(trade, hovering)}
@@ -573,7 +627,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     candles={activeSeries?.candles || []}
                     trades={activeSymbolTrades}
                     overlays={activeSeries?.overlays || []}
-                    playbackSpeed={playbackDraft}
+                    playbackSpeed={chartPlaybackSpeed}
+                    mode={chartMode}
                   />
                 ) : (
                   <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">

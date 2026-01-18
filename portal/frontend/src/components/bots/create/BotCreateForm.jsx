@@ -1,5 +1,5 @@
-import { PlusCircle, Zap, Clock, Play } from 'lucide-react'
-import { useMemo } from 'react'
+import { PlusCircle, Zap, Clock, Play, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { BacktestRangeField } from './BacktestRangeField.jsx'
 import { StrategySelector } from './StrategySelector.jsx'
 import { WalletBalancesSection } from './WalletBalancesSection.jsx'
@@ -61,17 +61,16 @@ function RunTypeSelector({ value, onChange }) {
 
 function PlaybackModeSelector({ value, onChange }) {
   const options = [
-    { value: 'instant', label: 'Instant', description: 'Fastest' },
-    { value: 'fast', label: 'Fast', description: 'Skip intrabar' },
-    { value: 'full', label: 'Full', description: 'All details' },
+    { value: 'instant', label: 'Fast', description: 'No intrabar animation' },
+    { value: 'walk-forward', label: 'Full', description: 'Intrabar animation' },
   ]
 
   return (
     <div className="space-y-1.5">
-      <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Speed</label>
+      <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Mode</label>
       <div className="flex gap-1">
         {options.map((opt) => {
-          const isActive = (value || 'full') === opt.value
+          const isActive = (value || 'instant') === opt.value
           return (
             <button
               key={opt.value}
@@ -143,127 +142,171 @@ export function BotCreateForm({
   const hasStrategy = form.strategy_ids?.length > 0
   const hasDateRange = form.backtest_start && form.backtest_end
   const hasWallet = form.wallet_balances?.length > 0 && form.wallet_balances.some(w => w.currency && w.amount)
+  const hasName = Boolean(form.name && form.name.trim())
+
+  const steps = useMemo(() => {
+    const baseSteps = [
+      {
+        key: 'setup',
+        title: 'Pick the strategy and run type',
+        hint: 'Select one strategy and choose how you want it to run.',
+        isComplete: Boolean(form.run_type) && hasStrategy,
+        content: (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-300">Run type</div>
+              <RunTypeSelector
+                value={form.run_type}
+                onChange={(value) => onChange({ target: { name: 'run_type', value } })}
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-300">Strategy (choose one)</div>
+              <StrategySelector
+                strategies={strategies}
+                selectedIds={form.strategy_ids}
+                onToggle={onStrategyToggle}
+                loading={strategiesLoading}
+                error={strategyError}
+                compact
+              />
+            </div>
+          </div>
+        ),
+      },
+      {
+        key: 'backtest_config',
+        title: 'Backtest details',
+        hint: 'Fast skips intrabar animation. Full shows intrabar movement.',
+        isComplete: form.run_type !== 'backtest' || (Boolean(form.mode) && Boolean(hasDateRange)),
+        enabled: form.run_type === 'backtest',
+        content: (
+          <div className="space-y-4">
+            <PlaybackModeSelector
+              value={form.mode}
+              onChange={(value) => onChange({ target: { name: 'mode', value } })}
+            />
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-medium text-slate-300">Date range</div>
+                <div className="flex gap-1">
+                  {DATE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => handleDatePreset(preset.days)}
+                      className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <BacktestRangeField
+                start={form.backtest_start}
+                end={form.backtest_end}
+                onChange={onBacktestRangeChange}
+                compact
+              />
+            </div>
+          </div>
+        ),
+      },
+      {
+        key: 'finalize',
+        title: 'Capital + name',
+        hint: 'Set wallet balances and name the bot.',
+        isComplete: hasWallet && hasName,
+        content: (
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-medium text-slate-300">Initial capital</div>
+                <div className="flex gap-1">
+                  {WALLET_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => handleWalletPreset(preset)}
+                      className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <WalletBalancesSection
+                walletBalances={form.wallet_balances}
+                onWalletBalanceChange={onWalletBalanceChange}
+                onWalletBalanceAdd={onWalletBalanceAdd}
+                onWalletBalanceRemove={onWalletBalanceRemove}
+                walletError={walletError}
+                compact
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Bot name</label>
+              <input
+                type="text"
+                name="name"
+                value={form.name}
+                onChange={onChange}
+                placeholder={suggestedName || 'Auto-generated if empty'}
+                className="w-full rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              />
+            </div>
+          </div>
+        ),
+      },
+    ]
+
+    return baseSteps.filter((step) => step.enabled !== false)
+  }, [
+    form.run_type,
+    form.strategy_ids,
+    form.backtest_start,
+    form.backtest_end,
+    form.wallet_balances,
+    form.mode,
+    form.name,
+    hasStrategy,
+    hasDateRange,
+    hasWallet,
+    hasName,
+    onBacktestRangeChange,
+    onChange,
+    onStrategyToggle,
+    onWalletBalanceAdd,
+    onWalletBalanceChange,
+    onWalletBalanceRemove,
+    strategies,
+    strategiesLoading,
+    strategyError,
+    suggestedName,
+    walletError,
+  ])
+
+  const [stepIndex, setStepIndex] = useState(0)
+
+  useEffect(() => {
+    if (!steps.length) return
+    if (stepIndex > steps.length - 1) {
+      setStepIndex(steps.length - 1)
+    }
+  }, [stepIndex, steps.length])
+
+  const currentStep = steps[stepIndex] || steps[0]
+  const isFinalStep = stepIndex === steps.length - 1
+  const canContinue = currentStep?.isComplete ?? true
 
   return (
     <form onSubmit={onSubmit} className="space-y-5">
-      {/* Step 1: Run Type */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="flex size-5 items-center justify-center rounded-full bg-slate-800 text-[10px] font-medium text-slate-400">1</span>
-          <label className="text-xs font-medium text-slate-300">Run Type</label>
+      <div className="space-y-4 rounded-xl border border-slate-800/60 bg-slate-950/30 p-5">
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold text-slate-100">{currentStep?.title}</h3>
+          <p className="text-sm text-slate-500">{currentStep?.hint}</p>
         </div>
-        <RunTypeSelector
-          value={form.run_type}
-          onChange={(value) => onChange({ target: { name: 'run_type', value } })}
-        />
-      </div>
-
-      {/* Step 2: Strategy Selection */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <span className={`flex size-5 items-center justify-center rounded-full text-[10px] font-medium ${
-            hasStrategy ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'
-          }`}>2</span>
-          <label className="text-xs font-medium text-slate-300">Strategy</label>
-          {hasStrategy && <span className="text-[10px] text-emerald-500">✓</span>}
-        </div>
-        <StrategySelector
-          strategies={strategies}
-          selectedIds={form.strategy_ids}
-          onToggle={onStrategyToggle}
-          loading={strategiesLoading}
-          error={strategyError}
-          compact
-        />
-      </div>
-
-      {/* Step 3: Date Range (for backtest) */}
-      {form.run_type === 'backtest' && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className={`flex size-5 items-center justify-center rounded-full text-[10px] font-medium ${
-                hasDateRange ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'
-              }`}>3</span>
-              <label className="text-xs font-medium text-slate-300">Date Range</label>
-              {hasDateRange && <span className="text-[10px] text-emerald-500">✓</span>}
-            </div>
-            {/* Quick presets */}
-            <div className="flex gap-1">
-              {DATE_PRESETS.map((preset) => (
-                <button
-                  key={preset.label}
-                  type="button"
-                  onClick={() => handleDatePreset(preset.days)}
-                  className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <BacktestRangeField
-            start={form.backtest_start}
-            end={form.backtest_end}
-            onChange={onBacktestRangeChange}
-            compact
-          />
-        </div>
-      )}
-
-      {/* Step 4: Initial Capital */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className={`flex size-5 items-center justify-center rounded-full text-[10px] font-medium ${
-              hasWallet ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'
-            }`}>{form.run_type === 'backtest' ? '4' : '3'}</span>
-            <label className="text-xs font-medium text-slate-300">Initial Capital</label>
-            {hasWallet && <span className="text-[10px] text-emerald-500">✓</span>}
-          </div>
-          {/* Quick presets */}
-          <div className="flex gap-1">
-            {WALLET_PRESETS.map((preset) => (
-              <button
-                key={preset.label}
-                type="button"
-                onClick={() => handleWalletPreset(preset)}
-                className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <WalletBalancesSection
-          walletBalances={form.wallet_balances}
-          onWalletBalanceChange={onWalletBalanceChange}
-          onWalletBalanceAdd={onWalletBalanceAdd}
-          onWalletBalanceRemove={onWalletBalanceRemove}
-          walletError={walletError}
-          compact
-        />
-      </div>
-
-      {/* Optional: Name and Playback Speed */}
-      <div className="space-y-3 rounded-lg border border-slate-800/50 bg-slate-950/30 p-3">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div className="space-y-1.5">
-            <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Bot Name</label>
-            <input
-              type="text"
-              name="name"
-              value={form.name}
-              onChange={onChange}
-              placeholder={suggestedName || 'Auto-generated if empty'}
-              className="w-full rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
-            />
-          </div>
-          <PlaybackModeSelector
-            value={form.playback_mode}
-            onChange={(value) => onChange({ target: { name: 'playback_mode', value } })}
-          />
-        </div>
+        <div>{currentStep?.content}</div>
       </div>
 
       {error && (
@@ -273,19 +316,43 @@ export function BotCreateForm({
       )}
 
       {/* Submit */}
-      <div className="flex items-center justify-between border-t border-slate-800 pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
         <div className="text-xs text-slate-600">
-          {!hasStrategy && 'Select a strategy to continue'}
-          {hasStrategy && !hasDateRange && form.run_type === 'backtest' && 'Set a date range'}
-          {hasStrategy && hasDateRange && !hasWallet && 'Add initial capital'}
+          {!canContinue && 'Complete this step to continue'}
+          {canContinue && !isFinalStep && 'Ready for the next step'}
+          {canContinue && isFinalStep && 'All set to run'}
         </div>
-        <button
-          type="submit"
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-700/80 px-4 py-2 text-sm font-medium text-slate-100 transition-colors hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={submitDisabled}
-        >
-          <PlusCircle className="size-4" /> Create & Run
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setStepIndex((prev) => Math.max(prev - 1, 0))}
+            disabled={stepIndex === 0}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-slate-600 hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ChevronLeft className="size-4" /> Back
+          </button>
+          {isFinalStep ? (
+            <button
+              type="submit"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-700/80 px-4 py-2 text-sm font-medium text-slate-100 transition-colors hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={submitDisabled}
+            >
+              <PlusCircle className="size-4" /> Create & Run
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                if (!canContinue) return
+                setStepIndex((prev) => Math.min(prev + 1, steps.length - 1))
+              }}
+              disabled={!canContinue}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-700/80 px-4 py-2 text-sm font-medium text-slate-100 transition-colors hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next <ChevronRight className="size-4" />
+            </button>
+          )}
+        </div>
       </div>
     </form>
   )

@@ -6,8 +6,9 @@ import { IndicatorSection } from './components/IndicatorTab.jsx'
 import StrategyTab from './components/StrategyTab.jsx'
 import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
-import { Bot, ChevronLeft, ChevronRight, FlaskConical, Layers, Menu, RefreshCw, X } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
+import { ReportsPage } from './components/reports/ReportsPage.jsx'
 
 const navItems = [
   {
@@ -33,6 +34,14 @@ const navItems = [
     kicker: 'Execution Lens',
     to: '/bots',
     icon: Bot,
+  },
+  {
+    id: 'reports',
+    label: 'Reports',
+    description: 'Backtest report archive with full analytics.',
+    kicker: 'Analysis Lens',
+    to: '/reports',
+    icon: FileText,
   },
 ]
 
@@ -392,6 +401,26 @@ function AppShell({ chartId }) {
                       <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
                         <BotPanel />
                       </section>
+                    </div>
+                  }
+                />
+                <Route
+                  path="/reports"
+                  element={
+                    <div className="space-y-10">
+                      <SectionHeading
+                        title="Reports"
+                        kicker="Analysis Lens"
+                        description="Review completed backtests, compare outcomes, and export performance summaries."
+                        actions={
+                          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300">
+                            <div className="uppercase tracking-[0.3em] text-slate-500">Archive</div>
+                            <p className="mt-2 text-sm text-slate-200">Every completed run becomes a report.</p>
+                            <p className="mt-1 text-[11px] text-slate-500">Open a report to see charts and trade analytics.</p>
+                          </div>
+                        }
+                      />
+                      <ReportsPage />
                     </div>
                   }
                 />

@@ -46,7 +46,8 @@ export function BotLensChart({
   candles = [],
   trades = [],
   overlays = [],
-  playbackSpeed = 10,
+  playbackSpeed = 1,
+  mode,
   debugRanges = false,
   className = '',
 }) {
@@ -73,7 +74,7 @@ export function BotLensChart({
   const resolvedCandles = Array.isArray(candles) ? candles : []
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
-  const instantPlayback = Number(playbackSpeed) <= 0
+  const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
 
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])

@@ -12,6 +12,7 @@ const getStatusColor = (status) => {
     running: 'bg-emerald-500',
     paused: 'bg-amber-500',
     stopped: 'bg-rose-500',
+    crashed: 'bg-rose-500',
     error: 'bg-rose-500',
     completed: 'bg-sky-500',
     starting: 'bg-slate-500',
@@ -95,12 +96,25 @@ export const BotCard = memo(function BotCard({
   const showResume = runtimeStatus === 'paused'
   const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
-  const canStart = ['idle', 'stopped', 'completed', 'error'].includes(runtimeStatus)
+  const canStart = ['idle', 'stopped', 'completed', 'error', 'crashed'].includes(runtimeStatus)
   const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
-  const startLabel = runtimeStatus === 'completed' ? 'Rerun' : runtimeStatus === 'stopped' ? 'Restart' : 'Start'
+  const startLabel =
+    runtimeStatus === 'completed'
+      ? 'Rerun'
+      : runtimeStatus === 'stopped' || runtimeStatus === 'crashed'
+        ? 'Restart'
+        : 'Start'
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
   const runType = (bot.run_type || 'backtest').toLowerCase()
   const runTypePill = runType === 'backtest' ? 'BT' : runType === 'paper' || runType === 'paper_trade' ? 'SIM' : 'LIVE'
+  const modeLabel =
+    runType === 'backtest'
+      ? (bot.mode || '').toLowerCase() === 'instant'
+        ? 'Fast'
+        : (bot.mode || '').toLowerCase() === 'walk-forward'
+          ? 'Full'
+          : null
+      : null
 
   // Get P&L data - this is the hero metric
   const stats = bot?.runtime?.stats || bot?.last_stats || {}
@@ -146,6 +160,11 @@ export const BotCard = memo(function BotCard({
               <span className="shrink-0 rounded bg-slate-800/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-500">
                 {runTypePill}
               </span>
+              {modeLabel ? (
+                <span className="shrink-0 rounded bg-slate-900/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-400">
+                  {modeLabel}
+                </span>
+              ) : null}
             </div>
             <p className="mt-0.5 truncate text-xs text-slate-500">
               {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}
@@ -220,7 +239,7 @@ export const BotCard = memo(function BotCard({
           <span className={`text-[10px] font-medium uppercase tracking-wider ${
             runtimeStatus === 'running' ? 'text-emerald-400' :
             runtimeStatus === 'paused' ? 'text-amber-400' :
-            runtimeStatus === 'error' ? 'text-rose-400' :
+            runtimeStatus === 'error' || runtimeStatus === 'crashed' ? 'text-rose-400' :
             runtimeStatus === 'completed' ? 'text-sky-400' : 'text-slate-500'
           }`}>
             {runtimeStatus}

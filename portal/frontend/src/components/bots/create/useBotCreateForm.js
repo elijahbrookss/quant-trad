@@ -78,9 +78,9 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
 
   const handleStrategyToggle = useCallback((strategyId) => {
     setForm((prev) => {
-      const next = prev.strategy_ids.includes(strategyId)
-        ? prev.strategy_ids.filter((id) => id !== strategyId)
-        : [...prev.strategy_ids, strategyId]
+      const selected = prev.strategy_ids || []
+      const isActive = selected.includes(strategyId)
+      const next = isActive ? [] : [strategyId]
       return { ...prev, strategy_ids: next }
     })
   }, [])

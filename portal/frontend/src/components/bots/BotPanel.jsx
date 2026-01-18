@@ -49,11 +49,6 @@ export function BotPanel() {
   const logger = useMemo(() => createLogger('BotPanel'), [])
   const runtimeQueueRef = useRef(new Map())
   const runtimeFrame = useRef(null)
-  const formatPlaybackValue = useCallback((value) => {
-    const numeric = Number(value)
-    if (!Number.isFinite(numeric)) return '—'
-    return numeric <= 0 ? 'Instant' : `${numeric.toFixed(2)}x`
-  }, [])
   const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
     if (next === prev) return true
     const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
@@ -247,8 +242,10 @@ export function BotPanel() {
     }
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
+    const normalizedMode = form.run_type === 'backtest' ? form.mode : 'walk-forward'
     logger.info('bot_create_request', {
       run_type: form.run_type,
+      mode: normalizedMode,
       strategy_count: form.strategy_ids.length,
       strategy_ids: form.strategy_ids,
       backtest_start: startISO,
@@ -258,6 +255,7 @@ export function BotPanel() {
       const { wallet_balances, ...rest } = form
       const payloadBody = {
         ...rest,
+        mode: normalizedMode,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
         wallet_config: walletConfig,
@@ -365,6 +363,7 @@ export function BotPanel() {
       running: { color: 'bg-emerald-500/10 text-emerald-300 border-emerald-800/50', dot: 'bg-emerald-400' },
       paused: { color: 'bg-amber-500/10 text-amber-300 border-amber-800/50', dot: 'bg-amber-400' },
       stopped: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
+      crashed: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
       completed: { color: 'bg-sky-500/10 text-sky-300 border-sky-800/50', dot: 'bg-sky-400' },
       starting: { color: 'bg-slate-700/30 text-slate-400 border-slate-700/50', dot: 'bg-slate-500' },
       idle: { color: 'bg-slate-800/40 text-slate-500 border-slate-800', dot: 'bg-slate-600' },

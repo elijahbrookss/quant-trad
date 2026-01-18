@@ -56,14 +56,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
   const [action, setAction] = useState(null)
   const [streamStatus, setStreamStatus] = useState('idle')
   const streamRef = useRef(null)
-  const playbackDebounceRef = useRef(null)
   const focusDebounceRef = useRef(null)
-  const [playbackDraft, setPlaybackDraft] = useState(() => {
-    const initial = bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
-    const raw = Number(initial)
-    return Number.isFinite(raw) ? raw : 10
-  })
-  const [speedSaving, setSpeedSaving] = useState(false)
 
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
@@ -72,22 +65,8 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     [runtimeStatus],
   )
 
-  useEffect(() => {
-    const candidate =
-      payload?.runtime?.playback_speed ?? bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
-    const numeric = Number(candidate)
-    if (Number.isFinite(numeric)) {
-      setPlaybackDraft(numeric)
-    } else {
-      setPlaybackDraft(10)
-    }
-  }, [payload?.runtime?.playback_speed, bot?.runtime?.playback_speed, bot?.playback_speed, bot?.id])
-
   useEffect(
     () => () => {
-      if (playbackDebounceRef.current) {
-        clearTimeout(playbackDebounceRef.current)
-      }
       if (focusDebounceRef.current) {
         clearTimeout(focusDebounceRef.current)
       }
@@ -165,39 +144,6 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     }
   }, [open, bot?.id, applyPayload, streamEligible])
 
-  const persistPlaybackSpeed = useCallback(
-    async (value) => {
-      if (!bot?.id) return
-      setSpeedSaving(true)
-      try {
-        await updateBot(bot.id, { playback_speed: Number.isFinite(value) ? value : 0 })
-        onRefresh?.()
-      } catch (err) {
-        console.error('bot playback update failed', err)
-        setError(err?.message || 'Unable to update playback speed')
-      } finally {
-        setSpeedSaving(false)
-      }
-    },
-    [bot?.id, onRefresh],
-  )
-
-  const handlePlaybackInput = useCallback(
-    (event) => {
-      const raw = Number(event?.target?.value)
-      const next = Number.isFinite(raw) ? raw : 0
-      setPlaybackDraft(next)
-      if (playbackDebounceRef.current) {
-        clearTimeout(playbackDebounceRef.current)
-      }
-      playbackDebounceRef.current = setTimeout(() => {
-        playbackDebounceRef.current = null
-        persistPlaybackSpeed(next)
-      }, 300)
-    },
-    [persistPlaybackSpeed],
-  )
-
   const handleFocusSymbolChange = useCallback(
     (symbol) => {
       if (!bot?.id) return
@@ -246,23 +192,17 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     }
   }, [bot?.id, loadPerformance, onRefresh])
 
-  const playbackLabel = useMemo(() => (playbackDraft <= 0 ? 'Instant' : `${playbackDraft.toFixed(2)}x`), [playbackDraft])
-
   return {
     action,
     applyPayload,
     error,
     handlePause,
-    handlePlaybackInput,
     handleFocusSymbolChange,
     handleResume,
     loadPerformance,
     payload,
-    playbackDraft,
-    playbackLabel,
     runtimeStatus,
     setError,
-    speedSaving,
     streamEligible,
     streamStatus,
     loading,
