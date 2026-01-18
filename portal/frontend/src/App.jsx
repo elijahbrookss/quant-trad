@@ -313,26 +313,25 @@ function AppShell({ chartId }) {
                 <Route
                   path="/quantlab"
                   element={
-                    <div className="space-y-10">
+                    <div className="space-y-6">
                       <SectionHeading
                         title="QuantLab"
                         kicker="Research Lens"
                         description="Visualize price action, overlays, and indicator signals in a focused, minimal workspace."
                         actions={
-                          <div className="flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-slate-300 sm:items-end">
-                            <div className="flex items-center gap-3">
-                              <ApiStatusPill chartId={chartId} />
-                              <button
-                                type="button"
-                                onClick={runHealthCheck}
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
-                                aria-label="Check API health"
-                                disabled={checkingHealth}
-                              >
-                                <RefreshCw className="size-4" />
-                              </button>
-                            </div>
-                            <span className="text-[11px] tracking-[0.25em] text-slate-400">{lastHealthCheckLabel}</span>
+                          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
+                            <ApiStatusPill chartId={chartId} />
+                            <button
+                              type="button"
+                              onClick={runHealthCheck}
+                              className="inline-flex h-8 items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-10)] px-3 text-[11px] font-semibold uppercase tracking-[0.25em] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-20)] disabled:opacity-60"
+                              aria-label="Check API health"
+                              disabled={checkingHealth}
+                            >
+                              <RefreshCw className="size-4" />
+                              Health
+                            </button>
+                            <span className="text-[11px] tracking-[0.25em] text-slate-500">{lastHealthCheckLabel}</span>
                             {healthMessage ? (
                               <span className="text-[11px] text-rose-300/80">{healthMessage}</span>
                             ) : null}
@@ -340,19 +339,17 @@ function AppShell({ chartId }) {
                         }
                       />
 
-                      <div className="space-y-10">
+                      <div className="space-y-6">
                         <ChartComponent chartId={chartId} />
 
-                        <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                          <header className="flex flex-col gap-3 border-b border-white/5 pb-4 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="space-y-1">
-                              <h3 className="text-lg font-semibold text-slate-100">Indicator &amp; Signal Console</h3>
-                              <p className="text-xs text-slate-400">
-                                Configure overlays and indicator signals before wiring strategy logic.
-                              </p>
+                        <section className="rounded-2xl border border-white/10 bg-[#151a28]/90 p-4 shadow-[0_35px_110px_-80px_rgba(0,0,0,0.85)]">
+                          <header className="flex items-center justify-between border-b border-white/5 pb-3">
+                            <div>
+                              <h3 className="text-sm font-semibold text-slate-100">Indicators</h3>
+                              <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Overlays and signals</p>
                             </div>
                           </header>
-                          <div className="pt-4">
+                          <div className="pt-3">
                             <IndicatorSection chartId={chartId} />
                           </div>
                         </section>

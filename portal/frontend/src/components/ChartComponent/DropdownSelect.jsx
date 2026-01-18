@@ -90,17 +90,17 @@ export function DropdownSelect({
           onClick={() => setOpen((prev) => !prev)}
           aria-haspopup="listbox"
           aria-expanded={open}
-          className={`flex w-full items-center justify-between rounded-lg border border-white/15 bg-[#141824]/85 px-3 py-2 text-sm font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+          className={`flex w-full items-center justify-between border-b border-slate-700 bg-transparent px-2 py-1.5 text-sm font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
             disabled
-              ? 'cursor-not-allowed opacity-60'
-              : 'hover:border-[color:var(--accent-alpha-30)] hover:bg-[#192236]'
-          } ${open ? 'border-[color:var(--accent-alpha-40)] bg-[#1b263c] shadow-lg shadow-black/40' : ''}`}
+              ? 'cursor-not-allowed opacity-50'
+              : 'hover:border-slate-600 hover:text-slate-100'
+          } ${open ? 'border-[color:var(--accent-alpha-60)] text-[color:var(--accent-text-strong)]' : ''}`}
         >
           <span className={`${hasSelection ? 'text-slate-100' : 'text-slate-400'}`}>
             {displayLabel}
           </span>
           <svg
-            className={`h-4 w-4 text-slate-300 transition-transform ${open ? 'rotate-180' : ''}`}
+            className={`h-3 w-3 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`}
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="none"
@@ -113,7 +113,7 @@ export function DropdownSelect({
 
         <div
           role="listbox"
-          className={`absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
+          className={`absolute z-20 mt-1 w-full overflow-hidden rounded-md border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
             open ? 'max-h-96 opacity-100' : 'pointer-events-none max-h-0 opacity-0'
           }`}
         >
