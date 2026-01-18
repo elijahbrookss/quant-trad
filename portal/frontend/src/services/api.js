@@ -2,7 +2,7 @@
  * Centralized API client for making HTTP requests.
  */
 
-const normalizeApiBase = (baseUrl) => {
+export const normalizeApiBase = (baseUrl) => {
   if (!baseUrl) return '/api'
   const trimmed = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
   if (trimmed.startsWith('http')) {

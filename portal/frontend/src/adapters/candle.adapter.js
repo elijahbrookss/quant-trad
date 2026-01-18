@@ -1,3 +1,4 @@
+import { normalizeApiBase } from '../services/api.js';
 import { createLogger } from '../utils/logger.js';
 
 const candleLogger = createLogger('CandleAdapter');
@@ -23,7 +24,7 @@ function resolveApiBase() {
   return 'http://localhost:8000';
 }
 
-const API_BASE_URL = resolveApiBase();
+const API_BASE_URL = normalizeApiBase(resolveApiBase());
 
 /**
  * Adapter to fetch OHLCV candle data from backend API
@@ -68,7 +69,7 @@ export async function fetchCandleData({
     if (exchange) payload.exchange = exchange;
     if (provider_id) payload.provider_id = provider_id;
     if (venue_id) payload.venue_id = venue_id;
-    const res = await fetch(`${API_BASE_URL}/api/candles`, {
+    const res = await fetch(`${API_BASE_URL}/candles/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
