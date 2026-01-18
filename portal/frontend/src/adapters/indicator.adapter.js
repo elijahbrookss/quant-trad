@@ -148,12 +148,21 @@ export async function duplicateIndicator(id, { name } = {}) {
   return handleResponse(res)
 }
 
-export async function fetchIndicatorOverlays(id, { start, end, interval, symbol, datasource, exchange }) {
-  adapterLogger.debug('fetch_indicator_overlays_request', { id, start, end, interval, symbol, datasource, exchange })
+export async function fetchIndicatorOverlays(id, { start, end, interval, symbol, datasource, exchange, instrument_id }) {
+  adapterLogger.debug('fetch_indicator_overlays_request', {
+    id,
+    start,
+    end,
+    interval,
+    symbol,
+    datasource,
+    exchange,
+    instrument_id,
+  })
   const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ start, end, interval, symbol, datasource, exchange }),
+    body: JSON.stringify({ start, end, interval, symbol, datasource, exchange, instrument_id }),
     mode: 'cors',
   });
   return handleResponse(res);
