@@ -13,6 +13,7 @@ from signals.rules.market_profile import MarketProfileBreakoutConfig
 from signals.rules.pivot import PivotBreakoutConfig
 
 from .context import IndicatorServiceContext, _context
+from ...market import instrument_service
 from .utils import (
     coerce_int,
     ensure_color,
@@ -152,7 +153,18 @@ class IndicatorSignalExecutor:
             exchange=effective_exchange,
             ctx=self._ctx,
         )
-        data_ctx = DataContext(symbol=symbol, start=start, end=end, interval=interval)
+        instrument_id = instrument_service.require_instrument_id(
+            effective_datasource,
+            effective_exchange,
+            symbol,
+        )
+        data_ctx = DataContext(
+            symbol=symbol,
+            start=start,
+            end=end,
+            interval=interval,
+            instrument_id=instrument_id,
+        )
         return provider, data_ctx
 
     def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):

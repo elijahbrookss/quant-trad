@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BotLensChart } from '../../bots/BotLensChart.jsx'
-import { fetchCandleData } from '../../../adapters/candle.adapter.js'
+import { fetchInstrumentCandles } from '../../../hooks/useInstrumentCandles.js'
 import { fetchIndicatorOverlays } from '../../../adapters/indicator.adapter.js'
 import { createLogger } from '../../../utils/logger.js'
 import { toSec } from '../../bots/chartDataUtils.js'
@@ -84,19 +84,16 @@ export const SignalPreviewCharts = ({
           if (symbol && windowSymbol && symbol !== windowSymbol) {
             throw new Error('Symbol mismatch for preview.')
           }
-          if (!windowSymbol || !datasource) {
-            throw new Error('Signal window is missing symbol or datasource.')
-          }
-          const candles = await fetchCandleData({
+          const result = await fetchInstrumentCandles({
+            instrumentId: instrument_id,
             symbol: windowSymbol,
             timeframe: interval,
             start,
             end,
             datasource,
             exchange,
-            provider_id: undefined,
-            venue_id: undefined,
           })
+          const candles = result.candles
           logger.info('preview_candles_loaded', {
             instrumentId,
             symbol: windowSymbol,

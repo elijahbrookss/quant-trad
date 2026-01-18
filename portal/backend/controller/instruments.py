@@ -43,6 +43,15 @@ class InstrumentResponse(InstrumentPayload):
     updated_at: Optional[str] = None
 
 
+class InstrumentResolveRequest(BaseModel):
+    symbol: str
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
+    force_refresh: bool = False
+
+
 @router.get("/", response_model=List[InstrumentResponse])
 async def list_instruments() -> List[Dict[str, Any]]:
     """Return all stored instruments."""
@@ -55,6 +64,25 @@ async def instrument_health(datasource: Optional[str] = None, exchange: Optional
     """Return spot instrument metadata health report."""
 
     return instrument_service.instrument_health_report(datasource=datasource, exchange=exchange)
+
+
+@router.post("/resolve", response_model=InstrumentResponse)
+async def resolve_instrument(request: InstrumentResolveRequest) -> Dict[str, Any]:
+    """Validate provider/venue/symbol and return a canonical instrument record."""
+
+    record, error = instrument_service.resolve_or_create_instrument(
+        request.datasource,
+        request.exchange,
+        request.symbol,
+        provider_id=request.provider_id,
+        venue_id=request.venue_id,
+        force_refresh=request.force_refresh,
+    )
+    if error:
+        raise HTTPException(400, error)
+    if not record:
+        raise HTTPException(404, "Instrument could not be resolved.")
+    return record
 
 
 @router.post("/", response_model=InstrumentResponse, status_code=201)

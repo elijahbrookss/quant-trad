@@ -5,7 +5,7 @@ import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
-import { fetchCandleData } from '../../adapters/candle.adapter';
+import { fetchInstrumentCandles } from '../../hooks/useInstrumentCandles.js';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
 import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
@@ -294,6 +294,9 @@ export const ChartComponent = ({ chartId }) => {
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenHost, setFullscreenHost] = useState(null);
+
+  const instrumentIdRef = useRef(null);
+  const instrumentKeyRef = useRef(null);
 
   const chartShellClasses = useMemo(() => {
     const base =
@@ -687,7 +690,22 @@ export const ChartComponent = ({ chartId }) => {
     }
     try {
       markAttempt();
+      const instrumentKey = [
+        effectiveDatasource,
+        effectiveExchange,
+        effectiveProvider,
+        effectiveVenue,
+        effectiveSymbol,
+      ]
+        .filter(Boolean)
+        .join('|');
+      let resolvedInstrumentId = instrumentIdRef.current;
+      if (!resolvedInstrumentId || instrumentKeyRef.current !== instrumentKey) {
+        instrumentIdRef.current = null;
+      }
+
       info('candles_fetch_start', {
+        instrument_id: instrumentIdRef.current,
         symbol: effectiveSymbol,
         interval: effectiveInterval,
         startISO,
@@ -697,16 +715,35 @@ export const ChartComponent = ({ chartId }) => {
         venue_id: effectiveVenue,
         exchange: effectiveExchange,
       });
-      const resp = await fetchCandleData({
-        symbol: effectiveSymbol,
-        timeframe: effectiveInterval,
-        start: startISO,
-        end: endISO,
-        datasource: effectiveDatasource,
-        provider_id: effectiveProvider ?? undefined,
-        venue_id: effectiveVenue ?? undefined,
-        exchange: effectiveExchange ?? undefined,
-      });
+      let resp;
+      try {
+        const result = await fetchInstrumentCandles({
+          instrumentId: instrumentIdRef.current,
+          symbol: effectiveSymbol,
+          timeframe: effectiveInterval,
+          start: startISO,
+          end: endISO,
+          datasource: effectiveDatasource,
+          providerId: effectiveProvider ?? undefined,
+          venueId: effectiveVenue ?? undefined,
+          exchange: effectiveExchange ?? undefined,
+          resolveIfMissing: true,
+        });
+        resp = result.candles;
+        resolvedInstrumentId = result.instrumentId;
+        instrumentIdRef.current = resolvedInstrumentId;
+        instrumentKeyRef.current = instrumentKey;
+      } catch (resolveError) {
+        warn('instrument_resolve_failed', {
+          symbol: effectiveSymbol,
+          datasource: effectiveDatasource,
+          exchange: effectiveExchange,
+          provider_id: effectiveProvider,
+          venue_id: effectiveVenue,
+        });
+        showWarning(resolveError?.message || 'Failed to resolve instrument.');
+        return { ok: false, reason: 'instrument_resolve_failed' };
+      }
 
       if (!Array.isArray(resp) || resp.length === 0) {
         warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval, behavior });
@@ -822,6 +859,7 @@ export const ChartComponent = ({ chartId }) => {
 
       const refreshAt = new Date();
       info('candles_fetch_success', {
+        instrument_id: instrumentIdRef.current,
         points: data.length,
         first: data[0]?.time,
         last: data.at(-1)?.time,
@@ -841,6 +879,7 @@ export const ChartComponent = ({ chartId }) => {
         provider_id: effectiveProvider,
         venue_id: effectiveVenue,
         exchange: effectiveExchange,
+        instrument_id: instrumentIdRef.current,
         lastUpdatedAt: refreshAt.toISOString(),
       });
 
@@ -851,6 +890,7 @@ export const ChartComponent = ({ chartId }) => {
         provider_id: effectiveProvider,
         venue_id: effectiveVenue,
         exchange: effectiveExchange,
+        instrument_id: instrumentIdRef.current,
       };
 
       return {

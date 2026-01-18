@@ -8,6 +8,7 @@ from indicators.market_profile import MarketProfileIndicator
 from indicators.runtime.incremental_cache_registry import is_incremental_cacheable
 
 from .context import IndicatorServiceContext, _context
+from ...market import instrument_service
 from .utils import (
     get_indicator_entry,
     normalize_datasource,
@@ -239,7 +240,18 @@ class IndicatorOverlayBuilder:
                     e,
                 )
 
-        data_ctx = DataContext(symbol=symbol, start=effective_start, end=end, interval=interval)
+        instrument_id = instrument_service.require_instrument_id(
+            effective_datasource,
+            effective_exchange,
+            symbol,
+        )
+        data_ctx = DataContext(
+            symbol=symbol,
+            start=effective_start,
+            end=end,
+            interval=interval,
+            instrument_id=instrument_id,
+        )
         return provider, data_ctx, effective_datasource, effective_exchange
 
     def _maybe_fetch_cached(

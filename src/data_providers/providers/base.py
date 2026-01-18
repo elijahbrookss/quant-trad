@@ -331,14 +331,6 @@ class BaseDataProvider(ProviderInterface):
         combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
         combined.sort_values("timestamp", inplace=True)
 
-        combined = self._compute_tr_atr(combined)
-
-        now_ts = dt.datetime.now(dt.timezone.utc)
-        combined["data_ingested_ts"] = now_ts
-        combined["datasource"] = self.get_datasource()
-        combined["interval"] = ctx.interval
-        combined["symbol"] = ctx.symbol
-
         try:
             return self._write_dataframe(combined, ctx)
         except SQLAlchemyError as e:
@@ -461,11 +453,6 @@ class BaseDataProvider(ProviderInterface):
                     continue
 
                 segment.sort_values("timestamp", inplace=True)
-                segment = self._compute_tr_atr(segment)
-                segment["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
-                segment["datasource"] = self.get_datasource()
-                segment["interval"] = ctx.interval
-                segment["symbol"] = ctx.symbol
 
                 try:
                     self._write_dataframe(segment, ctx)
@@ -482,8 +469,6 @@ class BaseDataProvider(ProviderInterface):
                             "low",
                             "close",
                             "volume",
-                            "tr",
-                            "atr_wilder",
                         ]
                     ]
                 )
@@ -551,6 +536,8 @@ class BaseDataProvider(ProviderInterface):
         df["datasource"] = self.get_datasource()
         df["interval"] = ctx.interval
         df["symbol"] = ctx.symbol
+        if ctx.instrument_id and "instrument_id" not in df.columns:
+            df["instrument_id"] = ctx.instrument_id
 
         return self._format_ohlcv_dataframe(df, ctx)
 
@@ -564,6 +551,8 @@ class BaseDataProvider(ProviderInterface):
             df["interval"] = ctx.interval
         if "symbol" not in df.columns:
             df["symbol"] = ctx.symbol
+        if ctx.instrument_id and "instrument_id" not in df.columns:
+            df["instrument_id"] = ctx.instrument_id
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df.set_index("timestamp", inplace=True)

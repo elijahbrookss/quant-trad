@@ -28,7 +28,7 @@ const API_BASE_URL = resolveApiBase();
 /**
  * Adapter to fetch OHLCV candle data from backend API
  * @param {Object} params
- * @param {string} params.symbol
+ * @param {string} params.instrument_id
  * @param {string} params.timeframe
  * @param {string} params.start - ISO string
  * @param {string} params.end - ISO string
@@ -38,10 +38,32 @@ const API_BASE_URL = resolveApiBase();
  * @param {string} [params.venue_id]
  * @returns {Promise<Array>} - array of candles
  */
-export async function fetchCandleData({ symbol, timeframe, start, end, datasource, exchange, provider_id, venue_id }) {
+export async function fetchCandleData({
+  instrument_id,
+  timeframe,
+  start,
+  end,
+  datasource,
+  exchange,
+  provider_id,
+  venue_id,
+}) {
   try {
-    candleLogger.debug('fetch_candles_request', { symbol, timeframe, start, end, datasource, exchange, provider_id, venue_id, baseUrl: API_BASE_URL });
-    const payload = { symbol, timeframe, start, end };
+    if (!instrument_id) {
+      throw new Error('instrument_id is required to fetch candles.')
+    }
+    candleLogger.debug('fetch_candles_request', {
+      instrument_id,
+      timeframe,
+      start,
+      end,
+      datasource,
+      exchange,
+      provider_id,
+      venue_id,
+      baseUrl: API_BASE_URL,
+    });
+    const payload = { instrument_id, timeframe, start, end };
     if (datasource) payload.datasource = datasource;
     if (exchange) payload.exchange = exchange;
     if (provider_id) payload.provider_id = provider_id;
@@ -58,10 +80,10 @@ export async function fetchCandleData({ symbol, timeframe, start, end, datasourc
 
     const { candles } = await res.json();
     const items = Array.isArray(candles) ? candles : [];
-    candleLogger.info('fetch_candles_success', { symbol, timeframe, candles: items.length });
+    candleLogger.info('fetch_candles_success', { instrument_id, timeframe, candles: items.length });
     return items;
   } catch (err) {
-    candleLogger.error('fetch_candles_failed', { symbol, timeframe }, err);
+    candleLogger.error('fetch_candles_failed', { instrument_id, timeframe }, err);
     return [];
   }
 }
