@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -70,6 +72,7 @@ class SeriesBuilder:
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
+        self._indicator_overlay_lock = threading.RLock()
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, **fields)
@@ -81,7 +84,8 @@ class SeriesBuilder:
         return merge_log_context(self._runtime_log_context(), strategy_log_context(strategy), **fields)
 
     def reset(self) -> None:
-        self._indicator_overlay_cache.clear()
+        with self._indicator_overlay_lock:
+            self._indicator_overlay_cache.clear()
 
     def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
         """Build series from strategy IDs (clean DB-based approach).
@@ -583,6 +587,7 @@ class SeriesBuilder:
             raise RuntimeError(f"Strategy {strategy.id} has no instruments configured")
 
         series_list: List[StrategySeries] = []
+        enabled_links: List[Any] = []
 
         for instrument_link in strategy.instrument_links:
             enabled = getattr(instrument_link, "enabled", True)
@@ -593,36 +598,44 @@ class SeriesBuilder:
                 )
                 logger.info(with_log_context("series_instrument_skipped", context))
                 continue
+            enabled_links.append(instrument_link)
 
-            try:
-                series = self._build_single_series(strategy, instrument_link)
-                series_list.append(series)
+        if enabled_links:
+            with ThreadPoolExecutor(max_workers=len(enabled_links)) as executor:
+                future_map = {
+                    executor.submit(self._build_single_series, strategy, link): link
+                    for link in enabled_links
+                }
+                for future in as_completed(future_map):
+                    instrument_link = future_map[future]
+                    try:
+                        series = future.result()
+                    except Exception as exc:
+                        context = self._strategy_log_context(
+                            strategy,
+                            symbol=instrument_link.symbol,
+                            error=str(exc),
+                        )
+                        logger.exception(with_log_context("series_build_failed", context))
+                        continue
+                    series_list.append(series)
 
-                # Log series build success with signal count
-                signal_count = len(series.signals) if series.signals else 0
-                if signal_count == 0:
-                    context = self._series_log_context(
-                        series,
-                        candles=len(series.candles),
-                        signals=signal_count,
-                    )
-                    logger.warning(with_log_context("series_built_no_signals", context))
-                else:
-                    context = self._series_log_context(
-                        series,
-                        candles=len(series.candles),
-                        signals=signal_count,
-                    )
-                    logger.info(with_log_context("series_built", context))
-            except Exception as exc:
-                context = self._strategy_log_context(
-                    strategy,
-                    symbol=instrument_link.symbol,
-                    error=str(exc),
-                )
-                logger.exception(with_log_context("series_build_failed", context))
-                # Continue with other instruments rather than failing entirely
-                continue
+                    # Log series build success with signal count
+                    signal_count = len(series.signals) if series.signals else 0
+                    if signal_count == 0:
+                        context = self._series_log_context(
+                            series,
+                            candles=len(series.candles),
+                            signals=signal_count,
+                        )
+                        logger.warning(with_log_context("series_built_no_signals", context))
+                    else:
+                        context = self._series_log_context(
+                            series,
+                            candles=len(series.candles),
+                            signals=signal_count,
+                        )
+                        logger.info(with_log_context("series_built", context))
 
         if not series_list:
             raise RuntimeError(
@@ -990,7 +1003,8 @@ class SeriesBuilder:
                 ex,
                 overlay_signature,
             )
-            cached = self._indicator_overlay_cache.get(cache_key)
+            with self._indicator_overlay_lock:
+                cached = self._indicator_overlay_cache.get(cache_key)
             if cached:
                 context = self._runtime_log_context(
                     indicator_id=indicator_id,
@@ -1075,7 +1089,8 @@ class SeriesBuilder:
                 total_overlays=len(overlays),
             )
             logger.info(with_log_context("bot_overlay_appended", appended_context))
-            self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
+            with self._indicator_overlay_lock:
+                self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
         return overlays
 
     @staticmethod

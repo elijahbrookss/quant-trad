@@ -12,6 +12,7 @@ import logging
 from ..market import instrument_service
 from ..risk.atm import merge_templates, template_metrics
 from .bot_runtime import BotRuntime
+from .bot_watchdog import get_watchdog
 from .bot_stream import BotStreamManager
 from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -49,6 +50,11 @@ def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
     updates = {key: patch[key] for key in ("status", "last_stats", "last_run_at") if key in patch}
     if not updates:
         return
+    status = str(updates.get("status") or "").lower()
+    if status in {"completed", "stopped", "error"}:
+        get_watchdog().unregister_bot(bot_id)
+        mutable["runner_id"] = None
+        mutable["heartbeat_at"] = None
     mutable.update(updates)
     upsert_bot(mutable)
     snapshot = dict(mutable)
@@ -68,11 +74,7 @@ def _now_iso() -> str:
 def _coerce_playback_speed(value: Optional[object]) -> float:
     """Normalise playback speed factors into non-negative floats."""
 
-    try:
-        numeric = float(value) if value is not None else 10.0
-    except (TypeError, ValueError):
-        numeric = 10.0
-    return numeric if numeric >= 0 else 0.0
+    return 0.0
 
 
 def _coerce_isoformat(value: Optional[object]) -> Optional[str]:
@@ -375,6 +377,7 @@ def delete_bot_record(bot_id: str) -> None:
     runtime = _RUNTIME.pop(bot_id, None)
     if runtime:
         runtime.stop()
+    get_watchdog().unregister_bot(bot_id)
     delete_bot(bot_id)
     logger.info("[BotService] bot deleted", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
@@ -402,6 +405,7 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     logger.info("[BotService] bot runtime start requested", extra={"bot_id": bot_id})
     runtime = _runtime_for(bot_id, bot)
     runtime.reset_if_finished()
+    get_watchdog().register_bot(bot_id)
     runtime.start()
     logger.info("[BotService] bot runtime start dispatched", extra={"bot_id": bot_id})
     bot["status"] = "running"
@@ -419,6 +423,7 @@ def stop_bot(bot_id: str) -> Dict[str, object]:
     runtime = _RUNTIME.get(bot_id)
     if runtime:
         runtime.stop()
+    get_watchdog().unregister_bot(bot_id)
     bots = {bot["id"]: bot for bot in load_bots()}
     if bot_id not in bots:
         raise KeyError(f"Bot {bot_id} was not found")

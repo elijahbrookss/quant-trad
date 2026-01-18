@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 
 from .margin import MarginSessionType
 from .wallet import WalletLedger, WalletState, wallet_can_apply
+
+logger = logging.getLogger(__name__)
 
 
 class WalletGateway(Protocol):
@@ -31,6 +34,7 @@ class WalletGateway(Protocol):
     def apply_fill(
         self,
         *,
+        event_type: str = "TRADE_FILL",
         side: str,
         base_currency: str,
         quote_currency: str,
@@ -41,6 +45,9 @@ class WalletGateway(Protocol):
         symbol: Optional[str] = None,
         trade_id: Optional[str] = None,
         leg_id: Optional[str] = None,
+        position_direction: Optional[str] = None,
+        accounting_mode: Optional[str] = None,
+        realized_pnl: Optional[float] = None,
     ) -> None:
         ...
 
@@ -95,6 +102,7 @@ class LedgerWalletGateway:
     def apply_fill(
         self,
         *,
+        event_type: str = "TRADE_FILL",
         side: str,
         base_currency: str,
         quote_currency: str,
@@ -105,8 +113,22 @@ class LedgerWalletGateway:
         symbol: Optional[str] = None,
         trade_id: Optional[str] = None,
         leg_id: Optional[str] = None,
+        position_direction: Optional[str] = None,
+        accounting_mode: Optional[str] = None,
+        realized_pnl: Optional[float] = None,
     ) -> None:
+        if event_type in {"ENTRY_FILL", "EXIT_FILL"} and accounting_mode is None:
+            logger.warning(
+                "wallet_fill_missing_accounting_mode | event_type=%s | symbol=%s | trade_id=%s | leg_id=%s | side=%s | position_direction=%s",
+                event_type,
+                symbol,
+                trade_id,
+                leg_id,
+                side,
+                position_direction,
+            )
         self._ledger.trade_fill(
+            event_type=event_type,
             side=side,
             base_currency=base_currency,
             quote_currency=quote_currency,
@@ -117,6 +139,9 @@ class LedgerWalletGateway:
             symbol=symbol,
             trade_id=trade_id,
             leg_id=leg_id,
+            position_direction=position_direction,
+            accounting_mode=accounting_mode,
+            realized_pnl=realized_pnl,
         )
 
     def reject(

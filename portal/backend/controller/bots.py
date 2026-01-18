@@ -59,7 +59,7 @@ class BotBase(BaseModel):
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
     run_type: str = Field(default="backtest", pattern="^(backtest|sim_trade)$")
-    playback_speed: float = Field(default=10.0, ge=0)
+    playback_speed: float = Field(default=0.0, ge=0)
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     wallet_config: Dict[str, Any] = Field(default_factory=dict)

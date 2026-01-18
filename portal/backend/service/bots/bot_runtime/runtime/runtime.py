@@ -89,10 +89,14 @@ class BotRuntime:
         self.config = dict(config)
         self.mode = (self.config.get("mode") or "instant").lower()
         self.run_type = (self.config.get("run_type") or "backtest").lower()
-        self.playback_speed = self._coerce_playback_speed(self.config.get("playback_speed"))
+        self.playback_speed = 0.0
         self.focus_symbol = self.config.get("focus_symbol")
-        self.state: Dict[str, object] = {"status": "idle", "progress": 0.0, "paused": False}
-        self.state["playback_speed"] = self.playback_speed
+        self.state: Dict[str, object] = {
+            "status": "idle",
+            "progress": 0.0,
+            "paused": False,
+            "mode": self.mode,
+        }
         self._lock = threading.Lock()
         self._series_update_lock = threading.RLock()
         self._trade_lock = threading.Lock()
@@ -152,6 +156,7 @@ class BotRuntime:
             log_sequence_fn=self._log_candle_sequence,
             strategy_key_fn=self._strategy_key,
         )
+        self._phase: Optional[str] = None
 
     def add_event_sink(self, sink: RuntimeEventSink) -> None:
         """Attach an additional event sink for runtime tracing."""
@@ -162,11 +167,7 @@ class BotRuntime:
 
     @staticmethod
     def _coerce_playback_speed(value: Optional[object]) -> float:
-        try:
-            numeric = float(value) if value is not None else 10.0
-        except (TypeError, ValueError):
-            numeric = 10.0
-        return numeric if numeric >= 0 else 0.0
+        return 0.0
 
     @staticmethod
     def _resolve_series_runner_type(value: Optional[object]) -> str:
@@ -234,6 +235,13 @@ class BotRuntime:
         run_id = self._run_context.run_id if self._run_context else None
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, run_id=run_id, **fields)
 
+    def _set_phase(self, phase: str, message: Optional[str] = None) -> None:
+        self._phase = phase
+        with self._lock:
+            self.state["phase"] = phase
+        context = self._runtime_log_context(phase=phase)
+        logger.info(with_log_context(message or "bot_runtime_phase", context))
+
     def _series_log_context(self, series: StrategySeries, **fields: object) -> Dict[str, object]:
         return merge_log_context(self._runtime_log_context(), series_log_context(series), **fields)
 
@@ -243,10 +251,10 @@ class BotRuntime:
         if not payload:
             return
         self.config.update(payload)
-        if "playback_speed" in payload:
-            self.playback_speed = self._coerce_playback_speed(payload.get("playback_speed"))
+        if "mode" in payload:
+            self.mode = str(payload.get("mode") or "instant").lower()
             with self._lock:
-                self.state["playback_speed"] = self.playback_speed
+                self.state["mode"] = self.mode
         if "focus_symbol" in payload:
             self.focus_symbol = payload.get("focus_symbol") or None
         if "series_runner" in payload:
@@ -279,6 +287,7 @@ class BotRuntime:
         if self.state.get("status") == "error":
             message = (self._prepare_error or {}).get("message") or "Runtime is in an error state; reset before preparing"
             raise RuntimeError(message)
+        self._set_phase("prepare_series", "bot_runtime_prepare_start")
         with self._lock:
             self.state.update({"status": "initialising", "progress": 0.0, "paused": False})
 
@@ -311,6 +320,7 @@ class BotRuntime:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
         context = self._runtime_log_context(series=len(self._series), total_bars=self._total_bars)
         logger.info(with_log_context("bot_runtime_prepared", context))
+        self._set_phase("prepared", "bot_runtime_prepare_complete")
         self._log_event("prepared", total_bars=self._total_bars)
         self._push_update("prepared")
 
@@ -599,12 +609,33 @@ class BotRuntime:
         intrabar = self._intrabar_manager.intrabar_candles(series, candle)
         if not intrabar:
             return engine.step(candle)
+        if self.mode == "instant":
+            return self._run_intrabar_batch(series, intrabar)
         state.intrabar_candles = intrabar
         state.intrabar_index = 0
         self._schedule_next_step(state, self._intrabar_interval())
         context = self._series_log_context(series, bars=len(intrabar))
         logger.debug(with_log_context("intrabar_start", context))
         return []
+
+    def _run_intrabar_batch(
+        self,
+        series: StrategySeries,
+        intrabar: Sequence[Candle],
+    ) -> List[Dict[str, Any]]:
+        engine = series.risk_engine
+        if engine is None:
+            return []
+        events: List[Dict[str, Any]] = []
+        steps = 0
+        for minute_bar in intrabar:
+            steps += 1
+            events.extend(engine.step(minute_bar))
+            if engine.active_trade is None:
+                break
+        context = self._series_log_context(series, bars=len(intrabar), steps=steps, mode=self.mode)
+        logger.debug(with_log_context("intrabar_batch", context))
+        return events
 
     def _step_intrabar(self, state: SeriesExecutionState) -> None:
         series = state.series
@@ -635,6 +666,12 @@ class BotRuntime:
                 event_time=event.get("time"),
                 bar_index=state.bar_index,
                 contracts=event.get("contracts"),
+                pnl=event.get("pnl"),
+                net_pnl=event.get("net_pnl"),
+                gross_pnl=event.get("gross_pnl"),
+                fees_paid=event.get("fees_paid"),
+                currency=event.get("currency"),
+                direction=event.get("direction"),
             )
             self._persist_trade_event(series, event)
         if engine.active_trade is None or not state.intrabar_active():
@@ -852,9 +889,8 @@ class BotRuntime:
                 ),
             )
         )
-        logger.info(with_log_context("bot_runtime_prepare_start", self._runtime_log_context()))
+        self._set_phase("prepare", "bot_runtime_prepare_start")
         self._ensure_prepared()
-        logger.info(with_log_context("bot_runtime_prepare_complete", self._runtime_log_context()))
         if self._thread and self._thread.is_alive():
             logger.info(with_log_context("bot_runtime_start_ignored", self._runtime_log_context()))
             return
@@ -869,6 +905,7 @@ class BotRuntime:
             self.state.update(
                 {"status": "starting", "paused": False, "started_at": _isoformat(self._run_started_at)}
             )
+        self._set_phase("start_threads", "bot_runtime_thread_starting")
         logger.info(
             with_log_context(
                 "bot_runtime_thread_starting",
@@ -907,6 +944,7 @@ class BotRuntime:
     def _execute_loop(self) -> None:
         self._ensure_prepared()
         status = "running"
+        self._set_phase("running", "bot_runtime_running")
         self._log_event(
             "running",
             message="Bot execution loop started",
@@ -1128,10 +1166,7 @@ class BotRuntime:
         return direction
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
-        speed = self.playback_speed or 0.0
-        if speed <= 0:
-            return 0.0
-        return max(base_seconds / speed, 0.001)
+        return 0.0
 
     def _has_open_trades(self) -> bool:
         for series in self._series or []:
@@ -1272,6 +1307,10 @@ class BotRuntime:
         net = 0.0
         currency: Optional[str] = None
         multi_currency = False
+        win_pnls: List[float] = []
+        loss_pnls: List[float] = []
+        tolerance = 1e-8
+
         for series in self._series:
             stats = series.risk_engine.stats()
             for key in summary:
@@ -1288,11 +1327,35 @@ class BotRuntime:
                     currency = series_currency
                 elif currency != series_currency:
                     multi_currency = True
+
+            # Collect individual trade PnLs for avg/largest calculations
+            for trade in series.risk_engine.trades:
+                if trade.is_active():
+                    continue
+                pnl = trade.net_pnl
+                if pnl > tolerance:
+                    win_pnls.append(pnl)
+                elif pnl < -tolerance:
+                    loss_pnls.append(pnl)
+
         total = summary.get("completed_trades") or (summary["wins"] + summary["losses"])
         summary["win_rate"] = round(summary["wins"] / total, 4) if total else 0.0
         summary["gross_pnl"] = round(gross, 4)
         summary["fees_paid"] = round(fees, 4)
         summary["net_pnl"] = round(net, 4)
+        summary["total_fees"] = round(fees, 4)  # Alias for frontend compatibility
+
+        # Avg win/loss
+        summary["avg_win"] = round(sum(win_pnls) / len(win_pnls), 4) if win_pnls else 0.0
+        summary["avg_loss"] = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0.0
+
+        # Largest win/loss
+        summary["largest_win"] = round(max(win_pnls), 4) if win_pnls else 0.0
+        summary["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
+
+        # Max drawdown
+        summary["max_drawdown"] = self._max_drawdown_from_trades()
+
         if multi_currency:
             summary["quote_currency"] = "MULTI"
         elif currency:
@@ -1438,9 +1501,19 @@ class BotRuntime:
         if self._run_context is None:
             return
         from ....storage import storage
+        from ....reports import report_service
 
         artifact = self._run_artifact_payload(status)
         storage.update_bot_run_artifact(self.bot_id, artifact)
+        report_service.record_run_report(
+            bot_id=self.bot_id,
+            run_id=artifact.get("run_id"),
+            status=status,
+            started_at=artifact.get("started_at"),
+            ended_at=artifact.get("ended_at"),
+            config=self.config,
+            series=list(self._series),
+        )
 
     def _run_artifact_payload(self, status: str) -> Dict[str, Any]:
         if self._run_context is None:
@@ -1481,10 +1554,12 @@ class BotRuntime:
     def _persist_trade_entry(self, series: StrategySeries, trade: LadderPosition) -> None:
         if not series or not trade:
             return
+        run_id = self._run_context.run_id if self._run_context else None
         contracts = sum(max(leg.contracts, 0) for leg in trade.legs)
         storage.record_bot_trade(
             {
                 "trade_id": trade.trade_id,
+                "run_id": run_id,
                 "bot_id": self.bot_id,
                 "strategy_id": series.strategy_id,
                 "symbol": series.symbol,
@@ -1503,9 +1578,11 @@ class BotRuntime:
         trade_id = event.get("trade_id")
         if not trade_id:
             return
+        run_id = self._run_context.run_id if self._run_context else None
         payload = {
             "id": event.get("id"),
             "trade_id": trade_id,
+            "run_id": run_id,
             "bot_id": self.bot_id,
             "strategy_id": getattr(series, "strategy_id", None),
             "symbol": getattr(series, "symbol", None),
@@ -1523,6 +1600,7 @@ class BotRuntime:
             storage.record_bot_trade(
                 {
                     "trade_id": trade_id,
+                    "run_id": run_id,
                     "bot_id": self.bot_id,
                     "strategy_id": getattr(series, "strategy_id", None),
                     "symbol": getattr(series, "symbol", None),
@@ -1567,7 +1645,6 @@ class BotRuntime:
             "paused": self._paused,
             "next_bar_at": _isoformat(self._next_bar_at),
             "next_bar_in_seconds": self._seconds_until_next_bar(),
-            "playback_speed": self.playback_speed,
         }
         with self._lock:
             self.state.update(snapshot)
@@ -1782,6 +1859,26 @@ class BotRuntime:
             overlays = list(series.overlays or [])
             if series.trade_overlay:
                 overlays.append(series.trade_overlay)
+            # Build per-series stats including avg/largest calculations
+            series_stats = series.risk_engine.stats()
+            series_stats["total_fees"] = series_stats.get("fees_paid", 0.0)
+            # Calculate avg and largest win/loss for this series
+            tolerance = 1e-8
+            win_pnls = []
+            loss_pnls = []
+            for trade in series.risk_engine.trades:
+                if trade.is_active():
+                    continue
+                pnl = trade.net_pnl
+                if pnl > tolerance:
+                    win_pnls.append(pnl)
+                elif pnl < -tolerance:
+                    loss_pnls.append(pnl)
+            series_stats["avg_win"] = round(sum(win_pnls) / len(win_pnls), 4) if win_pnls else 0.0
+            series_stats["avg_loss"] = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0.0
+            series_stats["largest_win"] = round(max(win_pnls), 4) if win_pnls else 0.0
+            series_stats["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
+
             payloads.append(
                 {
                     "strategy_id": series.strategy_id,
@@ -1802,6 +1899,7 @@ class BotRuntime:
                         self._current_epoch_for(series),
                     ),
                     "trades": series.risk_engine.serialise_trades(),
+                    "stats": series_stats,
                 }
             )
         return payloads

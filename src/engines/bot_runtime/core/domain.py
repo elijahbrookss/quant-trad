@@ -17,7 +17,7 @@ from .execution_adapter import ExecutionAdapter
 from utils.log_context import build_log_context, merge_log_context, with_log_context
 from .amount_constraints import normalize_qty_with_constraints, resolve_amount_constraints
 from .margin import calculate_max_qty_by_margin, resolve_instrument_type, InstrumentType
-from .wallet import WalletLedger
+from .wallet import WalletLedger, trace_wallet_balance
 from .wallet_gateway import LedgerWalletGateway, WalletGateway
 
 logger = logging.getLogger(__name__)
@@ -397,6 +397,12 @@ class LadderPosition:
     def _uses_wallet_execution(self) -> bool:
         return bool(self.execution_adapter and self.wallet_gateway)
 
+    def _accounting_mode(self) -> Optional[str]:
+        inst_type = resolve_instrument_type(self.instrument or {})
+        if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
+            return "margin"
+        return None
+
     def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
         """Check if candle price hits any target levels and process fills."""
         events: List[Dict[str, str]] = []
@@ -500,6 +506,7 @@ class LadderPosition:
                 self._apply_fee_amount(fill_result.fee)
                 if self.wallet_gateway:
                     self.wallet_gateway.apply_fill(
+                        event_type="EXIT_FILL",
                         side=side,
                         base_currency=self.base_currency or "",
                         quote_currency=self.quote_currency_code or "",
@@ -510,6 +517,9 @@ class LadderPosition:
                         symbol=None,
                         trade_id=self.trade_id,
                         leg_id=leg.leg_id,
+                        position_direction=self.direction,
+                        accounting_mode=self._accounting_mode(),
+                        realized_pnl=pnl,
                     )
             else:
                 self._apply_fee(exit_price, exit_qty)
@@ -690,6 +700,7 @@ class LadderPosition:
                     self._apply_fee_amount(fill_result.fee)
                     if self.wallet_gateway:
                         self.wallet_gateway.apply_fill(
+                            event_type="EXIT_FILL",
                             side=side,
                             base_currency=self.base_currency or "",
                             quote_currency=self.quote_currency_code or "",
@@ -700,6 +711,9 @@ class LadderPosition:
                             symbol=None,
                             trade_id=self.trade_id,
                             leg_id=leg.leg_id,
+                            position_direction=self.direction,
+                            accounting_mode=self._accounting_mode(),
+                            realized_pnl=pnl,
                         )
                 else:
                     self._apply_fee(exit_price, exit_qty)
@@ -1270,7 +1284,25 @@ class LadderRiskEngine:
         available_collateral = wallet_state.balances.get(quote, 0.0)
 
         if available_collateral <= 0:
-            return 0.0, True, {"reason": "no_available_collateral", "available": 0.0}
+            balance_trace = None
+            ledger = getattr(self._wallet_gateway, "ledger", None)
+            if ledger and hasattr(ledger, "events"):
+                balance_trace = trace_wallet_balance(ledger.events(), quote, limit=8)
+            return (
+                0.0,
+                True,
+                {
+                    "reason": "no_available_collateral",
+                    "available_collateral": float(available_collateral),
+                    "max_qty_by_margin": 0.0,
+                    "cost_per_contract": None,
+                    "margin_per_contract": None,
+                    "fee_per_contract": None,
+                    "margin_rate": None,
+                    "calculation_method": None,
+                    "balance_trace": balance_trace,
+                },
+            )
 
         try:
             margin_result = calculate_max_qty_by_margin(
@@ -1286,7 +1318,21 @@ class LadderRiskEngine:
             )
         except ValueError as exc:
             # Instrument misconfigured - fail loud
-            return 0.0, True, {"reason": "margin_calculation_failed", "error": str(exc)}
+            return (
+                0.0,
+                True,
+                {
+                    "reason": "margin_calculation_failed",
+                    "error": str(exc),
+                    "available_collateral": float(available_collateral),
+                    "max_qty_by_margin": 0.0,
+                    "cost_per_contract": None,
+                    "margin_per_contract": None,
+                    "fee_per_contract": None,
+                    "margin_rate": None,
+                    "calculation_method": None,
+                },
+            )
 
         max_qty = margin_result.max_qty
         was_capped = risk_qty > max_qty
@@ -1334,23 +1380,32 @@ class LadderRiskEngine:
             raise ValueError(f"Cannot resolve base/quote currencies for instrument {symbol}")
         return str(base).upper(), str(quote).upper()
 
-    def _is_discrete_contracts(self) -> bool:
+    def _resolve_tp_step(self) -> Optional[float]:
         step = self.qty_step
-        if step in (None, 0):
-            return False
-        if step < 1:
-            return False
-        return abs(step - round(step)) <= 1e-9
+        source = self.amount_constraints.step_source
+        inst_type = resolve_instrument_type(self.instrument)
+
+        if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
+            if source in {"base_increment", "provider_product", "metadata", "metadata_info"} and step not in (None, 0):
+                if step >= 1 and abs(step - round(step)) <= 1e-9:
+                    return float(step)
+                return None
+            symbol = self.instrument.get("symbol")
+            raise ValueError(f"Missing instrument metadata qty step for TP allocation: {symbol}")
+
+        if step not in (None, 0) and step >= 1 and abs(step - round(step)) <= 1e-9:
+            return float(step)
+        return None
 
     def _allocate_tp_contracts(
         self,
         *,
         qty_final: float,
         tp_leg_count: int,
+        step: float,
     ) -> Tuple[List[float], List[int]]:
         if tp_leg_count <= 0:
             return [], []
-        step = self.qty_step if self.qty_step not in (None, 0) else 1.0
         total_units = int(math.floor((qty_final + 1e-12) / step))
         if total_units <= 0:
             return [0.0 for _ in range(tp_leg_count)], list(range(1, tp_leg_count + 1))
@@ -1431,10 +1486,12 @@ class LadderRiskEngine:
         contracts_by_leg: List[float] = []
         dropped_legs: List[int] = []
 
-        if self._is_discrete_contracts():
+        tp_step = self._resolve_tp_step()
+        if tp_step is not None:
             contracts_by_leg, dropped_legs = self._allocate_tp_contracts(
                 qty_final=qty_final_value,
                 tp_leg_count=tp_leg_count,
+                step=tp_step,
             )
         else:
             for spec in leg_specs:
@@ -1482,6 +1539,7 @@ class LadderRiskEngine:
             qty_raw=qty_raw_value,
             qty_final=qty_final_value,
             qty_step=self.qty_step,
+            tp_step=tp_step,
             min_order_size=self.min_qty,
             tp_leg_count=tp_leg_count,
             tp_contracts=contracts_by_leg,
@@ -1490,6 +1548,7 @@ class LadderRiskEngine:
             drop_explain=drop_explain,
         )
         logger.info(with_log_context("tp_leg_allocation_finalized", context))
+        self._last_tp_allocation = dict(context)
 
         legs: List[Leg] = []
         for spec, contracts in zip(leg_specs, contracts_by_leg):
@@ -1556,12 +1615,30 @@ class LadderRiskEngine:
                 symbol=self.instrument.get("symbol"),
                 reason="QTY_CAPPED_TO_ZERO",
                 risk_qty=risk_based_qty,
-                available_cash=margin_info.get("available_cash") if margin_info else None,
+                capped_qty=capped_qty,
+                was_margin_capped=was_margin_capped,
+                price=candle.close,
+                direction=direction,
+                margin_reason=margin_info.get("reason") if margin_info else None,
+                margin_error=margin_info.get("error") if margin_info else None,
+                available_collateral=margin_info.get("available_collateral") if margin_info else None,
+                max_qty_by_margin=margin_info.get("max_qty_by_margin") if margin_info else None,
+                cost_per_contract=margin_info.get("cost_per_contract") if margin_info else None,
+                margin_per_contract=margin_info.get("margin_per_contract") if margin_info else None,
+                fee_per_contract=margin_info.get("fee_per_contract") if margin_info else None,
+                margin_rate=margin_info.get("margin_rate") if margin_info else None,
+                margin_method=margin_info.get("calculation_method") if margin_info else None,
+                balance_trace=margin_info.get("balance_trace") if margin_info else None,
+                qty_step=self.qty_step,
+                min_qty=self.min_qty,
+                max_qty=self.max_qty,
+                min_notional=self.min_notional,
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
 
         order_intent_id = str(uuid.uuid4())
+        trade_id = str(uuid.uuid4())
         qty_raw = capped_qty
         requested_qty = capped_qty
         normalization = normalize_qty_with_constraints(self.amount_constraints, requested_qty)
@@ -1663,7 +1740,12 @@ class LadderRiskEngine:
                 )
                 logger.warning(with_log_context("wallet_entry_rejected", context))
                 return None
+            accounting_mode = None
+            inst_type = resolve_instrument_type(self.instrument)
+            if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
+                accounting_mode = "margin"
             self._wallet_gateway.apply_fill(
+                event_type="ENTRY_FILL",
                 side=side,
                 base_currency=base_currency,
                 quote_currency=quote_currency,
@@ -1672,6 +1754,10 @@ class LadderRiskEngine:
                 fee=fill_result.fee,
                 notional=fill_result.notional,
                 symbol=self.instrument.get("symbol"),
+                trade_id=trade_id,
+                position_direction=direction,
+                accounting_mode=accounting_mode,
+                realized_pnl=0.0,
             )
 
         total_contracts = fill_result.filled_qty if fill_result else requested_qty
@@ -1694,7 +1780,8 @@ class LadderRiskEngine:
                 if self.qty_step not in (None, 0)
                 else requested_qty
             )
-            self.last_rejection_reason = "QTY_ROUNDS_TO_ZERO"
+            rejection_reason = "QTY_ROUNDS_TO_ZERO" if rounded_qty <= 0 else "TP_LEGS_EMPTY"
+            self.last_rejection_reason = rejection_reason
             self.last_rejection_detail = {
                 "requested_qty": requested_qty,
                 "rounded_qty": rounded_qty,
@@ -1702,15 +1789,19 @@ class LadderRiskEngine:
                 "qty_step": self.qty_step,
                 "min_qty": self.min_qty,
                 "min_notional": self.min_notional,
+                "tp_leg_count": len(self.orders),
+                "tp_allocation": self._last_tp_allocation,
             }
             context = build_log_context(
                 symbol=self.instrument.get("symbol"),
-                reason="QTY_ROUNDS_TO_ZERO",
+                reason=rejection_reason,
                 requested_qty=requested_qty,
                 rounded_qty=rounded_qty,
                 qty_step=self.qty_step,
                 min_qty=self.min_qty,
                 min_notional=self.min_notional,
+                tp_leg_count=len(self.orders),
+                tp_allocation=self._last_tp_allocation,
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
@@ -1723,6 +1814,7 @@ class LadderRiskEngine:
 
         # Get trailing config
         self.trailing_config = self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), Mapping) else {}
+        self._last_tp_allocation: Optional[Dict[str, Any]] = None
 
         # Create position
         position = LadderPosition(
@@ -1754,6 +1846,7 @@ class LadderRiskEngine:
             trailing_atr_multiple=float(self.trailing_config.get("atr_multiplier") or 0.0),
             pre_entry_context=getattr(candle, "lookback_15", None),
             stop_adjustments=runtime_stop_adjustments,
+            trade_id=trade_id,
         )
         if fill_result:
             position.apply_entry_fee(fill_result.fee)

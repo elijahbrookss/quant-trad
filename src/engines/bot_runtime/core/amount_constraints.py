@@ -137,6 +137,12 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
 
     metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
     info = metadata.get("info") if isinstance(metadata.get("info"), Mapping) else {}
+    provider_metadata = (
+        metadata.get("provider_metadata") if isinstance(metadata.get("provider_metadata"), Mapping) else {}
+    )
+    provider_product = (
+        provider_metadata.get("product") if isinstance(provider_metadata.get("product"), Mapping) else {}
+    )
     limits = metadata.get("limits") if isinstance(metadata.get("limits"), Mapping) else {}
     amount_limits = limits.get("amount") if isinstance(limits.get("amount"), Mapping) else {}
     cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
@@ -150,6 +156,7 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
         min_notional = _coerce_float(cost_limits.get("min"))
 
     base_increment = _coerce_float(info.get("base_increment"))
+    provider_base_increment = _coerce_float(provider_product.get("base_increment"))
     instrument_step = _coerce_float(instrument.get("qty_step") or instrument.get("step_size"))
     metadata_step = _coerce_float(metadata.get("qty_step"))
     info_step = _coerce_float(info.get("qty_step"))
@@ -157,6 +164,7 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
 
     step_sources = {
         "base_increment": base_increment,
+        "provider_product": provider_base_increment,
         "instrument": instrument_step,
         "metadata": metadata_step,
         "metadata_info": info_step,
@@ -176,6 +184,7 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
 
     step_priority = [
         ("base_increment", base_increment),
+        ("provider_product", provider_base_increment),
         ("instrument", instrument_step),
         ("metadata", metadata_step),
         ("metadata_info", info_step),
