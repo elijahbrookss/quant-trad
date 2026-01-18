@@ -420,7 +420,7 @@ class DataPersistenceService:
                 with conn.begin():
                     conn.execute(
                         text(
-                            f"CREATE TEMP TABLE tmp (LIKE {self._config.candles_raw_table}) ON COMMIT DROP;"
+                            f"CREATE TEMP TABLE tmp (LIKE {self._config.candles_raw_table} INCLUDING DEFAULTS) ON COMMIT DROP;"
                         )
                     )
                     try:
