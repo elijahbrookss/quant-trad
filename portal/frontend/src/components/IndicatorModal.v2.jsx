@@ -244,7 +244,18 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     const required = Array.isArray(meta.required_params) ? meta.required_params : []
     const preferred = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
     // Exclude chart-context fields - these are runtime parameters, not indicator config
-    const chartContextKeys = new Set(['symbol', 'interval', 'start', 'end', 'timeframe'])
+    const chartContextKeys = new Set([
+      'symbol',
+      'interval',
+      'start',
+      'end',
+      'timeframe',
+      'datasource',
+      'exchange',
+      'provider_id',
+      'venue_id',
+      'instrument_id',
+    ])
     const filteredOrder = fieldOrder.filter((key) => !chartContextKeys.has(key))
 
     const essential = new Set([...required, ...preferred])
