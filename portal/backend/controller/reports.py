@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..service.reports import compare_reports as _compare_reports, get_report as _get_report, list_reports as _list_reports
+from ..service.reports.export import build_run_export
 from utils.log_context import build_log_context, with_log_context
 
 
@@ -18,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 class ReportCompareRequest(BaseModel):
     run_ids: List[str]
+
+
+class ReportExportRequest(BaseModel):
+    pre_roll_hours: Optional[int] = 48
+    post_roll_hours: Optional[int] = 48
+    stats_versions: Optional[List[str]] = None
+    stats_key_limit: Optional[int] = 20
 
 
 @router.get("/")
@@ -105,3 +115,42 @@ async def get_report(run_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_get_failed", context), exc_info=exc)
         raise HTTPException(500, "Report build failed") from exc
+
+
+@router.post("/{run_id}/export")
+async def export_report(run_id: str, payload: ReportExportRequest) -> StreamingResponse:
+    """Export run data as a bounded LLM-ready archive."""
+
+    context = build_log_context(
+        run_id=run_id,
+        pre_roll_hours=payload.pre_roll_hours,
+        post_roll_hours=payload.post_roll_hours,
+        stats_versions=payload.stats_versions or [],
+        stats_key_limit=payload.stats_key_limit,
+    )
+    logger.info(with_log_context("report_export_request", context))
+    try:
+        archive, filename = build_run_export(
+            run_id,
+            pre_roll_hours=payload.pre_roll_hours if payload.pre_roll_hours is not None else 48,
+            post_roll_hours=payload.post_roll_hours if payload.post_roll_hours is not None else 48,
+            stats_versions=payload.stats_versions,
+            stats_key_limit=payload.stats_key_limit if payload.stats_key_limit is not None else 20,
+        )
+        logger.info(with_log_context("report_export_success", context))
+        return StreamingResponse(
+            io.BytesIO(archive),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+    except KeyError as exc:
+        logger.warning(with_log_context("report_export_missing", context))
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        logger.warning(with_log_context("report_export_invalid", context))
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_export_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report export failed") from exc
