@@ -1,5 +1,6 @@
-import { Play, Square, Eye, Trash2, Pause, RotateCw } from 'lucide-react'
-import { memo, useMemo } from 'react'
+import { Play, Square, Eye, Trash2, Pause, RotateCw, TriangleAlert } from 'lucide-react'
+import { memo, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
@@ -74,6 +75,8 @@ export const BotCard = memo(function BotCard({
   pendingStart,
   pendingDelete,
 }) {
+  const navigate = useNavigate()
+  const [errorOpen, setErrorOpen] = useState(false)
   const assignedNames = useMemo(
     () =>
       (bot.strategy_ids || [])
@@ -98,13 +101,21 @@ export const BotCard = memo(function BotCard({
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
   const canStart = ['idle', 'stopped', 'completed', 'error', 'crashed'].includes(runtimeStatus)
   const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
+  const isCompleted = runtimeStatus === 'completed'
+  const isStopped = runtimeStatus === 'stopped'
+  const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error'
+  const isIdle = runtimeStatus === 'idle'
+  const showDetails = !isCompleted && !isStopped && !isCrashed && !isIdle
+  const showViewReport = isCompleted
+  const showViewError = isCrashed
   const startLabel =
     runtimeStatus === 'completed'
       ? 'Rerun'
-      : runtimeStatus === 'stopped' || runtimeStatus === 'crashed'
+      : runtimeStatus === 'stopped' || runtimeStatus === 'crashed' || runtimeStatus === 'error'
         ? 'Restart'
         : 'Start'
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
+  const completedDuration = buildCompletedDuration(bot)
   const runType = (bot.run_type || 'backtest').toLowerCase()
   const runTypePill = runType === 'backtest' ? 'BT' : runType === 'paper' || runType === 'paper_trade' ? 'SIM' : 'LIVE'
   const modeLabel =
@@ -146,62 +157,66 @@ export const BotCard = memo(function BotCard({
     return `${formatDateShort(bot.backtest_start)} → ${formatDateShort(bot.backtest_end)}`
   }, [runType, bot.backtest_start, bot.backtest_end])
 
-  return (
-    <article className="group relative flex overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 transition-all duration-200 hover:border-slate-700 hover:bg-slate-900/60">
-      {/* Status color stripe */}
-      <div className={`w-1 flex-shrink-0 ${statusColor}`} />
+  const reportRunId = bot?.last_run_artifact?.run_id || bot?.runtime?.run_id || null
+  const errorPayload = bot?.runtime?.error || bot?.last_run_artifact?.error || null
+  const errorMessage = typeof errorPayload === 'string' ? errorPayload : errorPayload?.message || 'Bot crashed'
+  const errorMeta = typeof errorPayload === 'object' && errorPayload ? errorPayload : {}
 
-      <div className="flex flex-1 flex-col gap-3 p-4">
-        {/* Header: Name + P&L Hero */}
-        <div className="flex items-start justify-between gap-3">
+  return (
+    <article className="group relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950/80 via-slate-950/60 to-slate-900/80 shadow-[0_12px_40px_rgba(2,6,23,0.35)] transition-all duration-200 hover:border-slate-700">
+      <div className={`absolute left-0 top-0 h-full w-1 ${statusColor}`} />
+      <div className="relative flex flex-col gap-4 p-5">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <h4 className="truncate text-sm font-medium text-slate-100">{bot.name}</h4>
-              <span className="shrink-0 rounded bg-slate-800/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-500">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="truncate text-base font-semibold tracking-tight text-slate-100">{bot.name}</h4>
+              <span className="shrink-0 rounded-full bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                 {runTypePill}
               </span>
               {modeLabel ? (
-                <span className="shrink-0 rounded bg-slate-900/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-slate-400">
+                <span className="shrink-0 rounded-full bg-slate-900/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
                   {modeLabel}
                 </span>
               ) : null}
             </div>
-            <p className="mt-0.5 truncate text-xs text-slate-500">
+            <p className="mt-1 truncate text-xs text-slate-500">
               {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}
             </p>
           </div>
 
-          {/* P&L Hero Metric */}
-          <div className="flex flex-col items-end">
-            <span className={`text-lg font-semibold tabular-nums ${
+          <div className="text-right">
+            <span className={`text-2xl font-semibold tabular-nums ${
               pnlTone === 'positive' ? 'text-emerald-400' :
               pnlTone === 'negative' ? 'text-rose-400' : 'text-slate-400'
             }`}>
               {pnlDisplay}
             </span>
-            <span className="text-[10px] uppercase tracking-wider text-slate-600">P&L</span>
+            <div className="text-[10px] uppercase tracking-widest text-slate-600">Net P&L</div>
           </div>
         </div>
 
-        {/* Compact info row */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-          <span title={rawSymbols}>{symbolsDisplay}</span>
-          <span className="text-slate-700">·</span>
-          <span>{timeframeLabel || '—'}</span>
-          <span className="text-slate-700">·</span>
+        {/* Trading context */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-400">
+          <span className="rounded-full border border-slate-800/80 bg-slate-900/60 px-2 py-0.5 font-medium text-slate-300" title={rawSymbols}>
+            {symbolsDisplay}
+          </span>
+          <span className="text-slate-700">•</span>
+          <span className="uppercase tracking-wider">{timeframeLabel || '—'}</span>
+          <span className="text-slate-700">•</span>
           <span className="tabular-nums">{dateRangeShort}</span>
           {runDurationLabel && (
             <>
-              <span className="text-slate-700">·</span>
+              <span className="text-slate-700">•</span>
               <span className="tabular-nums text-slate-400">{runDurationLabel}</span>
             </>
           )}
         </div>
 
-        {/* Progress bar - only show when relevant */}
+        {/* Progress bar */}
         {showProgress && (
-          <div className="flex items-center gap-2">
-            <div className="h-1 flex-1 overflow-hidden rounded-full bg-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800/80">
               <div
                 className={`h-full transition-all duration-500 ${
                   runtimeStatus === 'running' ? 'bg-emerald-500' :
@@ -210,45 +225,70 @@ export const BotCard = memo(function BotCard({
                 style={{ width: `${progressPct}%` }}
               />
             </div>
-            <span className="shrink-0 text-[10px] tabular-nums text-slate-600">
-              {Math.round(progressPct)}%
-            </span>
+            <span className="shrink-0 text-[10px] tabular-nums text-slate-500">{Math.round(progressPct)}%</span>
           </div>
         )}
 
-        {/* Compact stats row */}
-        <div className="flex items-center justify-between border-t border-slate-800/50 pt-3">
-          <div className="flex items-center gap-4 text-xs">
+        {/* Performance strip */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800/70 bg-slate-950/40 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs text-slate-400">
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-600">Trades</span>
-              <span className="font-medium tabular-nums text-slate-300">{totalTrades}</span>
+              <span className="text-slate-500">Trades</span>
+              <span className="font-semibold tabular-nums text-slate-200">{totalTrades}</span>
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-slate-600">Win</span>
-              <span className="font-medium tabular-nums text-slate-300">{winRateDisplay}</span>
+              <span className="text-slate-500">Win</span>
+              <span className="font-semibold tabular-nums text-slate-200">{winRateDisplay}</span>
             </div>
-            {ddDisplay && (
+            {runtimeStatus === 'completed' ? (
               <div className="flex items-center gap-1.5">
-                <span className="text-slate-600">DD</span>
-                <span className="font-medium tabular-nums text-rose-400/80">{ddDisplay}</span>
+                <span className="text-slate-500">Run</span>
+                <span className="font-semibold tabular-nums text-slate-200">{completedDuration || '—'}</span>
+              </div>
+            ) : ddDisplay && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-slate-500">DD</span>
+                <span className="font-semibold tabular-nums text-rose-400/80">{ddDisplay}</span>
               </div>
             )}
           </div>
 
-          {/* Status badge - compact */}
-          <span className={`text-[10px] font-medium uppercase tracking-wider ${
-            runtimeStatus === 'running' ? 'text-emerald-400' :
-            runtimeStatus === 'paused' ? 'text-amber-400' :
-            runtimeStatus === 'error' || runtimeStatus === 'crashed' ? 'text-rose-400' :
-            runtimeStatus === 'completed' ? 'text-sky-400' : 'text-slate-500'
+          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
+            runtimeStatus === 'running' ? 'border-emerald-500/40 text-emerald-400' :
+            runtimeStatus === 'paused' ? 'border-amber-500/40 text-amber-400' :
+            runtimeStatus === 'error' || runtimeStatus === 'crashed' ? 'border-rose-500/40 text-rose-400' :
+            runtimeStatus === 'completed' ? 'border-sky-500/40 text-sky-400' :
+            'border-slate-600/40 text-slate-500'
           }`}>
             {runtimeStatus}
           </span>
         </div>
 
-        {/* Action Buttons - compact */}
-        <div className="flex items-center gap-1.5 pt-1">
-          <ActionButton onClick={() => onOpen(bot)} icon={<Eye className="size-3" />} label="Details" size="sm" />
+        {/* Action Buttons */}
+        <div className="flex flex-wrap items-center gap-2">
+          {showDetails && (
+            <ActionButton onClick={() => onOpen(bot)} icon={<Eye className="size-3" />} label="Details" size="sm" />
+          )}
+          {showViewReport && (
+            <ActionButton
+              onClick={() => {
+                const path = reportRunId ? `/reports?runId=${reportRunId}` : '/reports'
+                navigate(path)
+              }}
+              icon={<Eye className="size-3" />}
+              label="View Report"
+              size="sm"
+            />
+          )}
+          {showViewError && (
+            <ActionButton
+              onClick={() => setErrorOpen(true)}
+              icon={<TriangleAlert className="size-3" />}
+              label="View Error"
+              size="sm"
+              variant="danger"
+            />
+          )}
           {showPause && (
             <ActionButton onClick={() => onPause(bot.id)} icon={<Pause className="size-3" />} label="Pause" size="sm" />
           )}
@@ -280,6 +320,60 @@ export const BotCard = memo(function BotCard({
           </div>
         </div>
       </div>
+      {showViewError && errorOpen ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-4"
+          onClick={() => setErrorOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-rose-900/50 bg-slate-950 p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex size-10 items-center justify-center rounded-full border border-rose-800/60 bg-rose-950/40 text-rose-400">
+                  <TriangleAlert className="size-5" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-widest text-rose-400">Bot Crashed</p>
+                  <p className="text-sm text-slate-300">Runtime error details</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setErrorOpen(false)}
+                className="rounded-md border border-slate-800 bg-slate-900/60 px-2 py-1 text-xs text-slate-400 hover:border-slate-700 hover:text-slate-200"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-3 text-xs text-slate-300">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-slate-500">Message</p>
+                <p className="mt-1 text-sm text-rose-200">{errorMessage}</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Strategy</p>
+                  <p className="mt-1">{errorMeta.strategy_id || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Symbol</p>
+                  <p className="mt-1">{errorMeta.symbol || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Timeframe</p>
+                  <p className="mt-1">{errorMeta.timeframe || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500">Status</p>
+                  <p className="mt-1">{runtimeStatus}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </article>
   )
 })
@@ -294,6 +388,26 @@ function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
   const minutes = Math.floor((elapsedSeconds % 3600) / 60)
   const seconds = elapsedSeconds % 60
 
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  }
+  return `${seconds}s`
+}
+
+function buildCompletedDuration(bot) {
+  const startedAt = bot?.last_run_artifact?.started_at || bot?.runtime?.started_at
+  const endedAt = bot?.last_run_artifact?.ended_at || bot?.runtime?.ended_at
+  if (!startedAt || !endedAt) return null
+  const startMs = Date.parse(startedAt)
+  const endMs = Date.parse(endedAt)
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null
+  const elapsedSeconds = Math.floor((endMs - startMs) / 1000)
+  const hours = Math.floor(elapsedSeconds / 3600)
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60)
+  const seconds = elapsedSeconds % 60
   if (hours > 0) {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`
   }
