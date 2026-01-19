@@ -14,7 +14,7 @@ from core.chart_plotter import ChartPlotter
 from core.logger import logger
 from indicators.config import DataContext
 from ..config.runtime import ProviderRuntimeConfig, runtime_config_from_env
-from ..services.persistence import DataPersistenceService
+from ..services.persistence import DataPersistence, NullPersistence
 from ..utils import ohlcv as utils
 
 
@@ -23,6 +23,7 @@ class DataSource(str, Enum):
     ALPACA = "ALPACA"
     IBKR = "IBKR"
     CCXT = "CCXT"
+    COINBASE = "COINBASE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -38,12 +39,38 @@ class InstrumentMetadata:
     tick_size: Optional[float]
     contract_size: Optional[float]
     tick_value: Optional[float]
+    min_order_size: Optional[float]
+    maker_fee_rate: Optional[float]
+    taker_fee_rate: Optional[float]
+    margin_rates: Optional[dict]
+    can_short: Optional[bool]
+    short_requires_borrow: Optional[bool]
+    has_funding: Optional[bool]
+    expiry_ts: Optional[dt.datetime]
+    base_currency: Optional[str]
+    quote_currency: Optional[str]
+    metadata: Optional[dict]
 
     def as_dict(self) -> dict:
-        return {
+        expiry_value = self.expiry_ts.isoformat() if self.expiry_ts else None
+        instrument_fields = {
             "tick_size": self.tick_size,
             "contract_size": self.contract_size,
             "tick_value": self.tick_value,
+            "min_order_size": self.min_order_size,
+            "maker_fee_rate": self.maker_fee_rate,
+            "taker_fee_rate": self.taker_fee_rate,
+            "margin_rates": dict(self.margin_rates or {}),
+            "can_short": self.can_short,
+            "short_requires_borrow": self.short_requires_borrow,
+            "has_funding": self.has_funding,
+            "expiry_ts": expiry_value,
+            "base_currency": self.base_currency,
+            "quote_currency": self.quote_currency,
+        }
+        return {
+            "instrument_fields": instrument_fields,
+            "provider_metadata": dict(self.metadata or {}),
         }
 
 
@@ -79,11 +106,11 @@ class BaseDataProvider(ProviderInterface):
     def __init__(
         self,
         *,
-        persistence: Optional[DataPersistenceService] = None,
+        persistence: Optional[DataPersistence] = None,
         settings: Optional[ProviderRuntimeConfig] = None,
     ) -> None:
         self._settings = settings or runtime_config_from_env()
-        self._persistence = persistence or DataPersistenceService(self._settings.persistence)
+        self._persistence = persistence or NullPersistence()
 
     @staticmethod
     def _normalize_metadata(
@@ -91,6 +118,17 @@ class BaseDataProvider(ProviderInterface):
         tick_size: Optional[float] = None,
         contract_size: Optional[float] = None,
         tick_value: Optional[float] = None,
+        min_order_size: Optional[float] = None,
+        maker_fee_rate: Optional[float] = None,
+        taker_fee_rate: Optional[float] = None,
+        margin_rates: Optional[dict] = None,
+        can_short: Optional[bool] = None,
+        short_requires_borrow: Optional[bool] = None,
+        has_funding: Optional[bool] = None,
+        expiry_ts: Optional[dt.datetime] = None,
+        base_currency: Optional[str] = None,
+        quote_currency: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> InstrumentMetadata:
         """Derive a consistent metadata triple from the provided inputs."""
 
@@ -110,7 +148,36 @@ class BaseDataProvider(ProviderInterface):
         if ts is None and cs is not None and tv is not None and cs != 0:
             ts = tv / cs
 
-        return InstrumentMetadata(ts, cs, tv)
+        missing = []
+        if can_short is None:
+            missing.append("can_short")
+        if short_requires_borrow is None:
+            missing.append("short_requires_borrow")
+        if has_funding is None:
+            missing.append("has_funding")
+        if not base_currency:
+            missing.append("base_currency")
+        if not quote_currency:
+            missing.append("quote_currency")
+        if missing:
+            raise ValueError(f"Instrument metadata missing fields: {', '.join(missing)}")
+
+        return InstrumentMetadata(
+            ts,
+            cs,
+            tv,
+            float(min_order_size) if min_order_size is not None else None,
+            float(maker_fee_rate) if maker_fee_rate is not None else None,
+            float(taker_fee_rate) if taker_fee_rate is not None else None,
+            dict(margin_rates or {}),
+            can_short,
+            short_requires_borrow,
+            has_funding,
+            expiry_ts,
+            str(base_currency).upper() if base_currency else None,
+            str(quote_currency).upper() if quote_currency else None,
+            dict(metadata or {}),
+        )
 
     def ensure_schema(self):
         self._persistence.ensure_schema()
@@ -264,14 +331,6 @@ class BaseDataProvider(ProviderInterface):
         combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
         combined.sort_values("timestamp", inplace=True)
 
-        combined = self._compute_tr_atr(combined)
-
-        now_ts = dt.datetime.now(dt.timezone.utc)
-        combined["data_ingested_ts"] = now_ts
-        combined["datasource"] = self.get_datasource()
-        combined["interval"] = ctx.interval
-        combined["symbol"] = ctx.symbol
-
         try:
             return self._write_dataframe(combined, ctx)
         except SQLAlchemyError as e:
@@ -280,6 +339,16 @@ class BaseDataProvider(ProviderInterface):
 
     def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
         ctx.validate()
+        exchange = getattr(self, "_exchange_id", None) or getattr(self, "exchange", None)
+        logger.info(
+            "candle_fetch_start | datasource=%s exchange=%s symbol=%s interval=%s start=%s end=%s",
+            self.get_datasource(),
+            exchange,
+            ctx.symbol,
+            ctx.interval,
+            ctx.start,
+            ctx.end,
+        )
 
         if not self._persistence.engine_available:
             logger.warning(
@@ -384,11 +453,6 @@ class BaseDataProvider(ProviderInterface):
                     continue
 
                 segment.sort_values("timestamp", inplace=True)
-                segment = self._compute_tr_atr(segment)
-                segment["data_ingested_ts"] = dt.datetime.now(dt.timezone.utc)
-                segment["datasource"] = self.get_datasource()
-                segment["interval"] = ctx.interval
-                segment["symbol"] = ctx.symbol
 
                 try:
                     self._write_dataframe(segment, ctx)
@@ -405,8 +469,6 @@ class BaseDataProvider(ProviderInterface):
                             "low",
                             "close",
                             "volume",
-                            "tr",
-                            "atr_wilder",
                         ]
                     ]
                 )
@@ -474,6 +536,8 @@ class BaseDataProvider(ProviderInterface):
         df["datasource"] = self.get_datasource()
         df["interval"] = ctx.interval
         df["symbol"] = ctx.symbol
+        if ctx.instrument_id and "instrument_id" not in df.columns:
+            df["instrument_id"] = ctx.instrument_id
 
         return self._format_ohlcv_dataframe(df, ctx)
 
@@ -487,10 +551,34 @@ class BaseDataProvider(ProviderInterface):
             df["interval"] = ctx.interval
         if "symbol" not in df.columns:
             df["symbol"] = ctx.symbol
+        if ctx.instrument_id and "instrument_id" not in df.columns:
+            df["instrument_id"] = ctx.instrument_id
 
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df.set_index("timestamp", inplace=True)
         df["timestamp"] = df.index
+        exchange = getattr(self, "_exchange_id", None) or getattr(self, "exchange", None)
+        row_count = len(df.index) if df is not None else 0
+        range_start = None
+        range_end = None
+        if df is not None and not df.empty and "timestamp" in df.columns:
+            try:
+                ts = pd.to_datetime(df["timestamp"], utc=True)
+                range_start = ts.min()
+                range_end = ts.max()
+            except Exception:
+                range_start = None
+                range_end = None
+        logger.info(
+            "candle_fetch_end | datasource=%s exchange=%s symbol=%s interval=%s rows=%s range_start=%s range_end=%s",
+            self.get_datasource(),
+            exchange,
+            ctx.symbol,
+            ctx.interval,
+            row_count,
+            range_start,
+            range_end,
+        )
         return df
 
     def plot_ohlcv(self, plot_ctx: DataContext, title: str = None, **kwargs):

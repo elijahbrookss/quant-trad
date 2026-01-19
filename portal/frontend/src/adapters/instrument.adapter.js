@@ -64,3 +64,13 @@ export async function deleteInstrument(instrumentId) {
   })
   return handleResponse(res)
 }
+
+export async function resolveInstrument(payload) {
+  const res = await fetch(`${BASE}/api/instruments/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}

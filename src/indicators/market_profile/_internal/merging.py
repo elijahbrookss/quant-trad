@@ -10,6 +10,7 @@ from typing import List
 from ..domain import Profile, ValueArea
 
 logger = logging.getLogger(__name__)
+_LAST_MERGE_SIGNATURE = {}
 
 
 def calculate_overlap(val1: float, vah1: float, val2: float, vah2: float) -> float:
@@ -41,6 +42,9 @@ def merge_profiles(
     profiles: List[Profile],
     threshold: float = 0.6,
     min_sessions: int = 3,
+    bot_id: str = None,
+    symbol: str = None,
+    strategy_id: str = None,
 ) -> List[Profile]:
     """
     Merge consecutive profiles with overlapping value areas.
@@ -49,6 +53,9 @@ def merge_profiles(
         profiles: List of daily profiles to merge
         threshold: Minimum overlap ratio (0.0 to 1.0) to merge
         min_sessions: Minimum number of sessions required for a merged profile
+        bot_id: Optional bot identifier for logging context
+        symbol: Optional symbol for logging context
+        strategy_id: Optional strategy identifier for logging context
 
     Returns:
         List of merged profiles
@@ -59,7 +66,28 @@ def merge_profiles(
     merged = []
     i, n = 0, len(profiles)
 
-    logger.info("Starting merge of value areas: threshold=%.2f, min_merge=%d", threshold, min_sessions)
+    # Build log context labels
+    log_labels = []
+    if bot_id:
+        log_labels.append(f"bot_id={bot_id}")
+    if symbol:
+        log_labels.append(f"symbol={symbol}")
+    if strategy_id:
+        log_labels.append(f"strategy_id={strategy_id}")
+    label_str = " ".join(log_labels) + " " if log_labels else ""
+
+    log_key = (bot_id, strategy_id, symbol)
+    log_signature = (threshold, min_sessions, len(profiles), profiles[-1].end)
+    should_log = _LAST_MERGE_SIGNATURE.get(log_key) != log_signature
+    if should_log:
+        _LAST_MERGE_SIGNATURE[log_key] = log_signature
+        logger.info(
+            "event=market_profile_merge_start %sthreshold=%.2f min_merge_sessions=%d profiles=%d",
+            label_str,
+            threshold,
+            min_sessions,
+            len(profiles),
+        )
 
     while i < n:
         base = profiles[i]
@@ -71,16 +99,12 @@ def merge_profiles(
         count = 1
         j = i + 1
 
-        logger.debug("Merging from profile %d (start: %s)", i, start_ts)
-
         # Merge consecutive profiles that overlap
         while j < n:
             next_prof = profiles[j]
             overlap = calculate_overlap(merged_val, merged_vah, next_prof.val, next_prof.vah)
-            logger.debug("Checking overlap with profile %d: overlap=%.2f (threshold=%.2f)", j, overlap, threshold)
 
             if overlap < threshold:
-                logger.debug("Overlap below threshold, stopping merge at profile %d", j)
                 break
 
             # Expand boundaries
@@ -105,14 +129,27 @@ def merge_profiles(
             )
             merged.append(merged_profile)
 
-            logger.info(
-                "Merged %d profiles: [%s → %s], VAL=%.{prec}f, VAH=%.{prec}f, avg POC=%.{prec}f".replace("{prec}", str(base.precision)),
-                count, start_ts, end_ts, merged_val, merged_vah, avg_poc
-            )
-        else:
-            logger.debug("Merge group too small (%d < %d), skipping", count, min_sessions)
+            if should_log:
+                logger.info(
+                    "event=market_profile_merge_group_complete %ssessions=%d start=%s end=%s val=%.{prec}f vah=%.{prec}f poc=%.{prec}f".replace(
+                        "{prec}",
+                        str(base.precision),
+                    ),
+                    label_str,
+                    count,
+                    start_ts,
+                    end_ts,
+                    merged_val,
+                    merged_vah,
+                    avg_poc,
+                )
 
         i = j
 
-    logger.info("Completed merging. Total merged profiles: %d", len(merged))
+    if should_log:
+        logger.info(
+            "event=market_profile_merge_complete %smerged_profiles=%d",
+            label_str,
+            len(merged),
+        )
     return merged

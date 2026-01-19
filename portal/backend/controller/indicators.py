@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from portal.backend.service.indicator_service import (
+from portal.backend.service.indicators.indicator_service import (
     bulk_delete_instances,
     bulk_set_enabled,
     create_instance,
@@ -50,6 +50,7 @@ class OverlayRequest(BaseModel):
     symbol: Optional[str] = None  # optional override; defaults to stored
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    instrument_id: Optional[str] = None
 
 class SignalRequest(BaseModel):
     start: str
@@ -185,6 +186,17 @@ def overlays(inst_id: str, req: OverlayRequest):
     over the requested chart window. Does not accept indicator params.
     """
     try:
+        logger.info(
+            "event=overlay_request_received indicator_id=%s instrument_id=%s symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s",
+            inst_id,
+            req.instrument_id,
+            req.symbol,
+            req.interval,
+            req.datasource,
+            req.exchange,
+            req.start,
+            req.end,
+        )
         payload = overlays_for_instance(
             inst_id=inst_id,
             start=req.start,
@@ -193,6 +205,7 @@ def overlays(inst_id: str, req: OverlayRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
         return payload
     except KeyError:
@@ -211,6 +224,14 @@ def overlays(inst_id: str, req: OverlayRequest):
 
 @router.post("/{inst_id}/signals")
 async def signals(inst_id: str, req: SignalRequest):
+    logger.info(
+        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s",
+        inst_id,
+        req.datasource,
+        req.exchange,
+        req.symbol,
+        req.interval,
+    )
     try:
         return generate_signals_for_instance(
             inst_id=inst_id,

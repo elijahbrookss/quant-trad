@@ -12,7 +12,7 @@ from signals.rules.pivot import PivotLevelIndicator
 
 
 def test_indicator_service_registers_pivot_rules():
-    module = importlib.import_module("portal.backend.service.indicator_service")
+    module = importlib.import_module("portal.backend.service.indicators.indicator_service")
     original_registry = dict(engine._REGISTRY)
 
     try:
@@ -60,7 +60,7 @@ def _build_dataframe() -> _DummyFrame:
 
 @pytest.fixture
 def signal_test_env(monkeypatch):
-    from portal.backend.service import indicator_service as svc
+    from portal.backend.service.indicators import indicator_service as svc
     from signals.engine import signal_generator as engine
 
     def _setup(df: _DummyFrame):
@@ -180,7 +180,7 @@ def test_generate_signals_no_candles(signal_test_env):
 
 
 def test_overlays_backfill_legacy_context(monkeypatch):
-    from portal.backend.service import indicator_service as svc
+    from portal.backend.service.indicators import indicator_service as svc
 
     class _OverlayIndicator:
         NAME = "LegacyOverlayIndicator"

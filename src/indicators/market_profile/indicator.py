@@ -6,7 +6,7 @@ No dependencies on visualization libraries, signal decorators, or UI concerns.
 """
 
 import logging
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -15,13 +15,20 @@ from core.logger import logger
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
 from indicators.registry import indicator
+from indicators.runtime.overlay_cache_registry import overlay_cacheable
+from indicators.runtime.incremental_cache_registry import incremental_cacheable
 
 from .domain import Profile, ValueArea
 from ._internal.computation import build_tpo_histogram, extract_value_area
 from ._internal.bin_size import select_bin_size, infer_precision_from_step
 from ._internal.merging import merge_profiles
 
+if TYPE_CHECKING:
+    from indicators.runtime.incremental_cache import IncrementalCache
 
+
+@incremental_cacheable("market_profile")
+@overlay_cacheable("market_profile")
 @indicator(name="market_profile", inputs=["ohlc"], outputs=["profiles"])
 class MarketProfileIndicator(ComputeIndicator):
     """
@@ -41,6 +48,16 @@ class MarketProfileIndicator(ComputeIndicator):
     DEFAULT_MIN_MERGE_SESSIONS = 3
     DEFAULT_DAYS_BACK = 180
 
+    # Define required params with defaults (used during creation only)
+    # These params MUST be present in stored indicator records
+    REQUIRED_PARAMS = {
+        "use_merged_value_areas": True,
+        "merge_threshold": 0.6,
+        "min_merge_sessions": DEFAULT_MIN_MERGE_SESSIONS,
+        "extend_value_area_to_chart_end": True,
+        "days_back": DEFAULT_DAYS_BACK,
+    }
+
     def __init__(
         self,
         df: pd.DataFrame,
@@ -50,6 +67,9 @@ class MarketProfileIndicator(ComputeIndicator):
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         extend_value_area_to_chart_end: bool = True,
         days_back: int = DEFAULT_DAYS_BACK,
+        symbol: Optional[str] = None,
+        bot_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
     ):
         """
         Initialize Market Profile indicator.
@@ -62,6 +82,9 @@ class MarketProfileIndicator(ComputeIndicator):
             min_merge_sessions: Minimum sessions required for merge (default: 3)
             extend_value_area_to_chart_end: Extend value area boxes to chart end (default: True)
             days_back: Number of days of historical data to use (default: 180)
+            symbol: Optional symbol for logging context
+            bot_id: Optional bot identifier for logging context
+            strategy_id: Optional strategy identifier for logging context
         """
         super().__init__(df)
 
@@ -76,6 +99,11 @@ class MarketProfileIndicator(ComputeIndicator):
         self.min_merge_sessions = min_merge_sessions
         self.extend_value_area_to_chart_end = extend_value_area_to_chart_end
         self.days_back = days_back
+
+        # Store context for logging
+        self.symbol = symbol
+        self.bot_id = bot_id
+        self.strategy_id = strategy_id
 
         # Compute profiles on initialization
         self._profiles = self._compute_daily_profiles()
@@ -128,6 +156,7 @@ class MarketProfileIndicator(ComputeIndicator):
             start=start_date.isoformat(),
             end=ctx.end,
             interval="30m",  # Always use 30min for Market Profile
+            instrument_id=ctx.instrument_id,
         )
 
         logger.info(
@@ -174,7 +203,151 @@ class MarketProfileIndicator(ComputeIndicator):
             min_merge_sessions=min_merge_sessions,
             extend_value_area_to_chart_end=extend_value_area_to_chart_end,
             days_back=days_back,
+            symbol=ctx.symbol,
+            bot_id=kwargs.get("bot_id"),
+            strategy_id=kwargs.get("strategy_id"),
         )
+
+    @classmethod
+    def from_context_with_incremental_cache(
+        cls,
+        provider,
+        ctx: DataContext,
+        cache: "IncrementalCache",
+        inst_id: str,
+        bin_size: Optional[float] = None,
+        use_merged_value_areas: bool = True,
+        merge_threshold: float = 0.6,
+        min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
+        extend_value_area_to_chart_end: bool = True,
+        days_back: int = DEFAULT_DAYS_BACK,
+        **kwargs
+    ):
+        """
+        Instantiate from a DataContext with incremental caching.
+
+        This method checks the cache for previously computed daily profiles
+        and only fetches/computes data for missing days, enabling efficient
+        incremental updates.
+
+        Args:
+            provider: Data provider with get_ohlcv method
+            ctx: DataContext with symbol, start, end, interval
+            cache: IncrementalCache instance for storing/retrieving daily profiles
+            inst_id: Indicator instance ID for cache key
+            bin_size: Price bucket size (auto-inferred if not provided)
+            use_merged_value_areas: Whether to merge overlapping value areas
+            merge_threshold: Overlap threshold for merging
+            min_merge_sessions: Minimum sessions required for merge
+            extend_value_area_to_chart_end: Extend value area boxes to chart end
+            days_back: Number of days of historical data to use
+            **kwargs: Additional parameters (bot_id, strategy_id, etc.)
+
+        Returns:
+            MarketProfileIndicator instance with profiles from cache + fresh computation
+        """
+        from datetime import timedelta
+
+        end_date = pd.Timestamp(ctx.end)
+        start_date = end_date - timedelta(days=days_back)
+
+        # Build date keys for cache lookup
+        date_keys = []
+        current = start_date
+        while current <= end_date:
+            date_keys.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+
+        # Check cache for existing daily profiles
+        cached_profiles_dict = cache.get_range(inst_id, ctx.symbol, date_keys)
+
+        logger.info(
+            "Incremental cache check | inst_id=%s symbol=%s | cached_days=%d | total_days=%d",
+            inst_id,
+            ctx.symbol,
+            len(cached_profiles_dict),
+            len(date_keys),
+        )
+
+        # If we have all profiles cached, we can skip data fetching entirely
+        if len(cached_profiles_dict) >= len(date_keys):
+            logger.info(
+                "Using fully cached profiles | inst_id=%s symbol=%s | profiles=%d",
+                inst_id,
+                ctx.symbol,
+                len(cached_profiles_dict),
+            )
+            # Create a minimal instance with cached profiles
+            empty_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            empty_df.index = pd.DatetimeIndex([])
+
+            instance = cls.__new__(cls)
+            instance.bin_size = bin_size or 0.01
+            instance._bin_size_locked = bin_size is not None
+            instance._bin_precision = 2
+            instance.price_precision = 2
+            instance.use_merged_value_areas = use_merged_value_areas
+            instance.merge_threshold = merge_threshold
+            instance.min_merge_sessions = min_merge_sessions
+            instance.extend_value_area_to_chart_end = extend_value_area_to_chart_end
+            instance.days_back = days_back
+            instance.symbol = ctx.symbol
+            instance.bot_id = kwargs.get("bot_id")
+            instance.strategy_id = kwargs.get("strategy_id")
+            instance.df = empty_df
+            instance._profiles = sorted(cached_profiles_dict.values(), key=lambda p: p.start)
+
+            return instance
+
+        # Need to fetch data and compute profiles
+        mp_ctx = DataContext(
+            symbol=ctx.symbol,
+            start=start_date.isoformat(),
+            end=ctx.end,
+            interval="30m",
+            instrument_id=ctx.instrument_id,
+        )
+
+        logger.info(
+            "Fetching Market Profile data with cache | symbol=%s days_back=%d cached_days=%d",
+            ctx.symbol,
+            days_back,
+            len(cached_profiles_dict),
+        )
+
+        df = provider.get_ohlcv(mp_ctx)
+        if df is None or df.empty:
+            raise ValueError(
+                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {ctx.end}"
+            )
+
+        # Create instance normally
+        instance = cls(
+            df=df,
+            bin_size=bin_size,
+            use_merged_value_areas=use_merged_value_areas,
+            merge_threshold=merge_threshold,
+            min_merge_sessions=min_merge_sessions,
+            extend_value_area_to_chart_end=extend_value_area_to_chart_end,
+            days_back=days_back,
+            symbol=ctx.symbol,
+            bot_id=kwargs.get("bot_id"),
+            strategy_id=kwargs.get("strategy_id"),
+        )
+
+        # Cache the newly computed profiles by date
+        for profile in instance._profiles:
+            date_key = profile.start.strftime("%Y-%m-%d")
+            cache.set(inst_id, ctx.symbol, date_key, profile)
+
+        logger.info(
+            "Cached %d daily profiles | inst_id=%s symbol=%s",
+            len(instance._profiles),
+            inst_id,
+            ctx.symbol,
+        )
+
+        return instance
 
     def get_profiles(self) -> List[Profile]:
         """
@@ -200,7 +373,14 @@ class MarketProfileIndicator(ComputeIndicator):
         Returns:
             List of merged Profile objects
         """
-        return merge_profiles(self._profiles, threshold, min_sessions)
+        return merge_profiles(
+            self._profiles,
+            threshold,
+            min_sessions,
+            bot_id=self.bot_id,
+            symbol=self.symbol,
+            strategy_id=self.strategy_id,
+        )
 
     def clone_for_overlay(self, **override_params) -> "MarketProfileIndicator":
         """
@@ -240,6 +420,11 @@ class MarketProfileIndicator(ComputeIndicator):
             "extend_value_area_to_chart_end", self.extend_value_area_to_chart_end
         )
         clone.days_back = self.days_back
+
+        # Copy context attributes
+        clone.symbol = self.symbol
+        clone.bot_id = self.bot_id
+        clone.strategy_id = self.strategy_id
 
         # Reuse computed profiles (no recomputation!)
         clone._profiles = self._profiles
@@ -281,6 +466,7 @@ class MarketProfileIndicator(ComputeIndicator):
             if self.use_merged_value_areas
             else self._profiles
         )
+        raw_profiles = self._profiles
 
         logger.info(
             "Market Profile to_lightweight: total_profiles=%d | use_merged=%s | plot_df_rows=%d | plot_df_range=%s to %s",
@@ -292,6 +478,7 @@ class MarketProfileIndicator(ComputeIndicator):
         )
 
         boxes: List[Dict[str, Any]] = []
+        profiles_payload: List[Dict[str, Any]] = []
 
         # Get chart boundaries for visual clamping
         chart_start = pd.Timestamp(plot_df.index.min()).tz_localize(None) if plot_df.index.min().tz is None else pd.Timestamp(plot_df.index.min())
@@ -338,6 +525,19 @@ class MarketProfileIndicator(ComputeIndicator):
                     profile.vah,
                 )
 
+        for profile in raw_profiles:
+            profiles_payload.append(
+                {
+                    "start": int(pd.Timestamp(profile.start).timestamp()),
+                    "end": int(pd.Timestamp(profile.end).timestamp()),
+                    "VAH": float(profile.vah),
+                    "VAL": float(profile.val),
+                    "POC": float(profile.poc),
+                    "session_count": int(getattr(profile, "session_count", 1) or 1),
+                    "precision": int(getattr(profile, "precision", 4) or 4),
+                }
+            )
+
         logger.info(
             "Market Profile overlays: %d boxes rendered | chart_range=%s to %s",
             len(boxes),
@@ -350,6 +550,16 @@ class MarketProfileIndicator(ComputeIndicator):
             "price_lines": [],
             "markers": [],
             "boxes": boxes,
+            "profiles": profiles_payload,
+            "profile_params": {
+                "use_merged_value_areas": bool(self.use_merged_value_areas),
+                "merge_threshold": float(self.merge_threshold),
+                "min_merge_sessions": int(self.min_merge_sessions),
+                "extend_value_area_to_chart_end": bool(self.extend_value_area_to_chart_end),
+            },
+            "bot_id": self.bot_id,
+            "symbol": self.symbol,
+            "strategy_id": self.strategy_id,
         }
 
     def _compute_daily_profiles(self) -> List[Profile]:

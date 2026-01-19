@@ -10,6 +10,8 @@
 - Market Profile must NEVER appear in front of price
 - Logs must tell the story of the userflow
 - Duplicate logic = refactor signal
+- Avoid indicator-specific logic in engine/runtime; use registries or adapters.
+- AVOID ADDING FALLBACKS / DEFAULTS
 
 
 This repository uses a distributed agent-context model.
@@ -24,6 +26,10 @@ Agents MUST read the documents listed below before making architectural or behav
 If you violate these constraints you will create incorrect simulations, data-snooping bias, or broken UX guarantees.
 
 ---
+
+## Fallbacks
+
+Ideally we want no fallbacks. but if you're unsure prompt the user
 
 ## Logging Standards (Readability + Traceability > Volume)
 
@@ -75,6 +81,17 @@ Log at INFO for:
   - trade close (reason, realized pnl, fees)
 - Walk-forward:
   - step progress sampling (not every bar unless debugging): include `bar_time`, step index, state
+
+### Auth/Error Logging (Provider-Agnostic)
+- For provider request failures (4xx/5xx), include: `method`, `path`, `authenticated`, `status_code`, `request_id` (if present), and `content_type`.
+- For auth failures (401/403), include a non-sensitive credential identifier (e.g., API key suffix) and `www_authenticate` header when available.
+- Never log full tokens, secrets, or raw API keys.
+
+### Provider Framework Contract (No Core Edits)
+- Providers MUST be pluggable: adding a provider should not require edits in core service modules (e.g., instrument_service).
+- Use registration/registry patterns for provider discovery; avoid switch statements in core.
+- Keep provider-specific logic inside provider modules or adapters; core services should consume common interfaces only.
+- Prefer small, shared helpers in provider base/registry for repeated behaviors (logging, request context) instead of copying logic.
 
 ### Anti-Patterns (do not do these)
 - Logging without IDs (untraceable)

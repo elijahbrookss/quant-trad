@@ -1,0 +1,22 @@
+#!/bin/bash
+# Git hook to automatically backup Grafana dashboards before committing
+# Install: ln -sf ../../scripts/git-hooks/pre-commit-grafana .git/hooks/pre-commit-grafana
+
+# Check if Grafana is running
+if ! curl -s -u admin:admin http://localhost:3000/api/health >/dev/null 2>&1; then
+  # Grafana not running, skip backup
+  exit 0
+fi
+
+echo "🔄 Auto-backing up Grafana dashboards..."
+
+# Run backup script
+if bash scripts/backup-grafana-dashboards.sh 2>/dev/null; then
+  # Check if any dashboard files changed
+  if git status --porcelain docker/grafana/provisioning/dashboards/*.json 2>/dev/null | grep -q '^'; then
+    echo "📊 Dashboard changes detected - staging updated files"
+    git add docker/grafana/provisioning/dashboards/*.json 2>/dev/null || true
+  fi
+fi
+
+exit 0

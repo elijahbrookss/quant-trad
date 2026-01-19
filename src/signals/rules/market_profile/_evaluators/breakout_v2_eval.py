@@ -62,7 +62,8 @@ def _make_breakout_meta(
     level_price = vah if boundary == "VAH" else val
     breakout_id = f"{va_id}:{boundary}:{break_idx}"
     meta = {
-        "type": "breakout_v2",
+        # Normalize outward-facing signal type to breakout for strategy compatibility.
+        "type": "breakout",
         "rule_id": "market_profile_breakout_v2",
         "pattern_id": "breakout_v2",
         "source": "MarketProfile",
@@ -91,6 +92,7 @@ def _make_breakout_meta(
         "VAL": val,
         "breakout_id": breakout_id,
         "formed_at": formed_at.to_pydatetime() if hasattr(formed_at, "to_pydatetime") else formed_at,
+        "known_at": formed_at.to_pydatetime() if hasattr(formed_at, "to_pydatetime") else formed_at,
         "session_count": session_count,
         "va_start": va_start,
         "va_end": va_end,

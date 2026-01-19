@@ -30,32 +30,62 @@ def resolve_market_profile_params(
     merge_threshold: Any = None,
     min_merge_sessions: Any = None,
 ) -> MarketProfileParams:
-    """Resolve merge parameters from indicator + optional overrides."""
+    """Resolve merge parameters from indicator + optional overrides.
 
-    resolved_use_merged = (
-        getattr(indicator, "use_merged_value_areas", True)
-        if use_merged_value_areas is None
-        else bool(use_merged_value_areas)
-    )
+    IMPORTANT: No silent defaults. All params must be present on indicator instance.
+    If params are missing, this will raise ValueError (fail-fast).
+    """
 
-    resolved_threshold = getattr(indicator, "merge_threshold", 0.6)
+    # Resolve use_merged_value_areas
+    if use_merged_value_areas is not None:
+        resolved_use_merged = bool(use_merged_value_areas)
+    else:
+        # Read from indicator - FAIL if missing
+        if not hasattr(indicator, "use_merged_value_areas"):
+            raise ValueError(
+                "Market Profile indicator missing 'use_merged_value_areas' attribute. "
+                "This should have been populated during creation. "
+                "Indicator may need to be recreated."
+            )
+        resolved_use_merged = indicator.use_merged_value_areas
+
+    # Resolve merge_threshold
     if merge_threshold is not None:
         try:
             resolved_threshold = float(merge_threshold)
         except (TypeError, ValueError):
-            resolved_threshold = getattr(indicator, "merge_threshold", 0.6)
+            if not hasattr(indicator, "merge_threshold"):
+                raise ValueError(
+                    "Market Profile indicator missing 'merge_threshold' attribute. "
+                    "Indicator may need to be recreated."
+                )
+            resolved_threshold = indicator.merge_threshold
+    else:
+        if not hasattr(indicator, "merge_threshold"):
+            raise ValueError(
+                "Market Profile indicator missing 'merge_threshold' attribute. "
+                "Indicator may need to be recreated."
+            )
+        resolved_threshold = indicator.merge_threshold
 
-    default_min_sessions = getattr(
-        indicator,
-        "min_merge_sessions",
-        getattr(MarketProfileIndicator, "DEFAULT_MIN_MERGE_SESSIONS", 3),
-    )
-    resolved_min_sessions = default_min_sessions
+    # Resolve min_merge_sessions
     if min_merge_sessions is not None:
         try:
             resolved_min_sessions = int(min_merge_sessions)
         except (TypeError, ValueError):
-            resolved_min_sessions = default_min_sessions
+            if not hasattr(indicator, "min_merge_sessions"):
+                raise ValueError(
+                    "Market Profile indicator missing 'min_merge_sessions' attribute. "
+                    "Indicator may need to be recreated."
+                )
+            resolved_min_sessions = indicator.min_merge_sessions
+    else:
+        if not hasattr(indicator, "min_merge_sessions"):
+            raise ValueError(
+                "Market Profile indicator missing 'min_merge_sessions' attribute. "
+                "Indicator may need to be recreated."
+            )
+        resolved_min_sessions = indicator.min_merge_sessions
 
     return MarketProfileParams(
         use_merged_value_areas=resolved_use_merged,

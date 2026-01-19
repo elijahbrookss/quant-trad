@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from portal.backend.service.bot_runtime.domain import (
+from engines.bot_runtime.core.domain import (
     Candle,
     LadderPosition,
     Leg,

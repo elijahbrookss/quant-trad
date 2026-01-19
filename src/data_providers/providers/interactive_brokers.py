@@ -95,6 +95,12 @@ class InteractiveBrokersProvider(BaseDataProvider):
         sec_hint, parsed_exchange = self._parse_exchange(exchange)
         self._default_sec_type = sec_hint or default_sec
         self._default_exchange = parsed_exchange or default_exchange
+        if "IB_DEFAULT_CURRENCY" not in os.environ:
+            logger.warning("ibkr_default_currency_fallback | currency=%s", self._default_currency)
+        if "IB_DEFAULT_SEC_TYPE" not in os.environ and not sec_hint:
+            logger.warning("ibkr_default_sec_type_fallback | sec_type=%s", self._default_sec_type)
+        if "IB_DEFAULT_EXCHANGE" not in os.environ and not parsed_exchange:
+            logger.warning("ibkr_default_exchange_fallback | exchange=%s", self._default_exchange)
 
         self._ib = IB()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -153,7 +159,24 @@ class InteractiveBrokersProvider(BaseDataProvider):
         if min_tick is None:
             min_tick = 0.01
 
-        return self._normalize_metadata(tick_size=min_tick, contract_size=multiplier)
+        currency = getattr(contract, "currency", None)
+        if not currency:
+            raise ValueError(f"Interactive Brokers metadata missing currency for '{symbol}'")
+
+        can_short = None
+        if instrument_type == InstrumentType.FUTURE:
+            can_short = True
+
+        return self._normalize_metadata(
+            tick_size=min_tick,
+            contract_size=multiplier,
+            can_short=can_short,
+            short_requires_borrow=bool(can_short) if instrument_type == InstrumentType.SPOT else False,
+            has_funding=False,
+            expiry_ts=None,
+            base_currency=symbol,
+            quote_currency=currency,
+        )
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         """Raise if IBKR cannot resolve contract details for the symbol."""
@@ -537,4 +560,3 @@ class InteractiveBrokersProvider(BaseDataProvider):
             getattr(qualified, "lastTradeDateOrContractMonth", None),
         )
         return qualified
-

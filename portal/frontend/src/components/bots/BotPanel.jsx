@@ -10,8 +10,11 @@ import {
   resumeBot as resumeBotApi,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
+import { createLogger } from '../../utils/logger.js'
 import { BotPerformanceModal } from './BotPerformanceModal.jsx'
-import { BotCreateModal, buildDefaultForm } from './BotCreateForm.jsx'
+import { BotCreateModal } from './create/BotCreateModal.jsx'
+import { buildDefaultForm } from './create/botCreateFormDefaults.js'
+import { useBotCreateForm } from './create/useBotCreateForm.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 
@@ -20,7 +23,18 @@ const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').t
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
-  const [form, setForm] = useState(buildDefaultForm())
+  const {
+    form,
+    walletConfig,
+    walletError,
+    handleChange,
+    handleBacktestRangeChange,
+    handleStrategyToggle,
+    handleWalletBalanceChange,
+    handleWalletBalanceAdd,
+    handleWalletBalanceRemove,
+    resetForm,
+  } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
   const [lensBot, setLensBot] = useState(null)
@@ -31,13 +45,10 @@ export function BotPanel() {
   const [pendingDelete, setPendingDelete] = useState(null)
   const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
+  const [nowEpochMs, setNowEpochMs] = useState(() => Date.now())
+  const logger = useMemo(() => createLogger('BotPanel'), [])
   const runtimeQueueRef = useRef(new Map())
   const runtimeFrame = useRef(null)
-  const formatPlaybackValue = useCallback((value) => {
-    const numeric = Number(value)
-    if (!Number.isFinite(numeric)) return '—'
-    return numeric <= 0 ? 'Instant' : `${numeric.toFixed(2)}x`
-  }, [])
   const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
     if (next === prev) return true
     const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
@@ -48,20 +59,26 @@ export function BotPanel() {
   }, [])
 
   const mergeBots = useCallback(
-    (incoming) => {
+    (incoming, options = {}) => {
+      const { replace = false } = options || {}
       if (!Array.isArray(incoming)) return
       setBots((prev) => {
         const prevMap = new Map(prev.map((bot) => [bot.id, bot]))
+        const next = replace ? [] : [...prev]
+        const nextMap = new Map(next.map((bot) => [bot.id, bot]))
         let changed = false
-        const next = incoming.map((bot) => {
-          if (!bot?.id) return bot
-          const current = prevMap.get(bot.id)
+
+        for (const bot of incoming) {
+          if (!bot?.id) continue
+          const current = nextMap.get(bot.id) || prevMap.get(bot.id)
           if (!current) {
+            next.push(bot)
+            nextMap.set(bot.id, bot)
             changed = true
-            return bot
+            continue
           }
           const runtimeSame = shallowEqualRuntime(bot.runtime, current.runtime)
-          const payload = {
+          const merged = {
             ...current,
             ...bot,
             runtime: runtimeSame
@@ -72,12 +89,18 @@ export function BotPanel() {
             (key) => key !== 'runtime' && bot[key] !== current[key],
           )
           if (!nonRuntimeChanged && runtimeSame) {
-            return current
+            continue
           }
+          const index = next.findIndex((item) => item.id === merged.id)
+          if (index !== -1) {
+            next[index] = merged
+          } else {
+            next.push(merged)
+          }
+          nextMap.set(merged.id, merged)
           changed = true
-          return payload
-        })
-        return changed ? next : prev
+        }
+        return changed || replace ? next : prev
       })
     },
     [shallowEqualRuntime],
@@ -88,8 +111,13 @@ export function BotPanel() {
       if (!payload?.id) return
       mergeBots([payload])
     },
-    [mergeBots],
+    [logger, mergeBots],
   )
+
+  const removeBot = useCallback((botId) => {
+    if (!botId) return
+    setBots((prev) => prev.filter((bot) => bot.id !== botId))
+  }, [])
 
   const flushRuntimeQueue = useCallback(() => {
     setBots((prev) => {
@@ -125,10 +153,13 @@ export function BotPanel() {
     async (withSpinner = true) => {
       if (withSpinner) setLoading(true)
       setError(null)
+      logger.info('bots_load_start', { with_spinner: withSpinner })
       try {
         const data = await listBots()
-        mergeBots(data)
+        logger.info('bots_load_success', { count: Array.isArray(data) ? data.length : 0 })
+        mergeBots(data, { replace: true })
       } catch (err) {
+        logger.error('bots_load_failed', { message: err?.message }, err)
         setError(err?.message || 'Unable to load bots')
       } finally {
         if (withSpinner) setLoading(false)
@@ -140,70 +171,57 @@ export function BotPanel() {
   const loadStrategies = useCallback(async () => {
     setStrategiesLoading(true)
     setStrategyError(null)
+    logger.info('strategies_load_start')
     try {
       const data = await fetchStrategies()
       setStrategies(data)
+      logger.info('strategies_load_success', { count: Array.isArray(data) ? data.length : 0 })
     } catch (err) {
+      logger.error('strategies_load_failed', { message: err?.message }, err)
       setStrategyError(err?.message || 'Unable to load strategies')
     } finally {
       setStrategiesLoading(false)
     }
-  }, [])
+  }, [logger])
 
   useEffect(() => {
-    loadBots()
     loadStrategies()
-    console.info('[BotPanel] mounted, loading bots and strategies')
-  }, [loadBots, loadStrategies])
+    logger.info('bot_panel_mounted')
+  }, [loadStrategies, logger])
+
+  useEffect(() => {
+    logger.info('bot_create_modal_state', { open: createOpen })
+  }, [createOpen, logger])
+
+  useEffect(() => {
+    if (createOpen) {
+      logger.debug('bot_panel_tick_paused', { reason: 'create_modal_open' })
+      return undefined
+    }
+    logger.debug('bot_panel_tick_started')
+    const timer = setInterval(() => setNowEpochMs(Date.now()), 1000)
+    return () => {
+      clearInterval(timer)
+      logger.debug('bot_panel_tick_stopped')
+    }
+  }, [createOpen, logger])
 
   useEffect(() => () => {
     if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
   }, [])
 
-  const botStreamState = useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots })
-
-  const handleChange = (event) => {
-    const { name, value } = event.target
-    setForm((prev) => {
-      const next = { ...prev, [name]: value }
-      if (name === 'run_type' && value !== 'backtest') {
-        next.backtest_start = ''
-        next.backtest_end = ''
-      }
-      return next
-    })
-  }
+  const { state: botStreamState, reconnect: reconnectBotStream } = useBotStream({
+    mergeBots,
+    upsertBot,
+    removeBot,
+    applyRuntime,
+    loadBots,
+  })
 
   const closeCreateModal = useCallback(() => {
     setCreateOpen(false)
     setCreateError(null)
   }, [])
-
-  const handleBacktestRangeChange = useCallback((range) => {
-    const [start, end] = Array.isArray(range) ? range : []
-    const normalize = (value) => {
-      if (!(value instanceof Date)) return ''
-      const time = value.getTime()
-      return Number.isNaN(time) ? '' : new Date(time).toISOString()
-    }
-    let norm_start = normalize(start)
-    let norm_end = normalize(end)
-    
-    setForm((prev) => ({
-      ...prev,
-      backtest_start: norm_start,
-      backtest_end: norm_end,
-    }))
-  }, [])
-
-  const handleStrategyToggle = (strategyId) => {
-    setForm((prev) => {
-      const next = prev.strategy_ids.includes(strategyId)
-        ? prev.strategy_ids.filter((id) => id !== strategyId)
-        : [...prev.strategy_ids, strategyId]
-      return { ...prev, strategy_ids: next }
-    })
-  }
 
   const handleCreate = async (event) => {
     event.preventDefault()
@@ -218,24 +236,37 @@ export function BotPanel() {
       setCreateError('Provide both a start and end date for backtests.')
       return
     }
+    if (walletError || !walletConfig) {
+      setCreateError(walletError || 'Wallet config is required.')
+      return
+    }
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
+    const normalizedMode = form.run_type === 'backtest' ? form.mode : 'walk-forward'
+    logger.info('bot_create_request', {
+      run_type: form.run_type,
+      mode: normalizedMode,
+      strategy_count: form.strategy_ids.length,
+      strategy_ids: form.strategy_ids,
+      backtest_start: startISO,
+      backtest_end: endISO,
+    })
     try {
+      const { wallet_balances, ...rest } = form
       const payloadBody = {
-        ...form,
+        ...rest,
+        mode: normalizedMode,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
+        wallet_config: walletConfig,
       }
       const payload = await createBot(payloadBody)
-      console.info('[BotPanel] bot created', { id: payload?.id })
+      logger.info('bot_create_success', { bot_id: payload?.id })
       upsertBot(payload)
-      setForm((prev) => ({
-        ...buildDefaultForm(),
-        strategy_ids: prev.strategy_ids,
-        run_type: prev.run_type,
-      }))
+      resetForm({ strategy_ids: form.strategy_ids, run_type: form.run_type })
       closeCreateModal()
     } catch (err) {
+      logger.error('bot_create_failed', { message: err?.message }, err)
       setCreateError(err?.message || 'Unable to create bot')
     }
   }
@@ -247,7 +278,7 @@ export function BotPanel() {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
-    console.info('[BotPanel] start requested', { botId })
+    logger.info('bot_start_requested', { bot_id: botId })
     setPendingStart(botId)
     setBots((prev) =>
       prev.map((bot) =>
@@ -264,6 +295,7 @@ export function BotPanel() {
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_start_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to start bot')
     } finally {
       setPendingStart(null)
@@ -272,36 +304,39 @@ export function BotPanel() {
 
   const handleStop = async (botId) => {
     setError(null)
-    console.info('[BotPanel] stop requested', { botId })
+    logger.info('bot_stop_requested', { bot_id: botId })
     try {
       const payload = await stopBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_stop_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to stop bot')
     }
   }
 
   const handlePause = async (botId) => {
     setError(null)
-    console.info('[BotPanel] pause requested', { botId })
+    logger.info('bot_pause_requested', { bot_id: botId })
     try {
       const payload = await pauseBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_pause_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to pause bot')
     }
   }
 
   const handleResume = async (botId) => {
     setError(null)
-    console.info('[BotPanel] resume requested', { botId })
+    logger.info('bot_resume_requested', { bot_id: botId })
     try {
       const payload = await resumeBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_resume_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to resume bot')
     }
   }
@@ -310,12 +345,13 @@ export function BotPanel() {
     if (!botId) return
     if (!window.confirm('Delete this bot? This cannot be undone.')) return
     setError(null)
-    console.info('[BotPanel] delete requested', { botId })
+    logger.info('bot_delete_requested', { bot_id: botId })
     setPendingDelete(botId)
     try {
       await deleteBotApi(botId)
       setBots((prev) => prev.filter((bot) => bot.id !== botId))
     } catch (err) {
+      logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to delete bot')
     } finally {
       setPendingDelete(null)
@@ -323,17 +359,19 @@ export function BotPanel() {
   }
 
   const statusBadge = useCallback((status) => {
-    const tone = status === 'running'
-      ? 'bg-emerald-500/10 text-emerald-200 border-emerald-400/30'
-      : status === 'paused'
-        ? 'bg-amber-500/10 text-amber-200 border-amber-400/30'
-        : status === 'stopped'
-          ? 'bg-rose-500/10 text-rose-200 border-rose-400/30'
-          : status === 'completed'
-            ? 'bg-sky-500/10 text-sky-200 border-sky-400/30'
-            : 'bg-slate-600/20 text-slate-200 border-white/10'
+    const config = {
+      running: { color: 'bg-emerald-500/10 text-emerald-300 border-emerald-800/50', dot: 'bg-emerald-400' },
+      paused: { color: 'bg-amber-500/10 text-amber-300 border-amber-800/50', dot: 'bg-amber-400' },
+      stopped: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
+      crashed: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
+      completed: { color: 'bg-sky-500/10 text-sky-300 border-sky-800/50', dot: 'bg-sky-400' },
+      starting: { color: 'bg-slate-700/30 text-slate-400 border-slate-700/50', dot: 'bg-slate-500' },
+      idle: { color: 'bg-slate-800/40 text-slate-500 border-slate-800', dot: 'bg-slate-600' },
+    }
+    const { color, dot } = config[status] || config.idle
     return (
-      <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.25em] ${tone}`}>
+      <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[10px] font-medium uppercase tracking-wider ${color}`}>
+        <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
         {status || 'idle'}
       </span>
     )
@@ -412,68 +450,91 @@ export function BotPanel() {
   )
 
   return (
-    <section className="space-y-6">
-      <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
-            <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
-            <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="text-xs text-slate-400">
-              {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
+    <section className="space-y-5">
+      <header className="space-y-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-1.5">
+            <div className="flex items-baseline gap-3">
+              <h3 className="text-2xl font-medium tracking-tight text-slate-50">Bots</h3>
+              <span className="text-xs font-medium tabular-nums text-slate-500">
+                {strategiesLoading ? 'Loading…' : `${strategies.length} ${strategies.length === 1 ? 'strategy' : 'strategies'}`}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                console.info('[BotPanel] open create bot modal')
-                setCreateError(null)
-                setCreateOpen(true)
-              }}
-              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-            >
-              <PlusCircle className="size-4" /> Create bot
-            </button>
+            <p className="text-sm leading-relaxed text-slate-400">
+              Monitor and control walk-forward backtests across all configured strategies
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              logger.info('bot_create_modal_open')
+              setCreateError(null)
+              setCreateOpen(true)
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
+          >
+            <PlusCircle className="size-4" /> New Bot
+          </button>
         </div>
-        <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-1 flex-wrap items-center gap-3">
-            <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
-              <Search className="size-4 text-slate-500" />
+
+        <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3 backdrop-blur-sm lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 flex-wrap items-center gap-2.5">
+            <label className="flex min-w-[240px] flex-1 items-center gap-2.5 rounded-md border border-slate-800 bg-slate-950/80 px-3 py-2 text-slate-200 focus-within:border-slate-700 focus-within:bg-slate-950">
+              <Search className="size-3.5 shrink-0 text-slate-600" />
               <input
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search bots by name, status, or strategy"
-                className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+                placeholder="Filter by name, strategy, or status…"
+                className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
               />
             </label>
             <button
               type="button"
-              onClick={() => loadBots()}
-              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
+              onClick={() => {
+                if (botStreamState === 'open') {
+                  logger.info('bot_stream_refresh_requested')
+                  reconnectBotStream()
+                  return
+                }
+                loadBots()
+              }}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/80 px-3.5 py-2 text-sm font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={loading}
             >
-              <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+              <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Refresh</span>
             </button>
           </div>
-          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{`${filteredBots.length} of ${sortedBots.length} bots`}</span>
+          <div className="flex items-center gap-2 text-xs tabular-nums">
+            <span className="font-medium text-slate-400">{filteredBots.length}</span>
+            <span className="text-slate-600">of</span>
+            <span className="font-medium text-slate-500">{sortedBots.length}</span>
+          </div>
         </div>
       </header>
 
-        {error ? (
-          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-        ) : null}
+      {error ? (
+        <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 px-4 py-3 text-sm text-rose-300">
+          {error}
+        </div>
+      ) : null}
 
-        <div className="space-y-3">
-          {loading && sortedBots.length === 0 ? (
-            <p className="text-sm text-slate-400">Loading bots…</p>
-          ) : filteredBots.length === 0 ? (
+      <div className="space-y-2.5">
+        {loading && sortedBots.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
+            <p className="text-sm text-slate-500">Loading bots…</p>
+          </div>
+        ) : filteredBots.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
             <p className="text-sm text-slate-400">
-              {search.trim() ? 'No bots match your search.' : 'No bots yet. Create one to begin a backtest.'}
+              {search.trim() ? 'No bots match your filter.' : 'No bots configured.'}
             </p>
-          ) : (
+            {!search.trim() ? (
+              <p className="mt-1 text-xs text-slate-600">Create your first bot to begin backtesting.</p>
+            ) : null}
+          </div>
+        ) : (
             filteredBots.map((bot) => (
               <BotCard
                 key={bot.id}
@@ -481,6 +542,7 @@ export function BotPanel() {
                 strategyLookup={strategyLookup}
                 describeRange={describeRange}
                 statusBadge={statusBadge}
+                nowEpochMs={nowEpochMs}
                 onStart={handleStart}
                 onStop={handleStop}
                 onPause={handlePause}
@@ -502,10 +564,14 @@ export function BotPanel() {
           strategies={sortedStrategies}
           strategiesLoading={strategiesLoading}
           strategyError={strategyError}
+          walletError={walletError}
           onSubmit={handleCreate}
           onChange={handleChange}
           onBacktestRangeChange={handleBacktestRangeChange}
           onStrategyToggle={handleStrategyToggle}
+          onWalletBalanceChange={handleWalletBalanceChange}
+          onWalletBalanceAdd={handleWalletBalanceAdd}
+          onWalletBalanceRemove={handleWalletBalanceRemove}
           error={createError}
         />
       </section>

@@ -90,6 +90,28 @@ const normalizeParams = (params) => {
   return p;
 };
 
+const stripRuntimeParams = (params) => {
+  const cleaned = { ...params };
+  const runtimeKeys = [
+    'symbol',
+    'interval',
+    'timeframe',
+    'start',
+    'end',
+    'datasource',
+    'exchange',
+    'provider_id',
+    'venue_id',
+    'instrument_id',
+  ];
+  for (const key of runtimeKeys) {
+    if (Object.prototype.hasOwnProperty.call(cleaned, key)) {
+      delete cleaned[key];
+    }
+  }
+  return cleaned;
+};
+
 const parseTimestamp = (value) => {
   if (!value) return 0;
   const ts = Date.parse(value);
@@ -190,10 +212,16 @@ export const IndicatorSection = ({ chartId }) => {
       setIsLoading(false);
       return;
     }
-    if (!chartState.symbol || !chartState.interval) {
-      warn('indicator_refresh_skipped_inputs', {
+
+    // Wait for all required context fields before triggering overlay refresh
+    // This prevents race conditions where _version bumps before datasource is set
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval) {
+      warn('indicator_refresh_skipped_context', {
+        datasource: chartState.datasource,
+        exchange: chartState.exchange,
         symbol: chartState.symbol,
         interval: chartState.interval,
+        reason: !chartState.datasource ? 'no_datasource' : !chartState.symbol ? 'no_symbol' : 'no_interval',
       });
       setIsLoading(false);
       return;
@@ -219,7 +247,7 @@ export const IndicatorSection = ({ chartId }) => {
     })();
 
     return () => { isMounted = false; };
-  }, [chartId, chartState?._version]);
+  }, [chartId, chartState?._version, chartState?.datasource, chartState?.exchange]);
 
   // When indicator colors change, recolor overlays in chart context (post-render).
   useEffect(() => {
@@ -238,6 +266,29 @@ export const IndicatorSection = ({ chartId }) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
     if (!chartState) {
+      updateChart(chartId, { overlays: [], overlayLoading: false });
+      return;
+    }
+
+    // Wait for datasource and all required fields before loading overlays
+    // This prevents race conditions where _version bumps before datasource is set
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval || !chartState.instrument_id) {
+      warn('overlay_refresh_waiting_for_context', {
+        chartId,
+        hasChartState: Boolean(chartState),
+        datasource: chartState.datasource,
+        exchange: chartState.exchange,
+        symbol: chartState.symbol,
+        interval: chartState.interval,
+        instrument_id: chartState.instrument_id,
+        reason: !chartState.datasource
+          ? 'no_datasource'
+          : !chartState.symbol
+            ? 'no_symbol'
+            : !chartState.interval
+              ? 'no_interval'
+              : 'no_instrument_id',
+      });
       updateChart(chartId, { overlays: [], overlayLoading: false });
       return;
     }
@@ -265,53 +316,7 @@ export const IndicatorSection = ({ chartId }) => {
       symbol: chartState.symbol,
       interval: chartState.interval,
     });
-    const patched = await Promise.all(enabled.map(async (ind) => {
-      const p = ind?.params || {};
-      const desiredSymbol = chartState.symbol;
-      const desiredInterval = chartState.interval;
-      const needPatch = p.symbol !== desiredSymbol || p.interval !== desiredInterval;
-
-      if (!needPatch) return ind;
-
-      try {
-        const nextParams = {
-          ...p,
-          symbol: desiredSymbol,
-          interval: desiredInterval,
-          start: startISO,
-          end: endISO,
-          datasource: chartState?.datasource,
-          exchange: chartState?.exchange,
-        };
-        const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
-        return updated || { ...ind, params: nextParams };
-      } catch (e) {
-        warn('indicator_param_patch_failed', { indicatorId: ind.id, message: e?.message }, e);
-        // fall back locally so overlays still align this session
-        return {
-          ...ind,
-          params: {
-            ...p,
-            symbol: desiredSymbol,
-            interval: desiredInterval,
-            start: startISO,
-            end: endISO,
-            datasource: chartState?.datasource,
-            exchange: chartState?.exchange,
-          },
-        };
-      }
-    }));
-
-    // merge patched back into full list and persist
-    const byId = new Map(patched.map(p => [p.id, p]));
-    const merged = working.map(ind => byId.get(ind.id) || ind);
-    if (merged !== working) {
-      const sortedMerged = sortIndicators(merged);
-      working = sortedMerged;
-      setIndicators(sortedMerged);
-      updateChart(chartId, { indicators: sortedMerged });
-    }
+    const active = enabled;
 
     // compute overlays for enabled indicators using current chart window
     const body = {
@@ -321,15 +326,17 @@ export const IndicatorSection = ({ chartId }) => {
       symbol: chartState.symbol,
       datasource: chartState?.datasource,
       exchange: chartState?.exchange,
+      instrument_id: chartState?.instrument_id,
     };
 
     const results = await Promise.all(
-      patched.map(async (ind) => {
+      active.map(async (ind) => {
         try {
           const payload = await fetchIndicatorOverlays(ind.id, body);
           info('overlay_fetch_success', {
             indicatorId: ind.id,
             indicatorType: ind.type,
+            instrument_id: chartState?.instrument_id,
             hasPayload: Boolean(payload),
           });
           return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
@@ -347,21 +354,21 @@ export const IndicatorSection = ({ chartId }) => {
             }
             return null;
           }
-          logError('overlay_fetch_failed', { indicatorId: ind.id }, e);
+          logError('overlay_fetch_failed', { indicatorId: ind.id, instrument_id: chartState?.instrument_id }, e);
           return null;
         }
       })
     );
 
     const overlaysPayload = results.filter(Boolean);
-    const nextColorMap = buildColorMap(merged);
+    const nextColorMap = buildColorMap(working);
     setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
 
     const colored = applyIndicatorColors(overlaysPayload, nextColorMap);
     updateChart(chartId, { overlays: colored, overlayLoading: false });
     info('overlay_refresh_complete', {
       overlays: colored.length,
-      indicatorsProcessed: patched.length,
+      indicatorsProcessed: active.length,
       enabledCount: enabled.length,
     });
   };
@@ -381,7 +388,7 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Handlers for modal save/delete
   const handleSave = async (meta) => {
-    const core = normalizeParams(meta.params);
+    const core = stripRuntimeParams(normalizeParams(meta.params));
 
     if ('lookbacks' in core) {
       if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
@@ -390,15 +397,7 @@ export const IndicatorSection = ({ chartId }) => {
       }
     }
 
-    const params = {
-      ...core,
-      start: startISO,
-      end: endISO,
-      symbol: chartState?.symbol,
-      interval: chartState?.interval,
-      datasource: chartState?.datasource,
-      exchange: chartState?.exchange,
-    };
+    const params = { ...core };
 
     setError(null);
     setModalOpen(false);
@@ -413,7 +412,7 @@ export const IndicatorSection = ({ chartId }) => {
         const existing = indicators.find((i) => i.id === meta.id);
         if (existing) {
           // Compare core params (without runtime params like symbol/interval/start/end)
-          const existingCore = existing.params || {};
+          const existingCore = stripRuntimeParams(existing.params || {});
           const coreParamsChanged = JSON.stringify(existingCore) !== JSON.stringify(core);
           const nameChanged = meta.name !== existing.name;
 
@@ -458,8 +457,12 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { signalsConfig: nextSignalsConfig });
       }
 
-      const latest = await fetchAndSyncIndicators({ silent: !needsIndicatorUpdate });
-      await refreshEnabledOverlays(latest);
+      // Only refetch and refresh overlays if indicator params actually changed
+      // Signal rule changes are client-side only (stored in chart state)
+      if (needsIndicatorUpdate) {
+        const latest = await fetchAndSyncIndicators({ silent: false });
+        await refreshEnabledOverlays(latest);
+      }
     } catch (e) {
       setError(e.message);
       logError('indicator_save_failed', e);
@@ -599,13 +602,55 @@ export const IndicatorSection = ({ chartId }) => {
       })
   }
 
-  // Regenerate signals (not yet implemented)
+  // Regenerate signals
   const generateSignals = async (id) => {
+    info('signal_generation_start', {
+      indicatorId: id,
+      chartState: {
+        datasource: chartState?.datasource,
+        exchange: chartState?.exchange,
+        symbol: chartState?.symbol,
+        interval: chartState?.interval,
+      },
+    });
+
+    // Validate chart state has all required fields before generating signals
+    if (!chartState?.datasource || !chartState?.symbol || !chartState?.interval) {
+      const missing = !chartState?.datasource ? 'datasource' : !chartState?.symbol ? 'symbol' : 'interval';
+      const errorMsg = `Cannot generate signals: ${missing} is not set. Please ensure chart is fully loaded.`;
+      setError(errorMsg);
+      warn('signal_generation_blocked', {
+        indicatorId: id,
+        reason: `missing_${missing}`,
+        chartState: {
+          datasource: chartState?.datasource,
+          exchange: chartState?.exchange,
+          symbol: chartState?.symbol,
+          interval: chartState?.interval,
+        },
+      });
+      return;
+    }
+
     const indicator = indicators.find((ind) => ind.id === id);
+
+    // Get fresh chart state right before calling runSignalGeneration
+    // to avoid stale closure issues
+    const freshChartState = getChart(chartId);
+    info('signal_generation_fresh_state', {
+      indicatorId: id,
+      freshChartState: {
+        datasource: freshChartState?.datasource,
+        exchange: freshChartState?.exchange,
+        symbol: freshChartState?.symbol,
+        interval: freshChartState?.interval,
+      },
+    });
+
     await runSignalGeneration({
       indicator,
       chartId,
-      chartState,
+      chartState: freshChartState,
       startISO,
       endISO,
       indColors,
@@ -820,17 +865,17 @@ export const IndicatorSection = ({ chartId }) => {
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {error && (
-        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+        <div className="relative rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
           <div className="pr-6">
-            <p className="font-medium text-red-200">Request failed</p>
-            <p className="mt-1 text-red-100">{error}</p>
+            <p className="font-semibold text-red-200">Error</p>
+            <p className="mt-1 text-red-100/90">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            className="absolute right-3 top-3 text-red-200/70 hover:text-red-100"
             aria-label="Dismiss error"
           >
             <X className="size-4" />
@@ -838,281 +883,214 @@ export const IndicatorSection = ({ chartId }) => {
         </div>
       )}
 
-      {/* List of indicators */}
-      <section className="relative rounded-[28px] border border-white/8 bg-gradient-to-br from-[#080b14]/95 via-[#070a13]/95 to-[#04060c]/95 p-6 shadow-[0_50px_150px_-90px_rgba(0,0,0,0.85)]">
-        <LoadingOverlay show={isLoading} message="Loading indicators…" />
-        <div
-          className={`flex flex-col gap-6 transition ${
-            isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'
-          }`}
-        >
-          <header className="flex flex-col gap-4 border-b border-white/8 pb-5 md:flex-row md:items-start md:justify-between">
-            <div className="space-y-1.5">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-500/80">Indicators</span>
-              <h3 className="text-base font-semibold tracking-tight text-slate-100">Manage overlay configurations</h3>
-              <p className="text-sm text-slate-400">
-                Review saved indicators, toggle availability, and open edits without leaving the console.
-              </p>
+      {/* Indicators section */}
+      <section className="border-b border-slate-800">
+        <div className="flex flex-col gap-4 px-5 py-4">
+          {/* Header with title and actions */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-slate-100">Indicators</h3>
+              <p className="text-xs text-slate-500 mt-1">Manage overlay configurations</p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <button
                 type="button"
                 onClick={handleRefreshList}
                 disabled={refreshingList}
-                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition ${
                   refreshingList
-                    ? 'border-white/10 bg-white/5 text-slate-400 cursor-wait'
-                    : 'border-white/15 bg-white/5 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)]'
+                    ? 'text-slate-500 cursor-wait'
+                    : 'text-slate-300 hover:text-slate-100'
                 }`}
               >
-                <RefreshCw className={`size-4 ${refreshingList ? 'animate-spin' : ''}`} aria-hidden="true" />
+                <RefreshCw className={`size-3.5 ${refreshingList ? 'animate-spin' : ''}`} aria-hidden="true" />
                 Refresh
               </button>
               <button
                 type="button"
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:text-emerald-300 transition"
               >
-                <Plus className="size-4" aria-hidden="true" />
-                Add indicator
+                <Plus className="size-3.5" aria-hidden="true" />
+                Add
               </button>
             </div>
-          </header>
-
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.45fr)]">
-            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Filters</span>
-                <span className="text-[11px] uppercase tracking-[0.26em] text-slate-500/70">
-                  {enabledCount} enabled · {totalCount} total
-                </span>
-              </div>
-              <div className="mt-3 grid w-full gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="flex flex-col gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Visibility</span>
-                  <label className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 text-sm font-medium text-slate-200 shadow-inner shadow-black/20">
-                    <span className="tracking-tight text-slate-200">Show enabled only</span>
-                    <input
-                      type="checkbox"
-                      className="size-4 shrink-0 rounded border border-slate-600/70 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                      checked={showEnabledOnly}
-                      onChange={(event) => setShowEnabledOnly(event.target.checked)}
-                    />
-                  </label>
-                </div>
-
-                <DropdownSelect
-                  label="Type"
-                  value={typeFilter}
-                  onChange={(next) => setTypeFilter(next)}
-                  options={[
-                    { value: 'all', label: 'All types' },
-                    ...typeOptions.map((type) => ({ value: type, label: formatIndicatorType(type) })),
-                  ]}
-                  className="min-w-[12rem]"
-                />
-
-                <div className="flex min-w-[15rem] flex-col gap-2 sm:max-w-none">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Search</span>
-                  <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 shadow-inner shadow-black/18">
-                    <input
-                      type="search"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="Name, ID, type, or param"
-                      className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400/80">Overview</span>
-              <p className="mt-2 text-sm leading-relaxed text-slate-300">{indicatorSummary}</p>
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                <span className="uppercase tracking-[0.24em] text-slate-500">Page size</span>
-                <select
-                  className="rounded-lg border border-white/10 bg-[#0b1324]/60 px-3 py-1.5 text-sm text-slate-100 focus:border-[color:var(--accent-alpha-60)] focus:outline-none"
-                  value={pageSize}
-                  onChange={(event) => {
-                    const next = Number(event.target.value) || DEFAULT_PAGE_SIZE;
-                    setPageSize(next);
-                  }}
-                >
-                  {PAGE_SIZE_OPTIONS.map((size) => (
-                    <option key={size} value={size}>
-                      {size} per page
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
           </div>
 
-          {selectedIds?.size > 0 && (
-            <div className="flex flex-col gap-3 rounded-2xl border border-[color:var(--accent-alpha-20)] bg-[color:var(--accent-alpha-8)]/80 p-4 text-sm text-slate-200 shadow-inner shadow-black/30 md:flex-row md:items-center md:justify-between">
-              <div className="space-y-1">
-                <p className="text-base font-semibold text-slate-100">{selectedIds.size} selected</p>
-                <div className="flex flex-wrap gap-3 text-xs text-slate-400">
-                  <button
-                    type="button"
-                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
-                    onClick={() => {
-                      const pageIds = paginatedIndicators.map((ind) => ind.id);
-                      const pageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
-                      setSelectedIds((prev) => {
-                        const next = new Set(prev);
-                        if (pageSelected) {
-                          pageIds.forEach((id) => next.delete(id));
-                        } else {
-                          pageIds.forEach((id) => next.add(id));
-                        }
-                        return next;
-                      });
-                    }}
-                  >
-                    {paginatedIndicators.length > 0 && paginatedIndicators.every((ind) => selectedIds.has(ind.id)) ? 'Clear page' : 'Select page'}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
-                    onClick={() => setSelectedIds(new Set())}
-                  >
-                    Clear all
-                  </button>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={bulkActionLoading}
-                  onClick={() => handleBulkToggle(true)}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-emerald-500/40 text-emerald-200 hover:border-emerald-400/60 hover:text-emerald-100'
-                  }`}
-                >
-                  Enable
-                </button>
-                <button
-                  type="button"
-                  disabled={bulkActionLoading}
-                  onClick={() => handleBulkToggle(false)}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-amber-400/40 text-amber-200 hover:border-amber-300/60 hover:text-amber-100'
-                  }`}
-                >
-                  Disable
-                </button>
-                <button
-                  type="button"
-                  disabled={bulkActionLoading}
-                  onClick={handleBulkDelete}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-rose-500/50 text-rose-200 hover:border-rose-400/70 hover:text-rose-100'
-                  }`}
-                >
-                  Delete
-                </button>
-              </div>
+          {/* Filters - improved visibility */}
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-3 text-[11px] font-mono">
+              <span className="text-slate-300 font-semibold">{enabledCount}</span>
+              <span className="text-slate-600">enabled</span>
+              <span className="text-slate-700">•</span>
+              <span className="text-slate-300 font-semibold">{totalCount}</span>
+              <span className="text-slate-600">total</span>
             </div>
-          )}
-
-          <div className="space-y-4">
-            {paginatedIndicators.map(indicator => {
-              const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
-              const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
-              const isSelected = selectedIds.has(indicator.id)
-              return (
-                <IndicatorCard
-                  key={indicator.id}
-                  indicator={indicator}
-                  color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
-                  onToggle={toggleEnable}
-                  onEdit={openEditModal}
-                  onDelete={handleDelete}
-                  onDuplicate={handleDuplicate}
-                  onGenerateSignals={generateSignals}
-                  onSelectColor={handleSelectColor}
-                  colorSwatches={COLOR_SWATCHES}
-                  isGeneratingSignals={isGenerating}
-                  disableSignalAction={disableSignals}
-                  selected={isSelected}
-                  onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
-                  duplicatePending={duplicateBusyId === indicator.id}
-                />
-              )
-            })}
-
-            {!isLoading && paginatedIndicators.length === 0 && (
-              <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
-                {noIndicatorsMessage}
-              </div>
+            
+            <label className="flex items-center gap-2 text-[11px] text-slate-300 hover:text-slate-100 transition cursor-pointer">
+              <input
+                type="checkbox"
+                className="size-3.5 accent-emerald-500 cursor-pointer"
+                checked={showEnabledOnly}
+                onChange={(event) => setShowEnabledOnly(event.target.checked)}
+              />
+              <span className="font-medium">enabled only</span>
+            </label>
+            
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="bg-transparent border-b border-slate-700 hover:border-slate-600 focus:border-emerald-500 focus:outline-none text-slate-200 text-[11px] font-medium cursor-pointer px-0 py-1 transition"
+            >
+              <option value="all">all types</option>
+              {typeOptions.map((type) => (
+                <option key={type} value={type}>{formatIndicatorType(type)}</option>
+              ))}
+            </select>
+            
+            {trimmedSearchQuery && (
+              <span className="text-[11px] text-slate-500 font-mono">search: <span className="text-slate-300 font-medium">{trimmedSearchQuery}</span></span>
             )}
           </div>
+        </div>
 
-          {filteredCount > pageSize && (
-            <nav className="flex flex-col gap-2 rounded-lg border border-white/10 bg-[#11131b] px-4 py-3 text-xs text-slate-300 md:flex-row md:items-center md:justify-between" aria-label="Indicator pagination">
-              <span>
-                Page {currentPage} of {totalPages}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
-                  disabled={currentPage === 1}
-                  className={`rounded-full border px-3 py-1 transition ${
-                    currentPage === 1
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
-                  }`}
-                >
-                  Previous
-                </button>
-                <div className="flex items-center gap-1">
-                  {Array.from({ length: totalPages }).map((_, index) => {
-                    const pageNumber = index + 1;
-                    const isActive = pageNumber === currentPage;
-                    return (
-                      <button
-                        key={pageNumber}
-                        type="button"
-                        onClick={() => setCurrentPage(pageNumber)}
-                        className={`size-8 rounded-full border text-xs font-medium transition ${
-                          isActive
-                            ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
-                            : 'border-white/10 text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
-                        }`}
-                        aria-current={isActive ? 'page' : undefined}
-                      >
-                        {pageNumber}
-                      </button>
-                    );
-                  })}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                  disabled={currentPage === totalPages}
-                  className={`rounded-full border px-3 py-1 transition ${
-                    currentPage === totalPages
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
-                  }`}
-                >
-                  Next
-                </button>
-              </div>
-            </nav>
-          )}
+        {/* Search box - more visible */}
+        <div className="border-t border-slate-800 px-5 py-3">
+          <input
+            type="text"
+            placeholder="Search indicators..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-transparent border-0 border-b-2 border-slate-700 hover:border-slate-600 focus:border-emerald-500 focus:outline-none text-sm font-medium text-slate-100 placeholder-slate-500 pb-2 transition"
+          />
         </div>
       </section>
+
+      {/* Indicators list */}
+      <LoadingOverlay show={isLoading} message="Loading indicators…" />
+      <div className={`transition ${isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'}`}>
+        {/* Bulk actions - more visible */}
+        {selectedIds.size > 0 && (
+          <div className="mb-4 flex items-center justify-between border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 rounded">
+            <span className="text-sm font-mono text-emerald-300 font-semibold">{selectedIds.size} selected</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={bulkActionLoading}
+                onClick={handleBulkToggle}
+                className={`px-3 py-1 text-xs font-semibold rounded transition ${
+                  bulkActionLoading
+                    ? 'text-slate-500 cursor-not-allowed'
+                    : 'text-slate-200 hover:text-slate-100 hover:bg-slate-700'
+                }`}
+              >
+                Toggle
+              </button>
+              <button
+                type="button"
+                disabled={bulkActionLoading}
+                onClick={handleBulkDelete}
+                className={`px-3 py-1 text-xs font-semibold rounded transition ${
+                  bulkActionLoading
+                    ? 'text-slate-500 cursor-not-allowed'
+                    : 'text-rose-300 hover:text-rose-200 hover:bg-rose-500/20'
+                }`}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Indicators list */}
+        <div className="space-y-2">
+          {paginatedIndicators.map(indicator => {
+            const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
+            const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+            const isSelected = selectedIds.has(indicator.id)
+            return (
+              <IndicatorCard
+                key={indicator.id}
+                indicator={indicator}
+                color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
+                onToggle={toggleEnable}
+                onEdit={openEditModal}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onGenerateSignals={generateSignals}
+                onSelectColor={handleSelectColor}
+                colorSwatches={COLOR_SWATCHES}
+                isGeneratingSignals={isGenerating}
+                disableSignalAction={disableSignals}
+                selected={isSelected}
+                onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
+                duplicatePending={duplicateBusyId === indicator.id}
+              />
+            )
+          })}
+
+          {!isLoading && paginatedIndicators.length === 0 && (
+            <div className="rounded-lg border border-dashed border-slate-800 bg-slate-900/20 px-4 py-6 text-center text-sm text-slate-500">
+              {noIndicatorsMessage}
+            </div>
+          )}
+        </div>
+
+        {/* Pagination - more visible */}
+        {filteredCount > pageSize && (
+          <nav className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-300 font-mono" aria-label="Pagination">
+            <span className="font-medium">Page <span className="text-emerald-400">{currentPage}</span> of {totalPages}</span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className={`px-3 py-1 text-xs font-semibold rounded transition ${
+                  currentPage === 1
+                    ? 'text-slate-600 cursor-not-allowed'
+                    : 'text-slate-300 hover:text-slate-100 hover:bg-slate-800'
+                }`}
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: Math.min(totalPages, 5) }).map((_, index) => {
+                let pageNumber = index + 1;
+                if (totalPages > 5 && currentPage > 3) {
+                  pageNumber = currentPage - 2 + index;
+                }
+                if (pageNumber > totalPages) return null;
+                const isActive = pageNumber === currentPage;
+                return (
+                  <button
+                    key={pageNumber}
+                    type="button"
+                    onClick={() => setCurrentPage(pageNumber)}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded transition ${
+                      isActive
+                        ? 'text-emerald-400 bg-emerald-500/20 border border-emerald-500/50'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    {pageNumber}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
+                disabled={currentPage === totalPages}
+                className={`px-3 py-1 text-xs font-semibold rounded transition ${
+                  currentPage === totalPages
+                    ? 'text-slate-600 cursor-not-allowed'
+                    : 'text-slate-300 hover:text-slate-100 hover:bg-slate-800'
+                }`}
+              >
+                Next →
+              </button>
+            </div>
+          </nav>
+        )}
+      </div>
 
       <IndicatorModal
         isOpen={modalOpen}

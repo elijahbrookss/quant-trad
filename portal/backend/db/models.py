@@ -269,6 +269,10 @@ class InstrumentRecord(Base):
     contract_size = Column(Float, nullable=True)
     min_order_size = Column(Float, nullable=True)
     quote_currency = Column(String(16), nullable=True)
+    can_short = Column(Boolean, nullable=False, default=False)
+    short_requires_borrow = Column(Boolean, nullable=False, default=False)
+    has_funding = Column(Boolean, nullable=False, default=False)
+    expiry_ts = Column(DateTime(timezone=True), nullable=True)
     maker_fee_rate = Column(Float, nullable=True)
     taker_fee_rate = Column(Float, nullable=True)
     # ``metadata`` is reserved by SQLAlchemy declarative models, so we expose the
@@ -287,20 +291,28 @@ class InstrumentRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Return the instrument payload for API consumers."""
 
+        metadata = dict(self.extra_metadata or {})
+        instrument_fields = metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), dict) else {}
         return {
             "id": self.id,
             "datasource": self.datasource,
             "exchange": self.exchange,
             "symbol": self.symbol,
             "instrument_type": self.instrument_type,
-            "tick_size": self.tick_size,
-            "tick_value": self.tick_value,
-            "contract_size": self.contract_size,
-            "min_order_size": self.min_order_size,
-            "quote_currency": self.quote_currency,
-            "maker_fee_rate": self.maker_fee_rate,
-            "taker_fee_rate": self.taker_fee_rate,
-            "metadata": dict(self.extra_metadata or {}),
+            "tick_size": instrument_fields.get("tick_size"),
+            "tick_value": instrument_fields.get("tick_value"),
+            "contract_size": instrument_fields.get("contract_size"),
+            "min_order_size": instrument_fields.get("min_order_size"),
+            "base_currency": instrument_fields.get("base_currency"),
+            "quote_currency": instrument_fields.get("quote_currency"),
+            "maker_fee_rate": instrument_fields.get("maker_fee_rate"),
+            "taker_fee_rate": instrument_fields.get("taker_fee_rate"),
+            "margin_rates": instrument_fields.get("margin_rates"),
+            "can_short": instrument_fields.get("can_short"),
+            "short_requires_borrow": instrument_fields.get("short_requires_borrow"),
+            "has_funding": instrument_fields.get("has_funding"),
+            "expiry_ts": instrument_fields.get("expiry_ts"),
+            "metadata": metadata,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -316,13 +328,18 @@ class BotRecord(Base):
     strategy_id = Column(String(64), nullable=True)
     mode = Column(String(32), nullable=False, default="instant")
     run_type = Column(String(32), nullable=False, default="backtest")
-    playback_speed = Column("fetch_seconds", Float, nullable=False, default=10.0)
+    playback_speed = Column("fetch_seconds", Float, nullable=False, default=0.0)
     backtest_start = Column(DateTime, nullable=True)
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
+    wallet_config = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
     last_stats = Column(JSON, nullable=False, default=dict)
+    last_run_artifact = Column(JSON, nullable=True)
+    # Heartbeat fields for orphan detection (BotWatchdog)
+    runner_id = Column(String(128), nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -333,16 +350,20 @@ class BotRecord(Base):
             "id": self.id,
             "name": self.name,
             "strategy_id": self.strategy_id,
-            
+
             "mode": self.mode,
             "run_type": self.run_type,
-            "playback_speed": float(self.playback_speed if self.playback_speed is not None else 10.0),
+            "playback_speed": float(self.playback_speed if self.playback_speed is not None else 0.0),
             "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
+            "wallet_config": dict(self.wallet_config or {}),
             "status": self.status,
             "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
             "last_stats": dict(self.last_stats or {}),
+            "last_run_artifact": dict(self.last_run_artifact or {}),
+            "runner_id": self.runner_id,
+            "heartbeat_at": (self.heartbeat_at.isoformat() + "Z") if self.heartbeat_at else None,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
@@ -353,6 +374,7 @@ class BotTradeRecord(Base):
     __tablename__ = "portal_bot_trades"
 
     id = Column(String(64), primary_key=True)
+    run_id = Column(String(64), nullable=True)
     bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="CASCADE"), nullable=False)
     strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="SET NULL"), nullable=True)
     symbol = Column(String(64), nullable=True)
@@ -375,6 +397,7 @@ class BotTradeRecord(Base):
 
         return {
             "id": self.id,
+            "run_id": self.run_id,
             "bot_id": self.bot_id,
             "strategy_id": self.strategy_id,
             "symbol": self.symbol,
@@ -432,4 +455,55 @@ class BotTradeEventRecord(Base):
             "pnl": self.pnl,
             "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRunRecord(Base):
+    """Database row representing a completed bot run report snapshot."""
+
+    __tablename__ = "portal_bot_runs"
+
+    run_id = Column(String(64), primary_key=True)
+    bot_id = Column(String(64), ForeignKey("portal_bots.id", ondelete="SET NULL"), nullable=True)
+    bot_name = Column(String(255), nullable=True)
+    strategy_id = Column(String(64), nullable=True)
+    strategy_name = Column(String(255), nullable=True)
+    run_type = Column(String(32), nullable=False, default="backtest")
+    status = Column(String(32), nullable=False, default="completed")
+    timeframe = Column(String(32), nullable=True)
+    datasource = Column(String(64), nullable=True)
+    exchange = Column(String(64), nullable=True)
+    symbols = Column(JSON, nullable=True)
+    backtest_start = Column(DateTime, nullable=True)
+    backtest_end = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    summary = Column(JSON, nullable=True)
+    config_snapshot = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise the stored run snapshot."""
+
+        return {
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "bot_name": self.bot_name,
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "run_type": self.run_type,
+            "status": self.status,
+            "timeframe": self.timeframe,
+            "datasource": self.datasource,
+            "exchange": self.exchange,
+            "symbols": list(self.symbols or []),
+            "backtest_start": (self.backtest_start.isoformat() + "Z") if self.backtest_start else None,
+            "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
+            "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
+            "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
+            "summary": dict(self.summary or {}),
+            "config_snapshot": dict(self.config_snapshot or {}),
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

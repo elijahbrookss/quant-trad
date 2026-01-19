@@ -1,5 +1,5 @@
 """Supporting services for data provider persistence."""
 
-from .persistence import DataPersistenceService
+from .persistence import DataPersistence, NullPersistence
 
-__all__ = ["DataPersistenceService"]
+__all__ = ["DataPersistence", "NullPersistence"]

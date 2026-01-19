@@ -8,8 +8,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..service import provider_service
-from ..service.strategy_service import facade as strategy_service
+from ..service.market import instrument_service
+from ..service.providers import provider_service
+from ..service.strategies.strategy_service import facade as strategy_service
 
 
 router = APIRouter()
@@ -205,11 +206,7 @@ class StrategySignalRequest(BaseModel):
     start: str
     end: str
     interval: str
-    symbol: Optional[str] = None
-    datasource: Optional[str] = None
-    exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
+    instrument_ids: List[str] = Field(default_factory=list)
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -268,18 +265,7 @@ async def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
                 except Exception:
                     inst_rec = None
             if not inst_rec:
-                # Persist a minimal instrument record so frontend can reference it later.
-                # Include any provided datasource/exchange so subsequent lookups can match.
-                try:
-                    from ..service.storage import upsert_instrument as _upsert_instrument
-
-                    inst_rec = _upsert_instrument({
-                        "symbol": symbol,
-                        "datasource": payload.get("datasource"),
-                        "exchange": payload.get("exchange"),
-                    })
-                except Exception:
-                    inst_rec = None
+                inst_rec = None
 
             # If we persisted a minimal instrument (or found one without tick metadata),
             # attempt to enrich it immediately so the UI can display tick/contract data
@@ -513,15 +499,12 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
     """Generate buy/sell signal summaries for a strategy."""
 
     try:
-        market = _apply_market_aliases(body.dict())
         return strategy_service.generate_strategy_signals(
             strategy_id,
             start=body.start,
             end=body.end,
             interval=body.interval,
-            symbol=market.get("symbol") or body.symbol,
-            datasource=market.get("datasource"),
-            exchange=market.get("exchange"),
+            instrument_ids=body.instrument_ids,
             config=body.config,
         )
     except KeyError as exc:
@@ -565,4 +548,3 @@ async def delete_symbol_preset(preset_id: str) -> Response:
     strategy_service.delete_symbol_preset_service(preset_id)
 
     return Response(status_code=204)
-

@@ -6,12 +6,12 @@ pytest.importorskip("numpy")
 
 from datetime import datetime, timezone
 
-from portal.backend.service.indicator_service.signals import (
+from portal.backend.service.indicators.indicator_service.signals import (
     BreakoutCacheContext,
     IndicatorSignalExecutor,
 )
-from portal.backend.service.strategy_service import RuleCondition
-from portal.backend.service.strategy_service import evaluator, markers
+from portal.backend.service.strategies.strategy_service import RuleCondition
+from portal.backend.service.strategies.strategy_service import evaluator, markers
 from signals.base import BaseSignal
 from signals.engine.signal_generator import _metadata_to_signal
 from signals.rules.market_profile._meta import ensure_market_profile_rule_metadata

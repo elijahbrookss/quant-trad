@@ -1,17 +1,12 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { X, ChevronDown } from 'lucide-react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
+import { X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
-import { useChartValue } from '../../contexts/ChartStateContext.jsx'
-import ATMTemplateSummary from '../atm/ATMTemplateSummary.jsx'
+import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
 import LoadingOverlay from '../LoadingOverlay.jsx'
-import { BotStatusChips } from './BotStatusChips.jsx'
-import { PlaybackControls } from './PlaybackControls.jsx'
-import { PerformanceStats } from './PerformanceStats.jsx'
-import { TradeLogList } from './TradeLogList.jsx'
 import { ActiveTradeChip } from './ActiveTradeChip.jsx'
-import { describeLog, formatStatValue } from './botPerformanceFormatters.js'
 import { useBotPerformance } from './hooks/useBotPerformance.js'
+import DecisionTrace from './DecisionTrace'
 
 const BOOTLINE_POOL = {
   runtime: ['Spinning up bot runtime', 'Teaching the bot patience'],
@@ -26,43 +21,77 @@ const BOOTLINE_POOL = {
   ],
 }
 
+const PHASE_LABELS = {
+  prepare: 'Preparing bot runtime',
+  prepare_series: 'Building strategy series',
+  prepared: 'Series ready',
+  prepare_runtime: 'Initializing runtime context',
+  start_threads: 'Starting series threads',
+  running: 'Running bot',
+}
+
+const STATUS_LABELS = {
+  initialising: 'Preparing bot runtime',
+  starting: 'Starting series threads',
+  running: 'Running bot',
+  crashed: 'Bot crashed',
+}
+
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
-  const [expandedStrategies, setExpandedStrategies] = useState(() => new Set())
-  const [logTab, setLogTab] = useState('trade')
-  const chipHideTimeoutRef = useRef(null)
-  const [chipVisible, setChipVisible] = useState(false)
-  const [renderedChip, setRenderedChip] = useState(null)
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
-  const chartHandle = useChartValue(`bot-${bot?.id}`)
+  const [activeSymbol, setActiveSymbol] = useState(null)
+  const [statsTab, setStatsTab] = useState('overview')
+  const { getChart } = useChartState()
 
   const {
     action,
     error,
     handlePause,
-    handlePlaybackInput,
+    handleFocusSymbolChange,
     handleResume,
     loading,
     payload,
-    playbackDraft,
-    playbackLabel,
     runtimeStatus,
-    speedSaving,
     streamEligible,
     streamStatus,
   } = useBotPerformance({ bot, open, onRefresh })
 
-  useEffect(() => {
-    setExpandedStrategies(new Set())
-  }, [bot?.id])
-
   const logs = payload?.logs || []
-  const quoteCurrency = payload?.stats?.quote_currency || payload?.trades?.[0]?.currency
   const strategies = payload?.meta?.strategies || []
-  const botMeta = payload?.meta?.bot || {}
   const runtime = payload?.runtime || {}
+  const seriesList = Array.isArray(payload?.series) ? payload.series : []
+  const seriesBySymbol = useMemo(() => {
+    const map = new Map()
+    for (const series of seriesList) {
+      if (series?.symbol) {
+        map.set(series.symbol, series)
+      }
+    }
+    return map
+  }, [seriesList])
+  const seriesSymbols = useMemo(() => seriesList.map((series) => series?.symbol).filter(Boolean), [seriesList])
 
-  const chartHasData = Array.isArray(payload?.candles) && payload.candles.length > 0
+  useEffect(() => {
+    if (!seriesSymbols.length) {
+      setActiveSymbol(null)
+      return
+    }
+    setActiveSymbol((prev) => (prev && seriesSymbols.includes(prev) ? prev : seriesSymbols[0]))
+  }, [seriesSymbols])
+
+  useEffect(() => {
+    if (open) {
+      handleFocusSymbolChange?.(activeSymbol)
+    }
+  }, [activeSymbol, handleFocusSymbolChange, open])
+
+  const activeSeries = activeSymbol ? seriesBySymbol.get(activeSymbol) : null
+  const activeSymbolTrades = Array.isArray(activeSeries?.trades) ? activeSeries.trades : []
+  const activeChartId = activeSymbol ? `bot-${bot?.id}-${activeSymbol}` : ''
+  const chartHandle = useChartValue(activeChartId)
+
+  const chartHasData = Array.isArray(activeSeries?.candles) && activeSeries.candles.length > 0
   const isBootingStatus = ['initialising', 'starting', 'booting'].includes(runtimeStatus)
   const isBooting = isBootingStatus || loading || streamStatus === 'connecting'
   const showInactiveState = !isBooting && (Boolean(payload?.inactive) || (!streamEligible && !chartHasData))
@@ -70,19 +99,48 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const strategiesReady = strategies.length > 0
   const atmReady = strategies.some((entry) => Boolean(entry?.atm_template))
   const runtimeInitialising = runtimeStatus === 'initialising'
+  const chartMode = bot?.run_type === 'backtest' ? payload?.runtime?.mode : undefined
+  const chartPlaybackSpeed = 1
 
+  const phaseLabel = PHASE_LABELS[runtime?.phase] || null
+  const statusLabel = STATUS_LABELS[runtimeStatus] || null
   const bootStage = useMemo(() => {
+    if (phaseLabel || statusLabel) return 'runtime'
     if (runtimeInitialising || isBootingStatus) return 'runtime'
     if (streamStatus === 'connecting') return 'datasource'
     if (!strategiesReady) return 'strategy'
     if (!atmReady) return 'strategy'
     return 'generic'
-  }, [runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
+  }, [phaseLabel, statusLabel, runtimeInitialising, isBootingStatus, strategiesReady, atmReady, streamStatus])
 
   const lastCandle = useMemo(() => {
-    if (!Array.isArray(payload?.candles) || payload.candles.length === 0) return null
-    return payload.candles[payload.candles.length - 1]
-  }, [payload?.candles])
+    if (!Array.isArray(activeSeries?.candles) || activeSeries.candles.length === 0) return null
+    return activeSeries.candles[activeSeries.candles.length - 1]
+  }, [activeSeries?.candles])
+
+  // Build a map of latest prices and bar times per symbol for active trade chips
+  const latestDataBySymbol = useMemo(() => {
+    const dataMap = new Map()
+    for (const series of seriesList) {
+      if (!series?.symbol) continue
+      const candles = series.candles
+      if (!Array.isArray(candles) || candles.length === 0) continue
+      const lastCandle = candles[candles.length - 1]
+      // Use close price, or if intrabar data exists, use the most recent price
+      const price = lastCandle?.close ?? lastCandle?.price ?? lastCandle?.c
+      // Get the bar time - convert from epoch seconds if needed
+      let barTime = lastCandle?.time ?? lastCandle?.t ?? lastCandle?.timestamp
+      if (typeof barTime === 'number' && barTime < 1e12) {
+        // Likely epoch seconds, convert to ms
+        barTime = barTime * 1000
+      }
+      dataMap.set(series.symbol, {
+        price: Number.isFinite(Number(price)) ? Number(price) : null,
+        barTime: barTime ?? null,
+      })
+    }
+    return dataMap
+  }, [seriesList])
 
   const simTimeLabel = useMemo(() => {
     const epoch = toSec(lastCandle?.time)
@@ -103,164 +161,74 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return `Sim Time: ${dateLabel} — ${timeLabel} UTC`
   }, [lastCandle?.time])
 
-  const formatStatValueWithCurrency = useCallback(
-    (key, value) => formatStatValue(key, value, quoteCurrency),
-    [quoteCurrency],
-  )
-
-  const activeTrade = useMemo(() => {
-    const trades = Array.isArray(payload?.trades) ? payload.trades : []
-    return (
-      trades.find((trade) => {
-        const hasOpenLeg = (trade.legs || []).some((leg) => leg.status === 'open' || !leg.exit_time)
-        return hasOpenLeg || !trade?.closed_at
-      }) || null
-    )
-  }, [payload?.trades])
-
   const sumContracts = useCallback((legs = []) => {
     return legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
   }, [])
 
-  const activeTradeChip = useMemo(() => {
-    if (!activeTrade) return null
-    const directionLabel = (activeTrade.direction || 'long').toLowerCase() === 'short' ? 'Short' : 'Long'
-    const contractsTotal = sumContracts(activeTrade.legs)
-    const openContracts = sumContracts((activeTrade.legs || []).filter((leg) => leg.status === 'open' || !leg.exit_time))
-    const entryPrice = Number(activeTrade.entry_price)
-    const stopPrice = Number(activeTrade.stop_price)
-    const tickSize = Number(activeTrade.tick_size)
-    const tickValue = Number(activeTrade.tick_value)
-    const contractSize = Number(activeTrade.contract_size) || 1
-    const targets = (activeTrade.legs || [])
-      .map((leg) => Number(leg?.target_price))
-      .filter((value) => Number.isFinite(value))
-    const tpPrice = targets.length
-      ? (directionLabel === 'Short' ? Math.min(...targets) : Math.max(...targets))
-      : null
-    const currentPrice = Number(lastCandle?.close ?? lastCandle?.price)
-    const directionSign = directionLabel === 'Short' ? -1 : 1
-    const riskPerUnit = Number.isFinite(entryPrice) && Number.isFinite(stopPrice) ? Math.abs(entryPrice - stopPrice) : null
-    const rMultiple =
-      riskPerUnit && Number.isFinite(currentPrice)
-        ? ((currentPrice - entryPrice) * directionSign) / riskPerUnit
-        : null
-    const openContractsCount = openContracts || contractsTotal || 0
-    const unrealized =
-      Number.isFinite(entryPrice) &&
-      Number.isFinite(currentPrice) &&
-      Number.isFinite(tickSize) &&
-      Number.isFinite(tickValue) &&
-      tickSize !== 0
-        ? ((currentPrice - entryPrice) / tickSize) * directionSign * tickValue * contractSize * openContractsCount
-        : null
-    const realized = Number.isFinite(activeTrade.net_pnl) ? activeTrade.net_pnl : 0
-    const currentPnl = Number.isFinite(unrealized) ? realized + unrealized : realized
-    const fmtPrice = (value) => (Number.isFinite(value) ? Number(value).toFixed(2) : '—')
-    const fmtPnl = Number.isFinite(currentPnl)
-      ? `${currentPnl >= 0 ? '+' : ''}${currentPnl.toFixed(2)}${quoteCurrency ? ` ${quoteCurrency}` : ''}`
-      : '—'
-    const fmtR = Number.isFinite(rMultiple) ? `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)} R` : '—'
-    return {
-      headline: `${directionLabel} ${Math.max(1, openContractsCount || contractsTotal || 1)}x @ ${fmtPrice(entryPrice)}`,
-      r: fmtR,
-      pnl: fmtPnl,
-      sl: fmtPrice(stopPrice),
-      tp: fmtPrice(tpPrice),
-      direction: directionLabel.toLowerCase(),
+  const openTrades = useMemo(() => {
+    const open = []
+    for (const series of seriesList) {
+      const trades = Array.isArray(series?.trades) ? series.trades : []
+      for (const trade of trades) {
+        const hasOpenLeg = (trade.legs || []).some((leg) => leg.status === 'open' || !leg.exit_time)
+        const isOpen = hasOpenLeg || !trade?.closed_at
+        if (isOpen) {
+          open.push({ ...trade, symbol: trade.symbol || series.symbol })
+        }
+      }
     }
-  }, [activeTrade, lastCandle?.close, lastCandle?.price, quoteCurrency, sumContracts])
+    return open
+  }, [seriesList])
 
-  const handleChipHover = useCallback(
-    (hovering) => {
+  const buildTradeChip = useCallback(
+    (trade) => {
+      if (!trade) return null
+      const directionLabel = (trade.direction || 'long').toLowerCase() === 'short' ? 'Short' : 'Long'
+      const contractsTotal = sumContracts(trade.legs)
+      const openContracts = sumContracts((trade.legs || []).filter((leg) => leg.status === 'open' || !leg.exit_time))
+      const entryPrice = Number(trade.entry_price)
+      const stopPrice = Number(trade.stop_price)
+      const targets = (trade.legs || [])
+        .map((leg) => Number(leg?.target_price))
+        .filter((value) => Number.isFinite(value))
+      const tpPrice = targets.length
+        ? (directionLabel === 'Short' ? Math.min(...targets) : Math.max(...targets))
+        : null
+      const openContractsCount = openContracts || contractsTotal || 0
+      const fmtPrice = (value) => (Number.isFinite(value) ? Number(value).toFixed(2) : '—')
+      const fmtSize = (value) => {
+        if (!Number.isFinite(value) || value <= 0) return '—'
+        if (value >= 100) return value.toFixed(0)
+        if (value >= 10) return value.toFixed(1)
+        if (value >= 1) return value.toFixed(2)
+        return value.toFixed(4)
+      }
+      return {
+        directionLabel,
+        sizeLabel: `${fmtSize(openContractsCount)}x`,
+        entry: fmtPrice(entryPrice),
+        stop: fmtPrice(stopPrice),
+        target: fmtPrice(tpPrice),
+        direction: directionLabel.toLowerCase(),
+        symbol: trade.symbol || '—',
+        tradeId: trade.trade_id,
+      }
+    },
+    [sumContracts],
+  )
+
+  const handleTradeHover = useCallback(
+    (trade, hovering) => {
       const handles = chartHandle?.handles || chartHandle
       if (!handles) return
-      if (hovering && activeTrade) {
-        handles.pulseTrade?.(activeTrade)
+      if (hovering && trade && trade.symbol === activeSymbol) {
+        handles.pulseTrade?.(trade)
       } else {
         handles.clearPulse?.()
       }
     },
-    [activeTrade, chartHandle],
+    [activeSymbol, chartHandle],
   )
-
-  useEffect(() => {
-    if (chipHideTimeoutRef.current) {
-      clearTimeout(chipHideTimeoutRef.current)
-      chipHideTimeoutRef.current = null
-    }
-    if (activeTradeChip) {
-      setRenderedChip(activeTradeChip)
-      requestAnimationFrame(() => setChipVisible(true))
-    } else if (renderedChip) {
-      setChipVisible(false)
-      chipHideTimeoutRef.current = setTimeout(() => {
-        setRenderedChip(null)
-      }, 200)
-    }
-  }, [activeTradeChip, renderedChip])
-
-  const tradeMetrics = useMemo(() => {
-    const trades = Array.isArray(payload?.trades) ? payload.trades : []
-    const toContracts = (legs = []) => legs.reduce((sum, leg) => sum + (Number(leg?.contracts) || 0), 0)
-    const sortedTrades = trades.slice().sort((a, b) => (toSec(a?.entry_time) || 0) - (toSec(b?.entry_time) || 0))
-    let totalR = 0
-    let running = 0
-    let peak = 0
-    let maxDrawdown = 0
-    const rValues = []
-    const pnlValues = []
-    const winPnls = []
-    const lossPnls = []
-    for (const trade of sortedTrades) {
-      const net = Number(trade?.net_pnl)
-      const entryPrice = Number(trade?.entry_price)
-      const stopPrice = Number(trade?.stop_price)
-      const tickSize = Number(trade?.tick_size)
-      const tickValue = Number(trade?.tick_value)
-      const contracts = toContracts(trade?.legs)
-      const riskValue =
-        Number.isFinite(entryPrice) &&
-        Number.isFinite(stopPrice) &&
-        Number.isFinite(tickSize) &&
-        Number.isFinite(tickValue) &&
-        tickSize !== 0 &&
-        contracts > 0
-          ? (Math.abs(entryPrice - stopPrice) / tickSize) * tickValue * contracts
-          : null
-      const r = riskValue && Number.isFinite(net) && riskValue !== 0 ? net / riskValue : null
-      if (Number.isFinite(r)) {
-        rValues.push(r)
-        totalR += r
-      }
-      if (Number.isFinite(net)) {
-        pnlValues.push(net)
-        running += net
-        if (running > peak) peak = running
-        const dd = peak - running
-        if (dd > maxDrawdown) maxDrawdown = dd
-        if (net > 0) winPnls.push(net)
-        else if (net < 0) lossPnls.push(net)
-      }
-    }
-    const expectancyR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null
-    const expectancyPnl = pnlValues.length ? pnlValues.reduce((a, b) => a + b, 0) / pnlValues.length : null
-    const avgWin = winPnls.length ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : null
-    const avgLoss = lossPnls.length ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : null
-    return { totalR, expectancyR, expectancyPnl, maxDrawdown, avgWin, avgLoss }
-  }, [payload?.trades])
-
-  const statEntries = useMemo(() => {
-    const hidden = new Set(['quote_currency', 'legs_closed', 'breakeven_trades', 'completed_trades'])
-    const entries = Object.entries(payload?.stats || {}).filter(([key]) => !hidden.has(key))
-    if (Number.isFinite(tradeMetrics.maxDrawdown)) entries.push(['max_drawdown', tradeMetrics.maxDrawdown])
-    if (Number.isFinite(tradeMetrics.expectancyR)) entries.push(['expectancy_r', tradeMetrics.expectancyR])
-    if (Number.isFinite(tradeMetrics.expectancyPnl)) entries.push(['expectancy_value', tradeMetrics.expectancyPnl])
-    if (Number.isFinite(tradeMetrics.avgWin)) entries.push(['avg_win', tradeMetrics.avgWin])
-    if (Number.isFinite(tradeMetrics.avgLoss)) entries.push(['avg_loss', tradeMetrics.avgLoss])
-    if (Number.isFinite(tradeMetrics.totalR)) entries.push(['total_r', tradeMetrics.totalR])
-    return entries
-  }, [payload?.stats, tradeMetrics])
 
   const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
   const statusDisplay = isBooting ? 'booting' : runtimeStatus
@@ -270,6 +238,15 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!isBooting) {
       setBootDots(1)
       return undefined
+    }
+    if (phaseLabel || statusLabel) {
+      setBootLine(phaseLabel || statusLabel || '')
+      const dotsTimer = setInterval(() => {
+        setBootDots((value) => (value % 3) + 1)
+      }, 480)
+      return () => {
+        clearInterval(dotsTimer)
+      }
     }
     const stagePool = BOOTLINE_POOL[bootStage] || []
     const genericPool = BOOTLINE_POOL.generic
@@ -294,70 +271,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       clearInterval(phraseTimer)
       clearInterval(dotsTimer)
     }
-  }, [bootStage, isBooting])
+  }, [bootStage, isBooting, phaseLabel, statusLabel])
 
   const bootLineDisplay = useMemo(() => {
-    return `${bootLine}${'.'.repeat(Math.max(1, bootDots))}`
-  }, [bootDots, bootLine])
-
-  const formatRiskReward = useCallback((metrics) => {
-    if (!metrics || metrics.reward_to_risk === null || metrics.reward_to_risk === undefined) {
-      return '—'
-    }
-    const numeric = Number(metrics.reward_to_risk)
-    if (!Number.isFinite(numeric)) {
-      return '—'
-    }
-    return `${numeric.toFixed(2)} R`
-  }, [])
-
-  const toggleStrategyDetails = useCallback((strategyId) => {
-    if (!strategyId) return
-    setExpandedStrategies((prev) => {
-      const next = new Set(prev)
-      if (next.has(strategyId)) {
-        next.delete(strategyId)
-      } else {
-        next.add(strategyId)
-      }
-      return next
-    })
-  }, [])
-
-  const headerDetails = useMemo(() => {
-    const parts = []
-    const collectUnique = (iterable) => {
-      const set = new Set()
-      for (const value of iterable || []) {
-        if (value) set.add(value)
-      }
-      return Array.from(set)
-    }
-    const strategySymbols = collectUnique(strategies.flatMap((s) => s?.symbols || []))
-    if (strategySymbols.length) {
-      parts.push(`Symbols: ${strategySymbols.join(', ')}`)
-    }
-    const strategyTimeframes = collectUnique(strategies.map((s) => s?.timeframe))
-    const timeframes = strategyTimeframes.length
-      ? strategyTimeframes
-      : botMeta.timeframe
-        ? [botMeta.timeframe]
-        : []
-    if (timeframes.length) {
-      parts.push(`Timeframe: ${timeframes.join(', ')}`)
-    }
-    const datasources = collectUnique(strategies.map((s) => s?.datasource || botMeta.datasource))
-    if (datasources.length) {
-      parts.push(`Datasource: ${datasources.join(', ')}`)
-    }
-    const exchanges = collectUnique(strategies.map((s) => s?.exchange || botMeta.exchange))
-    if (exchanges.length) {
-      parts.push(`Exchange: ${exchanges.join(', ')}`)
-    }
-    parts.push(`Mode: ${bot?.mode}`)
-    parts.push(`Run: ${(bot?.run_type || 'backtest').replace('_', ' ')}`)
-    return parts.filter(Boolean).join(' • ')
-  }, [strategies, botMeta.timeframe, botMeta.datasource, botMeta.exchange, bot?.mode, bot?.run_type])
+    const label = phaseLabel || statusLabel || bootLine
+    return `${label}${'.'.repeat(Math.max(1, bootDots))}`
+  }, [bootDots, bootLine, phaseLabel, statusLabel])
 
   useEffect(() => {
     const handler = (event) => {
@@ -373,274 +292,426 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
   const progressDisplay =
     typeof runtime?.progress === 'number' ? `${Math.round(runtime.progress * 1000) / 10}%` : '—'
-  const playbackDisabled = isBooting
-  const canPause = runtimeStatus === 'running' && (bot?.mode || '').toLowerCase() === 'walk-forward'
+  const isWalkForward = (bot?.mode || '').toLowerCase() === 'walk-forward'
+  const isCompleted = ['completed', 'stopped', 'crashed'].includes(runtimeStatus)
+  const canPause = runtimeStatus === 'running' && isWalkForward
   const canResume = runtimeStatus === 'paused'
+  const canRestart = isCompleted && isWalkForward
   const bootLineVisible = streamStatus === 'connecting' && streamEligible
 
-  const logsForDisplay = useMemo(() => logs.filter((entry) => describeLog(entry) !== '—'), [logs])
-
-  const focusChartOnLog = useCallback(
-    (entry) => {
-      const handles = chartHandle?.handles || chartHandle
+  const focusChartAt = useCallback(
+    (timeValue, price, symbol) => {
+      if (!timeValue) return
+      const time = toSec(timeValue)
+      let handles = chartHandle?.handles || chartHandle
+      if (symbol && seriesBySymbol.has(symbol)) {
+        const targetId = `bot-${bot?.id}-${symbol}`
+        const target = getChart(targetId)
+        if (target) {
+          handles = target?.handles || target
+        }
+        setActiveSymbol(symbol)
+      }
       if (!handles?.focusAtTime) return
-      const time = entry?.bar_time || entry?.event_time || entry?.timestamp || entry?.time
-      const price = entry?.price
       handles.focusAtTime(time, price)
     },
-    [chartHandle],
+    [bot?.id, chartHandle, getChart, seriesBySymbol],
   )
 
-  const handleZoomIn = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.zoomIn?.()
-  }, [chartHandle])
+  // Aggregate stats across all symbols
+  const aggregateStats = useMemo(() => {
+    const stats = runtime?.stats || payload?.stats || {}
+    return {
+      net_pnl: stats.net_pnl,
+      total_trades: stats.total_trades,
+      wins: stats.wins,
+      losses: stats.losses,
+      win_rate: stats.win_rate,
+      avg_win: stats.avg_win,
+      avg_loss: stats.avg_loss,
+      largest_win: stats.largest_win,
+      largest_loss: stats.largest_loss,
+      total_fees: stats.total_fees,
+      max_drawdown: stats.max_drawdown,
+    }
+  }, [runtime?.stats, payload?.stats])
 
-  const handleZoomOut = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.zoomOut?.()
-  }, [chartHandle])
-
-  const handleCenterView = useCallback(() => {
-    const handles = chartHandle?.handles || chartHandle
-    handles?.centerView?.()
-  }, [chartHandle])
+  // Per-symbol stats
+  const symbolStats = useMemo(() => {
+    return seriesList.map((series) => ({
+      symbol: series.symbol,
+      net_pnl: series.stats?.net_pnl,
+      total_trades: series.stats?.total_trades,
+      wins: series.stats?.wins,
+      losses: series.stats?.losses,
+      win_rate: series.stats?.win_rate,
+      total_fees: series.stats?.total_fees,
+    })).filter((s) => s.symbol)
+  }, [seriesList])
 
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="relative flex h-full max-h-[90vh] w-full max-w-6xl flex-col gap-4 overflow-hidden rounded-3xl border border-white/10 bg-[#0e1016] p-6 shadow-2xl">
-        <header className="flex items-center justify-between gap-4 border-b border-white/5 pb-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Bot lens</p>
-            <h3 className="text-2xl font-semibold text-white">{bot?.name}</h3>
-            <p className="text-sm text-slate-400">{headerDetails}</p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="relative flex h-full max-h-[90vh] w-full max-w-[1400px] flex-col gap-5 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
+        <header className="flex items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-xl font-medium text-slate-50">{bot?.name}</h3>
+            <p className="mt-0.5 text-sm text-slate-400">Decision trace and execution context</p>
           </div>
           <button
             type="button"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-200 hover:border-white/30 hover:text-white"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/50 text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-300"
             onClick={onClose}
           >
-            <X className="size-5" />
+            <X className="size-4" />
           </button>
         </header>
 
-        <div className="flex flex-1 flex-col gap-6 overflow-auto">
-          <BotStatusChips statusDisplay={statusDisplay} progressDisplay={progressDisplay} streamStatus={streamStatus} />
-
-          <PlaybackControls
-            canPause={canPause}
-            canResume={canResume}
-            onPause={handlePause}
-            onResume={handleResume}
-            action={action}
-            playbackDisabled={playbackDisabled}
-            simTimeLabel={simTimeLabel}
-            onZoomIn={handleZoomIn}
-            onZoomOut={handleZoomOut}
-            onCenter={handleCenterView}
-            playbackDraft={playbackDraft}
-            playbackLabel={playbackLabel}
-            onPlaybackChange={handlePlaybackInput}
-            speedSaving={speedSaving}
-          />
-
-        <div className="flex flex-wrap items-center justify-center mb-2">
-          <ActiveTradeChip chip={renderedChip} visible={chipVisible} onHover={handleChipHover} />
-        </div>
-
-        <div className="relative min-h-[360px]">
-            <div
-              className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
-                bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
-              }`}
-            >
-              <div className="rounded-full border border-white/10 bg-white/5 px-4 py-3 text-base font-semibold text-slate-100 shadow-sm animate-pulse">
-                {bootLineDisplay}
+        <div className="flex flex-1 flex-col gap-5 overflow-auto">
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Status:</span>
+                  <span className="font-medium text-slate-300">{statusDisplay || '—'}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Progress:</span>
+                  <span className="tabular-nums font-medium text-slate-300">{progressDisplay}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-slate-500">Feed:</span>
+                  <span className="font-medium text-slate-300">{streamStatus}</span>
+                </div>
+                {simTimeLabel ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium text-slate-500">Sim Time:</span>
+                    <span className="tabular-nums font-medium text-slate-300">{simTimeLabel}</span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {(canPause || canResume || canRestart) && (
+                  <>
+                    {canResume && (
+                      <button
+                        type="button"
+                        onClick={handleResume}
+                        disabled={action === 'resuming'}
+                        className="rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:border-emerald-800/60 hover:bg-emerald-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {action === 'resuming' ? 'Resuming…' : 'Resume'}
+                      </button>
+                    )}
+                    {canPause && (
+                      <button
+                        type="button"
+                        onClick={handlePause}
+                        disabled={action === 'pausing'}
+                        className="rounded-md border border-amber-900/50 bg-amber-950/30 px-3 py-1.5 text-xs font-medium text-amber-300 transition-colors hover:border-amber-800/60 hover:bg-amber-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {action === 'pausing' ? 'Pausing…' : 'Pause'}
+                      </button>
+                    )}
+                    {canRestart && (
+                      <button
+                        type="button"
+                        onClick={onRefresh}
+                        className="rounded-md border border-sky-900/50 bg-sky-950/30 px-3 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:border-sky-800/60 hover:bg-sky-950/50"
+                      >
+                        Restart
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             </div>
-            <div
-              className={`transition-opacity duration-300 ${
-                bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
-              }`}
-            >
-              {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
-              {error ? (
-                <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-              ) : showInactiveState ? (
-                <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                  {idleMessage}
+          </div>
+
+          {/* Performance Stats Tabs */}
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40">
+            {/* Tab Headers */}
+            <div className="flex items-center gap-1 border-b border-slate-800 px-3 py-2 bg-slate-950/50">
+              <button
+                type="button"
+                onClick={() => setStatsTab('overview')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'overview'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                Overview
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatsTab('symbols')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'symbols'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                By Symbol
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatsTab('risk')}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statsTab === 'risk'
+                    ? 'bg-slate-800/80 text-slate-200'
+                    : 'text-slate-500 hover:bg-slate-900/50 hover:text-slate-400'
+                }`}
+              >
+                Risk & Fees
+              </button>
+            </div>
+
+            {/* Tab Content */}
+            <div className="p-4">
+              {statsTab === 'overview' && (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+                  <StatItem label="Net PNL" value={aggregateStats.net_pnl} format="currency" tone="pnl" />
+                  <StatItem label="Total Trades" value={aggregateStats.total_trades} format="number" />
+                  <StatItem label="Win Rate" value={aggregateStats.win_rate} format="percent" />
+                  <StatItem label="Wins" value={aggregateStats.wins} format="number" />
+                  <StatItem label="Losses" value={aggregateStats.losses} format="number" />
+                  <StatItem label="Avg Win" value={aggregateStats.avg_win} format="currency" tone="positive" />
+                  <StatItem label="Avg Loss" value={aggregateStats.avg_loss} format="currency" tone="negative" />
+                  <StatItem label="Best Trade" value={aggregateStats.largest_win} format="currency" tone="positive" />
+                  <StatItem label="Worst Trade" value={aggregateStats.largest_loss} format="currency" tone="negative" />
+                  <StatItem label="Total Fees" value={aggregateStats.total_fees} format="currency" />
+                  <StatItem label="Max Drawdown" value={aggregateStats.max_drawdown} format="currency" tone="negative" />
                 </div>
-              ) : chartHasData ? (
-                <BotLensChart
-                  chartId={`bot-${bot?.id}`}
-                  candles={payload?.candles || []}
-                  trades={payload?.trades || []}
-                  overlays={payload?.overlays || []}
-                  playbackSpeed={playbackDraft}
-                />
-              ) : (
-                <div className="flex h-[360px] items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/30 p-6 text-center text-sm text-slate-400">
-                  Awaiting the first candle…
+              )}
+
+              {statsTab === 'symbols' && (
+                symbolStats.length > 0 ? (
+                  <div className="space-y-3">
+                    {symbolStats.map((stat) => (
+                      <div key={stat.symbol} className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium text-slate-300">{stat.symbol}</span>
+                          <span className={`text-sm font-medium tabular-nums ${
+                            Number(stat.net_pnl) > 0
+                              ? 'text-emerald-400'
+                              : Number(stat.net_pnl) < 0
+                                ? 'text-rose-400'
+                                : 'text-slate-400'
+                          }`}>
+                            {formatCurrency(stat.net_pnl)}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-xs sm:grid-cols-5">
+                          <div>
+                            <p className="text-slate-600">Trades</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.total_trades)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Win Rate</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatPercent(stat.win_rate)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Wins</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.wins)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Losses</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatNumber(stat.losses)}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-600">Fees</p>
+                            <p className="font-medium tabular-nums text-slate-300">{formatCurrency(stat.total_fees)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">No per-symbol stats available</p>
+                )
+              )}
+
+              {statsTab === 'risk' && (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  <StatItem label="Total Fees Paid" value={aggregateStats.total_fees} format="currency" />
+                  <StatItem label="Max Drawdown" value={aggregateStats.max_drawdown} format="currency" tone="negative" />
+                  <StatItem label="Avg Win" value={aggregateStats.avg_win} format="currency" tone="positive" />
+                  <StatItem label="Avg Loss" value={aggregateStats.avg_loss} format="currency" tone="negative" />
+                  <StatItem label="Best Trade" value={aggregateStats.largest_win} format="currency" tone="positive" />
+                  <StatItem label="Worst Trade" value={aggregateStats.largest_loss} format="currency" tone="negative" />
                 </div>
               )}
             </div>
-            {bootLineVisible ? (
-              <div className="pointer-events-none absolute right-4 top-4 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-xs text-slate-200">
-                Establishing live feed…
-              </div>
-            ) : null}
           </div>
 
-          {strategies.length ? (
-            <div className="space-y-4 rounded-3xl border border-white/5 bg-black/30 p-4">
-              <div className="flex items-center justify-between">
-                <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Strategy wiring</p>
-                <span className="text-xs text-slate-400">{strategies.length} linked</span>
-              </div>
-              <div className="space-y-3">
-                {strategies.map((strategy) => {
-                  const summarySymbols = strategy.symbols?.join(', ') || strategy.symbol || '—'
-                  const timeframeLabel = strategy.timeframe || botMeta.timeframe || '—'
-                  const datasourceLabel = strategy.datasource || botMeta.datasource || '—'
-                  const exchangeLabel = strategy.exchange || botMeta.exchange || '—'
-                  const primaryInstrument = strategy.instruments?.[0] || strategy.instrument
-                  const contractSize = primaryInstrument?.contract_size ?? strategy.atm_template?.contract_size ?? '—'
-                  const rrDisplay = formatRiskReward(strategy.atm_metrics)
-                  const isExpanded = expandedStrategies.has(strategy.id)
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Active Trades</p>
+            {openTrades.length ? (
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                {openTrades.map((trade) => {
+                  const chip = buildTradeChip(trade)
+                  if (!chip) return null
+                  const latestData = latestDataBySymbol.get(trade.symbol)
                   return (
-                    <article key={strategy.id} className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <h4 className="text-lg font-semibold text-white">{strategy.name || 'Unnamed strategy'}</h4>
-                          <p className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">{strategy.id}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => toggleStrategyDetails(strategy.id)}
-                          className="inline-flex items-center gap-2 rounded-full border border-white/20 px-3 py-1 text-xs text-slate-100 hover:border-white/40"
-                        >
-                          <span>{isExpanded ? 'Hide details' : 'Details'}</span>
-                          <ChevronDown className={`size-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                        </button>
-                      </div>
-                      <dl className="mt-3 grid gap-3 text-xs text-slate-400 sm:grid-cols-4">
-                        <div>
-                          <dt className="uppercase tracking-[0.3em]">Symbols</dt>
-                          <dd className="text-sm text-white">{summarySymbols}</dd>
-                        </div>
-                        <div>
-                          <dt className="uppercase tracking-[0.3em]">Timeframe</dt>
-                          <dd className="text-sm text-white">{timeframeLabel}</dd>
-                        </div>
-                        <div>
-                          <dt className="uppercase tracking-[0.3em]">Datasource / Exch.</dt>
-                          <dd className="text-sm text-white">{datasourceLabel} / {exchangeLabel}</dd>
-                        </div>
-                        <div>
-                          <dt className="uppercase tracking-[0.3em]">Contract &amp; R:R</dt>
-                          <dd className="text-sm text-white">
-                            {contractSize} / {rrDisplay}
-                          </dd>
-                        </div>
-                      </dl>
-                      {isExpanded ? (
-                        <div className="mt-4 space-y-4 border-t border-white/10 pt-4 text-sm text-slate-200">
-                          <div>
-                            <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Indicator overlays</p>
-                            {strategy.indicators?.length ? (
-                              <ul className="mt-2 divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
-                                {strategy.indicators.map((indicator, idx) => (
-                                  <li key={`${indicator.id || idx}-${idx}`} className="flex items-center justify-between gap-3 px-3 py-2">
-                                    <div className="flex flex-wrap items-center gap-2 text-sm text-white">
-                                      <span
-                                        className="h-2 w-2 rounded-full"
-                                        style={{ backgroundColor: indicator.color || '#a5b4fc' }}
-                                      />
-                                      <span>{indicator.name || indicator.id || 'Indicator'}</span>
-                                      {indicator.id ? (
-                                        <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-slate-500">
-                                          {indicator.id}
-                                        </span>
-                                      ) : null}
-                                    </div>
-                                    <span className="text-[10px] uppercase tracking-[0.35em] text-slate-400">
-                                      {indicator.type || 'custom'}
-                                    </span>
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <div className="mt-2 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
-                                No indicator overlays attached
-                              </div>
-                            )}
-                          </div>
-                          <div>
-                            <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Instruments</p>
-                            {strategy.instruments?.length ? (
-                              <ul className="mt-2 divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
-                                {strategy.instruments.map((instrument, idx) => (
-                                  <li key={`${instrument.symbol || idx}-${idx}`} className="flex flex-col gap-1 px-3 py-2">
-                                    <div className="flex items-center justify-between text-sm text-white">
-                                      <span>{instrument.symbol || 'Instrument'}</span>
-                                      <span className="text-[11px] uppercase tracking-[0.3em] text-slate-500">
-                                        {instrument.quote_currency || '—'}
-                                      </span>
-                                    </div>
-                                    <div className="text-xs text-slate-300">
-                                      <div className="flex flex-wrap gap-3">
-                                        <span>Tick: {instrument.tick_size ?? '—'}</span>
-                                        <span>
-                                          Tick Value: {instrument.tick_value ?? '—'}
-                                          {instrument.quote_currency ? ` ${instrument.quote_currency}` : ''}
-                                        </span>
-                                      </div>
-                                      <div className="flex flex-wrap gap-3">
-                                        <span>Contract: {instrument.contract_size ?? '—'}</span>
-                                        <span>
-                                          Fees{' '}
-                                          {instrument.maker_fee_rate != null
-                                            ? `${(Number(instrument.maker_fee_rate) * 100).toFixed(2)}%`
-                                            : '—'}{' '}
-                                          /{' '}
-                                          {instrument.taker_fee_rate != null
-                                            ? `${(Number(instrument.taker_fee_rate) * 100).toFixed(2)}%`
-                                            : '—'}
-                                        </span>
-                                      </div>
-                                    </div>
-                                  </li>
-                                ))}
-                              </ul>
-                            ) : (
-                              <div className="mt-2 rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs text-slate-400">
-                                No instrument metadata attached
-                              </div>
-                            )}
-                          </div>
-                          <div>
-                            <div className="mb-2 flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-slate-400">
-                              <span>ATM template</span>
-                              <span className="text-xs text-slate-200">R:R {rrDisplay}</span>
-                            </div>
-                            <ATMTemplateSummary template={strategy.atm_template} />
-                          </div>
-                        </div>
-                      ) : null}
-                    </article>
+                    <ActiveTradeChip
+                      key={trade.trade_id || `${trade.symbol}-${trade.entry_time}`}
+                      chip={chip}
+                      trade={trade}
+                      currentPrice={latestData?.price}
+                      latestBarTime={latestData?.barTime}
+                      isActiveSymbol={trade.symbol === activeSymbol}
+                      visible
+                      onHover={(hovering) => handleTradeHover(trade, hovering)}
+                    />
                   )
                 })}
               </div>
+            ) : (
+              <p className="mt-2 text-sm text-slate-500">No active trades</p>
+            )}
+          </div>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium text-slate-400">Context Chart</p>
+              {activeSymbol ? <span className="text-xs font-medium text-slate-500">{activeSymbol}</span> : null}
             </div>
-          ) : null}
+            {seriesSymbols.length > 1 ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {seriesSymbols.map((symbol) => (
+                  <button
+                    key={`bot-series-${symbol}`}
+                    type="button"
+                    onClick={() => setActiveSymbol(symbol)}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-medium uppercase tracking-wider transition-colors ${
+                      symbol === activeSymbol
+                        ? 'border-slate-700 bg-slate-800/80 text-slate-200'
+                        : 'border-slate-800 bg-slate-950/50 text-slate-500 hover:border-slate-700 hover:bg-slate-950 hover:text-slate-400'
+                    }`}
+                  >
+                    {symbol}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
-          <PerformanceStats statEntries={statEntries} formatStatValue={formatStatValueWithCurrency} />
+            <div className="relative min-h-[360px] rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+              <div
+                className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
+                  bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+                }`}
+              >
+                <div className="animate-pulse rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-medium text-slate-200 shadow-sm">
+                  {bootLineDisplay}
+                </div>
+              </div>
+              <div
+                className={`transition-opacity duration-300 ${
+                  bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
+                }`}
+              >
+                {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
+                {error ? (
+                  <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-300">
+                    {error}
+                  </div>
+                ) : showInactiveState ? (
+                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
+                    {idleMessage}
+                  </div>
+                ) : chartHasData ? (
+                  <BotLensChart
+                    chartId={activeChartId}
+                    candles={activeSeries?.candles || []}
+                    trades={activeSymbolTrades}
+                    overlays={activeSeries?.overlays || []}
+                    playbackSpeed={chartPlaybackSpeed}
+                    mode={chartMode}
+                  />
+                ) : (
+                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
+                    Awaiting the first candle…
+                  </div>
+                )}
+              </div>
+              {bootLineVisible ? (
+                <div className="pointer-events-none absolute right-4 top-4 rounded-md border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-sm">
+                  Establishing live feed…
+                </div>
+              ) : null}
+            </div>
+          </section>
 
-          <TradeLogList logs={logsForDisplay} logTab={logTab} onTabChange={setLogTab} onFocusLog={focusChartOnLog} />
+          <div className="space-y-1 border-t border-slate-800 pt-5">
+            <p className="text-xs font-medium text-slate-400">Decision Ledger</p>
+            <p className="text-sm text-slate-500">Signal → Decision → Execution → Outcome with explainable context</p>
+          </div>
+          <DecisionTrace
+            ledgerEvents={payload?.decisions || []}
+            onEventClick={(timeValue, price, symbol) => focusChartAt(timeValue, price, symbol)}
+          />
         </div>
       </div>
     </div>
   )
+}
+
+// Helper component for stat items
+function StatItem({ label, value, format = 'number', tone = 'neutral' }) {
+  let formattedValue = '—'
+  if (value !== undefined && value !== null) {
+    const num = Number(value)
+    if (Number.isFinite(num)) {
+      if (format === 'currency') {
+        formattedValue = formatCurrency(num)
+      } else if (format === 'percent') {
+        formattedValue = formatPercent(num)
+      } else {
+        formattedValue = formatNumber(num)
+      }
+    }
+  }
+
+  let toneClass = 'text-slate-200'
+  if (tone === 'pnl') {
+    const num = Number(value)
+    if (num > 0) toneClass = 'text-emerald-400'
+    else if (num < 0) toneClass = 'text-rose-400'
+    else toneClass = 'text-slate-300'
+  } else if (tone === 'positive') {
+    toneClass = 'text-emerald-400'
+  } else if (tone === 'negative') {
+    toneClass = 'text-rose-400'
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-slate-600">{label}</p>
+      <p className={`truncate text-sm font-medium tabular-nums ${toneClass}`}>{formattedValue}</p>
+    </div>
+  )
+}
+
+// Formatting helpers
+function formatCurrency(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return num.toFixed(2)
+}
+
+function formatPercent(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return `${(num * 100).toFixed(1)}%`
+}
+
+function formatNumber(value) {
+  if (value === undefined || value === null) return '—'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '—'
+  return num.toString()
 }

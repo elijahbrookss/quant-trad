@@ -21,3 +21,7 @@ uvicorn
 httpx
 ib-insync
 ollama
+pyjwt
+cryptography
+coinbase-advanced-py
+coinbase-advanced-py

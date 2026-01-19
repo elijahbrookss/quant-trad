@@ -6,14 +6,14 @@ from typing import Any, Dict
 
 import pytest
 
-dummy_storage = types.ModuleType("portal.backend.service.storage")
+dummy_storage = types.ModuleType("portal.backend.service.storage.storage")
 dummy_storage.get_indicator = lambda *_, **__: None
 dummy_storage.load_indicators = lambda *_, **__: []
 dummy_storage.upsert_indicator = lambda *_, **__: None
 dummy_storage.delete_indicator = lambda *_, **__: None
 dummy_storage.strategies_for_indicator = lambda *_, **__: []
 dummy_storage.upsert_strategy_indicator = lambda *_, **__: None
-sys.modules.setdefault("portal.backend.service.storage", dummy_storage)
+sys.modules.setdefault("portal.backend.service.storage.storage", dummy_storage)
 
 
 class _DataSource:
@@ -107,12 +107,12 @@ sys.modules.setdefault(
     ),
 )
 
-from portal.backend.service.data_provider_resolver import DataProviderResolver
-from portal.backend.service.indicator_breakout_cache import IndicatorBreakoutCache
-from portal.backend.service.indicator_cache import IndicatorCacheManager
-from portal.backend.service.indicator_factory import IndicatorFactory
-from portal.backend.service.indicator_repository import IndicatorRepository
-from portal.backend.service.indicator_signal_runner import IndicatorSignalRunner
+from portal.backend.service.providers.data_provider_resolver import DataProviderResolver
+from indicators.runtime.indicator_breakout_cache import IndicatorBreakoutCache
+from portal.backend.service.indicators.indicator_cache import IndicatorCacheManager
+from portal.backend.service.indicators.indicator_factory import IndicatorFactory
+from portal.backend.service.indicators.indicator_repository import IndicatorRepository
+from indicators.runtime.indicator_signal_runner import IndicatorSignalRunner
 
 
 class _StubRepo(IndicatorRepository):
@@ -157,13 +157,13 @@ def test_indicator_repository_delegates(monkeypatch):
         calls.setdefault("upsert", payload)
 
     monkeypatch.setattr(
-        "portal.backend.service.indicator_repository.storage.get_indicator", fake_get
+        "portal.backend.service.indicators.indicator_repository.storage.get_indicator", fake_get
     )
     monkeypatch.setattr(
-        "portal.backend.service.indicator_repository.storage.load_indicators", fake_load
+        "portal.backend.service.indicators.indicator_repository.storage.load_indicators", fake_load
     )
     monkeypatch.setattr(
-        "portal.backend.service.indicator_repository.storage.upsert_indicator", fake_upsert
+        "portal.backend.service.indicators.indicator_repository.storage.upsert_indicator", fake_upsert
     )
 
     repo = IndicatorRepository()
@@ -228,14 +228,14 @@ def test_signal_runner_delegates(monkeypatch):
         return {"over": True}
 
     monkeypatch.setattr(
-        "portal.backend.service.indicator_signal_runner.describe_indicator_rules",
+        "indicators.runtime.indicator_signal_runner.describe_indicator_rules",
         fake_describe,
     )
     monkeypatch.setattr(
-        "portal.backend.service.indicator_signal_runner.run_indicator_rules", fake_run
+        "indicators.runtime.indicator_signal_runner.run_indicator_rules", fake_run
     )
     monkeypatch.setattr(
-        "portal.backend.service.indicator_signal_runner.build_signal_overlays", fake_overlays
+        "indicators.runtime.indicator_signal_runner.build_signal_overlays", fake_overlays
     )
 
     assert runner.describe_rules("demo") == ["rule"]
@@ -251,7 +251,7 @@ def test_signal_runner_catalog_enriches(monkeypatch):
     runner = IndicatorSignalRunner()
 
     monkeypatch.setattr(
-        "portal.backend.service.indicator_signal_runner.describe_indicator_rules",
+        "indicators.runtime.indicator_signal_runner.describe_indicator_rules",
         lambda indicator_type: [{"id": f"{indicator_type}_breakout", "label": "Breakout"}],
     )
 
@@ -266,7 +266,7 @@ def test_data_provider_resolver_defaults_and_normalizes(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        "portal.backend.service.data_provider_resolver.AlpacaProvider", lambda: "alpaca-provider"
+        "portal.backend.service.providers.data_provider_resolver.AlpacaProvider", lambda: "alpaca-provider"
     )
 
     def fake_provider(datasource, exchange=None):
@@ -274,7 +274,7 @@ def test_data_provider_resolver_defaults_and_normalizes(monkeypatch):
         return {"ds": datasource, "ex": exchange}
 
     monkeypatch.setattr(
-        "portal.backend.service.data_provider_resolver.get_provider", fake_provider
+        "portal.backend.service.providers.data_provider_resolver.get_provider", fake_provider
     )
 
     assert resolver.normalize_datasource("alpaca") == "ALPACA"

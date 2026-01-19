@@ -1,5 +1,6 @@
 import React from 'react'
 import { formatInstrumentNumber } from '../../../utils'
+import { symbolsFromInstrumentSlots } from '../../../utils/instrumentSymbols.js'
 import { Button } from '../../ui'
 
 /**
@@ -9,8 +10,20 @@ export const InstrumentsTab = ({
   strategy,
   instrumentMap,
   instrumentMessages,
-  onAddInstrument
+  onAddInstrument,
+  onRefreshMetadata,
+  refreshStatus
 }) => {
+  const formatExpiry = (value) => {
+    if (!value) return '—'
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.valueOf()) ? '—' : parsed.toLocaleString()
+  }
+  const formatFeeRate = (value) => {
+    const rate = Number(value)
+    if (!Number.isFinite(rate)) return '—'
+    return `${(rate * 100).toFixed(3)}%`
+  }
   return (
     <>
       {instrumentMessages.length > 0 && (
@@ -35,10 +48,11 @@ export const InstrumentsTab = ({
       </p>
 
       <div className="space-y-3">
-        {(strategy.symbols || []).map((symbol) => {
+        {symbolsFromInstrumentSlots(strategy.instrument_slots).map((symbol) => {
           const key = (symbol || '').toUpperCase()
           const record = key ? instrumentMap.get(key) : null
           const hasMetadata = record && (record.tick_size != null || record.tick_value != null || record.contract_size != null)
+          const isRefreshing = Boolean(refreshStatus?.[key]?.loading)
 
           return (
             <div key={key || symbol} className="rounded-xl border border-white/10 bg-black/30 p-4 text-sm text-slate-200">
@@ -47,9 +61,23 @@ export const InstrumentsTab = ({
                   <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Symbol</p>
                   <p className="text-lg font-semibold text-white">{symbol || '—'}</p>
                 </div>
-                <Button variant="ghost" size="sm" onClick={() => onAddInstrument(symbol)}>
-                  {hasMetadata ? 'Update metadata' : 'Add metadata'}
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => onAddInstrument(symbol)}>
+                    {hasMetadata ? 'Update metadata' : 'Add metadata'}
+                  </Button>
+                  {onRefreshMetadata ? (
+                    <Button variant="subtle" size="sm" onClick={() => onRefreshMetadata(symbol)} disabled={isRefreshing}>
+                      {isRefreshing ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-3 w-3 animate-spin rounded-full border border-white/30 border-t-white/80" />
+                          Refreshing…
+                        </span>
+                      ) : (
+                        'Refresh metadata'
+                      )}
+                    </Button>
+                  ) : null}
+                </div>
               </div>
 
               {hasMetadata ? (
@@ -75,13 +103,36 @@ export const InstrumentsTab = ({
                   <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Maker / Taker fees</dt>
                     <dd className="text-base text-white">
-                      {record.maker_fee_rate != null ? `${(Number(record.maker_fee_rate) * 100).toFixed(2)}%` : '—'} /{' '}
-                      {record.taker_fee_rate != null ? `${(Number(record.taker_fee_rate) * 100).toFixed(2)}%` : '—'}
+                      {formatFeeRate(record.maker_fee_rate)} / {formatFeeRate(record.taker_fee_rate)}
                     </dd>
                   </div>
                   <div>
                     <dt className="uppercase tracking-[0.3em] text-slate-500">Min order size</dt>
                     <dd className="text-base text-white">{formatInstrumentNumber(record.min_order_size)}</dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Base currency</dt>
+                    <dd className="text-base text-white">
+                      {record.metadata?.instrument_fields?.base_currency || record.base_currency || '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Quote currency</dt>
+                    <dd className="text-base text-white">
+                      {record.quote_currency || record.metadata?.instrument_fields?.quote_currency || '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Can short</dt>
+                    <dd className="text-base text-white">{record.can_short ? 'Yes' : 'No'}</dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Has funding</dt>
+                    <dd className="text-base text-white">{record.has_funding ? 'Yes' : 'No'}</dd>
+                  </div>
+                  <div>
+                    <dt className="uppercase tracking-[0.3em] text-slate-500">Expiry</dt>
+                    <dd className="text-base text-white">{formatExpiry(record.expiry_ts)}</dd>
                   </div>
                 </dl>
               ) : (

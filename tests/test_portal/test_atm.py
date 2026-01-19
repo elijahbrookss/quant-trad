@@ -1,7 +1,7 @@
 import pytest
 import pytest
 
-from portal.backend.service.atm import (
+from portal.backend.service.risk.atm import (
     DEFAULT_ATM_TEMPLATE,
     merge_templates,
     normalise_template,

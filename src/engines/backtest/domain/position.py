@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from risk import clamp_stop, price_from_r
 
 from .models import Candle, Leg
-from .utils import isoformat
+from ..utils import isoformat
 
 
 @dataclass

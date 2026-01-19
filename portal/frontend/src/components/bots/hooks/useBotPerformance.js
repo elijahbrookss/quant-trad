@@ -8,39 +8,44 @@ import {
 } from '../../../adapters/bot.adapter.js'
 import { toSec } from '../chartDataUtils.js'
 
-const logCandleDiagnostics = (label, candles, botId) => {
-  if (!Array.isArray(candles) || candles.length === 0) {
+const logCandleDiagnostics = (label, seriesList, botId) => {
+  if (!Array.isArray(seriesList) || seriesList.length === 0) {
     return
   }
-  let previous = null
-  let violation = null
-  let first = null
-  let last = null
-  for (let idx = 0; idx < candles.length; idx += 1) {
-    const raw = candles[idx]?.time
-    const epoch = toSec(raw)
-    if (!Number.isFinite(epoch)) {
-      continue
+  for (const series of seriesList) {
+    const candles = Array.isArray(series?.candles) ? series.candles : []
+    if (!candles.length) continue
+    let previous = null
+    let violation = null
+    let first = null
+    let last = null
+    for (let idx = 0; idx < candles.length; idx += 1) {
+      const raw = candles[idx]?.time
+      const epoch = toSec(raw)
+      if (!Number.isFinite(epoch)) {
+        continue
+      }
+      if (first === null) first = epoch
+      last = epoch
+      if (previous !== null && epoch < previous) {
+        violation = { index: idx, prev: previous, current: epoch }
+        break
+      }
+      previous = epoch
     }
-    if (first === null) first = epoch
-    last = epoch
-    if (previous !== null && epoch < previous) {
-      violation = { index: idx, prev: previous, current: epoch }
-      break
+    const context = {
+      botId,
+      label,
+      symbol: series?.symbol,
+      count: candles.length,
+      first,
+      last,
     }
-    previous = epoch
-  }
-  const context = {
-    botId,
-    label,
-    count: candles.length,
-    first,
-    last,
-  }
-  if (violation) {
-    console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
-  } else {
-    console.debug('[BotPerformanceModal] Candle payload received', context)
+    if (violation) {
+      console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
+    } else {
+      console.debug('[BotPerformanceModal] Candle payload received', context)
+    }
   }
 }
 
@@ -51,13 +56,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
   const [action, setAction] = useState(null)
   const [streamStatus, setStreamStatus] = useState('idle')
   const streamRef = useRef(null)
-  const playbackDebounceRef = useRef(null)
-  const [playbackDraft, setPlaybackDraft] = useState(() => {
-    const initial = bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
-    const raw = Number(initial)
-    return Number.isFinite(raw) ? raw : 10
-  })
-  const [speedSaving, setSpeedSaving] = useState(false)
+  const focusDebounceRef = useRef(null)
 
   const baseStatus = (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
   const runtimeStatus = (payload?.runtime?.status || baseStatus).toLowerCase()
@@ -66,21 +65,10 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     [runtimeStatus],
   )
 
-  useEffect(() => {
-    const candidate =
-      payload?.runtime?.playback_speed ?? bot?.runtime?.playback_speed ?? bot?.playback_speed ?? 10
-    const numeric = Number(candidate)
-    if (Number.isFinite(numeric)) {
-      setPlaybackDraft(numeric)
-    } else {
-      setPlaybackDraft(10)
-    }
-  }, [payload?.runtime?.playback_speed, bot?.runtime?.playback_speed, bot?.playback_speed, bot?.id])
-
   useEffect(
     () => () => {
-      if (playbackDebounceRef.current) {
-        clearTimeout(playbackDebounceRef.current)
+      if (focusDebounceRef.current) {
+        clearTimeout(focusDebounceRef.current)
       }
     },
     [],
@@ -88,11 +76,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
 
   const applyPayload = useCallback((incoming) => {
     if (!incoming) return
-    setPayload((prev) => {
-      const next = { ...(prev || {}), ...incoming }
-      next.meta = incoming.meta || prev?.meta || next.meta || null
-      return next
-    })
+    setPayload(incoming)
   }, [])
 
   const loadPerformance = useCallback(
@@ -102,7 +86,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
       setError(null)
       try {
         const data = await fetchBotPerformance(bot.id)
-        logCandleDiagnostics('initial_fetch', data?.candles, bot?.id)
+        logCandleDiagnostics('initial_fetch', data?.series, bot?.id)
         applyPayload(data)
       } catch (err) {
         setError(err?.message || 'Unable to fetch performance')
@@ -132,40 +116,11 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     setStreamStatus('connecting')
     const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
 
-    let pendingUpdate = null
-    let throttleTimer = null
-    let lastIntrabarUpdate = 0
-    const INTRABAR_THROTTLE_MS = 150
-
-    const flushUpdate = () => {
-      if (pendingUpdate) {
-        applyPayload(pendingUpdate)
-        pendingUpdate = null
-        lastIntrabarUpdate = Date.now()
-      }
-      throttleTimer = null
-    }
-
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data)
-        logCandleDiagnostics(event.type || 'message', data?.candles, bot?.id)
-
-        if (event.type === 'intrabar') {
-          pendingUpdate = data
-          if (!throttleTimer) {
-            const timeSinceLastUpdate = Date.now() - lastIntrabarUpdate
-            const delay = Math.max(0, INTRABAR_THROTTLE_MS - timeSinceLastUpdate)
-            throttleTimer = setTimeout(flushUpdate, delay)
-          }
-        } else {
-          if (throttleTimer) {
-            clearTimeout(throttleTimer)
-            throttleTimer = null
-            pendingUpdate = null
-          }
-          applyPayload(data)
-        }
+        logCandleDiagnostics(event.type || 'message', data?.series, bot?.id)
+        applyPayload(data)
         setStreamStatus('open')
       } catch (err) {
         console.error('bot stream parse failed', err)
@@ -183,46 +138,28 @@ export function useBotPerformance({ bot, open, onRefresh }) {
       for (const evt of events) {
         source.removeEventListener(evt, handler)
       }
-      if (throttleTimer) {
-        clearTimeout(throttleTimer)
-      }
       source.close()
       streamRef.current = null
       setStreamStatus('closed')
     }
   }, [open, bot?.id, applyPayload, streamEligible])
 
-  const persistPlaybackSpeed = useCallback(
-    async (value) => {
+  const handleFocusSymbolChange = useCallback(
+    (symbol) => {
       if (!bot?.id) return
-      setSpeedSaving(true)
-      try {
-        await updateBot(bot.id, { playback_speed: Number.isFinite(value) ? value : 0 })
-        onRefresh?.()
-      } catch (err) {
-        console.error('bot playback update failed', err)
-        setError(err?.message || 'Unable to update playback speed')
-      } finally {
-        setSpeedSaving(false)
+      if (focusDebounceRef.current) {
+        clearTimeout(focusDebounceRef.current)
       }
+      focusDebounceRef.current = setTimeout(async () => {
+        focusDebounceRef.current = null
+        try {
+          await updateBot(bot.id, { focus_symbol: symbol || null })
+        } catch (err) {
+          console.error('bot focus symbol update failed', err)
+        }
+      }, 150)
     },
-    [bot?.id, onRefresh],
-  )
-
-  const handlePlaybackInput = useCallback(
-    (event) => {
-      const raw = Number(event?.target?.value)
-      const next = Number.isFinite(raw) ? raw : 0
-      setPlaybackDraft(next)
-      if (playbackDebounceRef.current) {
-        clearTimeout(playbackDebounceRef.current)
-      }
-      playbackDebounceRef.current = setTimeout(() => {
-        playbackDebounceRef.current = null
-        persistPlaybackSpeed(next)
-      }, 300)
-    },
-    [persistPlaybackSpeed],
+    [bot?.id],
   )
 
   const handlePause = useCallback(async () => {
@@ -255,22 +192,17 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     }
   }, [bot?.id, loadPerformance, onRefresh])
 
-  const playbackLabel = useMemo(() => (playbackDraft <= 0 ? 'Instant' : `${playbackDraft.toFixed(2)}x`), [playbackDraft])
-
   return {
     action,
     applyPayload,
     error,
     handlePause,
-    handlePlaybackInput,
+    handleFocusSymbolChange,
     handleResume,
     loadPerformance,
     payload,
-    playbackDraft,
-    playbackLabel,
     runtimeStatus,
     setError,
-    speedSaving,
     streamEligible,
     streamStatus,
     loading,
