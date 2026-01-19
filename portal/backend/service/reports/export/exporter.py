@@ -15,8 +15,8 @@ from sqlalchemy import bindparam, create_engine, text
 from data_providers.config.runtime import runtime_config_from_env
 from utils.log_context import build_log_context, with_log_context
 
-from ...storage import storage
 from ...storage.storage import _parse_optional_timestamp
+from .. import report_data
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def _resolve_instruments(run: Dict[str, Any], symbols: Sequence[str]) -> Tuple[L
     for symbol in symbols:
         record = snapshot_map.get(symbol)
         if record is None:
-            record = storage.find_instrument(run.get("datasource"), run.get("exchange"), symbol)
+            record = report_data.find_instrument(run.get("datasource"), run.get("exchange"), symbol)
         if record is None:
             raise KeyError(f"Instrument not found for symbol {symbol}")
         instruments.append(record)
@@ -481,13 +481,13 @@ def build_run_export(
     if pre_roll_hours < 0 or post_roll_hours < 0:
         raise ValueError("pre_roll_hours and post_roll_hours must be >= 0")
 
-    run = storage.get_bot_run(run_id)
+    run = report_data.get_run(run_id)
     if not run:
         raise KeyError(f"Run not found: {run_id}")
 
-    trades = storage.list_bot_trades_for_run(run_id)
+    trades = report_data.list_trades_for_run(run_id)
     trade_ids = [trade.get("id") for trade in trades if trade.get("id")]
-    trade_events = storage.list_bot_trade_events_for_trades(trade_ids)
+    trade_events = report_data.list_trade_events_for_trades(trade_ids)
     decision_ledger = list(run.get("decision_ledger") or [])
 
     start, end = _resolve_run_window(run)
