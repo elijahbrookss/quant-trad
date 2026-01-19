@@ -1,13 +1,18 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import PropTypes from 'prop-types';
-import { X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, X } from 'lucide-react';
 import './DecisionTable.css';
 
 const PAGE_SIZE = 25;
+const METRIC_LIMIT = 5;
 
-/**
- * Format time with month/day and time (MMM DD HH:MM)
- */
+const EVENT_BADGES = {
+  signal: { label: 'SIGNAL', color: 'bg-sky-500/15 text-sky-400 border-sky-500/30' },
+  decision: { label: 'DECISION', color: 'bg-amber-500/15 text-amber-400 border-amber-500/30' },
+  execution: { label: 'EXEC', color: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' },
+  outcome: { label: 'OUTCOME', color: 'bg-violet-500/15 text-violet-400 border-violet-500/30' },
+};
+
 const formatTimeWithDate = (value) => {
   if (!value) return '—';
   const date = new Date(value);
@@ -22,418 +27,648 @@ const formatTimeWithDate = (value) => {
   return `${month} ${day} ${time}`;
 };
 
-/**
- * Format date/time for detail modal
- */
-const formatDateTime = (value) => {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
+const formatNumber = (value, digits = 2) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return num.toFixed(digits);
+};
+
+const formatSigned = (value, digits = 2) => {
+  const formatted = formatNumber(value, digits);
+  if (formatted === null) return null;
+  return Number(value) >= 0 ? `+${formatted}` : formatted;
+};
+
+const formatSide = (side) => {
+  if (!side) return '—';
+  const normalized = String(side).toLowerCase();
+  if (normalized === 'long' || normalized === 'buy') return 'LONG';
+  if (normalized === 'short' || normalized === 'sell') return 'SHORT';
+  return side.toUpperCase();
+};
+
+const formatValue = (value) => {
+  if (value === undefined || value === null) return '—';
+  if (typeof value === 'number') return formatNumber(value, 4) || String(value);
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+};
+
+const getEventBadge = (eventType) => {
+  return EVENT_BADGES[eventType] || { label: 'EVENT', color: 'bg-slate-500/15 text-slate-400 border-slate-500/30' };
+};
+
+const actionFromEvent = (event) => {
+  const subtype = String(event.event_subtype || '').toLowerCase();
+  if (subtype.includes('accepted')) return 'accept';
+  if (subtype.includes('rejected')) return 'reject';
+  if (['entry', 'open', 'fill'].includes(subtype)) return 'entry';
+  if (['stop', 'sl'].includes(subtype)) return 'stop';
+  if (['target', 'tp'].includes(subtype)) return 'tp';
+  if (['close', 'exit'].includes(subtype)) return 'close';
+  if (event.event_type === 'signal') return 'signal';
+  return subtype || '—';
+};
+
+const buildClusterSummary = (events) => {
+  const counts = events.reduce(
+    (acc, event) => {
+      const type = String(event.event_type || 'event').toUpperCase();
+      acc[type] = (acc[type] || 0) + 1;
+      return acc;
+    },
+    {}
+  );
+  const parts = Object.entries(counts)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([type, count]) => `${count} ${type}`);
+  return `Cluster: ${events.length} events (${parts.join(', ')})`;
+};
+
+const duplicateKeyForEvent = (event) => {
+  const action = actionFromEvent(event);
+  const ts = event.event_ts || event.created_at || '';
+  const side = event.side || '';
+  const price = event.price ?? '';
+  return `${ts}|${event.event_type}|${action}|${side}|${price}`;
+};
+
+const buildDuplicateRows = (events, groupId, expandedDuplicates) => {
+  const rows = [];
+  const execGroups = new Map();
+  const nonExec = [];
+  events.forEach((event) => {
+    if (event.event_type === 'execution') {
+      const key = duplicateKeyForEvent(event);
+      if (!execGroups.has(key)) {
+        execGroups.set(key, []);
+      }
+      execGroups.get(key).push(event);
+    } else {
+      nonExec.push({ kind: 'event', event, groupId });
+    }
+  });
+
+  execGroups.forEach((groupEvents, key) => {
+    if (groupEvents.length === 1) {
+      rows.push({ kind: 'event', event: groupEvents[0], groupId });
+      return;
+    }
+    rows.push({
+      kind: 'dup',
+      groupId,
+      dupKey: key,
+      count: groupEvents.length,
+      event: groupEvents[0],
+      children: groupEvents,
+      expanded: expandedDuplicates.has(key),
+    });
+    if (expandedDuplicates.has(key)) {
+      groupEvents.forEach((child) => rows.push({ kind: 'event', event: child, groupId, duplicate: true }));
+    }
+  });
+
+  return [...nonExec, ...rows].sort((a, b) => {
+    const left = new Date((a.event?.created_at || a.event?.event_ts || 0)).getTime();
+    const right = new Date((b.event?.created_at || b.event?.event_ts || 0)).getTime();
+    return left - right;
   });
 };
 
-/**
- * Get event type badge styling
- */
-const getEventBadge = (decision, kind, eventType) => {
-  if (kind === 'execution') {
-    // Color-code execution events by type
-    const type = (eventType || '').toLowerCase();
-    if (type === 'entry' || type === 'open') {
-      return { label: 'ENTRY', color: 'bg-sky-500/15 text-sky-400 border-sky-500/30' };
-    }
-    if (type === 'close' || type === 'exit') {
-      return { label: 'CLOSE', color: 'bg-violet-500/15 text-violet-400 border-violet-500/30' };
-    }
-    if (type === 'stop' || type === 'sl') {
-      return { label: 'STOP', color: 'bg-rose-500/15 text-rose-400 border-rose-500/30' };
-    }
-    if (type === 'target' || type === 'tp') {
-      return { label: 'TP', color: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' };
-    }
-    return { label: 'EXEC', color: 'bg-slate-500/15 text-slate-400 border-slate-500/30' };
-  }
-  if (decision === 'accepted') {
-    return { label: 'ACCEPT', color: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' };
-  }
-  if (decision === 'rejected') {
-    return { label: 'REJECT', color: 'bg-rose-500/15 text-rose-400 border-rose-500/30' };
-  }
-  return { label: 'SIGNAL', color: 'bg-slate-500/15 text-slate-400 border-slate-500/30' };
+const buildKeyMetrics = (aiContext) => {
+  if (!aiContext || typeof aiContext !== 'object') return [];
+  const keys = Object.keys(aiContext).sort();
+  return keys.slice(0, METRIC_LIMIT).map((key) => ({ key, value: aiContext[key] }));
 };
 
-/**
- * Format currency value
- */
-const formatCurrency = (value, currency) => {
-  if (value === undefined || value === null) return null;
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  const formatted = num.toFixed(2);
-  return currency ? `${formatted} ${currency}` : formatted;
+const buildBreadcrumb = (event, eventIndex) => {
+  const chain = [];
+  let current = event;
+  const seen = new Set();
+  while (current && current.event_id && !seen.has(current.event_id)) {
+    chain.unshift(current);
+    seen.add(current.event_id);
+    const parentId = current.parent_event_id;
+    if (!parentId) break;
+    current = eventIndex.get(parentId);
+  }
+  return chain;
 };
 
-/**
- * Format price
- */
-const formatPrice = (value) => {
-  if (value === undefined || value === null) return null;
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  return num.toFixed(2);
+const sortEvents = (events, order) => {
+  const sorted = events.slice().sort((a, b) => {
+    const left = new Date(a.created_at || a.event_ts || 0).getTime();
+    const right = new Date(b.created_at || b.event_ts || 0).getTime();
+    return left - right;
+  });
+  return order === 'asc' ? sorted : sorted.reverse();
 };
 
-/**
- * Build a contextual event description
- */
-const buildEventDescription = (row) => {
-  const type = (row.eventType || row.event || '').toLowerCase();
-  const price = formatPrice(row.price);
-  const direction = row.direction ? (row.direction === 'long' || row.direction === 'buy' ? 'Long' : 'Short') : null;
-  const contracts = row.contracts;
-  const pnl = row.pnl !== null ? Number(row.pnl) : null;
-  const currency = row.currency || '';
-
-  // Entry events
-  if (type === 'entry' || type === 'open') {
-    const parts = ['Opened'];
-    if (direction) parts.push(direction);
-    if (contracts) parts.push(`${contracts}x`);
-    if (price) parts.push(`@ ${price}`);
-    return parts.join(' ');
-  }
-
-  // Close events
-  if (type === 'close' || type === 'exit') {
-    if (pnl !== null) {
-      const pnlStr = pnl >= 0 ? `+${pnl.toFixed(2)}` : pnl.toFixed(2);
-      return `Closed for ${pnlStr} ${currency}`.trim();
-    }
-    return price ? `Closed @ ${price}` : 'Position closed';
-  }
-
-  // Stop events
-  if (type === 'stop' || type === 'sl') {
-    if (pnl !== null) {
-      const pnlStr = pnl >= 0 ? `+${pnl.toFixed(2)}` : pnl.toFixed(2);
-      return `Stop hit · ${pnlStr} ${currency}`.trim();
-    }
-    return price ? `Stop triggered @ ${price}` : 'Stop triggered';
-  }
-
-  // Target events
-  if (type === 'target' || type === 'tp') {
-    const legName = row.leg || '';
-    if (pnl !== null) {
-      const pnlStr = pnl >= 0 ? `+${pnl.toFixed(2)}` : pnl.toFixed(2);
-      return legName ? `${legName} hit · ${pnlStr} ${currency}`.trim() : `Target hit · ${pnlStr} ${currency}`.trim();
-    }
-    return legName ? `${legName} hit @ ${price}` : `Target hit @ ${price}`;
-  }
-
-  // Signal accepted
-  if (row.decision === 'accepted') {
-    return direction ? `${direction} signal accepted` : 'Signal accepted';
-  }
-
-  // Signal rejected
-  if (row.decision === 'rejected') {
-    const reason = row.reason ? row.reason.replace(/_/g, ' ') : 'No reason';
-    return reason;
-  }
-
-  // Fallback
-  return row.label || type.replace(/_/g, ' ') || '—';
+const filterEvents = (events, { eventType, reasonCode, tradeId }) => {
+  return events.filter((event) => {
+    if (eventType !== 'all' && event.event_type !== eventType) return false;
+    if (reasonCode !== 'all' && event.reason_code !== reasonCode) return false;
+    if (tradeId && !(event.trade_id || '').toLowerCase().includes(tradeId.toLowerCase())) return false;
+    return true;
+  });
 };
 
-/**
- * Event Detail Modal - Shows full details when clicking a row
- */
-function EventDetailModal({ event, onClose }) {
-  if (!event) return null;
+function InspectModal({ selection, eventIndex, onSelectEvent, onClose }) {
+  if (!selection) {
+    return null;
+  }
 
-  const handleBackdropClick = (e) => {
-    if (e.target === e.currentTarget) onClose();
-  };
-
-  // Extract all available data from the event
-  const details = useMemo(() => {
-    const items = [];
-
-    // Core info
-    if (event.symbol) items.push({ label: 'Symbol', value: event.symbol });
-    if (event.direction) items.push({ label: 'Direction', value: event.direction.toUpperCase() });
-    if (event.signal_type) items.push({ label: 'Signal Type', value: event.signal_type.replace(/_/g, ' ') });
-
-    // Pricing
-    if (event.price !== undefined) items.push({ label: 'Price', value: formatPrice(event.price) });
-    if (event.entry_price !== undefined) items.push({ label: 'Entry Price', value: formatPrice(event.entry_price) });
-    if (event.stop_price !== undefined) items.push({ label: 'Stop Price', value: formatPrice(event.stop_price) });
-    if (event.exit_price !== undefined) items.push({ label: 'Exit Price', value: formatPrice(event.exit_price) });
-
-    // Trade details
-    if (event.contracts !== undefined) items.push({ label: 'Contracts', value: event.contracts });
-    if (event.size !== undefined) items.push({ label: 'Size', value: event.size });
-    if (event.quantity !== undefined) items.push({ label: 'Quantity', value: event.quantity });
-    if (event.leverage !== undefined) items.push({ label: 'Leverage', value: `${event.leverage}x` });
-    if (event.margin_type) items.push({ label: 'Margin Type', value: event.margin_type });
-
-    // Fees and P&L - check multiple field names
-    const feeValue = event.fees_paid ?? event.fees ?? event.fee ?? event.commission;
-    if (feeValue !== undefined && feeValue !== null) {
-      items.push({ label: 'Fees', value: formatCurrency(feeValue, event.fee_currency || event.currency) });
-    }
-
-    // P&L values - show gross first, then net if different
-    if (event.gross_pnl !== undefined) {
-      items.push({ label: 'Gross P&L', value: formatCurrency(event.gross_pnl, event.currency), tone: Number(event.gross_pnl) >= 0 ? 'positive' : 'negative' });
-    }
-    const netPnl = event.net_pnl ?? event.pnl;
-    if (netPnl !== undefined) {
-      items.push({ label: 'Net P&L', value: formatCurrency(netPnl, event.currency), tone: Number(netPnl) >= 0 ? 'positive' : 'negative' });
-    }
-
-    // IDs and references
-    if (event.trade_id) items.push({ label: 'Trade ID', value: event.trade_id, mono: true });
-    if (event.tradeId && event.tradeId !== event.trade_id) items.push({ label: 'Trade ID', value: event.tradeId, mono: true });
-    if (event.order_id) items.push({ label: 'Order ID', value: event.order_id, mono: true });
-    if (event.strategy_id) items.push({ label: 'Strategy ID', value: event.strategy_id, mono: true });
-    if (event.strategy_name) items.push({ label: 'Strategy', value: event.strategy_name });
-    if (event.rule_id) items.push({ label: 'Rule ID', value: event.rule_id, mono: true });
-    if (event.leg) items.push({ label: 'Leg', value: event.leg });
-
-    // Timing
-    if (event.trade_time) items.push({ label: 'Trade Time', value: formatDateTime(event.trade_time) });
-    if (event.bar_time) items.push({ label: 'Bar Time', value: formatDateTime(event.bar_time) });
-    if (event.event_time) items.push({ label: 'Event Time', value: formatDateTime(event.event_time) });
-    if (event.created_at) items.push({ label: 'Created At', value: formatDateTime(event.created_at) });
-    if (event.filled_at) items.push({ label: 'Filled At', value: formatDateTime(event.filled_at) });
-
-    // Reason/message
-    if (event.reason) items.push({ label: 'Reason', value: event.reason.replace(/_/g, ' '), full: true });
-    if (event.message) items.push({ label: 'Message', value: event.message, full: true });
-
-    return items;
-  }, [event]);
-
-  // Extract metadata/conditions if present
-  const metadata = event.metadata || {};
-  const conditions = event.conditions || [];
+  const event = selection.event;
+  const breadcrumb = buildBreadcrumb(event, eventIndex);
+  const reasonCode = event.reason_code || null;
+  const reasonDetail = event.reason_detail || null;
+  const evidenceRefs = Array.isArray(event.evidence_refs) ? event.evidence_refs : [];
+  const aiContext = event.context || null;
+  const keyMetrics = buildKeyMetrics(aiContext);
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onClick={handleBackdropClick}
-    >
-      <div className="relative max-h-[80vh] w-full max-w-lg overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className={`rounded border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ${
-              getEventBadge(event.decision, event.kind, event.eventType).color
-            }`}>
-              {getEventBadge(event.decision, event.kind, event.eventType).label}
-            </span>
-            <span className="text-sm font-medium text-slate-200">
-              {buildEventDescription(event)}
-            </span>
+    <div className="decision-inspect-backdrop" onClick={onClose}>
+      <div
+        className="decision-inspect"
+        onClick={(eventClick) => eventClick.stopPropagation()}
+      >
+        <div className="decision-inspect-header">
+          <div>
+            <p className="decision-explain-title">Inspect</p>
+            <p className="decision-explain-muted">Deterministic ledger facts</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-800 hover:text-slate-300"
-          >
+          <button type="button" className="inspect-close" onClick={onClose} aria-label="Close inspect">
             <X className="size-4" />
           </button>
         </div>
 
-        {/* Content */}
-        <div className="max-h-[60vh] overflow-y-auto p-4">
-          <div className="grid grid-cols-2 gap-3">
-            {details.map((item, idx) => (
-              <div
-                key={`${item.label}-${idx}`}
-                className={item.full ? 'col-span-2' : ''}
-              >
-                <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">
-                  {item.label}
-                </p>
-                <p className={`mt-0.5 text-sm ${
-                  item.tone === 'positive' ? 'text-emerald-400' :
-                  item.tone === 'negative' ? 'text-rose-400' :
-                  item.mono ? 'font-mono text-xs text-slate-400' :
-                  'text-slate-200'
-                }`}>
-                  {item.value || '—'}
-                </p>
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Event Summary</p>
+          <div className="decision-explain-grid two-col">
+            <div>
+              <p className="decision-explain-key">created_at</p>
+              <p className="decision-explain-id">{event.created_at || event.event_ts || '—'}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">symbol</p>
+              <p className="decision-explain-id">{event.symbol || '—'}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">action + side</p>
+              <p className="decision-explain-id">{actionFromEvent(event)} · {formatSide(event.side)}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">size / price</p>
+              <p className="decision-explain-id">{formatNumber(event.qty, 4) || '—'} / {formatNumber(event.price, 4) || '—'}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">event_impact_pnl</p>
+              <p className="decision-explain-id">{formatSigned(event.event_impact_pnl, 2) || '—'}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">trade_net_pnl</p>
+              <p className="decision-explain-id">{formatSigned(event.trade_net_pnl, 2) || '—'}</p>
+            </div>
+            <div>
+              <p className="decision-explain-key">instrument_id</p>
+              <div className="identifier-value">
+                <span className="decision-explain-id">{event.instrument_id || '—'}</span>
+                {event.instrument_id && (
+                  <button
+                    type="button"
+                    className="copy-button"
+                    onClick={() => navigator.clipboard?.writeText(String(event.instrument_id))}
+                    aria-label="Copy instrument id"
+                  >
+                    <Copy className="size-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Cause Chain</p>
+          {breadcrumb.length ? (
+            <div className="decision-explain-chain">
+              {breadcrumb.map((node, idx) => {
+                const label = EVENT_BADGES[node.event_type]?.label || String(node.event_type || 'EVENT').toUpperCase();
+                return (
+                  <button
+                    key={node.event_id}
+                    type="button"
+                    className="chain-pill"
+                    onClick={() => onSelectEvent(node.event_id)}
+                  >
+                    <span>{label}</span>
+                    {idx < breadcrumb.length - 1 && <ChevronRight className="size-3" />}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="decision-explain-muted">No parent chain recorded.</p>
+          )}
+        </div>
+
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Reason</p>
+          {reasonCode ? (
+            <div className="decision-explain-reason">
+              <p className="decision-explain-value">{reasonCode}</p>
+              {reasonDetail && <p className="decision-explain-sub">{reasonDetail}</p>}
+            </div>
+          ) : (
+            <p className="decision-explain-muted">Reason not recorded (instrumentation incomplete).</p>
+          )}
+        </div>
+
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Evidence</p>
+          {evidenceRefs.length ? (
+            <div className="decision-evidence-list">
+              {evidenceRefs.map((ref, idx) => {
+                const refType = (ref.ref_type || 'unknown').toString().toUpperCase();
+                const refId = ref.ref_id ? String(ref.ref_id) : '—';
+                const summary = ref.summary ? String(ref.summary) : '—';
+                return (
+                  <div key={`${ref.ref_id || idx}`} className="evidence-row">
+                    <span className="evidence-pill">{refType}</span>
+                    <span className="evidence-id">{refId}</span>
+                    <span className="evidence-summary">{summary}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="decision-explain-muted">No evidence captured.</p>
+          )}
+        </div>
+
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Key Metrics</p>
+          {keyMetrics.length ? (
+            <div className="decision-explain-metrics">
+              {keyMetrics.map((metric) => (
+                <div key={metric.key} className="metric-row">
+                  <span className="metric-key">{metric.key}</span>
+                  <span className="metric-value">{formatValue(metric.value)}</span>
+                </div>
+              ))}
+              <details className="decision-explain-raw">
+                <summary>View raw context</summary>
+                <pre className="decision-explain-json">{JSON.stringify(aiContext, null, 2)}</pre>
+              </details>
+            </div>
+          ) : (
+            <p className="decision-explain-muted">No metrics recorded.</p>
+          )}
+        </div>
+
+        <div className="decision-explain-section">
+          <p className="decision-explain-label">Identifiers</p>
+          <div className="decision-explain-grid two-col">
+            {[
+              ['event_id', event.event_id],
+              ['parent_event_id', event.parent_event_id],
+              ['trade_id', event.trade_id],
+            ].map(([label, value]) => (
+              <div key={label} className="identifier-row">
+                <p className="decision-explain-key">{label}</p>
+                <div className="identifier-value">
+                  <span className="decision-explain-id">{value || '—'}</span>
+                  {value && (
+                    <button
+                      type="button"
+                      className="copy-button"
+                      onClick={() => navigator.clipboard?.writeText(String(value))}
+                      aria-label={`Copy ${label}`}
+                    >
+                      <Copy className="size-3" />
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
-
-          {/* Conditions */}
-          {conditions.length > 0 && (
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Conditions</p>
-              <div className="mt-2 space-y-1">
-                {conditions.map((cond, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-xs">
-                    <span className={`size-1.5 rounded-full ${cond.passed ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                    <span className="text-slate-400">{cond.name || cond.condition || `Condition ${idx + 1}`}</span>
-                    {cond.value !== undefined && (
-                      <span className="text-slate-500">= {String(cond.value)}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Metadata */}
-          {Object.keys(metadata).length > 0 && (
-            <div className="mt-4 border-t border-slate-800 pt-4">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Metadata</p>
-              <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-950 p-2 text-[10px] text-slate-400">
-                {JSON.stringify(metadata, null, 2)}
-              </pre>
-            </div>
-          )}
         </div>
       </div>
     </div>
   );
 }
 
-export default function DecisionTable({ decisions, executionEvents, onRowClick }) {
-  const [selectedEvent, setSelectedEvent] = useState(null);
+InspectModal.propTypes = {
+  selection: PropTypes.shape({
+    kind: PropTypes.string.isRequired,
+    event: PropTypes.object.isRequired,
+    children: PropTypes.array,
+  }),
+  eventIndex: PropTypes.instanceOf(Map).isRequired,
+  onSelectEvent: PropTypes.func.isRequired,
+  onClose: PropTypes.func.isRequired,
+};
 
-  const entries = useMemo(() => {
-    // Build a map of trade_id -> direction from decisions (signal_accepted events have direction)
-    const tradeDirectionMap = new Map();
-    for (const decision of decisions) {
-      if (decision.trade_id && decision.direction) {
-        tradeDirectionMap.set(decision.trade_id, decision.direction);
+export default function DecisionTable({ ledgerEvents, onRowClick }) {
+  const [selectedRow, setSelectedRow] = useState(null);
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const [expandedDuplicates, setExpandedDuplicates] = useState(new Set());
+  const [page, setPage] = useState(0);
+  const [eventTypeFilter, setEventTypeFilter] = useState('all');
+  const [reasonCodeFilter, setReasonCodeFilter] = useState('all');
+  const [tradeIdFilter, setTradeIdFilter] = useState('');
+  const [sortOrder, setSortOrder] = useState('desc');
+
+  const eventIndex = useMemo(() => {
+    const index = new Map();
+    ledgerEvents.forEach((event) => {
+      if (event.event_id) index.set(event.event_id, event);
+    });
+    return index;
+  }, [ledgerEvents]);
+
+  const reasonCodes = useMemo(() => {
+    const codes = new Set();
+    ledgerEvents.forEach((event) => {
+      if (event.reason_code) codes.add(event.reason_code);
+    });
+    return Array.from(codes).sort();
+  }, [ledgerEvents]);
+
+  const groupedRows = useMemo(() => {
+    const filtered = filterEvents(ledgerEvents, {
+      eventType: eventTypeFilter,
+      reasonCode: reasonCodeFilter,
+      tradeId: tradeIdFilter,
+    });
+
+    const grouped = new Map();
+    const singles = [];
+    filtered.forEach((event) => {
+      if (!event.trade_id) {
+        singles.push({ kind: 'event', event });
+        return;
       }
-    }
-    // Also check execution events for entry events which have direction
-    for (const event of executionEvents) {
-      const eventType = (event.event || event.type || '').toLowerCase();
-      if (event.trade_id && event.direction && (eventType === 'entry' || eventType === 'open')) {
-        tradeDirectionMap.set(event.trade_id, event.direction);
+      if (!grouped.has(event.trade_id)) {
+        grouped.set(event.trade_id, []);
       }
-    }
+      grouped.get(event.trade_id).push(event);
+    });
 
-    const decisionRows = decisions.map((decision) => ({
-      kind: 'decision',
-      time: decision.trade_time || decision.chart_time || decision.bar_time || decision.timestamp,
-      chartTime: decision.chart_time || decision.bar_time,
-      createdAt: decision.created_at || decision.timestamp,
-      symbol: decision.symbol,
-      direction: decision.direction || decision.signal_direction,
-      decision: decision.decision,
-      eventType: decision.event,
-      label: decision.event || (decision.decision === 'accepted' ? 'Signal Accepted' : decision.decision === 'rejected' ? 'Signal Rejected' : 'Signal'),
-      price: decision.price || decision.signal_price,
-      pnl: decision?.metadata?.net_pnl ?? decision?.metadata?.pnl ?? null,
-      fees: decision?.metadata?.fees_paid ?? decision?.metadata?.fees ?? null,
-      currency: decision?.metadata?.currency ?? null,
-      contracts: decision?.metadata?.contracts ?? null,
-      tradeId: decision.trade_id,
-      reason: decision.reason,
-      leg: decision.leg,
-      // Pass through all original data for detail modal
-      ...decision,
-    }));
-
-    const executionRows = executionEvents.map((event) => {
-      const eventType = (event.event || event.type || '').toLowerCase();
-      // Get direction from event, or look it up from the trade_id map
-      let direction = event.direction;
-      if (!direction && event.trade_id) {
-        direction = tradeDirectionMap.get(event.trade_id);
-      }
-
-      // Extract P&L - check multiple possible field names from backend
-      // Close events have: net_pnl, gross_pnl, fees_paid
-      // Stop/target events have: pnl (at leg level)
-      let pnlValue = null;
-      if (event.net_pnl !== undefined && event.net_pnl !== null) {
-        pnlValue = event.net_pnl;
-      } else if (event.pnl !== undefined && event.pnl !== null) {
-        pnlValue = event.pnl;
-      } else if (event.gross_pnl !== undefined && event.gross_pnl !== null) {
-        pnlValue = event.gross_pnl;
-      }
-
-      // Extract fees
-      let feesValue = null;
-      if (event.fees_paid !== undefined && event.fees_paid !== null) {
-        feesValue = event.fees_paid;
-      } else if (event.fees !== undefined && event.fees !== null) {
-        feesValue = event.fees;
-      } else if (event.fee !== undefined && event.fee !== null) {
-        feesValue = event.fee;
-      }
-
+    const groupEntries = Array.from(grouped.entries()).map(([tradeId, events]) => {
+      const sorted = sortEvents(events, 'asc');
+      const symbol = sorted.find((item) => item.symbol)?.symbol || null;
+      const createdAt = sortOrder === 'asc'
+        ? (sorted[0]?.created_at || sorted[0]?.event_ts || null)
+        : (sorted[sorted.length - 1]?.created_at || sorted[sorted.length - 1]?.event_ts || null);
       return {
-        kind: 'execution',
-        time: event.trade_time || event.event_time || event.bar_time || event.timestamp,
-        chartTime: event.chart_time || event.bar_time || event.event_time || event.timestamp,
-        createdAt: event.created_at || event.timestamp,
-        symbol: event.symbol,
-        direction,
-        decision: null,
-        eventType,
-        label: (event.event || event.type || 'execution').replace(/_/g, ' '),
-        price: event.price,
-        pnl: pnlValue,
-        fees: feesValue,
-        currency: event.currency ?? event.quote_currency ?? null,
-        contracts: event.contracts ?? event.quantity ?? event.size ?? null,
-        tradeId: event.trade_id,
-        leg: event.leg,
-        // Pass through all original data for detail modal
-        ...event,
+        kind: 'group',
+        groupId: tradeId,
+        tradeId,
+        created_at: createdAt,
+        symbol,
+        children: sorted,
       };
     });
 
-    return [...decisionRows, ...executionRows]
-      .filter((row) => row.time)
-      .sort((a, b) => new Date(b.createdAt || b.time).getTime() - new Date(a.createdAt || a.time).getTime());
-  }, [decisions, executionEvents]);
+    const allEntries = [...groupEntries, ...singles];
+    return allEntries.sort((a, b) => {
+      const left = new Date((a.event?.created_at || a.event?.event_ts || a.created_at || 0)).getTime();
+      const right = new Date((b.event?.created_at || b.event?.event_ts || b.created_at || 0)).getTime();
+      return sortOrder === 'asc' ? left - right : right - left;
+    });
+  }, [ledgerEvents, eventTypeFilter, reasonCodeFilter, tradeIdFilter, sortOrder]);
 
-  const [page, setPage] = useState(0);
-  const pageCount = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  const visibleRows = useMemo(() => {
+    const filteringActive = eventTypeFilter !== 'all' || reasonCodeFilter !== 'all' || tradeIdFilter.trim() !== '';
+    const filtered = [];
+    groupedRows.forEach((row) => {
+      if (row.kind === 'group') {
+        if (filteringActive) {
+          const dupRows = buildDuplicateRows(row.children, row.groupId, expandedDuplicates);
+          filtered.push(...dupRows);
+          return;
+        }
+        filtered.push(row);
+        if (expandedGroups.has(row.groupId)) {
+          const dupRows = buildDuplicateRows(row.children, row.groupId, expandedDuplicates);
+          filtered.push(...dupRows);
+        }
+        return;
+      }
+      filtered.push(row);
+    });
+    return filtered;
+  }, [
+    groupedRows,
+    expandedGroups,
+    expandedDuplicates,
+    eventTypeFilter,
+    reasonCodeFilter,
+    tradeIdFilter,
+  ]);
+
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / PAGE_SIZE));
+  const pageStart = page * PAGE_SIZE;
+  const pageEnd = pageStart + PAGE_SIZE;
+  const currentRows = visibleRows.slice(pageStart, pageEnd);
 
   useEffect(() => {
     setPage(0);
-  }, [entries.length]);
+  }, [ledgerEvents, eventTypeFilter, reasonCodeFilter, tradeIdFilter, sortOrder]);
 
-  const pageStart = page * PAGE_SIZE;
-  const pageEnd = pageStart + PAGE_SIZE;
-  const currentRows = entries.slice(pageStart, pageEnd);
+  const toggleGroup = useCallback((groupId) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleDuplicate = useCallback((dupKey) => {
+    setExpandedDuplicates((prev) => {
+      const next = new Set(prev);
+      if (next.has(dupKey)) {
+        next.delete(dupKey);
+      } else {
+        next.add(dupKey);
+      }
+      return next;
+    });
+  }, []);
 
   const handleRowClick = useCallback((row) => {
-    setSelectedEvent(row);
+    if (row.kind !== 'event') return;
+    setSelectedRow(row);
   }, []);
 
   const handleRowDoubleClick = useCallback((row) => {
-    onRowClick?.(row.chartTime || row.time, row.price, row.symbol);
+    if (row.kind !== 'event') return;
+    const event = row.event;
+    onRowClick?.(event.event_ts, event.price, event.symbol);
   }, [onRowClick]);
 
+  const handleSelectEventId = useCallback((eventId) => {
+    const event = eventIndex.get(eventId);
+    if (!event) return;
+    setSelectedRow({ kind: 'event', event });
+  }, [eventIndex]);
+
+  const renderGroupRow = (row, idx) => {
+    const isExpanded = expandedGroups.has(row.groupId);
+    const summary = buildClusterSummary(row.children);
+    return (
+      <tr key={`group-${row.groupId}-${idx}`} className="group-row">
+        <td className="tabular-nums">
+          <button
+            type="button"
+            className="group-toggle"
+            onClick={() => toggleGroup(row.groupId)}
+            aria-label={isExpanded ? 'Collapse trade group' : 'Expand trade group'}
+          >
+            <span className={`group-icon ${isExpanded ? 'expanded' : ''}`}>
+              <ChevronRight className="size-3" />
+            </span>
+          </button>
+          {row.created_at ? formatTimeWithDate(row.created_at) : '—'}
+        </td>
+        <td className="truncate">{row.symbol || '—'}</td>
+        <td className="uppercase">CLUSTER</td>
+        <td className="cluster-summary" title={summary}>{summary}</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+      </tr>
+    );
+  };
+
+  const renderDuplicateRow = (row, idx) => {
+    const event = row.event;
+    const badge = getEventBadge(event.event_type);
+    const createdAt = event.created_at || event.event_ts || null;
+    const action = actionFromEvent(event).toUpperCase();
+    return (
+      <tr key={`dup-${row.dupKey}-${idx}`} className="dup-row">
+        <td className="tabular-nums">
+          <button
+            type="button"
+            className="group-toggle"
+            onClick={() => toggleDuplicate(row.dupKey)}
+            aria-label={row.expanded ? 'Collapse duplicates' : 'Expand duplicates'}
+          >
+            <span className={`group-icon ${row.expanded ? 'expanded' : ''}`}>
+              <ChevronRight className="size-3" />
+            </span>
+          </button>
+          {createdAt ? formatTimeWithDate(createdAt) : '—'}
+        </td>
+        <td className="truncate">{event.symbol || '—'}</td>
+        <td>
+          <span className={`decision-type-badge ${badge.color}`}>
+            {badge.label}
+          </span>
+        </td>
+        <td className="uppercase">
+          {action} <span className="count-badge">x{row.count}</span>
+        </td>
+        <td className="tabular-nums">{formatSide(event.side)}</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">{formatNumber(event.price, 4) || '—'}</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">—</td>
+        <td className="tabular-nums">{event.reason_code || '—'}</td>
+      </tr>
+    );
+  };
+
+  const renderEventRow = (row, idx) => {
+    const event = row.event;
+    const badge = getEventBadge(event.event_type);
+    const impactPnl = formatSigned(event.event_impact_pnl, 2);
+    const netPnl = formatSigned(event.trade_net_pnl, 2);
+    const createdAt = event.created_at || event.event_ts || null;
+    return (
+      <tr
+        key={`${event.event_id || event.event_ts}-${idx}`}
+        className={`${row.groupId ? 'child-row' : ''} ${row.duplicate ? 'dup-child' : ''} event-row`}
+        onClick={() => handleRowClick(row)}
+        onDoubleClick={() => handleRowDoubleClick(row)}
+      >
+        <td className="tabular-nums">{createdAt ? formatTimeWithDate(createdAt) : '—'}</td>
+        <td className="truncate">{event.symbol || '—'}</td>
+        <td>
+          <span className={`decision-type-badge ${badge.color}`}>
+            {badge.label}
+          </span>
+        </td>
+        <td className="uppercase">{actionFromEvent(event)}</td>
+        <td className="tabular-nums">{formatSide(event.side)}</td>
+        <td className="tabular-nums">{formatNumber(event.qty, 4) || '—'}</td>
+        <td className="tabular-nums">{formatNumber(event.price, 4) || '—'}</td>
+        <td className={`tabular-nums ${impactPnl ? (Number(event.event_impact_pnl) >= 0 ? 'pnl-positive' : 'pnl-negative') : ''}`}>
+          {impactPnl || '—'}
+        </td>
+        <td className={`tabular-nums ${netPnl ? (Number(event.trade_net_pnl) >= 0 ? 'pnl-positive' : 'pnl-negative') : ''}`}>
+          {netPnl || '—'}
+        </td>
+        <td className="tabular-nums">{event.reason_code || '—'}</td>
+      </tr>
+    );
+  };
+
   return (
-    <div className="decision-table">
-      <div className="decision-table-header">
+    <div className="decision-ledger">
+      <div className="decision-ledger-header">
         <div>
-          <p className="decision-table-kicker">Decision Ledger</p>
-          <p className="decision-table-subtitle">Click row for details · Double-click to focus chart</p>
+          <p className="decision-ledger-kicker">Decision Ledger</p>
+          <p className="decision-ledger-subtitle">Inspect deterministic events (no narrative)</p>
         </div>
-        <div className="decision-table-controls">
+        <div className="decision-ledger-controls">
+          <div className="decision-ledger-filter">
+            <label htmlFor="ledger-type">event_type</label>
+            <select id="ledger-type" value={eventTypeFilter} onChange={(event) => setEventTypeFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="signal">SIGNAL</option>
+              <option value="decision">DECISION</option>
+              <option value="execution">EXEC</option>
+              <option value="outcome">OUTCOME</option>
+            </select>
+          </div>
+          <div className="decision-ledger-filter">
+            <label htmlFor="ledger-reason">reason_code</label>
+            <select id="ledger-reason" value={reasonCodeFilter} onChange={(event) => setReasonCodeFilter(event.target.value)}>
+              <option value="all">All</option>
+              {reasonCodes.map((code) => (
+                <option key={code} value={code}>{code}</option>
+              ))}
+            </select>
+          </div>
+          <div className="decision-ledger-filter">
+            <label htmlFor="ledger-trade">trade_id</label>
+            <input
+              id="ledger-trade"
+              type="text"
+              value={tradeIdFilter}
+              onChange={(event) => setTradeIdFilter(event.target.value)}
+              placeholder="trade_id"
+            />
+          </div>
+          <div className="decision-ledger-filter">
+            <label htmlFor="ledger-sort">sort</label>
+            <select id="ledger-sort" value={sortOrder} onChange={(event) => setSortOrder(event.target.value)}>
+              <option value="desc">Newest</option>
+              <option value="asc">Oldest</option>
+            </select>
+          </div>
+        </div>
+        <div className="decision-ledger-pagination">
           <button
             type="button"
             className="decision-table-nav"
@@ -456,89 +691,56 @@ export default function DecisionTable({ decisions, executionEvents, onRowClick }
         </div>
       </div>
 
-      <div className="decision-table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th style={{ width: '110px' }}>Time</th>
-              <th style={{ width: '70px' }}>Type</th>
-              <th style={{ width: '120px' }}>Symbol</th>
-              <th style={{ width: '60px' }}>Side</th>
-              <th style={{ width: '90px' }}>Price</th>
-              <th style={{ width: '90px' }}>P&L</th>
-              <th style={{ width: '70px' }}>Fees</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody>
-            {currentRows.length ? (
-              currentRows.map((row, idx) => {
-                const badge = getEventBadge(row.decision, row.kind, row.eventType);
-                const pnlValue = row.pnl !== null ? Number(row.pnl) : null;
-                const pnlColor = pnlValue !== null
-                  ? pnlValue > 0 ? 'pnl-positive' : pnlValue < 0 ? 'pnl-negative' : ''
-                  : '';
-                const feesValue = row.fees !== null ? Number(row.fees) : null;
-                const description = buildEventDescription(row);
-
-                return (
-                  <tr
-                    key={`${row.kind}-${row.time}-${idx}`}
-                    className={row.kind}
-                    onClick={() => handleRowClick(row)}
-                    onDoubleClick={() => handleRowDoubleClick(row)}
-                  >
-                    <td className="tabular-nums">{formatTimeWithDate(row.time)}</td>
-                    <td>
-                      <span className={`decision-type-badge ${badge.color}`}>
-                        {badge.label}
-                      </span>
+      <div className="decision-ledger-body">
+        <div className="decision-ledger-table">
+          <div className="decision-ledger-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: '150px' }}>created_at</th>
+                  <th style={{ width: '110px' }}>symbol</th>
+                  <th style={{ width: '90px' }}>event_type</th>
+                  <th style={{ width: '90px' }}>action</th>
+                  <th style={{ width: '70px' }}>side</th>
+                  <th style={{ width: '70px' }}>size</th>
+                  <th style={{ width: '90px' }}>price</th>
+                  <th style={{ width: '120px' }}>event_impact_pnl</th>
+                  <th style={{ width: '120px' }}>trade_net_pnl</th>
+                  <th>reason_code</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currentRows.length ? (
+                  currentRows.map((row, idx) => (
+                    row.kind === 'group'
+                      ? renderGroupRow(row, idx)
+                      : row.kind === 'dup'
+                        ? renderDuplicateRow(row, idx)
+                        : renderEventRow(row, idx)
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={10} className="decision-table-empty">
+                      No ledger events yet.
                     </td>
-                    <td className="font-medium symbol-cell">{row.symbol || '—'}</td>
-                    <td>
-                      {row.direction ? (
-                        <span className={`decision-pill ${row.direction}`}>
-                          {row.direction === 'long' || row.direction === 'buy' ? 'LONG' : 'SHORT'}
-                        </span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    <td className="tabular-nums">{formatPrice(row.price) || '—'}</td>
-                    <td className={`tabular-nums font-medium ${pnlColor}`}>
-                      {pnlValue !== null ? formatCurrency(pnlValue, row.currency) : '—'}
-                    </td>
-                    <td className="tabular-nums text-slate-500">
-                      {feesValue !== null && feesValue > 0 ? `-${feesValue.toFixed(2)}` : '—'}
-                    </td>
-                    <td className="truncate event-label" title={description}>{description}</td>
                   </tr>
-                );
-              })
-            ) : (
-              <tr>
-                <td colSpan={8} className="decision-table-empty">
-                  No decision events yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Event Detail Modal */}
-      {selectedEvent && (
-        <EventDetailModal
-          event={selectedEvent}
-          onClose={() => setSelectedEvent(null)}
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <InspectModal
+          selection={selectedRow}
+          eventIndex={eventIndex}
+          onSelectEvent={handleSelectEventId}
+          onClose={() => setSelectedRow(null)}
         />
-      )}
+      </div>
     </div>
   );
 }
 
 DecisionTable.propTypes = {
-  decisions: PropTypes.arrayOf(PropTypes.object).isRequired,
-  executionEvents: PropTypes.arrayOf(PropTypes.object).isRequired,
+  ledgerEvents: PropTypes.arrayOf(PropTypes.object).isRequired,
   onRowClick: PropTypes.func,
 };

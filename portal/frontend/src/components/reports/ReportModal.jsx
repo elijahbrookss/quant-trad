@@ -8,6 +8,7 @@ import {
   Download,
   Info,
   Layers,
+  RefreshCw,
   TrendingDown,
   TrendingUp,
   X,
@@ -18,6 +19,7 @@ import { formatCurrency, formatNumber, formatPercent, formatTimeframe } from '..
 import { reportService } from '../../services/reportService.js'
 import { Badge } from '../ui/Badge.jsx'
 import { getStatDescription, getChartDescription } from './statDescriptions.js'
+import DecisionTable from '../bots/DecisionTrace/DecisionTable.jsx'
 
 const formatDateTime = (value) => {
   if (!value) return '--'
@@ -105,9 +107,21 @@ const LightweightChart = ({ data, type = 'area', color = '#38bdf8', height = 160
         return { time: timestamp, value }
       })
       .filter(Boolean)
-      .sort((a, b) => a.time - b.time)
 
-    if (chartData.length === 0) {
+    chartData.sort((a, b) => a.time - b.time)
+
+    // Deduplicate identical timestamps to satisfy lightweight-charts' strict ordering.
+    const uniqueChartData = []
+    for (const point of chartData) {
+      const last = uniqueChartData[uniqueChartData.length - 1]
+      if (last && last.time === point.time) {
+        uniqueChartData[uniqueChartData.length - 1] = point
+      } else {
+        uniqueChartData.push(point)
+      }
+    }
+
+    if (uniqueChartData.length === 0) {
       chart.remove()
       return
     }
@@ -122,7 +136,7 @@ const LightweightChart = ({ data, type = 'area', color = '#38bdf8', height = 160
         priceLineVisible: false,
         lastValueVisible: false,
       })
-      series.setData(chartData)
+      series.setData(uniqueChartData)
     } else if (type === 'line') {
       const series = chart.addSeries(LineSeries, {
         color,
@@ -131,14 +145,14 @@ const LightweightChart = ({ data, type = 'area', color = '#38bdf8', height = 160
         priceLineVisible: false,
         lastValueVisible: false,
       })
-      series.setData(chartData)
+      series.setData(uniqueChartData)
     } else if (type === 'histogram') {
       const series = chart.addSeries(HistogramSeries, {
         color,
         priceLineVisible: false,
         lastValueVisible: false,
       })
-      series.setData(chartData)
+      series.setData(uniqueChartData)
     }
 
     chart.timeScale().fitContent()
@@ -470,6 +484,9 @@ export function ReportModal({ runId, open, onClose }) {
   const [error, setError] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
   const [tradesExpanded, setTradesExpanded] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportToast, setExportToast] = useState(null)
+  const exportToastTimer = useRef(null)
 
   const fetchReport = useCallback(async () => {
     if (!runId) return
@@ -485,6 +502,34 @@ export function ReportModal({ runId, open, onClose }) {
     }
   }, [runId])
 
+  const handleExport = useCallback(async () => {
+    if (!runId || exporting) return
+    setExporting(true)
+    setExportToast(null)
+    try {
+      const { blob, filename } = await reportService.exportReport(runId)
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename || `run_${runId}_llm_export.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      const message = err?.message || 'Failed to export report'
+      setExportToast(message)
+      if (exportToastTimer.current) {
+        clearTimeout(exportToastTimer.current)
+      }
+      exportToastTimer.current = setTimeout(() => {
+        setExportToast(null)
+      }, 4200)
+    } finally {
+      setExporting(false)
+    }
+  }, [exporting, runId])
+
   useEffect(() => {
     if (open) {
       fetchReport()
@@ -493,6 +538,14 @@ export function ReportModal({ runId, open, onClose }) {
     }
   }, [fetchReport, open])
 
+  useEffect(() => {
+    return () => {
+      if (exportToastTimer.current) {
+        clearTimeout(exportToastTimer.current)
+      }
+    }
+  }, [])
+
   if (!open) return null
 
   const summary = report?.summary || {}
@@ -500,6 +553,7 @@ export function ReportModal({ runId, open, onClose }) {
   const analytics = report?.trade_analytics || {}
   const runConfig = report?.run_config || {}
   const trades = report?.tables?.trades || []
+  const decisionLedger = report?.decision_ledger || []
   const balances = runConfig?.wallet_start?.balances || {}
   const balanceEntries = Object.entries(balances)
   const startingBalanceLabel = balanceEntries.length
@@ -511,7 +565,16 @@ export function ReportModal({ runId, open, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/80 px-4 py-8 backdrop-blur-sm">
-      <div className="w-full max-w-5xl rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl">
+      <div className="relative w-full max-w-5xl rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl">
+        {exportToast ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="absolute right-5 top-5 z-20 rounded-xl border border-rose-500/30 bg-rose-500/15 px-4 py-2 text-xs text-rose-200 shadow-lg"
+          >
+            {exportToast}
+          </div>
+        ) : null}
         <header className="sticky top-0 z-10 flex flex-wrap items-start justify-between gap-4 rounded-t-2xl border-b border-white/10 bg-[#0d1117]/95 p-5 backdrop-blur">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -533,12 +596,18 @@ export function ReportModal({ runId, open, onClose }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled
-              title="Coming soon"
-              className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-slate-400 opacity-60"
+              disabled={exporting || !runId}
+              onClick={handleExport}
+              className={`inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-xs text-slate-200 transition hover:border-white/20 hover:bg-white/10 ${
+                exporting ? 'opacity-70' : ''
+              }`}
             >
-              <Download className="size-3.5" />
-              Export
+              {exporting ? (
+                <RefreshCw className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              {exporting ? 'Exporting...' : 'Export'}
             </button>
             <button
               type="button"
@@ -826,6 +895,20 @@ export function ReportModal({ runId, open, onClose }) {
                   </div>
                   <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4">
                     <TradeTable trades={trades} expanded={tradesExpanded} onToggle={() => setTradesExpanded((prev) => !prev)} />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-slate-400">
+                        Decision Ledger ({decisionLedger.length})
+                      </div>
+                    </div>
+                    {decisionLedger.length ? (
+                      <DecisionTable ledgerEvents={decisionLedger} />
+                    ) : (
+                      <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4 text-xs text-slate-500">
+                        No decision ledger recorded for this run.
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

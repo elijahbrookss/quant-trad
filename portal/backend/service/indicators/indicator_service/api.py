@@ -182,6 +182,7 @@ def overlays_for_instance(
     symbol: Optional[str] = None,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    instrument_id: Optional[str] = None,
     *,
     overlay_options: Optional[Mapping[str, Any]] = None,
     ctx: IndicatorServiceContext = _context,
@@ -195,6 +196,7 @@ def overlays_for_instance(
         symbol=symbol,
         datasource=datasource,
         exchange=exchange,
+        instrument_id=instrument_id,
         overlay_options=overlay_options,
     )
 

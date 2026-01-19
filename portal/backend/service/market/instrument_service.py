@@ -290,6 +290,28 @@ def resolve_instrument(datasource: Optional[str], exchange: Optional[str], symbo
     return find_instrument(datasource, exchange, symbol)
 
 
+def require_instrument_id(datasource: Optional[str], exchange: Optional[str], symbol: Optional[str]) -> str:
+    """Return the instrument_id for the provided identifiers or raise if missing."""
+
+    normalized_symbol = _normalize_symbol(symbol)
+    if not normalized_symbol:
+        raise ValueError("Instrument symbol is required to resolve instrument_id")
+
+    record = resolve_instrument(datasource, exchange, normalized_symbol)
+    instrument_id = record.get("id") if isinstance(record, dict) else None
+    if not instrument_id:
+        logger.error(
+            "instrument_lookup_failed | symbol=%s datasource=%s exchange=%s",
+            normalized_symbol,
+            datasource,
+            exchange,
+        )
+        raise ValueError(
+            f"Instrument not found for symbol={normalized_symbol} datasource={datasource} exchange={exchange}"
+        )
+    return instrument_id
+
+
 def instrument_index() -> Dict[str, Dict[str, Any]]:
     """Return instruments keyed by datasource/exchange/symbol triplets."""
 
@@ -450,4 +472,30 @@ def validate_instrument(
         )
         return None, f"Unable to persist instrument metadata: {exc}"
 
+    return record, None
+
+
+def resolve_or_create_instrument(
+    datasource: Optional[str],
+    exchange: Optional[str],
+    symbol: Optional[str],
+    *,
+    provider_id: Optional[str] = None,
+    venue_id: Optional[str] = None,
+    force_refresh: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Resolve or create a canonical instrument after provider validation."""
+
+    record, error = validate_instrument(
+        datasource,
+        exchange,
+        symbol,
+        provider_id=provider_id,
+        venue_id=venue_id,
+        force_refresh=force_refresh,
+    )
+    if error:
+        return None, error
+    if not record:
+        return None, "Instrument validation returned no record."
     return record, None

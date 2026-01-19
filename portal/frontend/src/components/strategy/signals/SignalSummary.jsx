@@ -50,37 +50,39 @@ export const SignalSummary = ({ result, instrumentId }) => {
       : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
 
   return (
-    <div className="space-y-4 rounded-2xl border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] p-4 text-sm text-slate-200">
-      <div>
-        <h4 className="text-sm font-semibold text-white">Evaluation window</h4>
-        <p className="text-xs text-slate-400">
-          {window?.start || 'start ?'} → {window?.end || 'end ?'} • {window?.interval || 'interval ?'} •{' '}
-          {window?.symbol || 'symbol ?'}
-          {window?.datasource ? ` • ${window.datasource}` : ''}
-          {window?.exchange ? ` (${window.exchange})` : ''}
-        </p>
-        <span className={`mt-2 inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${statusClasses}`}>
+    <div className="space-y-4 rounded-xl border border-white/10 bg-[#0f1524]/80 p-4 text-sm text-slate-200">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-white">Evaluation window</h4>
+          <p className="text-xs text-slate-400">
+            {window?.start || 'start ?'} → {window?.end || 'end ?'} • {window?.interval || 'interval ?'} •{' '}
+            {window?.symbol || 'symbol ?'}
+            {window?.datasource ? ` • ${window.datasource}` : ''}
+            {window?.exchange ? ` (${window.exchange})` : ''}
+          </p>
+        </div>
+        <span className={`inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${statusClasses}`}>
           {statusLabel}
         </span>
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">
-        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
-          <p className="text-xs uppercase tracking-[0.3em] text-emerald-200/80">Buy</p>
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
+          <p className="text-[10px] uppercase tracking-[0.3em] text-emerald-200/80">Buy</p>
           <p className="text-lg font-semibold">{buySignalCount}</p>
           <p className="text-[11px] text-emerald-200/70">
-            signals · {buyRuleMatches || 0} rule{buyRuleMatches === 1 ? '' : 's'} matched
+            {buyRuleMatches || 0} rule{buyRuleMatches === 1 ? '' : 's'} matched
           </p>
         </div>
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-rose-100">
-          <p className="text-xs uppercase tracking-[0.3em] text-rose-200/80">Sell</p>
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-100">
+          <p className="text-[10px] uppercase tracking-[0.3em] text-rose-200/80">Sell</p>
           <p className="text-lg font-semibold">{sellSignalCount}</p>
           <p className="text-[11px] text-rose-200/70">
-            signals · {sellRuleMatches || 0} rule{sellRuleMatches === 1 ? '' : 's'} matched
+            {sellRuleMatches || 0} rule{sellRuleMatches === 1 ? '' : 's'} matched
           </p>
         </div>
-        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3 text-indigo-100">
-          <p className="text-xs uppercase tracking-[0.3em] text-indigo-200/80">Rules</p>
+        <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-indigo-100">
+          <p className="text-[10px] uppercase tracking-[0.3em] text-indigo-200/80">Rules</p>
           <p className="text-lg font-semibold">
             {matchedRules}
             <span className="text-sm text-indigo-200/80">/{totalRules || 0}</span>

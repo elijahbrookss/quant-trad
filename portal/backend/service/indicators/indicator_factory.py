@@ -13,6 +13,7 @@ from indicators.trendline import TrendlineIndicator
 from indicators.vwap import VWAPIndicator
 
 from ..providers.data_provider_resolver import DataProviderResolver, default_resolver
+from ..market import instrument_service
 
 if TYPE_CHECKING:
     from .indicator_service.context import IndicatorServiceContext
@@ -99,7 +100,12 @@ class IndicatorFactory:
         if exchange and not datasource:
             datasource = "CCXT"
 
-        ctx = DataContext(**ctx_kwargs)
+        instrument_id = instrument_service.require_instrument_id(
+            datasource,
+            exchange,
+            ctx_kwargs.get("symbol"),
+        )
+        ctx = DataContext(**ctx_kwargs, instrument_id=instrument_id)
         ctx.validate()
         provider = self._resolver.resolve(datasource, exchange=exchange)
         inst = Cls.from_context(provider=provider, ctx=ctx, **params)

@@ -1,16 +1,13 @@
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from ..service.market.candle_service import fetch_ohlcv
-from ..service.providers.provider_service import translate_market
-from ..service.providers.data_provider_resolver import DataProviderResolver
+from ..service.market.candle_service import fetch_ohlcv_by_instrument
 import pandas as pd
 from datetime import datetime, timezone
 import logging
 
 router = APIRouter()
-_resolver = DataProviderResolver()
 logger = logging.getLogger(__name__)
 
 def _normalize_time(value: str) -> str:
@@ -30,67 +27,63 @@ def _normalize_time(value: str) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 class CandleRequest(BaseModel):
-    symbol: str
+    instrument_id: str
+    symbol: Optional[str] = None
     start: str
     end: str
     timeframe: str
-    datasource: Optional[str] = None
-    exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
 
 @router.post("/")
 def get_candles(req: CandleRequest):
-    datasource = req.datasource
-    exchange = req.exchange
-    if req.provider_id or req.venue_id:
-        provider, venue_exchange = translate_market(req.provider_id, req.venue_id)
-        datasource = datasource or provider
-        exchange = exchange or venue_exchange
-    datasource = _resolver.normalize_datasource(datasource)
-    exchange = _resolver.normalize_exchange(exchange)
     start = _normalize_time(req.start)
     end = _normalize_time(req.end)
 
     logger.info(
-        "candle_fetch_request | symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s",
+        "candle_fetch_request | instrument_id=%s symbol=%s interval=%s start=%s end=%s",
+        req.instrument_id,
         req.symbol,
         req.timeframe,
         start,
         end,
-        datasource,
-        exchange,
     )
-    df = fetch_ohlcv(
-        req.symbol,
-        start,
-        end,
-        req.timeframe,
-        datasource=datasource,
-        exchange=exchange,
-    )
+    try:
+        df = fetch_ohlcv_by_instrument(
+            req.instrument_id,
+            start,
+            end,
+            req.timeframe,
+        )
+    except ValueError as exc:
+        logger.warning(
+            "candle_fetch_instrument_missing | instrument_id=%s symbol=%s interval=%s start=%s end=%s error=%s",
+            req.instrument_id,
+            req.symbol,
+            req.timeframe,
+            start,
+            end,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
 
     if df is None or df.empty:
        logger.warning(
-           "candle_fetch_empty | symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s",
+           "candle_fetch_empty | instrument_id=%s symbol=%s interval=%s start=%s end=%s",
+           req.instrument_id,
            req.symbol,
            req.timeframe,
            start,
            end,
-           datasource,
-           exchange,
        )
        return {"candles": []}
 
     logger.info(
-        "candle_fetch_success | symbol=%s interval=%s start=%s end=%s candles=%d datasource=%s exchange=%s",
+        "candle_fetch_success | instrument_id=%s symbol=%s interval=%s start=%s end=%s candles=%d",
+        req.instrument_id,
         req.symbol,
         req.timeframe,
         start,
         end,
         len(df),
-        datasource,
-        exchange,
     )
     return {
         "candles": [

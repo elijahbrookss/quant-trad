@@ -50,6 +50,7 @@ export const SignalsTab = ({
   const interval = strategy.timeframe || '—'
   const datasource = activeInstrument?.datasource || '—'
   const exchange = activeInstrument?.exchange || '—'
+  const instrumentResult = signalResult?.instruments?.[signalInstrumentId] || null
 
   // Handle preset date range selection
   const handlePresetClick = (days) => {
@@ -61,30 +62,44 @@ export const SignalsTab = ({
   }
 
   // Get signal counts for mini summary
-  const buyCount = signalResult?.buy_signals?.length || signalResult?.summary?.buy_count || 0
-  const sellCount = signalResult?.sell_signals?.length || signalResult?.summary?.sell_count || 0
+  const countSignals = (entries = []) => entries.reduce((total, entry) => {
+    if (!entry) return total
+    if (Array.isArray(entry.signals) && entry.signals.length) {
+      return total + entry.signals.length
+    }
+    return total + (entry.matched ? 1 : 0)
+  }, 0)
+  const buyCount = instrumentResult
+    ? countSignals(instrumentResult.buy_signals || [])
+    : signalResult?.summary?.buy_count || 0
+  const sellCount = instrumentResult
+    ? countSignals(instrumentResult.sell_signals || [])
+    : signalResult?.summary?.sell_count || 0
+  const rulesMatched = instrumentResult
+    ? (instrumentResult.rule_results || []).filter((entry) => entry?.matched).length
+    : signalResult?.summary?.rules_matched
 
   return (
     <div className="space-y-4">
       {/* Mini signal summary - shown if we have results */}
       {signalResult && (
-        <div className="flex items-center gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-2">
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-2">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-emerald-500" />
             <span className="text-sm font-medium text-white">{buyCount}</span>
-            <span className="text-xs text-slate-500">buy signals</span>
+            <span className="text-xs text-slate-500">buys</span>
           </div>
           <div className="h-4 w-px bg-white/10" />
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-rose-500" />
             <span className="text-sm font-medium text-white">{sellCount}</span>
-            <span className="text-xs text-slate-500">sell signals</span>
+            <span className="text-xs text-slate-500">sells</span>
           </div>
-          {signalResult?.summary?.rules_matched !== undefined && (
+          {rulesMatched !== undefined && (
             <>
               <div className="h-4 w-px bg-white/10" />
               <span className="text-xs text-slate-400">
-                {signalResult.summary.rules_matched}/{strategy.rules?.length || 0} rules matched
+                {rulesMatched}/{strategy.rules?.length || 0} rules matched
               </span>
             </>
           )}

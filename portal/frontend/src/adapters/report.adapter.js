@@ -57,3 +57,21 @@ export async function compareReports(runIds = []) {
   })
   return handleResponse(res)
 }
+
+export async function exportReport(runId, options = {}) {
+  const res = await fetch(`${BASE}/api/reports/${runId}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options || {}),
+    mode: 'cors',
+  })
+  if (!res.ok) {
+    await handleResponse(res)
+  }
+
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') || ''
+  const match = disposition.match(/filename="?([^";]+)"?/i)
+  const filename = match?.[1] || `run_${runId}_llm_export.zip`
+  return { blob, filename }
+}

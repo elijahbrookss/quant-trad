@@ -194,61 +194,83 @@ class StrategySignal:
 
 
 @dataclass
-class DecisionEvent:
-    """Represents a strategy-level decision point for observability."""
+class DecisionLedgerEvent:
+    """Represents a causal ledger event for BotLens explainability."""
 
     event_id: str
-    event: str  # "signal_received", "signal_accepted", "signal_rejected", "trade_opened", etc.
-    timestamp: str  # ISO8601 when event occurred
-    bar_time: str  # ISO8601 of the bar that triggered this event
-    strategy_id: str
-    strategy_name: str
-    symbol: str
-    signal_type: str  # e.g., "breakout", "retest"
-    signal_direction: Optional[str] = None  # "long" | "short"
-    signal_price: Optional[float] = None
-    rule_id: Optional[str] = None
-    decision: Optional[str] = None  # "accepted" | "rejected"
-    reason: Optional[str] = None  # Why rejected (if applicable)
-    trade_id: Optional[str] = None  # Links to actual trade if opened
-    conditions: Optional[List[Dict[str, Any]]] = None  # Rule condition results
-    metadata: Optional[Dict[str, Any]] = None
-    chart_time: Optional[str] = None  # ISO8601 for chart focus (defaults to bar_time)
-    trade_time: Optional[str] = None  # ISO8601 of trade entry time (if applicable)
-    created_at: Optional[str] = None  # ISO8601 when the event was created
+    event_ts: str
+    event_type: str
+    reason_code: str
+    event_subtype: Optional[str] = None
+    parent_event_id: Optional[str] = None
+    trade_id: Optional[str] = None
+    position_id: Optional[str] = None
+    strategy_id: Optional[str] = None
+    strategy_name: Optional[str] = None
+    symbol: Optional[str] = None
+    instrument_id: Optional[str] = None
+    timeframe: Optional[str] = None
+    side: Optional[str] = None
+    qty: Optional[float] = None
+    price: Optional[float] = None
+    event_impact_pnl: Optional[float] = None
+    trade_net_pnl: Optional[float] = None
+    reason_detail: Optional[str] = None
+    evidence_refs: Optional[List[Dict[str, Any]]] = None
+    context: Optional[Dict[str, Any]] = None
+    alternatives_rejected: Optional[List[Dict[str, Any]]] = None
+    created_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.reason_code:
+            raise ValueError("reason_code is required for DecisionLedgerEvent")
 
     def serialize(self) -> Dict[str, Any]:
-        """Return a JSON-serializable representation of the decision event."""
+        """Return a JSON-serializable representation of the ledger event."""
         payload: Dict[str, Any] = {
-            "id": self.event_id,
-            "event": self.event,
-            "timestamp": self.timestamp,
-            "created_at": self.created_at or self.timestamp,
-            "bar_time": self.bar_time,
-            "chart_time": self.chart_time or self.bar_time,
-            "strategy_id": self.strategy_id,
-            "strategy_name": self.strategy_name,
-            "symbol": self.symbol,
-            "signal_type": self.signal_type,
+            "event_id": self.event_id,
+            "event_ts": self.event_ts,
+            "event_type": self.event_type,
+            "reason_code": self.reason_code,
         }
-        if self.trade_time is not None:
-            payload["trade_time"] = self.trade_time
-        if self.signal_direction is not None:
-            payload["direction"] = self.signal_direction
-        if self.signal_price is not None:
-            payload["price"] = round(self.signal_price, 4)
-        if self.rule_id is not None:
-            payload["rule_id"] = self.rule_id
-        if self.decision is not None:
-            payload["decision"] = self.decision
-        if self.reason is not None:
-            payload["reason"] = self.reason
+        if self.event_subtype is not None:
+            payload["event_subtype"] = self.event_subtype
+        if self.parent_event_id is not None:
+            payload["parent_event_id"] = self.parent_event_id
         if self.trade_id is not None:
             payload["trade_id"] = self.trade_id
-        if self.conditions is not None:
-            payload["conditions"] = self.conditions
-        if self.metadata is not None:
-            payload["metadata"] = self.metadata
+        if self.position_id is not None:
+            payload["position_id"] = self.position_id
+        if self.strategy_id is not None:
+            payload["strategy_id"] = self.strategy_id
+        if self.strategy_name is not None:
+            payload["strategy_name"] = self.strategy_name
+        if self.symbol is not None:
+            payload["symbol"] = self.symbol
+        if self.instrument_id is not None:
+            payload["instrument_id"] = self.instrument_id
+        if self.timeframe is not None:
+            payload["timeframe"] = self.timeframe
+        if self.side is not None:
+            payload["side"] = self.side
+        if self.qty is not None:
+            payload["qty"] = round(float(self.qty), 6)
+        if self.price is not None:
+            payload["price"] = round(float(self.price), 4)
+        if self.event_impact_pnl is not None:
+            payload["event_impact_pnl"] = round(float(self.event_impact_pnl), 4)
+        if self.trade_net_pnl is not None:
+            payload["trade_net_pnl"] = round(float(self.trade_net_pnl), 4)
+        if self.reason_detail is not None:
+            payload["reason_detail"] = self.reason_detail
+        if self.evidence_refs is not None:
+            payload["evidence_refs"] = self.evidence_refs
+        if self.context is not None:
+            payload["context"] = self.context
+        if self.alternatives_rejected is not None:
+            payload["alternatives_rejected"] = self.alternatives_rejected
+        if self.created_at is not None:
+            payload["created_at"] = self.created_at
         return payload
 
 
@@ -1923,6 +1945,7 @@ class LadderRiskEngine:
 
 __all__ = [
     "Candle",
+    "DecisionLedgerEvent",
     "StrategySignal",
     "Leg",
     "LadderPosition",

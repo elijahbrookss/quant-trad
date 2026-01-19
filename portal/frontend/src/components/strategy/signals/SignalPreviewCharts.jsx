@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BotLensChart } from '../../bots/BotLensChart.jsx'
-import { fetchCandleData } from '../../../adapters/candle.adapter.js'
+import { fetchInstrumentCandles } from '../../../hooks/useInstrumentCandles.js'
 import { fetchIndicatorOverlays } from '../../../adapters/indicator.adapter.js'
 import { createLogger } from '../../../utils/logger.js'
 import { toSec } from '../../bots/chartDataUtils.js'
@@ -84,19 +84,16 @@ export const SignalPreviewCharts = ({
           if (symbol && windowSymbol && symbol !== windowSymbol) {
             throw new Error('Symbol mismatch for preview.')
           }
-          if (!windowSymbol || !datasource) {
-            throw new Error('Signal window is missing symbol or datasource.')
-          }
-          const candles = await fetchCandleData({
+          const candleResult = await fetchInstrumentCandles({
+            instrumentId: instrument_id,
             symbol: windowSymbol,
             timeframe: interval,
             start,
             end,
             datasource,
             exchange,
-            provider_id: undefined,
-            venue_id: undefined,
           })
+          const candles = candleResult.candles
           logger.info('preview_candles_loaded', {
             instrumentId,
             symbol: windowSymbol,
@@ -141,6 +138,7 @@ export const SignalPreviewCharts = ({
               symbol: windowSymbol,
               datasource,
               exchange,
+              instrument_id: instrumentId,
             })
             indicatorOverlays.push(buildIndicatorOverlay({ indicator, instrumentId, payload: overlayPayload }))
           }
@@ -201,16 +199,16 @@ export const SignalPreviewCharts = ({
   return (
     <div className="space-y-4">
       <div>
-        <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signal Preview Charts</p>
+        <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Preview charts</p>
         <p className="mt-1 text-sm text-slate-400">
-          Each instrument shows indicators plus the generated signal markers for the preview window.
+          Indicators and signal markers for the evaluation window.
         </p>
       </div>
       <div className="space-y-4">
         {instrumentResults.map(({ instrumentId, symbol }) => {
           const state = previewState[instrumentId] || {}
           return (
-            <div key={`signal-preview-${instrumentId}`} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+            <div key={`signal-preview-${instrumentId}`} className="rounded-xl border border-white/10 bg-[#0f1524]/70 p-4">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Instrument</p>

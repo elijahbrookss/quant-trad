@@ -156,6 +156,7 @@ class MarketProfileIndicator(ComputeIndicator):
             start=start_date.isoformat(),
             end=ctx.end,
             interval="30m",  # Always use 30min for Market Profile
+            instrument_id=ctx.instrument_id,
         )
 
         logger.info(
@@ -304,6 +305,7 @@ class MarketProfileIndicator(ComputeIndicator):
             start=start_date.isoformat(),
             end=ctx.end,
             interval="30m",
+            instrument_id=ctx.instrument_id,
         )
 
         logger.info(

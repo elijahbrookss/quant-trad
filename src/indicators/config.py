@@ -9,6 +9,7 @@ class DataContext:
     start: Optional[str]
     end: Optional[str]
     interval: Optional[str]
+    instrument_id: Optional[str] = None
 
     def __post_init__(self):
         self.validate()

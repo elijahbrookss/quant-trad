@@ -610,6 +610,8 @@ def upsert_bot_run(payload: Dict[str, Any]) -> Dict[str, Any]:
             record.summary = dict(payload.get("summary") or {})
         if payload.get("config_snapshot") is not None:
             record.config_snapshot = dict(payload.get("config_snapshot") or {})
+        if payload.get("decision_ledger") is not None:
+            record.decision_ledger = list(payload.get("decision_ledger") or [])
         record.updated_at = now
         if record.created_at is None:
             record.created_at = now
@@ -625,6 +627,18 @@ def get_bot_run(run_id: str) -> Optional[Dict[str, Any]]:
         return None
     with db.session() as session:
         record = session.get(BotRunRecord, run_id)
+        return record.to_dict() if record else None
+
+
+def get_bot(bot_id: str) -> Optional[Dict[str, Any]]:
+    """Return a persisted bot configuration."""
+
+    if not db.available:
+        return None
+    if not bot_id:
+        return None
+    with db.session() as session:
+        record = session.get(BotRecord, bot_id)
         return record.to_dict() if record else None
 
 
@@ -682,6 +696,21 @@ def list_bot_trades_for_run(run_id: str) -> List[Dict[str, Any]]:
     with db.session() as session:
         rows = session.execute(
             select(BotTradeRecord).where(BotTradeRecord.run_id == run_id)
+        ).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def list_bot_trade_events_for_trades(trade_ids: Iterable[str]) -> List[Dict[str, Any]]:
+    """Return trade events for the provided trade IDs."""
+
+    if not db.available:
+        return []
+    trade_ids = [trade_id for trade_id in trade_ids if trade_id]
+    if not trade_ids:
+        return []
+    with db.session() as session:
+        rows = session.execute(
+            select(BotTradeEventRecord).where(BotTradeEventRecord.trade_id.in_(trade_ids))
         ).scalars().all()
         return [row.to_dict() for row in rows]
 

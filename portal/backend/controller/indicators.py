@@ -50,6 +50,7 @@ class OverlayRequest(BaseModel):
     symbol: Optional[str] = None  # optional override; defaults to stored
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    instrument_id: Optional[str] = None
 
 class SignalRequest(BaseModel):
     start: str
@@ -185,6 +186,17 @@ def overlays(inst_id: str, req: OverlayRequest):
     over the requested chart window. Does not accept indicator params.
     """
     try:
+        logger.info(
+            "event=overlay_request_received indicator_id=%s instrument_id=%s symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s",
+            inst_id,
+            req.instrument_id,
+            req.symbol,
+            req.interval,
+            req.datasource,
+            req.exchange,
+            req.start,
+            req.end,
+        )
         payload = overlays_for_instance(
             inst_id=inst_id,
             start=req.start,
@@ -193,6 +205,7 @@ def overlays(inst_id: str, req: OverlayRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
         return payload
     except KeyError:

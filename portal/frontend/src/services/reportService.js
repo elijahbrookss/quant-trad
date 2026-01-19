@@ -2,7 +2,7 @@
  * Report service - handles report list and detail API calls.
  */
 
-import { compareReports, getReport, listReports } from '../adapters/report.adapter.js'
+import { compareReports, exportReport, getReport, listReports } from '../adapters/report.adapter.js'
 
 export const reportService = {
   async listReports(params = {}) {
@@ -15,5 +15,9 @@ export const reportService = {
 
   async compareReports(runIds) {
     return compareReports(runIds)
+  },
+
+  async exportReport(runId, options) {
+    return exportReport(runId, options)
   },
 }

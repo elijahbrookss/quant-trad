@@ -11,6 +11,7 @@ from indicators.market_profile import MarketProfileIndicator
 
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from .context import IndicatorServiceContext, _context
+from ...market import instrument_service
 from .utils import (
     build_meta_from_record,
     ensure_color,
@@ -44,6 +45,11 @@ class IndicatorInstanceCreator:
         data_ctx, ctor_params = self._pop_data_context(params_copy)
         datasource, exchange = pull_datasource_exchange(ctor_params, ctx=self._ctx)
         provider = self._resolve_provider(datasource, exchange)
+        data_ctx.instrument_id = instrument_service.require_instrument_id(
+            datasource,
+            exchange,
+            data_ctx.symbol,
+        )
         instance = self._build_instance(Cls, provider, data_ctx, ctor_params)
         runtime_params = self._capture_runtime_params(
             instance, datasource=datasource, exchange=exchange
@@ -65,6 +71,9 @@ class IndicatorInstanceCreator:
             ctx_kwargs = {k: params.pop(k) for k in ctx_keys}
         except KeyError as e:
             raise ValueError(f"Missing required context param: {e.args[0]}")
+        instrument_id = params.pop("instrument_id", None)
+        if instrument_id:
+            ctx_kwargs["instrument_id"] = instrument_id
         data_ctx = DataContext(**ctx_kwargs)
         data_ctx.validate()
         return data_ctx, params
@@ -258,6 +267,11 @@ class IndicatorInstanceUpdater:
             ctor_params, fallback_meta=meta, ctx=self._ctx
         )
         provider = resolve_data_provider(datasource, exchange=exchange, ctx=self._ctx)
+        data_ctx.instrument_id = instrument_service.require_instrument_id(
+            datasource,
+            exchange,
+            data_ctx.symbol,
+        )
         instance = self._rebuild_instance(type_str, provider, data_ctx, ctor_params)
         runtime_params = self._capture_runtime_params(
             instance, datasource=datasource, exchange=exchange
@@ -329,6 +343,9 @@ class IndicatorInstanceUpdater:
             ctx_kwargs = {k: params.pop(k) for k in ctx_keys}
         except KeyError as e:
             raise ValueError(f"Missing required context param: {e.args[0]}")
+        instrument_id = params.pop("instrument_id", None)
+        if instrument_id:
+            ctx_kwargs["instrument_id"] = instrument_id
         data_ctx = DataContext(**ctx_kwargs)
         data_ctx.validate()
         return data_ctx, params

@@ -8,6 +8,7 @@ from indicators.market_profile import MarketProfileIndicator
 from indicators.runtime.incremental_cache_registry import is_incremental_cacheable
 
 from .context import IndicatorServiceContext, _context
+from ...market import instrument_service
 from .utils import (
     get_indicator_entry,
     normalize_datasource,
@@ -36,15 +37,17 @@ class IndicatorOverlayBuilder:
         symbol: Optional[str] = None,
         datasource: Optional[str] = None,
         exchange: Optional[str] = None,
+        instrument_id: Optional[str] = None,
         overlay_options: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         logger.info(
-            "event=overlay_build_start indicator_id=%s symbol=%s interval=%s start=%s end=%s",
+            "event=overlay_build_start indicator_id=%s symbol=%s interval=%s start=%s end=%s instrument_id=%s",
             inst_id,
             symbol,
             interval,
             start,
             end,
+            instrument_id,
         )
         entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
         logger.info(
@@ -54,7 +57,7 @@ class IndicatorOverlayBuilder:
         )
         sym = self._resolve_symbol(entry, symbol)
         provider, data_ctx, effective_datasource, effective_exchange = self._prepare_provider(
-            entry.meta, sym, start, end, interval, datasource, exchange
+            entry.meta, sym, start, end, interval, datasource, exchange, instrument_id
         )
         cache_enabled = self._ctx.overlay_cache.is_enabled(entry.meta.get("type"))
         cached_payload = self._maybe_fetch_cached(
@@ -173,6 +176,7 @@ class IndicatorOverlayBuilder:
         interval: str,
         datasource: Optional[str],
         exchange: Optional[str],
+        instrument_id: Optional[str],
     ):
         from datetime import datetime, timedelta
 
@@ -239,7 +243,28 @@ class IndicatorOverlayBuilder:
                     e,
                 )
 
-        data_ctx = DataContext(symbol=symbol, start=effective_start, end=end, interval=interval)
+        resolved_instrument_id = instrument_id.strip() if isinstance(instrument_id, str) else instrument_id
+        if not resolved_instrument_id:
+            resolved_instrument_id = instrument_service.require_instrument_id(
+                effective_datasource,
+                effective_exchange,
+                symbol,
+            )
+        logger.info(
+            "event=overlay_instrument_resolved indicator_id=%s instrument_id=%s symbol=%s datasource=%s exchange=%s",
+            meta.get("id"),
+            resolved_instrument_id,
+            symbol,
+            effective_datasource,
+            effective_exchange,
+        )
+        data_ctx = DataContext(
+            symbol=symbol,
+            start=effective_start,
+            end=end,
+            interval=interval,
+            instrument_id=resolved_instrument_id,
+        )
         return provider, data_ctx, effective_datasource, effective_exchange
 
     def _maybe_fetch_cached(

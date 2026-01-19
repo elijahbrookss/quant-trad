@@ -3,7 +3,18 @@ import React, { Fragment, useMemo, useState } from "react";
 import { Switch, Popover, PopoverButton, PopoverPanel, Transition } from "@headlessui/react";
 import { MoreHorizontal, Copy } from "lucide-react";
 
-const HIDE_KEYS = new Set(["symbol", "interval", "start", "end", "debug"]);
+const HIDE_KEYS = new Set([
+  "symbol",
+  "interval",
+  "start",
+  "end",
+  "debug",
+  "datasource",
+  "exchange",
+  "provider_id",
+  "venue_id",
+  "instrument_id",
+]);
 const isAdvancedKey = (key) =>
   key.startsWith("ransac_") || key.includes("dedupe") || key.includes("max_windows") || key.includes("min_inliers");
 
