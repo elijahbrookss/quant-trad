@@ -645,12 +645,11 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           </section>
 
           <div className="space-y-1 border-t border-slate-800 pt-5">
-            <p className="text-xs font-medium text-slate-400">Decision Trace</p>
-            <p className="text-sm text-slate-500">Strategy signals, decisions, and execution events in chronological order</p>
+            <p className="text-xs font-medium text-slate-400">Decision Ledger</p>
+            <p className="text-sm text-slate-500">Signal → Decision → Execution → Outcome with explainable context</p>
           </div>
           <DecisionTrace
-            decisions={payload?.decisions || []}
-            logs={logs}
+            ledgerEvents={payload?.decisions || []}
             onEventClick={(timeValue, price, symbol) => focusChartAt(timeValue, price, symbol)}
           />
         </div>
