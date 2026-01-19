@@ -690,6 +690,7 @@ def _build_report(run: Dict[str, Any], trades: Sequence[Dict[str, Any]]) -> Dict
         },
         "run_config": run_config,
     }
+    report["decision_ledger"] = list(run.get("decision_ledger") or [])
     return report
 
 
@@ -860,6 +861,7 @@ def record_run_report(
     ended_at: Optional[str],
     config: Dict[str, Any],
     series: Sequence[Any],
+    decision_ledger: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Persist a completed run snapshot and summary."""
 
@@ -940,6 +942,7 @@ def record_run_report(
                 "ended_at": ended_at,
                 "summary": summary,
                 "config_snapshot": run_config,
+                "decision_ledger": list(decision_ledger or []),
             }
         )
     except Exception as exc:  # noqa: BLE001 - logging boundary
