@@ -13,6 +13,7 @@ from utils.log_context import build_log_context, with_log_context
 
 from ..bots.bot_runtime.strategy.strategy_loader import StrategyLoader
 from ..storage import storage
+from . import report_data
 from .metrics import (
     compute_expectancy,
     compute_max_drawdown,
@@ -723,7 +724,7 @@ def list_reports(
     )
     logger.debug(with_log_context("report_list_start", context))
     try:
-        runs = storage.list_bot_runs(
+        runs = report_data.list_runs(
             run_type=run_type,
             status=status,
             bot_id=bot_id,
@@ -789,10 +790,10 @@ def list_reports(
 def get_report(run_id: str) -> Dict[str, Any]:
     """Return a full report payload for *run_id*."""
 
-    run = storage.get_bot_run(run_id)
+    run = report_data.get_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
-    trades = storage.list_bot_trades_for_run(run_id)
+    trades = report_data.list_trades_for_run(run_id)
     try:
         return _build_report(run, trades)
     except Exception as exc:  # noqa: BLE001 - logging boundary
@@ -812,10 +813,10 @@ def compare_reports(run_ids: Sequence[str]) -> Dict[str, Any]:
 
     reports: List[Dict[str, Any]] = []
     for run_id in run_ids:
-        run = storage.get_bot_run(run_id)
+        run = report_data.get_run(run_id)
         if not run:
             raise KeyError(f"Run {run_id} was not found")
-        trades = storage.list_bot_trades_for_run(run_id)
+        trades = report_data.list_trades_for_run(run_id)
         reports.append(_build_compare_report(run, trades))
 
     baseline = reports[0]
@@ -916,7 +917,7 @@ def record_run_report(
             "slippage_model": (config.get("risk") or {}).get("slippage_model"),
             "strategies": strategies,
         }
-        trades = storage.list_bot_trades_for_run(run_id)
+        trades = report_data.list_trades_for_run(run_id)
         summary = _compute_summary(
             _closed_trades(trades),
             run_config,
