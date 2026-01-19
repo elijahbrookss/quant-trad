@@ -480,6 +480,7 @@ class BotRunRecord(Base):
     ended_at = Column(DateTime, nullable=True)
     summary = Column(JSON, nullable=True)
     config_snapshot = Column(JSON, nullable=True)
+    decision_ledger = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -504,6 +505,7 @@ class BotRunRecord(Base):
             "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
             "summary": dict(self.summary or {}),
             "config_snapshot": dict(self.config_snapshot or {}),
+            "decision_ledger": list(self.decision_ledger or []),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
