@@ -31,9 +31,10 @@ _PERSISTENCE_FACTORY = None
 def configure_persistence_factory(factory):
     """Provide a service-layer persistence builder for provider instances."""
 
-    global _PERSISTENCE_FACTORY, _PERSISTENCE
+    global _PERSISTENCE_FACTORY, _PERSISTENCE, _PROVIDER_CACHE
     _PERSISTENCE_FACTORY = factory
     _PERSISTENCE = None
+    _PROVIDER_CACHE = {}
 
 
 def _get_persistence() -> DataPersistence:
