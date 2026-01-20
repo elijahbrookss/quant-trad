@@ -1,7 +1,9 @@
 """Configure provider persistence wiring for service-layer runtime."""
 
 from data_providers.config.runtime import runtime_config_from_env
-from data_providers.services import configure_provider_persistence as wire_provider_persistence
+from data_providers.services.persistence_integration import (
+    configure_provider_persistence as wire_provider_persistence,
+)
 
 from .persistence import DataPersistenceService
 
