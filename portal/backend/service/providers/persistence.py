@@ -469,6 +469,13 @@ class DataPersistenceService:
                 instrument_id,
                 timeframe_seconds,
             )
+            logger.debug(
+                "candle_ingest_range | instrument_id=%s timeframe_seconds=%s time_min=%s time_max=%s",
+                instrument_id,
+                timeframe_seconds,
+                candle_time.min().isoformat(),
+                candle_time.max().isoformat(),
+            )
             enqueue_stats_job(
                 instrument_id=instrument_id,
                 timeframe_seconds=timeframe_seconds,

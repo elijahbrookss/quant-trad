@@ -59,6 +59,7 @@ class StatsPipeline:
         if self._threads:
             return
         self._stop_event.clear()
+        logger.debug("stats_pipeline_starting")
         self._threads = [
             threading.Thread(target=self._run_stats_worker, name="candle-stats-worker", daemon=True),
             threading.Thread(target=self._run_regime_worker, name="regime-stats-worker", daemon=True),
@@ -71,6 +72,7 @@ class StatsPipeline:
         if not self._threads:
             return
         self._stop_event.set()
+        logger.debug("stats_pipeline_stopping")
         for _ in self._threads:
             self._stats_queue.put(None)
             self._regime_queue.put(None)
@@ -90,6 +92,13 @@ class StatsPipeline:
             )
             return
         self._stats_queue.put(job)
+        logger.debug(
+            "stats_job_enqueued_debug | job_id=%s instrument_id=%s timeframe_seconds=%s attempts=%s",
+            job.job_id,
+            job.instrument_id,
+            job.timeframe_seconds,
+            job.attempts,
+        )
         logger.info(
             "stats_job_enqueued | job_id=%s instrument_id=%s timeframe_seconds=%s time_min=%s time_max=%s stats_version=%s regime_version=%s",
             job.job_id,
@@ -110,6 +119,13 @@ class StatsPipeline:
             if job is None:
                 self._stats_queue.task_done()
                 continue
+            logger.debug(
+                "candle_stats_job_dequeued | job_id=%s instrument_id=%s timeframe_seconds=%s stats_version=%s",
+                job.job_id,
+                job.instrument_id,
+                job.timeframe_seconds,
+                job.stats_version,
+            )
             started = time.monotonic()
             try:
                 result = self._stats_service.compute_range(
@@ -157,6 +173,13 @@ class StatsPipeline:
             if job is None:
                 self._regime_queue.task_done()
                 continue
+            logger.debug(
+                "regime_stats_job_dequeued | job_id=%s instrument_id=%s timeframe_seconds=%s regime_version=%s",
+                job.job_id,
+                job.instrument_id,
+                job.timeframe_seconds,
+                job.regime_version,
+            )
             started = time.monotonic()
             try:
                 result = self._regime_service.compute_range(
@@ -225,6 +248,13 @@ def enqueue_stats_job(
     time_max: pd.Timestamp,
 ) -> None:
     pipeline = get_pipeline()
+    logger.debug(
+        "stats_job_enqueue_request | instrument_id=%s timeframe_seconds=%s time_min=%s time_max=%s",
+        instrument_id,
+        timeframe_seconds,
+        pd.to_datetime(time_min, utc=True).isoformat(),
+        pd.to_datetime(time_max, utc=True).isoformat(),
+    )
     if not pipeline.engine_available:
         logger.error(
             "stats_pipeline_unavailable | instrument_id=%s timeframe_seconds=%s time_min=%s time_max=%s",

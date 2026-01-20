@@ -52,6 +52,15 @@ class CandleStatsService:
         time_min = pd.to_datetime(time_min, utc=True)
         time_max = pd.to_datetime(time_max, utc=True)
         lookback_start = time_min - pd.Timedelta(seconds=timeframe_seconds * LOOKBACK_BARS)
+        logger.debug(
+            "candle_stats_compute_start | instrument_id=%s timeframe_seconds=%s stats_version=%s lookback_start=%s time_min=%s time_max=%s",
+            instrument_id,
+            timeframe_seconds,
+            stats_version,
+            lookback_start.isoformat(),
+            time_min.isoformat(),
+            time_max.isoformat(),
+        )
 
         candles = self._load_candles(instrument_id, timeframe_seconds, lookback_start, time_max)
         if candles.empty:
@@ -70,6 +79,14 @@ class CandleStatsService:
             (stats_df["candle_time"] >= time_min) & (stats_df["candle_time"] <= time_max)
         ].copy()
         if in_window.empty:
+            logger.warning(
+                "candle_stats_no_window | instrument_id=%s timeframe_seconds=%s stats_version=%s time_min=%s time_max=%s",
+                instrument_id,
+                timeframe_seconds,
+                stats_version,
+                time_min.isoformat(),
+                time_max.isoformat(),
+            )
             return StatsResult(rows_upserted=0, gaps=0, last_candle_time=None)
 
         rows = self._serialize_stats(
@@ -83,6 +100,15 @@ class CandleStatsService:
         last_candle_time = in_window["candle_time"].max()
         gaps = self._count_gaps(in_window["candle_time"], timeframe_seconds)
 
+        logger.debug(
+            "candle_stats_compute_end | instrument_id=%s timeframe_seconds=%s stats_version=%s rows=%s last_candle_time=%s gaps=%s",
+            instrument_id,
+            timeframe_seconds,
+            stats_version,
+            len(rows),
+            last_candle_time.isoformat() if last_candle_time is not None else None,
+            gaps,
+        )
         return StatsResult(
             rows_upserted=len(rows),
             gaps=gaps,
@@ -96,6 +122,13 @@ class CandleStatsService:
         start: pd.Timestamp,
         end: pd.Timestamp,
     ) -> pd.DataFrame:
+        logger.debug(
+            "candle_stats_load_candles | instrument_id=%s timeframe_seconds=%s start=%s end=%s",
+            instrument_id,
+            timeframe_seconds,
+            start.isoformat(),
+            end.isoformat(),
+        )
         query = text(
             f"""
             SELECT candle_time, open, high, low, close, volume, trade_count

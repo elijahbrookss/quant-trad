@@ -47,6 +47,16 @@ class RegimeStatsService:
         time_min = pd.to_datetime(time_min, utc=True)
         time_max = pd.to_datetime(time_max, utc=True)
         lookback_start = time_min - pd.Timedelta(seconds=timeframe_seconds * LOOKBACK_BARS)
+        logger.debug(
+            "regime_stats_compute_start | instrument_id=%s timeframe_seconds=%s stats_version=%s regime_version=%s lookback_start=%s time_min=%s time_max=%s",
+            instrument_id,
+            timeframe_seconds,
+            stats_version,
+            regime_version,
+            lookback_start.isoformat(),
+            time_min.isoformat(),
+            time_max.isoformat(),
+        )
 
         candles = self._load_candles(instrument_id, timeframe_seconds, lookback_start, time_max)
         if candles.empty:
@@ -77,6 +87,13 @@ class RegimeStatsService:
 
         missing = self._find_missing_stats(in_window_candles["candle_time"], in_window_stats["candle_time"])
         if missing:
+            logger.debug(
+                "regime_stats_missing_samples | instrument_id=%s timeframe_seconds=%s stats_version=%s missing_times=%s",
+                instrument_id,
+                timeframe_seconds,
+                stats_version,
+                [ts.isoformat() for ts in missing[:5]],
+            )
             logger.error(
                 "regime_stats_missing_dependency | instrument_id=%s timeframe_seconds=%s stats_version=%s time_min=%s time_max=%s missing_count=%s",
                 instrument_id,
@@ -100,6 +117,15 @@ class RegimeStatsService:
         last_candle_time = in_window_candles["candle_time"].max()
         gaps = self._count_gaps(in_window_candles["candle_time"], timeframe_seconds)
 
+        logger.debug(
+            "regime_stats_compute_end | instrument_id=%s timeframe_seconds=%s regime_version=%s rows=%s last_candle_time=%s gaps=%s",
+            instrument_id,
+            timeframe_seconds,
+            regime_version,
+            len(rows),
+            last_candle_time.isoformat() if last_candle_time is not None else None,
+            gaps,
+        )
         return RegimeResult(
             rows_upserted=len(rows),
             gaps=gaps,
@@ -113,6 +139,13 @@ class RegimeStatsService:
         start: pd.Timestamp,
         end: pd.Timestamp,
     ) -> pd.DataFrame:
+        logger.debug(
+            "regime_stats_load_candles | instrument_id=%s timeframe_seconds=%s start=%s end=%s",
+            instrument_id,
+            timeframe_seconds,
+            start.isoformat(),
+            end.isoformat(),
+        )
         query = text(
             f"""
             SELECT candle_time, open, high, low, close, volume, trade_count
@@ -142,6 +175,14 @@ class RegimeStatsService:
         end: pd.Timestamp,
         stats_version: str,
     ) -> pd.DataFrame:
+        logger.debug(
+            "regime_stats_load_stats | instrument_id=%s timeframe_seconds=%s stats_version=%s start=%s end=%s",
+            instrument_id,
+            timeframe_seconds,
+            stats_version,
+            start.isoformat(),
+            end.isoformat(),
+        )
         query = text(
             f"""
             SELECT candle_time, stats
