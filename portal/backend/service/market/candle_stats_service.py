@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 
 import pandas as pd
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from core.logger import logger
 from data_providers.config.runtime import PersistenceConfig
@@ -220,7 +221,7 @@ class CandleStatsService:
             ON CONFLICT (instrument_id, timeframe_seconds, candle_time, stats_version)
             DO UPDATE SET computed_at = now(), stats = EXCLUDED.stats
             """
-        )
+        ).bindparams(bindparam("stats", type_=JSONB))
         with self._engine.begin() as conn:
             conn.execute(query, list(rows))
 
