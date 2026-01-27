@@ -24,6 +24,8 @@ the code is wrong.
 - Prefer interfaces at real boundaries
 - Duplicate logic is a refactor signal
 
+> **Infrastructure Rule:** Only one DSN exists (`PG_DSN`). New persistence layers must use it directly—no additional DSN env vars or mapper layers.
+
 ---
 
 ## Canonical Context (Required Reading)
@@ -124,6 +126,12 @@ Good boundaries include:
 
 Avoid switch statements in core services.
 Use registries and explicit registration instead.
+
+### Schema Expectations
+- No runtime migrations or backfills live in the codebase.
+- If a table is missing, create it once and log a WARN so operators know it was provisioned.
+- If columns are missing, fail loud with an actionable error; do not attempt to patch or alter in-place.
+- All schema changes must come from clean table definitions (drop/recreate out-of-band if needed).
 
 ---
 
