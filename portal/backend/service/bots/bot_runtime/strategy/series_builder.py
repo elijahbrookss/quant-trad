@@ -10,7 +10,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+
+import pandas as pd
 
 from ....risk.atm import merge_templates
 from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
@@ -63,14 +65,16 @@ class SeriesBuilder:
         bot_id: str,
         config: Mapping[str, Any],
         run_type: str,
-        log_candle_sequence: Optional[callable] = None,
+        log_candle_sequence: Optional[Callable[..., None]] = None,
         indicator_ctx: Optional[Any] = None,
+        warning_sink: Optional[Callable[[Dict[str, object]], None]] = None,
     ):
         self.bot_id = bot_id
         self.config = config
         self.run_type = run_type
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
+        self._warning_sink = warning_sink
         self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
         self._indicator_overlay_lock = threading.RLock()
 
@@ -82,6 +86,20 @@ class SeriesBuilder:
 
     def _strategy_log_context(self, strategy: Strategy, **fields: object) -> Dict[str, object]:
         return merge_log_context(self._runtime_log_context(), strategy_log_context(strategy), **fields)
+
+    def _emit_warning(self, warning_type: str, message: str, **context: object) -> None:
+        """Forward builder warnings to the runtime when configured."""
+
+        if not self._warning_sink:
+            return
+        payload_context = {key: value for key, value in context.items() if value is not None and value != ""}
+        self._warning_sink(
+            {
+                "type": warning_type,
+                "message": message,
+                "context": payload_context,
+            }
+        )
 
     def reset(self) -> None:
         with self._indicator_overlay_lock:
@@ -125,6 +143,15 @@ class SeriesBuilder:
         )
         if df is None or getattr(df, "empty", False):
             return False
+        self._maybe_emit_data_limit_warning(
+            df,
+            start_iso,
+            series.symbol,
+            series.timeframe,
+            series.datasource,
+            series.exchange,
+            series.strategy_id,
+        )
         new_candles = [
             c
             for c in self._build_candles(df, series.timeframe)
@@ -253,7 +280,57 @@ class SeriesBuilder:
             )
             logger.warning(with_log_context("bot_runtime_unsorted_dataframe", context))
 
+        self._maybe_emit_data_limit_warning(
+            df,
+            start_iso,
+            symbol,
+            timeframe,
+            datasource,
+            exchange,
+            strategy_id,
+        )
+
         return df
+
+    def _maybe_emit_data_limit_warning(
+        self,
+        df: Any,
+        start_iso: Optional[str],
+        symbol: Optional[str],
+        timeframe: Optional[str],
+        datasource: Optional[str],
+        exchange: Optional[str],
+        strategy_id: Optional[str],
+    ) -> None:
+        if not self._warning_sink or df is None or getattr(df, "empty", False):
+            return
+        if not start_iso:
+            return
+        requested = pd.to_datetime(start_iso, utc=True, errors="coerce")
+        if requested is pd.NaT:
+            return
+        actual = pd.to_datetime(df.index.min(), utc=True, errors="coerce")
+        if actual is pd.NaT:
+            return
+        delta_seconds = (actual - requested).total_seconds()
+        if delta_seconds <= 60:
+            return
+        message = (
+            "Historical data limited by provider. "
+            f"Requested start {requested.strftime('%Y-%m-%d')}, "
+            f"oldest available {actual.strftime('%Y-%m-%d')}."
+        )
+        self._emit_warning(
+            "historical_data_limited",
+            message,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            requested_start=requested.isoformat(),
+            earliest_available=actual.isoformat(),
+        )
 
     def _evaluate_strategy(
         self,

@@ -1200,7 +1200,10 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
                 record.net_pnl = net
             # quote_currency is no longer stored on trades; resolve via instrument service when needed
             if snapshot.get("metrics") is not None:
-                record.metrics = dict(snapshot.get("metrics") or {})
+                incoming_metrics = dict(snapshot.get("metrics") or {})
+                existing_metrics = dict(record.metrics or {})
+                existing_metrics.update(incoming_metrics)
+                record.metrics = existing_metrics
             record.updated_at = now
             if record.created_at is None:
                 record.created_at = now

@@ -9,7 +9,6 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from core.logger import logger
 from data_providers.config.runtime import PersistenceConfig
-from data_providers.utils.ohlcv import compute_tr_atr
 
 
 ATR_SHORT = 14
@@ -20,6 +19,8 @@ SLOPE_WINDOW = 20
 RANGE_WINDOW = 20
 EXPANSION_WINDOW = 20
 VOLUME_WINDOW = 50
+OVERLAP_WINDOW = 8
+SLOPE_STABILITY_LOOKBACK = 150
 LOOKBACK_BARS = 200
 
 
@@ -154,12 +155,16 @@ class CandleStatsService:
         candles = candles.copy()
         candles["candle_time"] = pd.to_datetime(candles["candle_time"], utc=True)
         candles.sort_values("candle_time", inplace=True)
-        candles = compute_tr_atr(candles, period=ATR_SHORT)
-        candles.rename(columns={"atr_wilder": "atr_short"}, inplace=True)
-        tr = candles["tr"]
-        candles["atr_long"] = tr.ewm(alpha=1 / ATR_LONG, adjust=False).mean()
-        candles["atr_zscore"] = self._rolling_zscore(candles["atr_short"], ATR_Z_WINDOW)
-        candles["tr_pct"] = tr / candles["close"]
+        true_range = self._true_range(candles)
+        candles["tr"] = true_range
+        candles["atr_short"] = true_range.ewm(alpha=1 / ATR_SHORT, adjust=False).mean()
+        candles["atr_long"] = true_range.ewm(alpha=1 / ATR_LONG, adjust=False).mean()
+        candles["atr_zscore"], _ = self._rolling_zscore(candles["atr_short"], ATR_Z_WINDOW)
+        prev_close = candles["close"].shift().replace(0, pd.NA)
+        candles["tr_pct"] = true_range / prev_close
+        # Fall back to current close if we cannot normalize against the previous close.
+        fallback_close = candles["close"].replace(0, pd.NA)
+        candles["tr_pct"] = candles["tr_pct"].fillna(true_range / fallback_close)
         candles["atr_ratio"] = candles["atr_short"] / candles["atr_long"]
 
         close = candles["close"]
@@ -167,7 +172,13 @@ class CandleStatsService:
         efficiency_denom = diff_abs.rolling(DIRECTIONAL_EFFICIENCY_WINDOW).sum()
         candles["directional_efficiency"] = (close - close.shift(DIRECTIONAL_EFFICIENCY_WINDOW)).abs() / efficiency_denom
         candles["slope"] = (close - close.shift(SLOPE_WINDOW)) / SLOPE_WINDOW
-        candles["slope_stability"] = candles["slope"].rolling(SLOPE_WINDOW).std()
+        slope_std = candles["slope"].rolling(SLOPE_WINDOW, min_periods=SLOPE_WINDOW).std()
+        candles["slope_stability"], slope_warmup = self._rolling_zscore(
+            slope_std,
+            SLOPE_STABILITY_LOOKBACK,
+            min_periods=SLOPE_STABILITY_LOOKBACK,
+        )
+        candles["slope_stability_warmup"] = slope_warmup
 
         range_high = candles["high"].rolling(RANGE_WINDOW).max()
         range_low = candles["low"].rolling(RANGE_WINDOW).min()
@@ -177,32 +188,63 @@ class CandleStatsService:
 
         candles["atr_slope"] = candles["atr_short"] - candles["atr_short"].shift(EXPANSION_WINDOW)
         candles["range_contraction"] = range_width / range_width.shift(EXPANSION_WINDOW)
-        candles["overlap_pct"] = self._overlap_ratio(candles)
+        candles["overlap_pct"] = self._body_overlap_pct(candles)
 
         volume = candles.get("volume")
-        candles["volume_zscore"] = self._rolling_zscore(volume, VOLUME_WINDOW)
+        candles["volume_zscore"], _ = self._rolling_zscore(volume, VOLUME_WINDOW)
         candles["volume_vs_median"] = volume / volume.rolling(VOLUME_WINDOW).median()
 
         return candles
 
     @staticmethod
-    def _rolling_zscore(series: pd.Series, window: int) -> pd.Series:
-        if series is None:
-            return pd.Series(dtype="float64")
-        mean = series.rolling(window).mean()
-        std = series.rolling(window).std()
-        return (series - mean) / std.replace(0, pd.NA)
+    def _true_range(df: pd.DataFrame) -> pd.Series:
+        prev_close = df["close"].shift()
+        high_low = df["high"] - df["low"]
+        high_prev_close = (df["high"] - prev_close).abs()
+        low_prev_close = (df["low"] - prev_close).abs()
+        stacked = pd.concat([high_low, high_prev_close, low_prev_close], axis=1)
+        return stacked.max(axis=1, skipna=True)
 
     @staticmethod
-    def _overlap_ratio(df: pd.DataFrame) -> pd.Series:
-        prev_high = df["high"].shift()
-        prev_low = df["low"].shift()
-        overlap = (pd.concat([df["high"], prev_high], axis=1).min(axis=1)) - (
-            pd.concat([df["low"], prev_low], axis=1).max(axis=1)
-        )
+    def _rolling_zscore(
+        series: pd.Series,
+        window: int,
+        min_periods: Optional[int] = None,
+    ) -> tuple[pd.Series, pd.Series]:
+        if series is None:
+            series = pd.Series(dtype="float64")
+        min_periods = window if min_periods is None else min_periods
+        rolling = series.rolling(window, min_periods=min_periods)
+        mean = rolling.mean()
+        std = rolling.std()
+        warmup = mean.isna() | std.isna()
+        zscore = (series - mean) / std.replace(0, pd.NA)
+        zscore = zscore.where(~warmup)
+        return zscore.fillna(0), warmup.fillna(True)
+
+    @staticmethod
+    def _body_overlap_pct(df: pd.DataFrame) -> pd.Series:
+        body_high = df[["open", "close"]].max(axis=1)
+        body_low = df[["open", "close"]].min(axis=1)
+        prev_body_high = body_high.shift()
+        prev_body_low = body_low.shift()
+        max_high = pd.concat([body_high, prev_body_high], axis=1).max(axis=1)
+        min_low = pd.concat([body_low, prev_body_low], axis=1).min(axis=1)
+        overlap = pd.concat([body_high, prev_body_high], axis=1).min(axis=1) - pd.concat(
+            [body_low, prev_body_low], axis=1
+        ).max(axis=1)
         overlap = overlap.clip(lower=0)
-        span = (df["high"] - df["low"]).replace(0, pd.NA)
-        return overlap / span
+        body_range = max_high - min_low
+        zero_range = body_range == 0
+        identical_bodies = zero_range & (body_high == prev_body_high) & (body_low == prev_body_low)
+        ratio = overlap / body_range
+        ratio = ratio.clip(lower=0, upper=1)
+        ratio = ratio.fillna(0)
+        ratio = ratio.mask(zero_range, 0.0)
+        ratio = ratio.mask(identical_bodies, 1.0)
+        raw_pct = ratio.fillna(0)
+        aggregated = raw_pct.rolling(OVERLAP_WINDOW).mean()
+        return aggregated.clip(0, 1).fillna(0)
 
     @staticmethod
     def _serialize_stats(
@@ -224,6 +266,7 @@ class CandleStatsService:
                 "directional_efficiency": _to_float(row.get("directional_efficiency")),
                 "slope": _to_float(row.get("slope")),
                 "slope_stability": _to_float(row.get("slope_stability")),
+                "slope_stability_warmup": bool(row.get("slope_stability_warmup")),
                 "range_position": _to_float(row.get("range_position")),
                 "range_width": _to_float(row.get("range_width")),
                 "atr_slope": _to_float(row.get("atr_slope")),

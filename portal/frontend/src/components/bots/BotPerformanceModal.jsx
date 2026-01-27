@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { X } from 'lucide-react'
+import { TriangleAlert, X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
@@ -58,6 +58,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   } = useBotPerformance({ bot, open, onRefresh })
 
   const logs = payload?.logs || []
+  const warnings = payload?.warnings || []
   const strategies = payload?.meta?.strategies || []
   const runtime = payload?.runtime || {}
   const seriesList = Array.isArray(payload?.series) ? payload.series : []
@@ -429,6 +430,32 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             </div>
           </div>
 
+          {warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-xs text-amber-100">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-amber-200">
+                  <TriangleAlert className="size-4 text-amber-300" />
+                  <span>Warnings</span>
+                </div>
+                <span className="text-[10px] uppercase tracking-wider text-amber-200/70">{warnings.length} active</span>
+              </div>
+              <div className="mt-3 space-y-3">
+                {warnings.slice(0, 5).map((warning) => (
+                  <div
+                    key={warning.id || warning.timestamp || warning.message}
+                    className="rounded-xl border border-amber-700/60 bg-amber-950/60 px-3 py-2 shadow-inner"
+                  >
+                    <p className="text-sm font-medium text-amber-100">{warning.message || 'Warning issued'}</p>
+                    <WarningContext context={warning.context} />
+                  </div>
+                ))}
+                {warnings.length > 5 && (
+                  <p className="text-[10px] text-amber-200/70">Showing first 5 warnings.</p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Performance Stats Tabs */}
           <div className="rounded-lg border border-slate-800 bg-slate-900/40">
             {/* Tab Headers */}
@@ -714,4 +741,31 @@ function formatNumber(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return '—'
   return num.toString()
+}
+
+function WarningContext({ context }) {
+  if (!context || typeof context !== 'object') return null
+  const entries = Object.entries(context).filter(
+    ([, value]) => value !== undefined && value !== null && value !== '',
+  )
+  if (!entries.length) return null
+  return (
+    <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-amber-100/80">
+      {entries.map(([key, value]) => (
+        <span key={key} className="rounded-full border border-amber-500/40 px-2 py-0.5">
+          {formatWarningLabel(key)}: {String(value)}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function formatWarningLabel(label) {
+  if (!label) return ''
+  return label
+    .toString()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ')
 }

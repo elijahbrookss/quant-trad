@@ -46,6 +46,23 @@ const formatDateTimeShort = (value) => {
   }
 }
 
+const formatRunTime = (seconds) => {
+  if (seconds === null || seconds === undefined) return '--'
+  const numeric = Number(seconds)
+  if (!Number.isFinite(numeric) || numeric < 0) return '--'
+  const totalSeconds = Math.floor(numeric)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const secs = totalSeconds % 60
+  if (hours) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  }
+  if (minutes) {
+    return `${minutes}m ${String(secs).padStart(2, '0')}s`
+  }
+  return `${secs}s`
+}
+
 const SORT_OPTIONS = [
   { value: 'completed_at', label: 'Date' },
   { value: 'net_pnl', label: 'Net PnL' },
@@ -654,6 +671,7 @@ export function ReportsPage() {
                   <th className="pb-3 pr-4">Bot / Strategy</th>
                   <th className="pb-3 pr-4">Instruments</th>
                   <th className="pb-3 pr-4">Date Range</th>
+                  <th className="pb-3 pr-4">Run Time</th>
                   <th className="pb-3 pr-4">TF</th>
                   <th className="pb-3 pr-4 text-right">Net PnL</th>
                   <th className="pb-3 pr-4 text-right">Return</th>
@@ -666,6 +684,7 @@ export function ReportsPage() {
                 {sortedReports.map((report) => {
                   const pnl = report.net_pnl || 0
                   const ret = report.total_return || 0
+                  const runTimeLabel = formatRunTime(report.run_duration_seconds)
                   return (
                     <tr
                       key={report.run_id}
@@ -683,6 +702,7 @@ export function ReportsPage() {
                       <td className="py-3 pr-4 text-xs text-slate-400">
                         {formatDateTimeShort(report.date_range?.start)} → {formatDateTimeShort(report.date_range?.end)}
                       </td>
+                      <td className="py-3 pr-4 text-xs text-slate-400">{runTimeLabel}</td>
                       <td className="py-3 pr-4 text-xs">{formatTimeframe(report.timeframe)}</td>
                       <td
                         className={`py-3 pr-4 text-right font-mono ${pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : ''}`}

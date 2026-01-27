@@ -7,10 +7,15 @@ import io
 import json
 import logging
 import zipfile
+from bisect import bisect_right
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import bindparam, create_engine, text
+from data_providers.utils.ohlcv import interval_to_timedelta
+
+from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
 
 from data_providers.config.runtime import runtime_config_from_env
 from utils.log_context import build_log_context, with_log_context
@@ -45,6 +50,76 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=True)
 
 
+DEFAULT_STATS_VERSION = STATS_VERSION
+DEFAULT_REGIME_VERSION = REGIME_VERSION
+
+CANDLE_STATS_COLUMNS = [
+    "instrument_id",
+    "symbol",
+    "timeframe",
+    "timeframe_seconds",
+    "candle_time",
+    "stats_version",
+    "computed_at",
+    "stats_json",
+    "tr",
+    "tr_pct",
+    "atr_short",
+    "atr_long",
+    "atr_ratio",
+    "atr_slope",
+    "atr_zscore",
+    "slope",
+    "directional_efficiency",
+    "slope_stability",
+    "slope_stability_warmup",
+    "overlap_pct",
+    "range_contraction",
+    "range_position",
+    "volume_zscore",
+    "volume_vs_median",
+]
+
+REGIME_STATS_COLUMNS = [
+    "instrument_id",
+    "symbol",
+    "timeframe",
+    "timeframe_seconds",
+    "candle_time",
+    "regime_version",
+    "computed_at",
+    "regime_json",
+    "volatility_state",
+    "structure_state",
+    "expansion_state",
+    "liquidity_state",
+    "confidence",
+]
+
+DECISION_LEDGER_COLUMNS = [
+    "ts",
+    "decision_id",
+    "trade_id",
+    "instrument_id",
+    "symbol",
+    "timeframe_seconds",
+    "decision_type",
+    "action",
+    "outcome",
+    "reason_code",
+    "context_json",
+    "side",
+    "qty",
+    "price",
+    "event_impact_pnl",
+    "trade_net_pnl",
+    "reason_detail",
+    "evidence_refs_json",
+    "alternatives_rejected_json",
+    "created_at",
+]
+
+
 def _write_csv(zip_file: zipfile.ZipFile, name: str, rows: Sequence[Dict[str, Any]], fieldnames: Sequence[str]) -> None:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
@@ -63,6 +138,16 @@ def _flatten_stats(stats: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]
         else:
             flattened[key] = value
     return flattened
+
+
+def _floor_to_interval(value: Optional[datetime], interval_seconds: int) -> Optional[datetime]:
+    if not value:
+        return None
+    value = value.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    total_seconds = int((value - epoch).total_seconds())
+    remainder = total_seconds % interval_seconds
+    return epoch + timedelta(seconds=total_seconds - remainder)
 
 
 def _resolve_run_window(run: Dict[str, Any]) -> Tuple[datetime, datetime]:
@@ -111,8 +196,42 @@ def _resolve_instruments(run: Dict[str, Any], symbols: Sequence[str]) -> Tuple[L
     return instruments, instrument_by_symbol
 
 
-def _build_trade_rows(trades: Sequence[Dict[str, Any]], instrument_by_symbol: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
+def _regime_metrics_from_row(regime_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not regime_row:
+        return {}
+    raw = regime_row.get("regime_json")
+    if not raw:
+        return {}
+    try:
+        regime = json.loads(raw)
+    except ValueError:
+        return {}
+    volatility = regime.get("volatility") or {}
+    structure = regime.get("structure") or {}
+    expansion = regime.get("expansion") or {}
+    return {
+        "entry_tr_pct": volatility.get("tr_pct"),
+        "entry_atr_ratio": volatility.get("atr_ratio"),
+        "entry_atr_zscore": volatility.get("atr_zscore"),
+        "entry_atr_slope": expansion.get("atr_slope"),
+        "entry_overlap_pct": expansion.get("overlap_pct"),
+        "entry_directional_efficiency": structure.get("directional_efficiency"),
+        "entry_range_position": structure.get("range_position"),
+    }
+
+
+def _build_trade_rows(
+    trades: Sequence[Dict[str, Any]],
+    instrument_by_symbol: Dict[str, Optional[str]],
+    timeframe_seconds: int,
+    timeframe: str,
+    stats_index: Dict[Tuple[str, int, str], List[Tuple[datetime, Dict[str, Any]]]],
+    regime_index: Dict[Tuple[str, int, str], List[Tuple[datetime, Dict[str, Any]]]],
+    stats_version: str,
+    regime_version: str,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    timeframe_delta = timedelta(seconds=timeframe_seconds)
     for trade in trades:
         entry = _parse_iso(trade.get("entry_time"))
         exit_time = _parse_iso(trade.get("exit_time"))
@@ -121,13 +240,78 @@ def _build_trade_rows(trades: Sequence[Dict[str, Any]], instrument_by_symbol: Di
             duration = int((exit_time - entry).total_seconds())
         net_pnl = trade.get("net_pnl")
         was_win = None if net_pnl is None else bool(net_pnl > 0)
+        entry_candle = _floor_to_interval(entry, timeframe_seconds) if entry else None
+        entry_candle_time = _isoformat(entry_candle)
+        instrument_id = instrument_by_symbol.get(trade.get("symbol"))
+        stats_row = None
+        regime_row = None
+        stats_fallback = False
+        regime_fallback = False
+        if entry_candle and instrument_id:
+            stats_row, stats_fallback = _lookup_entry_row(
+                stats_index,
+                instrument_id,
+                timeframe_seconds,
+                stats_version,
+                entry_candle,
+                timeframe_delta,
+            )
+            regime_row, regime_fallback = _lookup_entry_row(
+                regime_index,
+                instrument_id,
+                timeframe_seconds,
+                regime_version,
+                entry_candle,
+                timeframe_delta,
+            )
+        entry_fallback_used = stats_fallback or regime_fallback
+        entry_regime_missing = regime_row is None
+        entry_stats_warmup = bool(stats_row.get("slope_stability_warmup")) if stats_row else False
+        entry_volatility_state = regime_row.get("volatility_state") if regime_row else None
+        entry_structure_state = regime_row.get("structure_state") if regime_row else None
+        entry_expansion_state = regime_row.get("expansion_state") if regime_row else None
+        entry_liquidity_state = regime_row.get("liquidity_state") if regime_row else None
+        entry_regime_confidence = regime_row.get("confidence") if regime_row else None
+        entry_values = {
+            "entry_atr_zscore": stats_row.get("atr_zscore") if stats_row else None,
+            "entry_atr_ratio": stats_row.get("atr_ratio") if stats_row else None,
+            "entry_atr_slope": stats_row.get("atr_slope") if stats_row else None,
+            "entry_tr_pct": stats_row.get("tr_pct") if stats_row else None,
+            "entry_overlap_pct": stats_row.get("overlap_pct") if stats_row else None,
+            "entry_directional_efficiency": stats_row.get("directional_efficiency") if stats_row else None,
+            "entry_range_position": stats_row.get("range_position") if stats_row else None,
+        }
+        regime_metrics = _regime_metrics_from_row(regime_row)
+        for key, value in regime_metrics.items():
+            if entry_values.get(key) is None:
+                entry_values[key] = value
+        entry_metrics = dict(trade.get("metrics") or {})
+        entry_metrics.update(
+            {
+                "entry_tr_pct": entry_values["entry_tr_pct"],
+                "entry_atr_ratio": entry_values["entry_atr_ratio"],
+                "entry_atr_slope": entry_values["entry_atr_slope"],
+                "entry_atr_zscore": entry_values["entry_atr_zscore"],
+                "entry_overlap_pct": entry_values["entry_overlap_pct"],
+                "entry_directional_efficiency": entry_values["entry_directional_efficiency"],
+                "entry_range_position": entry_values["entry_range_position"],
+                "entry_volatility_state": entry_volatility_state,
+                "entry_structure_state": entry_structure_state,
+                "entry_expansion_state": entry_expansion_state,
+                "entry_liquidity_state": entry_liquidity_state,
+                "entry_regime_confidence": entry_regime_confidence,
+                "entry_stats_warmup": entry_stats_warmup,
+                "entry_regime_missing": entry_regime_missing,
+                "entry_fallback_used": entry_fallback_used,
+            }
+        )
         rows.append(
             {
                 "trade_id": trade.get("id"),
                 "run_id": trade.get("run_id"),
                 "bot_id": trade.get("bot_id"),
                 "strategy_id": trade.get("strategy_id"),
-                "instrument_id": instrument_by_symbol.get(trade.get("symbol")),
+                "instrument_id": instrument_id,
                 "symbol": trade.get("symbol"),
                 "direction": trade.get("direction"),
                 "status": trade.get("status"),
@@ -141,9 +325,26 @@ def _build_trade_rows(trades: Sequence[Dict[str, Any]], instrument_by_symbol: Di
                 "net_pnl": net_pnl,
                 "duration_seconds": duration,
                 "was_win": was_win,
-                "metrics_json": _json_dumps(trade.get("metrics") or {}),
+                "metrics_json": _json_dumps(entry_metrics),
                 "created_at": trade.get("created_at"),
                 "updated_at": trade.get("updated_at"),
+                "timeframe": timeframe,
+                "entry_candle_time": entry_candle_time,
+                "entry_stats_warmup_flags": entry_stats_warmup,
+                "entry_fallback_used": entry_fallback_used,
+                "entry_regime_missing": entry_regime_missing,
+                "entry_volatility_state": entry_volatility_state,
+                "entry_structure_state": entry_structure_state,
+                "entry_expansion_state": entry_expansion_state,
+                "entry_liquidity_state": entry_liquidity_state,
+                "entry_regime_confidence": entry_regime_confidence,
+                "entry_tr_pct": entry_values["entry_tr_pct"],
+                "entry_atr_ratio": entry_values["entry_atr_ratio"],
+                "entry_atr_slope": entry_values["entry_atr_slope"],
+                "entry_atr_zscore": entry_values["entry_atr_zscore"],
+                "entry_overlap_pct": entry_values["entry_overlap_pct"],
+                "entry_directional_efficiency": entry_values["entry_directional_efficiency"],
+                "entry_range_position": entry_values["entry_range_position"],
             }
         )
     return rows
@@ -205,6 +406,46 @@ def _build_ledger_rows(
                 "evidence_refs_json": _json_dumps(event.get("evidence_refs") or []),
                 "alternatives_rejected_json": _json_dumps(event.get("alternatives_rejected") or []),
                 "context_json": _json_dumps(event.get("context") or {}),
+            }
+        )
+    return rows
+
+
+def _build_decision_ledger_rows(
+    events: Sequence[Dict[str, Any]],
+    default_timeframe_seconds: Optional[int],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for event in events:
+        timeframe = event.get("timeframe")
+        timeframe_secs = default_timeframe_seconds
+        if timeframe:
+            try:
+                timeframe_secs = int(interval_to_timedelta(timeframe).total_seconds())
+            except Exception:
+                pass
+        rows.append(
+            {
+                "ts": event.get("event_ts"),
+                "decision_id": event.get("event_id"),
+                "trade_id": event.get("trade_id"),
+                "instrument_id": event.get("instrument_id"),
+                "symbol": event.get("symbol"),
+                "timeframe_seconds": timeframe_secs,
+                "decision_type": event.get("event_type"),
+                "action": event.get("event_subtype"),
+                "reason_code": event.get("reason_code"),
+                "outcome": event.get("event_subtype") if event.get("event_type") == "outcome" else None,
+                "context_json": _json_dumps(event.get("context") or {}),
+                "side": event.get("side"),
+                "qty": event.get("qty"),
+                "price": event.get("price"),
+                "event_impact_pnl": event.get("event_impact_pnl"),
+                "trade_net_pnl": event.get("trade_net_pnl"),
+                "reason_detail": event.get("reason_detail"),
+                "evidence_refs_json": _json_dumps(event.get("evidence_refs") or []),
+                "alternatives_rejected_json": _json_dumps(event.get("alternatives_rejected") or []),
+                "created_at": event.get("created_at"),
             }
         )
     return rows
@@ -290,6 +531,8 @@ def _build_readme(
         "- candles_raw: Raw OHLCV candles bounded to the requested window.",
         "- derivatives_state: Per-instrument funding/derivatives state (bounded).",
         "- candle_stats_flat: Flattened candle stats for selected versions (optional).",
+        "- regime_stats_flat: Flattened regime stats for selected versions (optional).",
+        "- decision_ledger: Cleaned decision ledger events for the run (optional).",
         "",
         "Time window:",
         f"- backtest_start={_isoformat(start)}",
@@ -452,11 +695,123 @@ def _fetch_candle_stats(
                 "stats_version": row["stats_version"],
                 "computed_at": _isoformat(row["computed_at"]),
                 "stats_json": _json_dumps(stats),
+                "tr": stats.get("tr"),
+                "tr_pct": stats.get("tr_pct"),
+                "atr_short": stats.get("atr_short"),
+                "atr_long": stats.get("atr_long"),
+                "atr_ratio": stats.get("atr_ratio"),
+                "atr_slope": stats.get("atr_slope"),
+                "atr_zscore": stats.get("atr_zscore"),
+                "slope": stats.get("slope"),
+                "directional_efficiency": stats.get("directional_efficiency"),
+                "slope_stability": stats.get("slope_stability"),
+                "slope_stability_warmup": bool(stats.get("slope_stability_warmup")),
+                "overlap_pct": stats.get("overlap_pct"),
+                "range_contraction": stats.get("range_contraction"),
+                "range_position": stats.get("range_position"),
+                "volume_zscore": stats.get("volume_zscore"),
+                "volume_vs_median": stats.get("volume_vs_median"),
             }
             for key, value in flattened.items():
                 payload[f"stat_{key}"] = value
             rows.append(payload)
     return rows
+
+
+def _fetch_regime_stats(
+    engine,
+    table: str,
+    instrument_id: str,
+    timeframe_seconds: int,
+    start: datetime,
+    end: datetime,
+    regime_versions: Sequence[str],
+) -> List[Dict[str, Any]]:
+    if not regime_versions:
+        return []
+    query = text(
+        f"""
+        SELECT instrument_id, timeframe_seconds, candle_time, regime_version, computed_at, regime
+        FROM {table}
+        WHERE instrument_id = :instrument_id
+          AND timeframe_seconds = :timeframe_seconds
+          AND candle_time BETWEEN :start AND :end
+          AND regime_version IN :regime_versions
+        ORDER BY candle_time
+        """
+    ).bindparams(bindparam("regime_versions", expanding=True))
+    rows: List[Dict[str, Any]] = []
+    with engine.begin() as conn:
+        result = conn.execute(
+            query,
+            {
+                "instrument_id": instrument_id,
+                "timeframe_seconds": timeframe_seconds,
+                "start": start,
+                "end": end,
+                "regime_versions": list(regime_versions),
+            },
+        )
+        for row in result.mappings():
+            regime = dict(row["regime"] or {})
+            volatility = regime.get("volatility") or {}
+            structure = regime.get("structure") or {}
+            expansion = regime.get("expansion") or {}
+            liquidity = regime.get("liquidity") or {}
+            payload = {
+                "instrument_id": row["instrument_id"],
+                "timeframe_seconds": row["timeframe_seconds"],
+                "candle_time": _isoformat(row["candle_time"]),
+                "regime_version": row["regime_version"],
+                "computed_at": _isoformat(row["computed_at"]),
+                "regime_json": _json_dumps(regime),
+                "volatility_state": volatility.get("state"),
+                "structure_state": structure.get("state"),
+                "expansion_state": expansion.get("state"),
+                "liquidity_state": liquidity.get("state"),
+                "confidence": regime.get("confidence"),
+            }
+            rows.append(payload)
+    return rows
+
+
+def _build_time_index(
+    rows: Sequence[Dict[str, Any]],
+    version_key: str,
+) -> Dict[Tuple[str, int, str], List[Tuple[datetime, Dict[str, Any]]]]:
+    index: Dict[Tuple[str, int, str], List[Tuple[datetime, Dict[str, Any]]]] = defaultdict(list)
+    for row in rows:
+        key = (row["instrument_id"], row["timeframe_seconds"], row.get(version_key) or "")
+        dt = _parse_iso(row.get("candle_time"))
+        if not dt:
+            continue
+        index[key].append((dt, row))
+    for entries in index.values():
+        entries.sort(key=lambda item: item[0])
+    return index
+
+
+def _lookup_entry_row(
+    index: Dict[Tuple[str, int, str], List[Tuple[datetime, Dict[str, Any]]]],
+    instrument_id: str,
+    timeframe_seconds: int,
+    version: str,
+    target: datetime,
+    delta: timedelta,
+) -> Tuple[Optional[Dict[str, Any]], bool]:
+    key = (instrument_id, timeframe_seconds, version)
+    entries = index.get(key)
+    if not entries:
+        return None, False
+    times = [entry[0] for entry in entries]
+    pos = bisect_right(times, target)
+    if pos and pos <= len(entries) and times[pos - 1] == target:
+        return entries[pos - 1][1], False
+    if pos:
+        prev_dt, prev_row = entries[pos - 1]
+        if target - prev_dt <= delta:
+            return prev_row, True
+    return None, False
 
 
 def build_run_export(
@@ -466,15 +821,19 @@ def build_run_export(
     post_roll_hours: int = 48,
     stats_versions: Optional[Sequence[str]] = None,
     stats_key_limit: int = 20,
+    regime_versions: Optional[Sequence[str]] = None,
 ) -> Tuple[bytes, str]:
     """Return a ZIP export payload and filename for the requested run."""
 
+    stats_versions_param_list = list(stats_versions) if stats_versions else [DEFAULT_STATS_VERSION]
+    regime_versions_param_list = list(regime_versions) if regime_versions else [DEFAULT_REGIME_VERSION]
     context = build_log_context(
         run_id=run_id,
         pre_roll_hours=pre_roll_hours,
         post_roll_hours=post_roll_hours,
-        stats_versions=stats_versions or [],
+        stats_versions=stats_versions_param_list,
         stats_key_limit=stats_key_limit,
+        regime_versions=regime_versions_param_list,
     )
     logger.info(with_log_context("report_export_start", context))
 
@@ -489,6 +848,8 @@ def build_run_export(
     trade_ids = [trade.get("id") for trade in trades if trade.get("id")]
     trade_events = report_data.list_trade_events_for_trades(trade_ids)
     decision_ledger = list(run.get("decision_ledger") or [])
+    stats_versions_param = stats_versions_param_list
+    regime_versions_param = regime_versions_param_list
 
     start, end = _resolve_run_window(run)
     window_start = start - timedelta(hours=pre_roll_hours)
@@ -506,7 +867,6 @@ def build_run_export(
     export_rows = {
         "run": _build_run_rows(run, duration_seconds),
         "instruments": _build_instrument_rows(instruments),
-        "trades": _build_trade_rows(trades, instrument_by_symbol),
         "trade_events": _build_trade_event_rows(trade_events, instrument_by_symbol),
         "ledger_events": _build_ledger_rows(decision_ledger),
     }
@@ -520,12 +880,11 @@ def build_run_export(
     if not timeframe:
         raise ValueError("Run timeframe is required for candle export.")
 
-    from data_providers.utils.ohlcv import interval_to_timedelta
-
     timeframe_seconds = int(interval_to_timedelta(timeframe).total_seconds())
     candles_rows: List[Dict[str, Any]] = []
     derivatives_rows: List[Dict[str, Any]] = []
     stats_rows: List[Dict[str, Any]] = []
+    regime_rows: List[Dict[str, Any]] = []
     for instrument in instruments:
         instrument_id = instrument.get("id")
         symbol = instrument.get("symbol")
@@ -561,18 +920,60 @@ def build_run_export(
             timeframe_seconds,
             window_start,
             window_end,
-            stats_versions or [],
+            stats_versions_param,
             stats_key_limit,
         )
         for row in stats:
             row["symbol"] = symbol
             row["timeframe"] = timeframe
         stats_rows.extend(stats)
+        regime = _fetch_regime_stats(
+            engine,
+            runtime_config.persistence.regime_stats_table,
+            instrument_id,
+            timeframe_seconds,
+            window_start,
+            window_end,
+            regime_versions_param,
+        )
+        for row in regime:
+            row["symbol"] = symbol
+            row["timeframe"] = timeframe
+        regime_rows.extend(regime)
 
+    export_rows["candle_stats_flat"] = stats_rows
+    export_rows["regime_stats_flat"] = regime_rows
+    stats_lookup_version = stats_versions_param[0] if stats_versions_param else DEFAULT_STATS_VERSION
+    regime_lookup_version = regime_versions_param[0] if regime_versions_param else DEFAULT_REGIME_VERSION
+    stats_index = _build_time_index(stats_rows, "stats_version")
+    regime_index = _build_time_index(regime_rows, "regime_version")
+    trade_rows = _build_trade_rows(
+        trades,
+        instrument_by_symbol,
+        timeframe_seconds,
+        timeframe,
+        stats_index,
+        regime_index,
+        stats_lookup_version,
+        regime_lookup_version,
+    )
+    export_rows["trades"] = trade_rows
+    if trade_rows:
+        total_trades = len(trade_rows)
+        fallback_rate = sum(1 for row in trade_rows if row.get("entry_fallback_used")) / total_trades
+        regime_missing_rate = sum(1 for row in trade_rows if row.get("entry_regime_missing")) / total_trades
+        log_context = {
+            **context,
+            "trade_count": total_trades,
+            "stats_version": stats_lookup_version,
+            "regime_version": regime_lookup_version,
+            "fallback_rate": round(fallback_rate, 4),
+            "regime_missing_rate": round(regime_missing_rate, 4),
+        }
+        logger.info(with_log_context("report_export_entry_context_stats", log_context))
+    export_rows["decision_ledger"] = _build_decision_ledger_rows(decision_ledger, timeframe_seconds)
     export_rows["candles_raw"] = candles_rows
     export_rows["derivatives_state"] = derivatives_rows
-    if stats_rows:
-        export_rows["candle_stats_flat"] = stats_rows
 
     readme = _build_readme(
         run_id,
@@ -580,7 +981,7 @@ def build_run_export(
         end,
         pre_roll_hours,
         post_roll_hours,
-        stats_versions or [],
+        stats_versions_param,
         stats_key_limit,
     )
 
@@ -632,6 +1033,7 @@ def build_run_export(
                 "strategy_id",
                 "instrument_id",
                 "symbol",
+                "timeframe",
                 "direction",
                 "status",
                 "contracts",
@@ -647,6 +1049,22 @@ def build_run_export(
                 "metrics_json",
                 "created_at",
                 "updated_at",
+                "entry_candle_time",
+                "entry_stats_warmup_flags",
+                "entry_fallback_used",
+                "entry_regime_missing",
+                "entry_volatility_state",
+                "entry_structure_state",
+                "entry_expansion_state",
+                "entry_liquidity_state",
+                "entry_regime_confidence",
+                "entry_tr_pct",
+                "entry_atr_ratio",
+                "entry_atr_slope",
+                "entry_atr_zscore",
+                "entry_overlap_pct",
+                "entry_directional_efficiency",
+                "entry_range_position",
             ],
         )
         _write_csv(
@@ -742,13 +1160,24 @@ def build_run_export(
                 "inserted_at",
             ],
         )
-        if "candle_stats_flat" in export_rows:
-            _write_csv(
-                zip_file,
-                "candle_stats_flat.csv",
-                export_rows["candle_stats_flat"],
-                list(export_rows["candle_stats_flat"][0].keys()) if export_rows["candle_stats_flat"] else [],
-            )
+        _write_csv(
+            zip_file,
+            "candle_stats_flat.csv",
+            export_rows["candle_stats_flat"],
+            CANDLE_STATS_COLUMNS,
+        )
+        _write_csv(
+            zip_file,
+            "regime_stats_flat.csv",
+            export_rows["regime_stats_flat"],
+            REGIME_STATS_COLUMNS,
+        )
+        _write_csv(
+            zip_file,
+            "decision_ledger.csv",
+            export_rows["decision_ledger"],
+            DECISION_LEDGER_COLUMNS,
+        )
 
     logger.info(with_log_context("report_export_success", context))
     return buffer.getvalue(), filename

@@ -84,6 +84,16 @@ export const BotCard = memo(function BotCard({
         .filter(Boolean),
     [bot.strategy_ids, strategyLookup],
   )
+  const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
+  const warningCount = runtimeWarnings.length
+  const warningMessages = runtimeWarnings
+    .slice(0, 3)
+    .map((warning) => (warning?.message ? String(warning.message) : 'Warning'))
+  const warningOverflow = Math.max(0, warningCount - warningMessages.length)
+  const warningTooltip =
+    warningMessages.length > 0
+      ? `${warningMessages.join(' • ')}${warningOverflow > 0 ? ` • +${warningOverflow} more` : ''}`
+      : null
 
   const runtimeStatus = computeStatus(bot)
   const statusColor = getStatusColor(runtimeStatus)
@@ -179,6 +189,15 @@ export const BotCard = memo(function BotCard({
                   {modeLabel}
                 </span>
               ) : null}
+              {warningCount > 0 && (
+                <div
+                  className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
+                  title={warningTooltip || undefined}
+                >
+                  <TriangleAlert className="size-3 text-amber-300" />
+                  <span>{warningCount}</span>
+                </div>
+              )}
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
               {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}

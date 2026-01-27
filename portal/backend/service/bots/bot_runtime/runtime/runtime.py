@@ -42,11 +42,14 @@ from ....indicators.indicator_service.context import IndicatorServiceContext, _c
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
 from .series_runner import InlineSeriesRunner, SeriesRunnerContext, ThreadedSeriesRunner
+from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
+from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SIM_LOOKBACK_DAYS = 7
 MAX_LOG_ENTRIES = 500
+MAX_WARNING_ENTRIES = 20
 INTRABAR_BASE_SECONDS = 0.4
 WALK_FORWARD_SAMPLE_INTERVAL = 50
 
@@ -121,6 +124,7 @@ class BotRuntime:
         self._live_mode = self._policy.allow_live_refresh
         self._series_runner_type = self._resolve_series_runner_type(self.config.get("series_runner"))
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
+        self._warnings: Deque[Dict[str, Any]] = deque(maxlen=MAX_WARNING_ENTRIES)
         self._decision_events: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._signal_event_ids: Dict[Tuple[str, str, Optional[str], Optional[str]], str] = {}
         self._decision_event_ids: Dict[str, str] = {}
@@ -133,6 +137,9 @@ class BotRuntime:
         self._candle_diag_seen: Set[Tuple[str, str]] = set()
         self._candle_diag_null: Set[Tuple[str, str]] = set()
         self._prepare_error: Optional[Dict[str, Any]] = None
+        self._overlay_dirty = threading.Event()
+        self._overlay_aggregator_stop = threading.Event()
+        self._overlay_aggregator_thread: Optional[threading.Thread] = None
         overlay_cache = default_overlay_cache()
         for indicator_type in get_overlay_cache_types():
             overlay_cache.enable_type(indicator_type)
@@ -147,6 +154,7 @@ class BotRuntime:
             self.run_type,
             self._log_candle_sequence,
             indicator_ctx=self._indicator_ctx,
+            warning_sink=self._record_runtime_warning,
         )
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
@@ -329,13 +337,70 @@ class BotRuntime:
         self._push_update("prepared")
 
     def _rebuild_overlay_cache(self) -> None:
+        """Rebuild overlays synchronously and signal the aggregator."""
+
+        self._aggregate_overlays_to_cache()
+        self._notify_overlay_aggregation_needed()
+
+    def _aggregate_overlays_to_cache(self) -> None:
+        """Collect overlays for every series while holding the update lock."""
+
         overlays: List[Dict[str, Any]] = []
         with self._series_update_lock:
             for series in self._series:
-                overlays.extend(series.overlays)
+                overlays.extend(series.overlays or [])
                 if series.trade_overlay:
                     overlays.append(series.trade_overlay)
+        with self._lock:
             self._chart_overlays = overlays
+
+    def _notify_overlay_aggregation_needed(self) -> None:
+        """Signal the background aggregator that overlays need refreshing."""
+
+        if self._overlay_aggregator_thread and self._overlay_aggregator_thread.is_alive():
+            self._overlay_dirty.set()
+        else:
+            # Fallback to synchronous rebuild if the aggregator is not running.
+            self._aggregate_overlays_to_cache()
+
+    def _start_overlay_aggregator(self) -> None:
+        """Ensure the aggregator thread is running and primed."""
+
+        if self._overlay_aggregator_thread and self._overlay_aggregator_thread.is_alive():
+            return
+        self._overlay_aggregator_stop.clear()
+        self._overlay_dirty.clear()
+        self._overlay_aggregator_thread = threading.Thread(
+            target=self._overlay_aggregator_loop,
+            name=f"bot-{self.bot_id}-overlay-aggregator",
+            daemon=True,
+        )
+        self._overlay_aggregator_thread.start()
+        # Trigger an initial update so the cache is populated.
+        self._overlay_dirty.set()
+
+    def _stop_overlay_aggregator(self) -> None:
+        """Shut down the overlay aggregator thread cleanly."""
+
+        self._overlay_aggregator_stop.set()
+        self._overlay_dirty.set()
+        thread = self._overlay_aggregator_thread
+        self._overlay_aggregator_thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=0.5)
+
+    def _overlay_aggregator_loop(self) -> None:
+        """Background loop that batches overlay builds while the runtime is running."""
+
+        while not self._stop.is_set() and not self._overlay_aggregator_stop.is_set():
+            triggered = self._overlay_dirty.wait(timeout=0.25)
+            self._overlay_dirty.clear()
+            if self._overlay_aggregator_stop.is_set() or self._stop.is_set():
+                break
+            if triggered:
+                self._aggregate_overlays_to_cache()
+        # Ensure the cache is up to date before exiting.
+        self._aggregate_overlays_to_cache()
 
     def _build_series_states(self) -> None:
         self._series_states = []
@@ -782,6 +847,7 @@ class BotRuntime:
             overlay_transform=summary.get("transform_counts"),
         )
         logger.info(with_log_context("instrument_overlay_summary", context))
+        self._notify_overlay_aggregation_needed()
 
     @staticmethod
     def _overlay_summary(overlays: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -861,6 +927,7 @@ class BotRuntime:
             self._last_stats = {}
             self._next_bar_at = None
             self._logs.clear()
+            self._warnings.clear()
             self._decision_events.clear()
             self._intrabar_manager.clear_cache()
             self._run_started_at = None
@@ -973,8 +1040,12 @@ class BotRuntime:
             series_runner=self._series_runner_type,
             series_count=len(self._series_states),
         )
-        self._runner = self._build_series_runner()
-        self._runner.run()
+        self._start_overlay_aggregator()
+        try:
+            self._runner = self._build_series_runner()
+            self._runner.run()
+        finally:
+            self._stop_overlay_aggregator()
         if self._stop.is_set():
             status = "stopped"
         elif not self._live_mode:
@@ -1512,6 +1583,32 @@ class BotRuntime:
         for sink in sinks:
             sink.record_log(entry)
 
+    def _record_runtime_warning(self, warning: Optional[Mapping[str, object]]) -> None:
+        """Capture runtime warnings for UI consumption."""
+
+        if not warning:
+            return
+        entry: Dict[str, object] = dict(warning)
+        entry.setdefault("level", "warning")
+        entry.setdefault("type", entry.get("type") or "runtime_warning")
+        entry.setdefault("message", entry.get("message") or "Runtime warning")
+        entry.setdefault("source", entry.get("source") or "runtime")
+        entry.setdefault("bot_id", self.bot_id)
+        entry.setdefault("bot_mode", self.run_type)
+        entry.setdefault("timestamp", _isoformat(datetime.now(timezone.utc)))
+        entry.setdefault("id", str(uuid.uuid4()))
+        context = dict(entry.get("context") or {})
+        entry["context"] = context
+        with self._lock:
+            self._warnings.append(entry)
+            self.state["warnings"] = list(self._warnings)
+
+    def warnings(self) -> List[Dict[str, object]]:
+        """Return the current runtime warnings."""
+
+        with self._lock:
+            return list(self._warnings)
+
     def _signal_key(
         self,
         series: StrategySeries,
@@ -1818,6 +1915,18 @@ class BotRuntime:
             return
         run_id = self._run_context.run_id if self._run_context else None
         contracts = sum(max(leg.contracts, 0) for leg in trade.legs)
+        timeframe_label = series.timeframe
+        timeframe_seconds = _timeframe_to_seconds(timeframe_label)
+        instrument_id = (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None
+        entry_context = derive_entry_context(
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+            entry_time=trade.entry_time,
+            stats_version=STATS_VERSION,
+            regime_version=REGIME_VERSION,
+        )
+        metrics = dict(trade._metrics_snapshot())
+        metrics.update(build_entry_metrics(entry_context))
         storage.record_bot_trade(
             {
                 "trade_id": trade.trade_id,
@@ -1832,7 +1941,10 @@ class BotRuntime:
                 "contracts": contracts,
                 "status": "open",
                 "quote_currency": trade.quote_currency,
-                "metrics": trade._metrics_snapshot(),
+                "metrics": metrics,
+                "instrument_id": instrument_id,
+                "timeframe": timeframe_label,
+                "timeframe_seconds": timeframe_seconds,
             }
         )
 
@@ -1874,6 +1986,9 @@ class BotRuntime:
                     "net_pnl": event.get("net_pnl"),
                     "quote_currency": event.get("currency"),
                     "metrics": event.get("metrics"),
+                    "instrument_id": (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None,
+                    "timeframe": series.timeframe,
+                    "timeframe_seconds": _timeframe_to_seconds(series.timeframe),
                 }
             )
 
@@ -1934,6 +2049,7 @@ class BotRuntime:
             payload["next_bar_in_seconds"] = self._seconds_until_next_bar()
         if "started_at" not in payload and self._run_started_at is not None:
             payload["started_at"] = _isoformat(self._run_started_at)
+        payload.setdefault("warnings", self.warnings())
         return payload
 
     def snapshot(self) -> Dict[str, object]:
@@ -1948,6 +2064,7 @@ class BotRuntime:
 
         self._ensure_prepared()
         payload = self._chart_state()
+        payload["warnings"] = self.warnings()
         payload["runtime"] = self.snapshot()
         return payload
 

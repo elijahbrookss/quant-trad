@@ -224,3 +224,10 @@ changelog-pr-batch: ## Generate changelog entries for merged PRs since BASE_BRAN
 	@set -euo pipefail; \
 	if [ -z "$${BASE_BRANCH:-}" ]; then echo "✗ BASE_BRANCH is required (e.g., BASE_BRANCH=develop)"; exit 1; fi; \
 	scripts/automation/changelog_pr_batch.sh "$$BASE_BRANCH"
+
+.PHONY: branch-artifact
+branch-artifact: ## Build artifact with all commits and merged PRs for a branch (defaults to current branch)
+	@set -euo pipefail; \
+	branch=$${BRANCH:-$$(git branch --show-current)}; \
+	if [ -z "$$branch" ]; then echo "✗ Could not determine branch (not on a branch?)"; exit 1; fi; \
+	scripts/automation/branch_artifact_builder.sh "$$branch"

@@ -638,6 +638,7 @@ def performance(bot_id: str) -> Dict[str, object]:
             "stats": bot.get("last_stats") or {},
             "overlays": [],
             "logs": [],
+            "warnings": [],
             "inactive": True,
             "message": "Start this bot to stream performance data.",
             "runtime": {
