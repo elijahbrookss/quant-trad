@@ -43,6 +43,7 @@ import pandas as pd
 from ib_insync import IB, Contract, util
 
 from core.logger import logger
+from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 
@@ -208,7 +209,27 @@ class InteractiveBrokersProvider(BaseDataProvider):
                     contract.exchange,
                     exc,
                 )
-                return []
+        return []
+
+
+@_REGISTRY.provider(
+    id="INTERACTIVE_BROKERS",
+    label="Interactive Brokers",
+    supported_venues=["INTERACTIVE_BROKERS"],
+    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities", "futures", "options"]},
+)
+def _register_ibkr_provider():
+    return InteractiveBrokersProvider
+
+
+@_REGISTRY.venue(
+    id="INTERACTIVE_BROKERS",
+    label="Interactive Brokers",
+    provider_id="INTERACTIVE_BROKERS",
+    adapter_id=None,
+)
+def _register_ibkr_venue():
+    return "INTERACTIVE_BROKERS"
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -560,3 +581,23 @@ class InteractiveBrokersProvider(BaseDataProvider):
             getattr(qualified, "lastTradeDateOrContractMonth", None),
         )
         return qualified
+
+
+@_REGISTRY.provider(
+    id="INTERACTIVE_BROKERS",
+    label="Interactive Brokers",
+    supported_venues=["INTERACTIVE_BROKERS"],
+    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities", "futures", "options"]},
+)
+def _register_ibkr_provider():
+    return InteractiveBrokersProvider
+
+
+@_REGISTRY.venue(
+    id="INTERACTIVE_BROKERS",
+    label="Interactive Brokers",
+    provider_id="INTERACTIVE_BROKERS",
+    adapter_id=None,
+)
+def _register_ibkr_venue():
+    return "INTERACTIVE_BROKERS"

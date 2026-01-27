@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 
 from core.logger import logger
+from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 class YahooFinanceProvider(BaseDataProvider):
@@ -160,3 +161,45 @@ class YahooFinanceProvider(BaseDataProvider):
             return InstrumentType.SPOT
 
         return None
+
+
+@_REGISTRY.provider(
+    id="YAHOO",
+    label="Yahoo Finance",
+    supported_venues=["YAHOO"],
+    capabilities={"supportsHistorical": True, "supportsLive": False, "supportsOrders": False, "assetClasses": ["equities", "etf"]},
+)
+def _register_yahoo_provider():
+    return YahooFinanceProvider
+
+
+@_REGISTRY.venue(
+    id="YAHOO",
+    label="Yahoo Finance",
+    provider_id="YAHOO",
+    adapter_id=None,
+    asset_class="equities",
+)
+def _register_yahoo_venue():
+    return "YAHOO"
+
+
+@_REGISTRY.provider(
+    id="YAHOO",
+    label="Yahoo Finance",
+    supported_venues=["YAHOO"],
+    capabilities={"supportsHistorical": True, "supportsLive": False, "supportsOrders": False, "assetClasses": ["equities", "etf"]},
+)
+def _register_yahoo_provider():
+    return YahooFinanceProvider
+
+
+@_REGISTRY.venue(
+    id="YAHOO",
+    label="Yahoo Finance",
+    provider_id="YAHOO",
+    adapter_id=None,
+    asset_class="equities",
+)
+def _register_yahoo_venue():
+    return "YAHOO"

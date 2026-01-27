@@ -8,6 +8,7 @@ import pandas as pd
 import ccxt
 
 from core.logger import logger
+from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
 
@@ -443,3 +444,46 @@ class CCXTProvider(BaseDataProvider):
 
         # Align with downstream expectations
         return df[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+
+@_REGISTRY.provider(
+    id="CCXT",
+    label="CCXT (multi-exchange)",
+    supported_venues=["KRAKEN_PRO", "BINANCE_US", "COINBASE"],
+    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+)
+def _register_ccxt_provider():
+    return CCXTProvider
+
+
+@_REGISTRY.venue(
+    id="KRAKEN_PRO",
+    label="Kraken Pro",
+    provider_id="CCXT",
+    adapter_id="kraken",
+    asset_class="crypto",
+)
+def _register_ccxt_kraken():
+    return "KRAKEN_PRO"
+
+
+@_REGISTRY.venue(
+    id="BINANCE_US",
+    label="Binance US",
+    provider_id="CCXT",
+    adapter_id="binanceus",
+    asset_class="crypto",
+)
+def _register_ccxt_binance_us():
+    return "BINANCE_US"
+
+
+@_REGISTRY.venue(
+    id="COINBASE",
+    label="Coinbase Advanced (CCXT)",
+    provider_id="CCXT",
+    adapter_id="coinbase",
+    asset_class="crypto",
+)
+def _register_ccxt_coinbase():
+    return "COINBASE"
