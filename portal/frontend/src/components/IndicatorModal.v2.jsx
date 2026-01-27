@@ -15,6 +15,22 @@ const EMPTY_META = {
 }
 
 const NUMBER_FIELDS = new Set(['int', 'float', 'number'])
+const RUNTIME_CONTEXT_KEYS = new Set([
+  'symbol',
+  'interval',
+  'start',
+  'end',
+  'timeframe',
+  'datasource',
+  'exchange',
+  'provider_id',
+  'venue_id',
+  'instrument_id',
+  'bot_id',
+  'strategy_id',
+  'bot_mode',
+  'run_id',
+])
 
 const toInt = (value) => {
   if (typeof value === 'number') {
@@ -238,37 +254,25 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const fieldOrder = useMemo(() => buildFieldOrder(meta, params), [meta, params])
   const intListKeys = useMemo(() => deriveIntListKeys(meta), [meta])
 
-  const { primaryKeys, advancedKeys } = useMemo(() => {
-    if (!fieldOrder.length) return { primaryKeys: [], advancedKeys: [] }
+  const { coreKeys, optionalKeys, requiredKeys } = useMemo(() => {
+    if (!fieldOrder.length) return { coreKeys: [], optionalKeys: [], requiredKeys: [] }
 
-    const required = Array.isArray(meta.required_params) ? meta.required_params : []
-    const preferred = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
-    // Exclude chart-context fields - these are runtime parameters, not indicator config
-    const chartContextKeys = new Set([
-      'symbol',
-      'interval',
-      'start',
-      'end',
-      'timeframe',
-      'datasource',
-      'exchange',
-      'provider_id',
-      'venue_id',
-      'instrument_id',
-    ])
-    const filteredOrder = fieldOrder.filter((key) => !chartContextKeys.has(key))
+    const requiredList = Array.isArray(meta.required_params) ? meta.required_params : []
+    const preferredList = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
+    const filteredOrder = fieldOrder.filter((key) => !RUNTIME_CONTEXT_KEYS.has(key))
 
-    const essential = new Set([...required, ...preferred])
+    const requiredOnly = filteredOrder.filter((key) => requiredList.includes(key))
+    const preferredOnly = filteredOrder.filter((key) => preferredList.includes(key) && !requiredOnly.includes(key))
 
-    for (const key of filteredOrder) {
-      if (essential.size >= Math.max(required.length, Math.min(filteredOrder.length, 6))) break
-      essential.add(key)
-    }
+    const fallbackPrimary = filteredOrder.slice(
+      0,
+      Math.min(filteredOrder.length, Math.max(requiredOnly.length || 2, 4)),
+    )
 
-    const primary = filteredOrder.filter((key) => essential.has(key))
-    const advanced = filteredOrder.filter((key) => !essential.has(key))
+    const core = Array.from(new Set([...requiredOnly, ...preferredOnly, ...fallbackPrimary]))
+    const optional = filteredOrder.filter((key) => !core.includes(key))
 
-    return { primaryKeys: primary, advancedKeys: advanced }
+    return { coreKeys: core, optionalKeys: optional, requiredKeys: requiredOnly }
   }, [fieldOrder, meta])
 
   const handleParamChange = (key) => (input) => {
@@ -305,14 +309,14 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     const enumValues = Array.isArray(meta.ui_enums?.[key]) ? meta.ui_enums[key] : null
 
     return (
-      <div key={key} className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-4">
-        <div>
+      <div key={key} className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
           <label className="text-sm font-semibold text-white">
             {key}
             {isRequired && <span className="ml-1 text-rose-300">*</span>}
           </label>
-          {description && <p className="text-xs text-slate-300/80">{description}</p>}
         </div>
+        {description && <p className="text-xs text-slate-300/80">{description}</p>}
 
         {fieldType === 'bool' ? (
           <div className="flex items-center gap-3">
@@ -380,38 +384,38 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
 
   return (
     <Dialog open={isOpen} onClose={onClose} className="relative z-50">
-      <div className="fixed inset-0 bg-black/50" aria-hidden="true" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-3xl overflow-hidden rounded-2xl border border-white/10 bg-[#121520] text-slate-100 shadow-2xl">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
+      <div className="fixed inset-0 flex items-center justify-center p-6">
+        <DialogPanel className="flex w-full max-w-4xl max-h-[92vh] flex-col overflow-hidden rounded-xl border border-white/10 bg-[#0c111d] text-slate-100 shadow-2xl">
           <header className="border-b border-white/10 bg-white/5 px-6 py-4">
             <DialogTitle className="text-lg font-semibold text-white">
               {initial?.id ? 'Edit indicator' : 'Create indicator'}
             </DialogTitle>
             <p className="mt-1 text-sm text-slate-400">
-              Configure the core parameters and choose which signal rules should run for this indicator.
+              Configure the core parameters and choose which signal rules should run for this indicator. Required fields are marked with *.
             </p>
           </header>
 
-          <div className="space-y-6 px-6 py-6">
+          <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
             {(metaError || error) && (
-              <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">
+              <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 shadow-sm">
                 {metaError || error}
               </div>
             )}
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1">
-                <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Name</label>
+                <label className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Name</label>
                 <input
-                  className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
+                  className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Indicator type</label>
+                <label className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-400">Indicator type</label>
                 {initial?.id ? (
-                  <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200">
+                  <div className="rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-slate-200">
                     {typeId || '—'}
                   </div>
                 ) : (
@@ -427,77 +431,99 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
             </div>
 
             {typeId ? (
-              <div className="space-y-4">
+              <div className="space-y-5">
                 {fieldOrder.length ? (
-                  <div className="space-y-4">
-                    {primaryKeys.length > 0 && (
-                      <div className="grid gap-3 md:grid-cols-2">{primaryKeys.map(renderField)}</div>
-                    )}
+                  <div className="space-y-5">
+                    <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <h4 className="text-sm font-semibold text-white">Core parameters</h4>
+                          <p className="text-xs text-slate-400">
+                            {requiredKeys.length
+                              ? `${requiredKeys.length} required field${requiredKeys.length > 1 ? 's' : ''} for this indicator`
+                              : 'Primary settings for this indicator'}
+                          </p>
+                        </div>
+                        {requiredKeys.length > 0 && (
+                          <span className="rounded-full border border-white/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-slate-300">
+                            Required
+                          </span>
+                        )}
+                      </div>
 
-                    {advancedKeys.length > 0 && (
-                      <div className="space-y-3 rounded-xl border border-dashed border-white/10 bg-white/5 p-4">
+                      {coreKeys.length > 0 ? (
+                        <div className="grid gap-3 md:grid-cols-2">{coreKeys.map(renderField)}</div>
+                      ) : (
+                        <p className="text-sm text-slate-400">No configurable parameters for this indicator.</p>
+                      )}
+                    </div>
+
+                    {optionalKeys.length > 0 && (
+                      <div className="space-y-3 rounded-lg border border-dashed border-white/12 bg-slate-900/40 p-4">
                         <div className="flex items-center justify-between">
                           <div>
-                            <h4 className="text-sm font-semibold text-white">Advanced parameters</h4>
+                            <h4 className="text-sm font-semibold text-white">Additional parameters</h4>
                             <p className="text-xs text-slate-400">
-                              {advancedKeys.length} optional setting{advancedKeys.length > 1 ? 's' : ''} hidden by default.
+                              {optionalKeys.length} optional setting{optionalKeys.length > 1 ? 's' : ''} kept separate for clarity.
                             </p>
                           </div>
                           <button
                             type="button"
                             onClick={() => setShowAdvanced((prev) => !prev)}
-                            className="rounded-full border border-white/15 px-3 py-1 text-xs text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white"
+                            className="rounded-md border border-white/15 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:text-white"
                           >
-                            {showAdvanced ? 'Hide advanced' : 'Show advanced'}
+                            {showAdvanced ? 'Hide optional' : 'Show optional'}
                           </button>
                         </div>
 
                         {showAdvanced && (
-                          <div className="grid gap-3 md:grid-cols-2">{advancedKeys.map(renderField)}</div>
+                          <div className="grid gap-3 md:grid-cols-2">{optionalKeys.map(renderField)}</div>
                         )}
                       </div>
                     )}
                   </div>
                 ) : (
-                  <p className="text-sm text-slate-400">No editable parameters for this indicator.</p>
+                  <p className="rounded-lg border border-dashed border-white/10 bg-slate-900/50 p-4 text-sm text-slate-400">
+                    No editable parameters for this indicator.
+                  </p>
                 )}
 
                 {availableSignalRules.length > 0 && (
-                  <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="space-y-3 rounded-lg border border-white/10 bg-slate-900/60 p-4">
                     <div className="flex items-center justify-between">
                       <div>
                         <h4 className="text-sm font-semibold text-white">Signal rules</h4>
-                        <p className="text-xs text-slate-400">Choose which rule detections should run when generating signals.</p>
+                        <p className="text-xs text-slate-400">Toggle the detections you want to run for this indicator.</p>
                       </div>
                       <button
                         type="button"
-                        className="rounded-full border border-white/10 px-3 py-1 text-xs text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white"
+                        className="rounded-md border border-white/10 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:text-white"
                         onClick={() => setSelectedSignalRules(allRulesSelected ? [] : availableSignalRules.map((rule) => rule.id))}
                       >
                         {allRulesSelected ? 'Clear' : 'Enable all'}
                       </button>
                     </div>
 
-                    <div className="space-y-3">
-                      {availableSignalRules.map((rule) => {
+                    <div className="divide-y divide-white/10 rounded-md border border-white/10 bg-black/20">
+                      {availableSignalRules.map((rule, idx) => {
                         const checked = selectedSignalRules.includes(rule.id)
                         return (
                           <label
                             key={rule.id}
-                            className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-sm transition ${
+                            className={`flex items-start justify-between gap-3 px-3 py-3 text-sm transition ${
                               checked
-                                ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)] text-white'
-                                : 'border-white/10 bg-black/30 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
-                            }`}
+                                ? 'bg-[color:var(--accent-alpha-10)] text-white'
+                                : 'text-slate-200 hover:bg-white/5 hover:text-white'
+                            } ${idx === 0 ? 'rounded-t-md' : ''} ${idx === availableSignalRules.length - 1 ? 'rounded-b-md' : ''}`}
                           >
                             <div className="space-y-1">
                               <span className="font-medium">{rule.label || rule.id}</span>
-                              {rule.description && <p className="text-xs text-slate-300/80">{rule.description}</p>}
+                              {rule.description && <p className="text-xs text-slate-300/80 leading-relaxed">{rule.description}</p>}
                             </div>
                             <Switch
                               checked={checked}
                               onChange={() => toggleSignalRule(rule.id)}
-                              className={`${checked ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                              className={`${checked ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition`}
                             >
                               <span className={`${checked ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
                             </Switch>
@@ -509,28 +535,28 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                 )}
               </div>
             ) : (
-              <p className="rounded-xl border border-dashed border-white/10 bg-white/5 p-4 text-sm text-slate-400">
+              <p className="rounded-lg border border-dashed border-white/10 bg-slate-900/50 p-4 text-sm text-slate-400">
                 Select an indicator type to configure its parameters and signal rules.
               </p>
             )}
-
-            <footer className="flex items-center justify-end gap-3">
-              <button
-                type="button"
-                className="rounded-lg border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 hover:bg-white/10"
-                onClick={onClose}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="rounded-lg bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] hover:bg-[color:var(--accent-alpha-60)]"
-                onClick={handleSubmit}
-              >
-                Save indicator
-              </button>
-            </footer>
           </div>
+
+          <footer className="flex items-center justify-end gap-3 border-t border-white/10 bg-white/5 px-6 py-4">
+            <button
+              type="button"
+              className="rounded-md border border-white/10 bg-transparent px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="rounded-md bg-[color:var(--accent-alpha-40)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] transition hover:bg-[color:var(--accent-alpha-60)]"
+              onClick={handleSubmit}
+            >
+              Save indicator
+            </button>
+          </footer>
         </DialogPanel>
       </div>
     </Dialog>
