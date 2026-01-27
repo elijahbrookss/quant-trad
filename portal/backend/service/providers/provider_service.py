@@ -18,6 +18,8 @@ from data_providers.registry import (
 )
 
 from . import persistence_bootstrap  # noqa: F401
+from .secret_status import resolve_status, required_keys
+from data_providers.services.credential_store import save_credentials
 
 from ..market import instrument_service
 
@@ -29,6 +31,7 @@ def provider_payloads() -> List[Dict[str, Any]]:
 
     venues_by_provider: Dict[str, List[Dict[str, Any]]] = {}
     for venue in list_venues():
+        venue_status = resolve_status(venue.provider_id, venue.id)
         venues_by_provider.setdefault(venue.provider_id, []).append(
             {
                 "id": venue.id,
@@ -38,17 +41,20 @@ def provider_payloads() -> List[Dict[str, Any]]:
                 "asset_class": venue.asset_class,
                 "symbols_format": venue.symbols_format,
                 "metadata": venue.metadata,
+                "status": venue_status,
             }
         )
 
     payload: List[Dict[str, Any]] = []
     for provider in list_providers():
+        status = resolve_status(provider.id, None)
         payload.append(
             {
                 "id": provider.id,
                 "label": provider.label,
                 "capabilities": provider.capabilities,
                 "supportedVenues": provider.supported_venues,
+                "status": status,
                 "venues": venues_by_provider.get(provider.id, []),
             }
         )
@@ -68,12 +74,22 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
     provider_cfg = get_provider_config(normalized_provider)
     if not provider_cfg:
         errors["provider_id"] = "Select a valid data provider."
+    else:
+        provider_status = resolve_status(provider_cfg.id, None)
+        if provider_status.get("state") != "available":
+            missing = provider_status.get("missing", [])
+            errors["provider_id"] = f"Provider unavailable; missing secrets: {', '.join(missing)}"
 
     venue_cfg = get_venue_config(normalized_venue) if normalized_venue else None
     if normalized_venue and not venue_cfg:
         errors["venue_id"] = "Select an exchange/venue supported by the provider."
     elif venue_cfg and provider_cfg and venue_cfg.provider_id != provider_cfg.id:
         errors["venue_id"] = "Venue is not supported by the chosen provider."
+    elif venue_cfg:
+        venue_status = resolve_status(venue_cfg.provider_id, venue_cfg.id)
+        if venue_status.get("state") != "available":
+            missing = venue_status.get("missing", [])
+            errors["venue_id"] = f"Venue unavailable; missing secrets: {', '.join(missing)}"
 
     if provider_cfg and not normalized_venue:
         venues = provider_cfg.supported_venues
@@ -204,3 +220,21 @@ def tick_metadata(
     metadata["symbol"] = normalized_symbol
     metadata["timeframe"] = timeframe
     return {"metadata": metadata}
+
+
+def upsert_provider_secrets(provider_id: Optional[str], venue_id: Optional[str], credentials: Dict[str, str]) -> Dict[str, object]:
+    """Persist credentials for a provider/venue and return the updated status."""
+
+    normalized_provider = normalize_provider_id(provider_id)
+    normalized_venue = normalize_venue_id(venue_id)
+    required = required_keys(normalized_provider, normalized_venue)
+    if not required:
+        raise ValueError("This provider/venue does not accept credential updates.")
+
+    missing = [key for key in required if not credentials.get(key)]
+    if missing:
+        raise ValueError(f"Missing required secrets: {', '.join(missing)}")
+
+    save_credentials(normalized_provider, normalized_venue, {key: str(credentials[key]) for key in required})
+    status = resolve_status(normalized_provider, normalized_venue)
+    return {"status": status}

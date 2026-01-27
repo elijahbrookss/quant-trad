@@ -32,13 +32,10 @@ class Database:
     def _resolve_dsn() -> str:
         """Return the configured DSN or fall back to a local SQLite file."""
 
-        for env_key in ("PORTAL_DB_DSN", "PG_DSN"):
-            value = os.getenv(env_key)
-            if value:
-                return value
-        data_dir = Path(__file__).resolve().parent.parent / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        return f"sqlite:///{data_dir / 'portal.db'}"
+        value = os.getenv("PG_DSN")
+        if value:
+            return value
+        raise RuntimeError("PG_DSN is required. No SQLite fallback is supported.")
 
     def ensure_schema(self) -> bool:
         """Initialise the database engine and create tables if required."""
@@ -89,21 +86,33 @@ class Database:
         if not self._engine:
             return
         inspector = inspect(self._engine)
-        if "portal_bot_runs" not in inspector.get_table_names():
-            Base.metadata.tables["portal_bot_runs"].create(self._engine, checkfirst=True)
-        if "portal_bot_trades" in inspector.get_table_names():
-            columns = {col["name"] for col in inspector.get_columns("portal_bot_trades")}
-            if "run_id" not in columns:
-                with self._engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE portal_bot_trades ADD COLUMN run_id VARCHAR(64)"))
-        if "portal_bots" in inspector.get_table_names():
-            columns = {col["name"] for col in inspector.get_columns("portal_bots")}
-            if "runner_id" not in columns:
-                with self._engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE portal_bots ADD COLUMN runner_id VARCHAR(128)"))
-            if "heartbeat_at" not in columns:
-                with self._engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE portal_bots ADD COLUMN heartbeat_at TIMESTAMP"))
+        table_names = set(inspector.get_table_names())
+
+        def require_table(name: str) -> None:
+            if name not in table_names:
+                Base.metadata.tables[name].create(self._engine, checkfirst=True)
+                logger.warning("portal_db_table_created | table=%s", name)
+
+        def assert_columns(name: str) -> None:
+            expected = {column.name for column in Base.metadata.tables[name].columns}
+            existing = {col["name"] for col in inspector.get_columns(name)}
+            missing = sorted(set(expected) - existing)
+            if missing:
+                logger.error(
+                    "portal_db_column_mismatch | table=%s | missing=%s",
+                    name,
+                    ",".join(missing),
+                )
+                raise RuntimeError(
+                    f"Table '{name}' is missing columns: {', '.join(missing)}. "
+                    "Drop the table or rebuild the database to ensure a clean schema."
+                )
+
+        require_table("portal_bot_runs")
+        require_table("portal_bot_trades")
+        require_table("portal_bots")
+        assert_columns("portal_bot_trades")
+        assert_columns("portal_bots")
 
     @property
     def available(self) -> bool:

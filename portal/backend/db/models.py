@@ -221,6 +221,18 @@ class ATMTemplateRecord(Base):
         }
 
 
+class ProviderCredentialRecord(Base):
+    """Encrypted provider credential storage."""
+
+    __tablename__ = "portal_provider_credentials"
+
+    provider_id = Column(String(64), primary_key=True)
+    venue_id = Column(String(64), primary_key=True, default="")
+    secrets_encrypted = Column(String, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class SymbolPresetRecord(Base):
     """Persisted combination of datasource, exchange, timeframe, and symbol."""
 

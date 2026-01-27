@@ -192,6 +192,8 @@ class DataPersistenceService:
         if not self._engine:
             return pd.DataFrame()
 
+        self.ensure_schema()
+
         try:
             instrument_id, timeframe_seconds = self._resolve_context(ctx)
             query = text(
@@ -216,9 +218,33 @@ class DataPersistenceService:
             )
         except ProgrammingError as exc:
             if "does not exist" in str(exc).lower():
-                logger.warning("Table '%s' missing. Ensuring schema.", self._config.candles_raw_table)
+                logger.warning("Table '%s' missing. Ensuring schema and retrying fetch.", self._config.candles_raw_table)
                 self.ensure_schema()
-                return pd.DataFrame()
+                try:
+                    instrument_id, timeframe_seconds = self._resolve_context(ctx)
+                    query = text(
+                        f"""
+                        SELECT candle_time AS timestamp, open, high, low, close, volume, trade_count
+                        FROM {self._config.candles_raw_table}
+                        WHERE instrument_id = :instrument_id
+                          AND timeframe_seconds = :timeframe_seconds
+                          AND candle_time BETWEEN :start AND :end
+                        ORDER BY candle_time
+                        """
+                    )
+                    return pd.read_sql(
+                        query,
+                        self._engine,
+                        params={
+                            "instrument_id": instrument_id,
+                            "timeframe_seconds": timeframe_seconds,
+                            "start": ctx.start,
+                            "end": ctx.end,
+                        },
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
+                    logger.exception("Retry failed for table '%s': %s", self._config.candles_raw_table, retry_exc)
+                    return pd.DataFrame()
             logger.exception("Query failed for table '%s': %s", self._config.candles_raw_table, exc)
             return pd.DataFrame()
         except SQLAlchemyError as exc:
@@ -236,6 +262,8 @@ class DataPersistenceService:
 
         if not self._engine:
             return []
+
+        self.ensure_schema()
 
         instrument_id, timeframe_seconds = self._resolve_context(ctx)
         query = text(
@@ -268,7 +296,19 @@ class DataPersistenceService:
                     self._config.closures_table,
                 )
                 self.ensure_schema()
-                return []
+                try:
+                    with self._engine.begin() as conn:
+                        rows = conn.execute(
+                            query,
+                            {
+                                "instrument_id": instrument_id,
+                                "timeframe_seconds": timeframe_seconds,
+                                "request_start": requested_start,
+                                "request_end": requested_end,
+                            },
+                        ).fetchall()
+                except Exception:  # noqa: BLE001
+                    return []
             logger.exception(
                 "Failed to load closure ranges for %s [%s]: %s",
                 ctx.symbol,
@@ -302,6 +342,8 @@ class DataPersistenceService:
 
         if not self._engine or end <= start:
             return
+
+        self.ensure_schema()
 
         instrument_id, timeframe_seconds = self._resolve_context(ctx)
         start_ts = pd.to_datetime(start, utc=True)
@@ -485,6 +527,19 @@ class DataPersistenceService:
             return len(prepared)
 
         except SQLAlchemyError as exc:
+            message = str(exc).lower()
+            if "does not exist" in message:
+                logger.warning(
+                    "Candle table missing during ingest; ensuring schema and retrying once for %s [%s].",
+                    ctx.symbol,
+                    ctx.interval,
+                )
+                self.ensure_schema()
+                try:
+                    return self.write_dataframe(df, ctx)
+                except Exception:
+                    logger.exception("Retry failed after ensuring schema for %s [%s].", ctx.symbol, ctx.interval)
+                    return 0
             logger.exception("DB error during ingest for %s: %s", ctx.symbol, exc)
             raise
 
