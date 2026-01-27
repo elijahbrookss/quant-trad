@@ -128,6 +128,7 @@ export function DropdownSelect({
                 {group.options.map((option) => {
                   const isActive = option?.value === value;
                   const isOptionDisabled = Boolean(option?.disabled);
+                  const tooltip = option?.tooltip || option?.description || option?.label;
                   return (
                     <button
                       key={option.value}
@@ -137,6 +138,7 @@ export function DropdownSelect({
                       aria-disabled={isOptionDisabled}
                       disabled={isOptionDisabled}
                       onClick={() => handleSelect(option.value, isOptionDisabled)}
+                      title={tooltip || undefined}
                       className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
                         isOptionDisabled
                           ? 'cursor-not-allowed text-slate-500'

@@ -1,6 +1,13 @@
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, silent: 50 };
 
-let globalLevel = (import.meta?.env?.MODE === 'production') ? 'warn' : 'debug';
+const envLogLevel = (() => {
+  const explicit = import.meta?.env?.VITE_LOG_LEVEL;
+  if (explicit && LEVELS[explicit]) return explicit;
+  if (import.meta?.env?.VITE_DEBUG_LOGS) return 'debug';
+  return null;
+})();
+
+let globalLevel = envLogLevel ?? ((import.meta?.env?.MODE === 'production') ? 'warn' : 'debug');
 try {
   const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('LOG_LEVEL') : null;
   if (stored && LEVELS[stored]) globalLevel = stored;
