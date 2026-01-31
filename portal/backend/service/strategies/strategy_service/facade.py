@@ -7,13 +7,23 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from ...market import instrument_service
+from ...market.stats_repository import build_stats_snapshot
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import generate_signals_for_instance, get_instance_meta
+from data_providers.utils.ohlcv import interval_to_timedelta
 from strategies import evaluator, markers
 from . import persistence
+from .filters import (
+    FilterContext,
+    FilterDefinition,
+    collect_filter_versions,
+    evaluate_filter_definitions,
+    summarize_filter_results,
+    validate_filter_dsl,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +69,12 @@ storage_upsert_strategy_indicator = persistence.upsert_strategy_indicator
 storage_delete_strategy_indicator = persistence.delete_strategy_indicator
 storage_upsert_strategy_rule = persistence.upsert_strategy_rule
 storage_delete_strategy_rule = persistence.delete_strategy_rule
+storage_list_strategy_filters = persistence.list_strategy_filters
+storage_list_rule_filters = persistence.list_rule_filters
+storage_upsert_strategy_filter = persistence.upsert_strategy_filter
+storage_upsert_rule_filter = persistence.upsert_rule_filter
+storage_delete_strategy_filter = persistence.delete_strategy_filter
+storage_delete_rule_filter = persistence.delete_rule_filter
 list_symbol_presets = persistence.list_symbol_presets
 upsert_symbol_preset = persistence.upsert_symbol_preset
 delete_symbol_preset = persistence.delete_symbol_preset
@@ -209,6 +225,7 @@ class StrategyRule:
     match: str = "all"
     description: Optional[str] = None
     enabled: bool = True
+    filters: List[FilterDefinition] = field(default_factory=list)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -223,6 +240,7 @@ class StrategyRule:
             "match": self.match,
             "description": self.description,
             "enabled": self.enabled,
+            "filters": [flt.to_dict() for flt in self.filters],
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
@@ -306,6 +324,7 @@ class StrategyDefinition:
     indicator_ids: List[str] = field(default_factory=list)
     # REMOVED: indicator_snapshots - strategies now load indicators fresh from DB
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
+    global_filters: List[FilterDefinition] = field(default_factory=list)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
@@ -427,6 +446,7 @@ class StrategyDefinition:
             "instruments": instruments,
             "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
+            "global_filters": [flt.to_dict() for flt in self.global_filters],
             "atm_template": atm_template or {},
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
@@ -608,6 +628,49 @@ class StrategyRegistry:
                     updated_at=_parse_timestamp(rule_entry.get("updated_at")),
                 )
                 base.rules[rule_id] = rule
+
+            for filter_entry in entry.get("strategy_filters_raw", []):
+                filter_id = str(filter_entry.get("id") or "").strip()
+                if not filter_id:
+                    continue
+                dsl_payload = filter_entry.get("dsl") or {}
+                base.global_filters.append(
+                    FilterDefinition(
+                        id=filter_id,
+                        scope=str(filter_entry.get("scope") or "GLOBAL").upper(),
+                        name=str(filter_entry.get("name") or filter_id),
+                        description=filter_entry.get("description"),
+                        dsl=dict(dsl_payload),
+                        enabled=bool(filter_entry.get("enabled", True)),
+                        created_at=_parse_timestamp(filter_entry.get("created_at")),
+                        updated_at=_parse_timestamp(filter_entry.get("updated_at")),
+                    )
+                )
+
+            rule_filters_by_rule: Dict[str, List[FilterDefinition]] = {}
+            for filter_entry in entry.get("rule_filters_raw", []):
+                filter_id = str(filter_entry.get("id") or "").strip()
+                rule_id = str(filter_entry.get("rule_id") or "").strip()
+                if not filter_id or not rule_id:
+                    continue
+                dsl_payload = filter_entry.get("dsl") or {}
+                rule_filters_by_rule.setdefault(rule_id, []).append(
+                    FilterDefinition(
+                        id=filter_id,
+                        scope=str(filter_entry.get("scope") or "RULE").upper(),
+                        name=str(filter_entry.get("name") or filter_id),
+                        description=filter_entry.get("description"),
+                        dsl=dict(dsl_payload),
+                        enabled=bool(filter_entry.get("enabled", True)),
+                        created_at=_parse_timestamp(filter_entry.get("created_at")),
+                        updated_at=_parse_timestamp(filter_entry.get("updated_at")),
+                    )
+                )
+
+            for rule_id, filters in rule_filters_by_rule.items():
+                rule = base.rules.get(rule_id)
+                if rule:
+                    rule.filters = filters
 
             self._records[strategy_id] = base
 
@@ -976,6 +1039,185 @@ class StrategyRegistry:
         )
         return record.to_dict()
 
+    def list_strategy_filters(self, strategy_id: str) -> List[Dict[str, Any]]:
+        record = self.get(strategy_id)
+        return [flt.to_dict() for flt in record.global_filters]
+
+    def list_rule_filters(self, strategy_id: str, rule_id: str) -> List[Dict[str, Any]]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        return [flt.to_dict() for flt in rule.filters]
+
+    def add_strategy_filter(
+        self,
+        strategy_id: str,
+        *,
+        name: str,
+        dsl: Mapping[str, Any],
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        validate_filter_dsl(dsl)
+        filter_id = str(uuid.uuid4())
+        now = _utcnow()
+        flt = FilterDefinition(
+            id=filter_id,
+            scope="GLOBAL",
+            name=str(name).strip() or filter_id,
+            description=str(description).strip() if description else None,
+            dsl=dict(dsl),
+            enabled=bool(enabled),
+            created_at=now,
+            updated_at=now,
+        )
+        record.global_filters.append(flt)
+        storage_upsert_strategy_filter(flt.to_storage_payload(strategy_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_created | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+        return flt.to_dict()
+
+    def update_strategy_filter(
+        self,
+        strategy_id: str,
+        filter_id: str,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        target = next((flt for flt in record.global_filters if flt.id == filter_id), None)
+        if target is None:
+            raise KeyError("Filter not found")
+        if "name" in fields and fields["name"] is not None:
+            target.name = str(fields["name"]).strip()
+        if "description" in fields:
+            description = fields.get("description")
+            target.description = str(description).strip() if description else None
+        if "enabled" in fields and fields["enabled"] is not None:
+            target.enabled = bool(fields["enabled"])
+        if "dsl" in fields and fields["dsl"] is not None:
+            validate_filter_dsl(fields["dsl"])
+            target.dsl = dict(fields["dsl"])
+        target.updated_at = _utcnow()
+        storage_upsert_strategy_filter(target.to_storage_payload(strategy_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_updated | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+        return target.to_dict()
+
+    def remove_strategy_filter(self, strategy_id: str, filter_id: str) -> None:
+        record = self.get(strategy_id)
+        before = len(record.global_filters)
+        record.global_filters = [flt for flt in record.global_filters if flt.id != filter_id]
+        if len(record.global_filters) == before:
+            raise KeyError("Filter not found")
+        storage_delete_strategy_filter(filter_id)
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_deleted | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+
+    def add_rule_filter(
+        self,
+        strategy_id: str,
+        rule_id: str,
+        *,
+        name: str,
+        dsl: Mapping[str, Any],
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        validate_filter_dsl(dsl)
+        filter_id = str(uuid.uuid4())
+        now = _utcnow()
+        flt = FilterDefinition(
+            id=filter_id,
+            scope="RULE",
+            name=str(name).strip() or filter_id,
+            description=str(description).strip() if description else None,
+            dsl=dict(dsl),
+            enabled=bool(enabled),
+            created_at=now,
+            updated_at=now,
+        )
+        rule.filters.append(flt)
+        storage_upsert_rule_filter(flt.to_storage_payload(rule_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_created | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+        return flt.to_dict()
+
+    def update_rule_filter(
+        self,
+        strategy_id: str,
+        rule_id: str,
+        filter_id: str,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        target = next((flt for flt in rule.filters if flt.id == filter_id), None)
+        if target is None:
+            raise KeyError("Filter not found")
+        if "name" in fields and fields["name"] is not None:
+            target.name = str(fields["name"]).strip()
+        if "description" in fields:
+            description = fields.get("description")
+            target.description = str(description).strip() if description else None
+        if "enabled" in fields and fields["enabled"] is not None:
+            target.enabled = bool(fields["enabled"])
+        if "dsl" in fields and fields["dsl"] is not None:
+            validate_filter_dsl(fields["dsl"])
+            target.dsl = dict(fields["dsl"])
+        target.updated_at = _utcnow()
+        storage_upsert_rule_filter(target.to_storage_payload(rule_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_updated | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+        return target.to_dict()
+
+    def remove_rule_filter(self, strategy_id: str, rule_id: str, filter_id: str) -> None:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        before = len(rule.filters)
+        rule.filters = [flt for flt in rule.filters if flt.id != filter_id]
+        if len(rule.filters) == before:
+            raise KeyError("Filter not found")
+        storage_delete_rule_filter(filter_id)
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_deleted | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+
     def evaluate(
         self,
         strategy_id: str,
@@ -989,6 +1231,12 @@ class StrategyRegistry:
         """Evaluate a strategy against current indicator signals."""
 
         record = self.get(strategy_id)
+        timeframe_delta = interval_to_timedelta(interval)
+        timeframe_seconds = int(timeframe_delta.total_seconds())
+        if timeframe_seconds <= 0:
+            raise ValueError(f"Invalid interval: {interval}")
+        start_dt = _parse_timestamp(start)
+        end_dt = _parse_timestamp(end)
 
         requested_ids = [str(item).strip() for item in (instrument_ids or []) if item]
         if not requested_ids:
@@ -1030,6 +1278,34 @@ class StrategyRegistry:
                 bucket = indicator_rule_map.setdefault(indicator_id, [])
                 if rule_id not in bucket:
                     bucket.append(rule_id)
+
+        all_filters: List[FilterDefinition] = []
+        all_filters.extend(record.global_filters)
+        for rule in record.rules.values():
+            all_filters.extend(rule.filters)
+        candle_versions, regime_versions, needs_latest_candle, needs_latest_regime = collect_filter_versions(
+            all_filters
+        )
+        stats_snapshot = build_stats_snapshot(
+            instrument_ids=requested_ids,
+            timeframe_seconds=timeframe_seconds,
+            start=start_dt,
+            end=end_dt,
+            candle_versions=candle_versions,
+            regime_versions=regime_versions,
+            include_latest_candle=needs_latest_candle,
+            include_latest_regime=needs_latest_regime,
+        )
+
+        def _signal_candle_time(signal: Optional[Mapping[str, Any]]) -> Optional[datetime]:
+            epoch = _extract_signal_epoch(signal)
+            if epoch is None:
+                return None
+            floored = epoch - (epoch % timeframe_seconds)
+            try:
+                return datetime.utcfromtimestamp(floored)
+            except (OverflowError, OSError, ValueError):
+                return None
 
         # Validate that all indicators referenced in rules are actually attached to the strategy
         orphaned_indicators = [ind_id for ind_id in indicator_rule_map.keys() if ind_id not in record.indicator_ids]
@@ -1228,6 +1504,55 @@ class StrategyRegistry:
 
             rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
             for res in rule_results:
+                res["signal_conditions"] = {
+                    "matched": bool(res.get("matched")),
+                    "reason": res.get("reason"),
+                    "direction": res.get("direction"),
+                }
+                res["global_filters"] = []
+                res["rule_filters"] = []
+                res["final_decision"] = {
+                    "allowed": False,
+                    "reason": "signal_conditions_failed",
+                }
+
+            for res in rule_results:
+                if not res.get("matched"):
+                    continue
+                last_signal = None
+                signals = res.get("signals") or []
+                if isinstance(signals, list) and signals:
+                    last_signal = signals[-1]
+                candle_time = _signal_candle_time(last_signal)
+                context = FilterContext(
+                    instrument_id=instrument_id,
+                    candle_time=candle_time,
+                    candle_stats_latest=stats_snapshot.candle_stats_latest,
+                    candle_stats_by_version=stats_snapshot.candle_stats_by_version,
+                    regime_stats_latest=stats_snapshot.regime_stats_latest,
+                    regime_stats_by_version=stats_snapshot.regime_stats_by_version,
+                )
+                global_results = evaluate_filter_definitions(record.global_filters, context)
+                rule_obj = record.rules.get(res.get("rule_id"))
+                rule_filters = rule_obj.filters if rule_obj else []
+                rule_results_eval = evaluate_filter_definitions(rule_filters, context)
+                res["global_filters"] = global_results
+                res["rule_filters"] = rule_results_eval
+                global_passed, global_failed = summarize_filter_results(global_results)
+                rule_passed, rule_failed = summarize_filter_results(rule_results_eval)
+                allowed = bool(global_passed and rule_passed)
+                reason_parts: List[str] = []
+                if global_failed:
+                    reason_parts.append("global_filters_failed")
+                if rule_failed:
+                    reason_parts.append("rule_filters_failed")
+                if candle_time is None and (record.global_filters or rule_filters):
+                    reason_parts.append("signal_time_missing")
+                res["final_decision"] = {
+                    "allowed": allowed,
+                    "reason": ",".join(reason_parts) if reason_parts else "allowed",
+                }
+            for res in rule_results:
                 conditions = res.get("conditions") or []
                 matched_count = sum(1 for cond in conditions if cond.get("matched"))
                 total_conditions = len(conditions)
@@ -1259,8 +1584,20 @@ class StrategyRegistry:
                         cond.get("observed_directions"),
                     )
 
-            buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
-            sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
+            buy_signals = [
+                res
+                for res in rule_results
+                if res["matched"]
+                and res["action"] == "buy"
+                and res.get("final_decision", {}).get("allowed")
+            ]
+            sell_signals = [
+                res
+                for res in rule_results
+                if res["matched"]
+                and res["action"] == "sell"
+                and res.get("final_decision", {}).get("allowed")
+            ]
 
             chart_markers = build_chart_markers(buy_signals, sell_signals)
 
@@ -1514,6 +1851,82 @@ def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
     """Remove a rule from a strategy."""
 
     return _REGISTRY.remove_rule(strategy_id, rule_id)
+
+
+def list_strategy_filters(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return global filters for a strategy."""
+
+    return _REGISTRY.list_strategy_filters(strategy_id)
+
+
+def list_rule_filters(strategy_id: str, rule_id: str) -> List[Dict[str, Any]]:
+    """Return filters for a specific rule."""
+
+    return _REGISTRY.list_rule_filters(strategy_id, rule_id)
+
+
+def create_strategy_filter(
+    strategy_id: str,
+    *,
+    name: str,
+    dsl: Mapping[str, Any],
+    description: Optional[str] = None,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """Create a strategy-wide filter."""
+
+    return _REGISTRY.add_strategy_filter(
+        strategy_id,
+        name=name,
+        dsl=dsl,
+        description=description,
+        enabled=enabled,
+    )
+
+
+def update_strategy_filter(strategy_id: str, filter_id: str, **fields: Any) -> Dict[str, Any]:
+    """Update a strategy-wide filter."""
+
+    return _REGISTRY.update_strategy_filter(strategy_id, filter_id, **fields)
+
+
+def delete_strategy_filter(strategy_id: str, filter_id: str) -> None:
+    """Remove a strategy-wide filter."""
+
+    _REGISTRY.remove_strategy_filter(strategy_id, filter_id)
+
+
+def create_rule_filter(
+    strategy_id: str,
+    rule_id: str,
+    *,
+    name: str,
+    dsl: Mapping[str, Any],
+    description: Optional[str] = None,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """Create a rule-scoped filter."""
+
+    return _REGISTRY.add_rule_filter(
+        strategy_id,
+        rule_id,
+        name=name,
+        dsl=dsl,
+        description=description,
+        enabled=enabled,
+    )
+
+
+def update_rule_filter(strategy_id: str, rule_id: str, filter_id: str, **fields: Any) -> Dict[str, Any]:
+    """Update a rule-scoped filter."""
+
+    return _REGISTRY.update_rule_filter(strategy_id, rule_id, filter_id, **fields)
+
+
+def delete_rule_filter(strategy_id: str, rule_id: str, filter_id: str) -> None:
+    """Remove a rule-scoped filter."""
+
+    _REGISTRY.remove_rule_filter(strategy_id, rule_id, filter_id)
 
 
 def generate_strategy_signals(
