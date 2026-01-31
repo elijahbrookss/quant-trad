@@ -7,11 +7,11 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
 from ...risk.atm import normalise_template
-from ...indicators.indicator_service import generate_signals_for_instance, get_instance_meta
+from ...indicators.indicator_service import get_instance_meta
 from data_providers.utils.ohlcv import interval_to_timedelta
 from strategies import evaluator, markers
 from . import persistence
@@ -20,6 +20,7 @@ from .filters import (
     validate_filter_dsl,
 )
 from .filter_runtime import apply_filter_gates, build_filter_gate_snapshot
+from .indicator_signal_service import generate_indicator_payloads
 
 
 logger = logging.getLogger(__name__)
@@ -1301,48 +1302,6 @@ class StrategyRegistry:
                 "Please attach these indicators to the strategy or update the rules."
             )
 
-        def _merge_enabled_rules(existing: Any, extras: Iterable[str]) -> List[str]:
-            ordered: List[str] = []
-            seen: Set[str] = set()
-
-            sources: List[Any] = []
-            if existing is not None:
-                sources.append(existing)
-            sources.append(extras)
-
-            for source in sources:
-                if not source:
-                    continue
-                if isinstance(source, Mapping):
-                    iterable = source.values()
-                elif isinstance(source, (str, bytes)):
-                    iterable = [source]
-                else:
-                    iterable = source
-
-                for item in iterable:
-                    text = str(item).strip()
-                    if not text:
-                        continue
-                    key = text.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    ordered.append(text)
-
-            return ordered
-
-        def _config_diff(base: Mapping[str, Any], derived: Mapping[str, Any]) -> Dict[str, Any]:
-            diff: Dict[str, Any] = {}
-            base_keys = set(base.keys())
-            for key, value in derived.items():
-                if key not in base_keys or base.get(key) != value:
-                    diff[key] = value
-            removed = [key for key in base_keys if key not in derived]
-            if removed:
-                diff["_removed"] = sorted(removed)
-            return diff
-
         def _evaluate_for_instrument(instrument_id: str) -> Dict[str, Any]:
             instrument_rec = instrument_service.get_instrument_record(instrument_id)
             if not instrument_rec:
@@ -1360,125 +1319,19 @@ class StrategyRegistry:
             missing_indicators: List[str] = []
             run_id = uuid.uuid4().hex
             base_config = dict(config or {})
-
-            logger.info(
-                "strategy_signal_preview_start | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s config_keys=%s indicator_count=%d",
-                run_id,
-                strategy_id,
-                instrument_id,
-                start,
-                end,
-                interval,
-                effective_symbol,
-                effective_datasource,
-                effective_exchange,
-                sorted(base_config.keys()),
-                len(record.indicator_ids),
-            )
-
-            total_signals = 0
-            for inst_id in record.indicator_ids:
-                try:
-                    per_config = dict(base_config)
-                    rule_filters = indicator_rule_map.get(inst_id)
-                    if rule_filters:
-                        merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
-                        if merged_rules:
-                            per_config["enabled_rules"] = merged_rules
-                        else:
-                            per_config.pop("enabled_rules", None)
-                    logger.info(
-                        "strategy_signal_preview_generate | run_id=%s strategy=%s instrument_id=%s indicator=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s enabled_rules=%s config_diff=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        start,
-                        end,
-                        interval,
-                        effective_symbol,
-                        effective_datasource,
-                        effective_exchange,
-                        per_config.get("enabled_rules"),
-                        _config_diff(base_config, per_config),
-                    )
-                    payload = generate_signals_for_instance(
-                        inst_id,
-                        start=start,
-                        end=end,
-                        interval=interval,
-                        symbol=effective_symbol,
-                        datasource=effective_datasource,
-                        exchange=effective_exchange,
-                        config=per_config,
-                    )
-                    indicator_payloads[inst_id] = payload
-                    signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
-                    signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
-                    total_signals += signal_count
-                    error_hint = payload.get("error") if isinstance(payload, Mapping) else None
-                    logger.info(
-                        "strategy_signal_preview_result | run_id=%s strategy=%s instrument_id=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        signal_count,
-                        start,
-                        end,
-                        interval,
-                        error_hint,
-                    )
-                    if isinstance(signals_obj, list):
-                        for signal in signals_obj:
-                            if isinstance(signal, dict):
-                                _ensure_signal_direction(signal)
-                        summary = _summarise_signal_population(signals_obj)
-                        logger.debug(
-                            "strategy_indicator_signal_summary | strategy=%s instrument_id=%s indicator=%s total=%d types=[%s] rules=[%s] directions=[%s]",
-                            strategy_id,
-                            instrument_id,
-                            inst_id,
-                            len(signals_obj),
-                            _format_counter(summary["types"]),
-                            _format_counter(summary["rules"]),
-                            _format_counter(summary["directions"]),
-                        )
-                except KeyError:
-                    missing_indicators.append(inst_id)
-                    indicator_payloads[inst_id] = {"error": "Indicator not available"}
-                    logger.warning(
-                        "strategy_indicator_missing | strategy=%s instrument_id=%s indicator=%s",
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                    )
-                    continue
-                except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
-                    logger.warning(
-                        "strategy_signal_preview_failed | run_id=%s strategy=%s instrument_id=%s indicator=%s error=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        exc,
-                    )
-                    indicator_payloads[inst_id] = {"error": str(exc)}
-
-            logger.info(
-                "strategy_signal_preview_complete | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s indicators=%d missing=%s total_signals=%d",
-                run_id,
-                strategy_id,
-                instrument_id,
-                start,
-                end,
-                interval,
-                effective_symbol,
-                effective_datasource,
-                effective_exchange,
-                len(record.indicator_ids),
-                missing_indicators,
-                total_signals,
+            indicator_payloads, missing_indicators, total_signals = generate_indicator_payloads(
+                strategy_id=strategy_id,
+                instrument_id=instrument_id,
+                indicator_ids=record.indicator_ids,
+                indicator_rule_map=indicator_rule_map,
+                start=start,
+                end=end,
+                interval=interval,
+                symbol=effective_symbol,
+                datasource=effective_datasource,
+                exchange=effective_exchange,
+                base_config=base_config,
+                run_id=run_id,
             )
 
             rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
