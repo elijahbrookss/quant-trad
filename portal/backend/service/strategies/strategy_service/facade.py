@@ -10,20 +10,16 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from ...market import instrument_service
-from ...market.stats_repository import build_stats_snapshot
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import generate_signals_for_instance, get_instance_meta
 from data_providers.utils.ohlcv import interval_to_timedelta
 from strategies import evaluator, markers
 from . import persistence
 from .filters import (
-    FilterContext,
     FilterDefinition,
-    collect_filter_versions,
-    evaluate_filter_definitions,
-    summarize_filter_results,
     validate_filter_dsl,
 )
+from .filter_runtime import apply_filter_gates, build_filter_gate_snapshot
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +55,6 @@ _format_counter = evaluator._format_counter
 _collect_rule_identifiers = evaluator._collect_rule_identifiers
 _normalise_match_mode = evaluator._normalise_match_mode
 _normalise_action = evaluator._normalise_action
-_extract_signal_epoch = evaluator._extract_signal_epoch
 _evaluate_condition = evaluator._evaluate_condition
 
 storage_load_strategies = persistence.load_strategies
@@ -1279,33 +1274,17 @@ class StrategyRegistry:
                 if rule_id not in bucket:
                     bucket.append(rule_id)
 
-        all_filters: List[FilterDefinition] = []
-        all_filters.extend(record.global_filters)
-        for rule in record.rules.values():
-            all_filters.extend(rule.filters)
-        candle_versions, regime_versions, needs_latest_candle, needs_latest_regime = collect_filter_versions(
-            all_filters
-        )
-        stats_snapshot = build_stats_snapshot(
+        rule_filters_by_rule: Dict[str, Sequence[FilterDefinition]] = {
+            rule_id: list(rule.filters) for rule_id, rule in record.rules.items()
+        }
+        stats_snapshot = build_filter_gate_snapshot(
             instrument_ids=requested_ids,
             timeframe_seconds=timeframe_seconds,
             start=start_dt,
             end=end_dt,
-            candle_versions=candle_versions,
-            regime_versions=regime_versions,
-            include_latest_candle=needs_latest_candle,
-            include_latest_regime=needs_latest_regime,
+            global_filters=record.global_filters,
+            rule_filters_by_rule=rule_filters_by_rule,
         )
-
-        def _signal_candle_time(signal: Optional[Mapping[str, Any]]) -> Optional[datetime]:
-            epoch = _extract_signal_epoch(signal)
-            if epoch is None:
-                return None
-            floored = epoch - (epoch % timeframe_seconds)
-            try:
-                return datetime.utcfromtimestamp(floored)
-            except (OverflowError, OSError, ValueError):
-                return None
 
         # Validate that all indicators referenced in rules are actually attached to the strategy
         orphaned_indicators = [ind_id for ind_id in indicator_rule_map.keys() if ind_id not in record.indicator_ids]
@@ -1516,42 +1495,14 @@ class StrategyRegistry:
                     "reason": "signal_conditions_failed",
                 }
 
-            for res in rule_results:
-                if not res.get("matched"):
-                    continue
-                last_signal = None
-                signals = res.get("signals") or []
-                if isinstance(signals, list) and signals:
-                    last_signal = signals[-1]
-                candle_time = _signal_candle_time(last_signal)
-                context = FilterContext(
-                    instrument_id=instrument_id,
-                    candle_time=candle_time,
-                    candle_stats_latest=stats_snapshot.candle_stats_latest,
-                    candle_stats_by_version=stats_snapshot.candle_stats_by_version,
-                    regime_stats_latest=stats_snapshot.regime_stats_latest,
-                    regime_stats_by_version=stats_snapshot.regime_stats_by_version,
-                )
-                global_results = evaluate_filter_definitions(record.global_filters, context)
-                rule_obj = record.rules.get(res.get("rule_id"))
-                rule_filters = rule_obj.filters if rule_obj else []
-                rule_results_eval = evaluate_filter_definitions(rule_filters, context)
-                res["global_filters"] = global_results
-                res["rule_filters"] = rule_results_eval
-                global_passed, global_failed = summarize_filter_results(global_results)
-                rule_passed, rule_failed = summarize_filter_results(rule_results_eval)
-                allowed = bool(global_passed and rule_passed)
-                reason_parts: List[str] = []
-                if global_failed:
-                    reason_parts.append("global_filters_failed")
-                if rule_failed:
-                    reason_parts.append("rule_filters_failed")
-                if candle_time is None and (record.global_filters or rule_filters):
-                    reason_parts.append("signal_time_missing")
-                res["final_decision"] = {
-                    "allowed": allowed,
-                    "reason": ",".join(reason_parts) if reason_parts else "allowed",
-                }
+            apply_filter_gates(
+                rule_results=rule_results,
+                instrument_id=instrument_id,
+                timeframe_seconds=timeframe_seconds,
+                stats_snapshot=stats_snapshot,
+                global_filters=record.global_filters,
+                rule_filters_by_rule=rule_filters_by_rule,
+            )
             for res in rule_results:
                 conditions = res.get("conditions") or []
                 matched_count = sum(1 for cond in conditions if cond.get("matched"))
