@@ -141,6 +141,80 @@ export async function generateStrategySignals(strategyId, payload) {
   return handleResponse(res)
 }
 
+/** List strategy-wide filters. */
+export async function fetchStrategyFilters(strategyId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+/** Create a strategy-wide filter. */
+export async function createStrategyFilter(strategyId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Update a strategy-wide filter. */
+export async function updateStrategyFilter(strategyId, filterId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters/${filterId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Delete a strategy-wide filter. */
+export async function deleteStrategyFilter(strategyId, filterId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/filters/${filterId}`, {
+    method: 'DELETE',
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** List filters attached to a rule. */
+export async function fetchRuleFilters(strategyId, ruleId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
+/** Create a rule-scoped filter. */
+export async function createRuleFilter(strategyId, ruleId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Update a rule-scoped filter. */
+export async function updateRuleFilter(strategyId, ruleId, filterId, payload) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters/${filterId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
+/** Delete a rule-scoped filter. */
+export async function deleteRuleFilter(strategyId, ruleId, filterId) {
+  const res = await fetch(`${BASE}/api/strategies/${strategyId}/rules/${ruleId}/filters/${filterId}`, {
+    method: 'DELETE',
+    mode: 'cors',
+  })
+  return handleResponse(res)
+}
+
 export async function fetchSymbolPresets() {
   const res = await fetch(`${BASE}/api/strategies/presets/symbols`, { mode: 'cors' })
   return handleResponse(res)
@@ -178,4 +252,3 @@ export async function saveATMTemplate(payload) {
   })
   return handleResponse(res)
 }
-

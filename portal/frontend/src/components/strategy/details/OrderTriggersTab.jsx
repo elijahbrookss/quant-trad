@@ -83,6 +83,23 @@ export const OrderTriggersTab = ({
     : signalResult?.summary?.rules_matched
 
   const triggerRows = buildTriggerRows({ instrumentResult, rules: strategy.rules, symbol })
+  const ruleLookup = new Map((Array.isArray(strategy.rules) ? strategy.rules : []).map((rule) => [rule.id, rule]))
+  const filterFailures = (instrumentResult?.rule_results || [])
+    .filter((entry) => entry?.matched && entry?.final_decision && entry.final_decision.allowed === false)
+    .map((entry) => {
+      const globalFailed = (entry.global_filters || []).filter((filter) => filter?.passed === false)
+      const ruleFailed = (entry.rule_filters || []).filter((filter) => filter?.passed === false)
+      if (!globalFailed.length && !ruleFailed.length) return null
+      const ruleMeta = ruleLookup.get(entry.rule_id)
+      return {
+        id: entry.rule_id,
+        name: ruleMeta?.name || entry.rule_id || 'Rule',
+        action: ruleMeta?.action || entry.action,
+        globalFailed,
+        ruleFailed,
+      }
+    })
+    .filter(Boolean)
 
   return (
     <div className="space-y-4">
@@ -273,6 +290,68 @@ export const OrderTriggersTab = ({
               </div>
             )}
           </div>
+
+          {filterFailures.length > 0 && (
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-amber-100">Why didn’t this fire?</p>
+                  <p className="text-xs text-amber-100/80">
+                    These rules matched signals but were gated by filters.
+                  </p>
+                </div>
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/20 px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-amber-100">
+                  {filterFailures.length} filtered
+                </span>
+              </div>
+              <div className="mt-3 space-y-3 text-xs text-amber-50">
+                {filterFailures.map((failure) => (
+                  <div key={`filter-failure-${failure.id}`} className="rounded-lg border border-amber-500/20 bg-black/30 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-white">{failure.name}</p>
+                        <p className="text-[11px] text-amber-100/80">
+                          {failure.action ? `Action: ${String(failure.action).toUpperCase()}` : 'Action pending'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {failure.globalFailed.length > 0 && (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-[0.24em] text-amber-100/70">Global Filters</p>
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            {failure.globalFailed.map((filter) => (
+                              <span
+                                key={`global-fail-${failure.id}-${filter.filter_id}`}
+                                className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-amber-100"
+                              >
+                                {filter.name || filter.filter_id}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {failure.ruleFailed.length > 0 && (
+                        <div>
+                          <p className="text-[10px] uppercase tracking-[0.24em] text-amber-100/70">Rule Filters</p>
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            {failure.ruleFailed.map((filter) => (
+                              <span
+                                key={`rule-fail-${failure.id}-${filter.filter_id}`}
+                                className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-amber-100"
+                              >
+                                {filter.name || filter.filter_id}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

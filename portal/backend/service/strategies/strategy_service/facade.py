@@ -18,7 +18,7 @@ from .filters import (
     FilterDefinition,
     validate_filter_dsl,
 )
-from .evaluation_orchestrator import StrategyEvaluationOrchestrator
+from .evaluation_orchestrator import StrategyEvaluationDependencies, StrategyEvaluationOrchestrator
 
 
 logger = logging.getLogger(__name__)
@@ -1220,11 +1220,12 @@ class StrategyRegistry:
         interval: str,
         instrument_ids: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None,
+        dependencies: Optional[StrategyEvaluationDependencies] = None,
     ) -> Dict[str, Any]:
         """Evaluate a strategy against current indicator signals."""
 
         record = self.get(strategy_id)
-        orchestrator = StrategyEvaluationOrchestrator(record)
+        orchestrator = StrategyEvaluationOrchestrator(record, dependencies=dependencies)
         inputs = orchestrator.build_inputs(
             strategy_id=strategy_id,
             start=start,
@@ -1448,6 +1449,7 @@ def generate_strategy_signals(
     interval: str,
     instrument_ids: Optional[List[str]] = None,
     config: Optional[Dict[str, Any]] = None,
+    dependencies: Optional[StrategyEvaluationDependencies] = None,
 ) -> Dict[str, Any]:
     """Evaluate the strategy rules for the requested window."""
 
@@ -1458,6 +1460,7 @@ def generate_strategy_signals(
         interval=interval,
         instrument_ids=instrument_ids,
         config=config,
+        dependencies=dependencies,
     )
 
 

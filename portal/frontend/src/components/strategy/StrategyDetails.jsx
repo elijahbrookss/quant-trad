@@ -40,6 +40,12 @@ const StrategyDetails = ({
   onAddRule,
   onEditRule,
   onDeleteRule,
+  onCreateGlobalFilter,
+  onUpdateGlobalFilter,
+  onDeleteGlobalFilter,
+  onCreateRuleFilter,
+  onUpdateRuleFilter,
+  onDeleteRuleFilter,
   onRunSignals,
   signalWindow,
   setSignalWindow,
@@ -284,7 +290,7 @@ const StrategyDetails = ({
               </svg>
               <span className="text-xl font-semibold text-white">{ruleCount}</span>
             </div>
-            <span className="mt-0.5 text-[10px] uppercase tracking-wider text-slate-500">Rules</span>
+            <span className="mt-0.5 text-[10px] uppercase tracking-wider text-slate-500">Decision Logic</span>
           </button>
           <button
             onClick={() => setActiveTab('logic')}
@@ -430,7 +436,7 @@ const StrategyDetails = ({
             )}
           </TabButton>
           <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
-            Signal Sources & Rules
+            Decision Logic
           </TabButton>
           <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
             Risk & Execution
@@ -459,7 +465,7 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Attach signal sources and define decision logic.</p>
+          <p className="px-6 pb-2 text-xs text-slate-400">Attach signal sources, define rule logic, and gate triggers with filters.</p>
           <RulesTab
             strategy={strategy}
             attachedIndicators={attachedIndicators}
@@ -469,6 +475,12 @@ const StrategyDetails = ({
             onAddRule={onAddRule}
             onEditRule={onEditRule}
             onDeleteRule={onDeleteRule}
+            onCreateGlobalFilter={onCreateGlobalFilter}
+            onUpdateGlobalFilter={onUpdateGlobalFilter}
+            onDeleteGlobalFilter={onDeleteGlobalFilter}
+            onCreateRuleFilter={onCreateRuleFilter}
+            onUpdateRuleFilter={onUpdateRuleFilter}
+            onDeleteRuleFilter={onDeleteRuleFilter}
             indicatorLookup={indicatorLookup}
             DropdownSelect={DropdownSelect}
             ActionButton={ActionButton}

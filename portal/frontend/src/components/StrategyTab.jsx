@@ -2,12 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   attachStrategyIndicator,
+  createRuleFilter,
   createStrategy,
+  createStrategyFilter,
   createStrategyRule,
+  deleteRuleFilter,
   deleteStrategy,
+  deleteStrategyFilter,
   deleteStrategyRule,
   detachStrategyIndicator,
+  updateRuleFilter,
   updateStrategy,
+  updateStrategyFilter,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { createInstrument } from '../adapters/instrument.adapter.js'
@@ -375,6 +381,84 @@ const StrategyTab = ({ chartId }) => {
     }
   }
 
+  const handleCreateGlobalFilter = async (payload) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await createStrategyFilter(selectedStrategy.id, payload)
+      info('strategy_filter_created', { strategyId: selectedStrategy.id })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to create global filter')
+      error('strategy_filter_create_failed', err)
+    }
+  }
+
+  const handleUpdateGlobalFilter = async (filterId, payload) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await updateStrategyFilter(selectedStrategy.id, filterId, payload)
+      info('strategy_filter_updated', { strategyId: selectedStrategy.id, filterId })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to update global filter')
+      error('strategy_filter_update_failed', err)
+    }
+  }
+
+  const handleDeleteGlobalFilter = async (filterId) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await deleteStrategyFilter(selectedStrategy.id, filterId)
+      info('strategy_filter_deleted', { strategyId: selectedStrategy.id, filterId })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to delete global filter')
+      error('strategy_filter_delete_failed', err)
+    }
+  }
+
+  const handleCreateRuleFilter = async (ruleId, payload) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await createRuleFilter(selectedStrategy.id, ruleId, payload)
+      info('rule_filter_created', { strategyId: selectedStrategy.id, ruleId })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to create rule filter')
+      error('rule_filter_create_failed', err)
+    }
+  }
+
+  const handleUpdateRuleFilter = async (ruleId, filterId, payload) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await updateRuleFilter(selectedStrategy.id, ruleId, filterId, payload)
+      info('rule_filter_updated', { strategyId: selectedStrategy.id, ruleId, filterId })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to update rule filter')
+      error('rule_filter_update_failed', err)
+    }
+  }
+
+  const handleDeleteRuleFilter = async (ruleId, filterId) => {
+    if (!selectedStrategy) return
+    setErrorMessage(null)
+    try {
+      await deleteRuleFilter(selectedStrategy.id, ruleId, filterId)
+      info('rule_filter_deleted', { strategyId: selectedStrategy.id, ruleId, filterId })
+      await refreshStrategies()
+    } catch (err) {
+      setErrorMessage(err?.message || 'Failed to delete rule filter')
+      error('rule_filter_delete_failed', err)
+    }
+  }
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -452,6 +536,12 @@ const StrategyTab = ({ chartId }) => {
               onAddRule={() => openRuleModal(null)}
               onEditRule={(rule) => openRuleModal(rule)}
               onDeleteRule={handleDeleteRule}
+              onCreateGlobalFilter={handleCreateGlobalFilter}
+              onUpdateGlobalFilter={handleUpdateGlobalFilter}
+              onDeleteGlobalFilter={handleDeleteGlobalFilter}
+              onCreateRuleFilter={handleCreateRuleFilter}
+              onUpdateRuleFilter={handleUpdateRuleFilter}
+              onDeleteRuleFilter={handleDeleteRuleFilter}
               onRunSignals={runSignals}
               signalWindow={signalWindow}
               setSignalWindow={setSignalWindow}
