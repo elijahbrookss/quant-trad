@@ -5,4 +5,4 @@
 export { InstrumentsTab } from './InstrumentsTab'
 export { ATMTab } from './ATMTab'
 export { RulesTab } from './RulesTab'
-export { SignalsTab } from './SignalsTab'
+export { OrderTriggersTab } from './OrderTriggersTab'

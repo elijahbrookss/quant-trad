@@ -148,6 +148,7 @@ export const ChartComponent = ({ chartId }) => {
     onDatasourceChange: setDatasource,
     onExchangeChange: setExchange,
   });
+  const { providerBlocked } = providerMgmt;
 
   const [palOpen, setPalOpen] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
@@ -173,6 +174,7 @@ export const ChartComponent = ({ chartId }) => {
     new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
     new Date(),
   ]);
+  const lastOverlaysRef = useRef(null);
 
   // Window configuration hook
   const windowConfig = useWindowConfiguration({
@@ -358,7 +360,7 @@ export const ChartComponent = ({ chartId }) => {
   }, [supportsLive, datasource]);
 
   // Overlay synchronization
-  const overlaySync = useOverlaySync({
+  const { syncOverlays, overlayHandlesRef } = useOverlaySync({
     chartRef,
     seriesRef,
     pvMgrRef,
@@ -758,7 +760,7 @@ export const ChartComponent = ({ chartId }) => {
       if (result?.appended) {
         debug('live_refresh_appended', { appended: result.appended, touched: result.touched });
       }
-      if (result?.replaced || result?.appended) {
+      if (result?.replaced || (result?.appended && modeRef.current !== 'live')) {
         bumpRefresh?.(chartId);
       }
     }
@@ -773,31 +775,48 @@ export const ChartComponent = ({ chartId }) => {
   }, [mode]);
 
   useEffect(() => {
-    if (mode === 'live') {
-      return;
-    }
-    if (windowConfig.historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) {
-      return;
-    }
+    if (mode === 'live') return;
+    if (windowConfig.historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) return;
+
     const now = new Date();
     const normalized = clampLookbackDays(windowConfig.historicalLookbackDays);
     const start = new Date(now.getTime() - normalized * DAY_MS);
     const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    windowConfig.setDateRange(nextRange);
-  }, [mode, windowConfig]);
+    const current = dateRangeRef.current || [];
+    const unchanged =
+      current[0] instanceof Date &&
+      current[1] instanceof Date &&
+      current[0].getTime() === nextRange[0].getTime() &&
+      current[1].getTime() === nextRange[1].getTime();
+    if (!unchanged) {
+      dateRangeRef.current = nextRange;
+      windowConfig.setDateRange(nextRange);
+    }
+  }, [
+    mode,
+    windowConfig.historicalWindowMode,
+    windowConfig.historicalLookbackDays,
+    windowConfig.setDateRange,
+  ]);
 
   useEffect(() => {
-    if (mode !== 'live') {
-      return;
-    }
+    if (mode !== 'live') return;
+
     const now = new Date();
     const normalized = clampLookbackDays(windowConfig.liveLookbackDays);
     const start = new Date(now.getTime() - normalized * DAY_MS);
     const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    windowConfig.setDateRange(nextRange);
-  }, [mode, windowConfig]);
+    const current = dateRangeRef.current || [];
+    const unchanged =
+      current[0] instanceof Date &&
+      current[1] instanceof Date &&
+      current[0].getTime() === nextRange[0].getTime() &&
+      current[1].getTime() === nextRange[1].getTime();
+    if (!unchanged) {
+      dateRangeRef.current = nextRange;
+      windowConfig.setDateRange(nextRange);
+    }
+  }, [mode, windowConfig.liveLookbackDays, windowConfig.setDateRange]);
 
   const lastModeRef = useRef('historical');
   useEffect(() => {
@@ -864,7 +883,7 @@ export const ChartComponent = ({ chartId }) => {
 
     info('chart_created');
 
-    const overlayHandles = overlaySync.overlayHandlesRef.current;
+    const overlayHandles = overlayHandlesRef.current;
 
     return () => {
       try {
@@ -955,9 +974,12 @@ export const ChartComponent = ({ chartId }) => {
 
   // React to overlay changes.
   useEffect(() => {
-    if (!chartState) return;
-    overlaySync.syncOverlays(chartState.overlays || []);
-  }, [chartState, overlaySync]);
+    const overlays = chartState?.overlays;
+    if (overlays === lastOverlaysRef.current) return;
+    lastOverlaysRef.current = overlays;
+    const list = overlays || [];
+    syncOverlays(list);
+  }, [chartState?.overlays, syncOverlays]);
 
   // Apply handler.
   const handleApply = useCallback(async (overrides = {}, options = {}) => {
@@ -1021,7 +1043,7 @@ export const ChartComponent = ({ chartId }) => {
         // ignore failures caused by interim series resets
       }
     }
-    overlaySync.syncOverlays([]); // clear overlays on apply
+    syncOverlays([]); // clear overlays on apply
     updateChart?.(chartId, {
       symbol: nextSymbol,
       interval: nextInterval,
@@ -1047,12 +1069,12 @@ export const ChartComponent = ({ chartId }) => {
       loaderReason: symbolChanged ? 'symbol-change' : undefined,
     });
 
-    if (result?.ok && (result.replaced || result.appended)) {
+    if (result?.ok && (result.replaced || (result.appended && modeRef.current !== 'live'))) {
       bumpRefresh?.(chartId);
     }
 
     return result;
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, windowConfig.dateRange, datasource, exchange, warn, overlaySync, showWarning, providerMgmt.providerId, providerMgmt.venueId, markChartState]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, windowConfig.dateRange, datasource, exchange, warn, syncOverlays, showWarning, providerMgmt.providerId, providerMgmt.venueId, markChartState]);
 
   const handleSymbolInputCommit = useCallback(() => {
     const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
@@ -1172,18 +1194,12 @@ export const ChartComponent = ({ chartId }) => {
   }, [mode, symbol, interval, datasource, exchange, handleApply, windowConfig.dateRange, supportsLive]);
 
   useEffect(() => {
-    if (mode === 'live') {
-      return;
-    }
+    if (mode === 'live') return;
 
     const current = dateRangeRef.current;
-    if (!Array.isArray(current) || current.length !== 2) {
-      return;
-    }
+    if (!Array.isArray(current) || current.length !== 2) return;
     const [start, end] = current;
-    if (!(start instanceof Date) || !(end instanceof Date)) {
-      return;
-    }
+    if (!(start instanceof Date) || !(end instanceof Date)) return;
 
     windowConfig.setDateRange((prev) => {
       const prevStart = prev?.[0] instanceof Date ? prev[0].getTime() : null;
@@ -1193,7 +1209,7 @@ export const ChartComponent = ({ chartId }) => {
       }
       return [start, end];
     });
-  }, [mode, windowConfig]);
+  }, [mode, windowConfig.setDateRange]);
 
   function useBusyDelay(busy, ms = 250) {
     const [show, setShow] = useState(false);

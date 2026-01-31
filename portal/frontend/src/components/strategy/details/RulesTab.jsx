@@ -1,10 +1,11 @@
-import React from 'react'
+import React, { useMemo } from 'react'
 import { Button } from '../../ui'
 import { AttachedIndicators } from '../indicators'
 import { RuleList } from '../rules'
+import { findBrokenRuleIndicators } from '../utils/indicatorUsage.js'
 
 /**
- * Rules & Indicators tab combining indicator attachment and rule management.
+ * Signal Sources & Rules tab combining indicator attachment and rule management.
  */
 export const RulesTab = ({
   strategy,
@@ -20,13 +21,18 @@ export const RulesTab = ({
   DropdownSelect,
   ActionButton
 }) => {
+  const brokenIndicatorIds = useMemo(
+    () => findBrokenRuleIndicators(attachedIndicators.map((ind) => ind.id), strategy?.rules),
+    [attachedIndicators, strategy?.rules],
+  )
+
   return (
     <div className="space-y-6">
-      {/* Indicators Section */}
+      {/* Signal sources (attach only) */}
       <div className="space-y-3">
-        <h4 className="text-sm font-semibold text-white">Indicators</h4>
+        <h4 className="text-sm font-semibold text-white">Signal Sources</h4>
         <p className="text-xs text-slate-400">
-          Attach indicators to this strategy to enable signal generation and rule evaluation.
+          Attach indicators to use their signals in rules. Editing belongs in QuantLab.
         </p>
         <AttachedIndicators
           strategy={strategy}
@@ -58,6 +64,7 @@ export const RulesTab = ({
           onEdit={onEditRule}
           onDelete={onDeleteRule}
           indicatorLookup={indicatorLookup}
+          brokenIndicatorIds={brokenIndicatorIds}
           ActionButton={ActionButton}
         />
       </div>

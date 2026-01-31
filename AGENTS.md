@@ -71,6 +71,10 @@ QuantLab → Strategy → Bot → Trades → Playback
 - One event = one log line with full context
 - Never swallow errors to “keep things running”
 
+### Debugging Guidance
+- If the root cause isn’t clear, add targeted, temporary logs to observe state transitions—do not ship workarounds that mask the issue.
+- Prefer stabilizing dependencies (refs, memoized callbacks) before adding logs; throttle diagnostics and remove them once the fix is in.
+
 ### Required Correlation Fields (when applicable)
 Include these whenever they exist:
 - `run_id`, `bot_id`, `bot_mode`

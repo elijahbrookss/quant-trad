@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
 import DropdownSelect from '../ChartComponent/DropdownSelect.jsx'
-import { InstrumentsTab, ATMTab, RulesTab, SignalsTab } from './index.js'
+import { InstrumentsTab, ATMTab, RulesTab, OrderTriggersTab } from './index.js'
 import ActionButton from './ui/ActionButton.jsx'
 import TabButton from './ui/TabButton.jsx'
 import TabPanel from './ui/TabPanel.jsx'
@@ -430,17 +430,18 @@ const StrategyDetails = ({
             )}
           </TabButton>
           <TabButton active={activeTab === 'logic'} onClick={() => setActiveTab('logic')}>
-            Rules & Indicators
+            Signal Sources & Rules
           </TabButton>
           <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
-            ATM
+            Risk & Execution
           </TabButton>
           <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>
-            Signals
+            Order Triggers
           </TabButton>
         </div>
 
         <TabPanel active={activeTab === 'instruments'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Contracts used for sizing, fees, and execution.</p>
           <InstrumentsTab
             strategy={strategy}
             instrumentMap={instrumentMap}
@@ -453,10 +454,12 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'atm'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Define sizing, risk limits, and order management.</p>
           <ATMTab template={strategy.atm_template} />
         </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
+          <p className="px-6 pb-2 text-xs text-slate-400">Attach signal sources and define decision logic.</p>
           <RulesTab
             strategy={strategy}
             attachedIndicators={attachedIndicators}
@@ -473,7 +476,8 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'signals'}>
-          <SignalsTab
+          <p className="px-6 pb-2 text-xs text-slate-400">Preview when this strategy would attempt orders.</p>
+          <OrderTriggersTab
             strategy={strategy}
             instruments={strategyInstruments}
             attachedIndicators={attachedIndicators}
@@ -485,6 +489,8 @@ const StrategyDetails = ({
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
             DateRangePickerComponent={DateRangePickerComponent}
+            onNavigateToRules={() => setActiveTab('logic')}
+            onNavigateToExecution={() => setActiveTab('atm')}
           />
         </TabPanel>
       </div>

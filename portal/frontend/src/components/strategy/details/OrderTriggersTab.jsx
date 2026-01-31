@@ -1,6 +1,7 @@
 import { Button } from '../../ui'
 import { SignalSummary } from '../signals'
 import { SignalPreviewCharts } from '../signals/SignalPreviewCharts.jsx'
+import { buildTriggerRows } from '../utils/orderTriggers.js'
 
 /**
  * Get display name for an instrument - prefers base_currency from metadata
@@ -30,9 +31,9 @@ const DATE_PRESETS = [
 ]
 
 /**
- * Signals tab for generating and previewing strategy signals.
+ * Order Triggers tab for previewing when a strategy would attempt orders.
  */
-export const SignalsTab = ({
+export const OrderTriggersTab = ({
   strategy,
   instruments = [],
   attachedIndicators,
@@ -44,6 +45,8 @@ export const SignalsTab = ({
   onSubmit,
   onDateRangeChange,
   DateRangePickerComponent,
+  onNavigateToRules,
+  onNavigateToExecution,
 }) => {
   const activeInstrument = instruments.find((instrument) => instrument?.id === signalInstrumentId) || null
   const symbol = activeInstrument?.symbol || '—'
@@ -79,9 +82,28 @@ export const SignalsTab = ({
     ? (instrumentResult.rule_results || []).filter((entry) => entry?.matched).length
     : signalResult?.summary?.rules_matched
 
+  const triggerRows = buildTriggerRows({ instrumentResult, rules: strategy.rules, symbol })
+
   return (
     <div className="space-y-4">
-      {/* Mini signal summary - shown if we have results */}
+      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-slate-500">Order triggers</p>
+            <p className="text-xs text-slate-400">Read-only preview of when this strategy would place orders based on your rules.</p>
+          </div>
+          <div className="flex gap-2 text-[11px] text-slate-400">
+            <button type="button" onClick={onNavigateToRules} className="rounded border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-200 hover:border-white/20 hover:text-white">
+              View rules
+            </button>
+            <button type="button" onClick={onNavigateToExecution} className="rounded border border-white/10 bg-white/5 px-2 py-1 text-xs text-slate-200 hover:border-white/20 hover:text-white">
+              Execution config
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Mini trigger summary - shown if we have results */}
       {signalResult && (
         <div className="flex flex-wrap items-center gap-4 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-2">
           <div className="flex items-center gap-2">
@@ -106,7 +128,7 @@ export const SignalsTab = ({
         </div>
       )}
 
-      <form onSubmit={onSubmit} className="space-y-3">
+      <form onSubmit={onSubmit} className="space-y-3" aria-label="Order trigger preview controls">
         {/* Date range with presets */}
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
           <div className="mb-2 flex items-center justify-between">
@@ -176,19 +198,19 @@ export const SignalsTab = ({
           </div>
         </div>
 
-        {/* Generate button */}
+        {/* Preview button */}
         <div className="flex justify-end">
           <Button
             type="submit"
             disabled={signalsLoading || !signalInstrumentId}
             loading={signalsLoading}
           >
-            {signalsLoading ? 'Generating...' : 'Generate Signals'}
+            {signalsLoading ? 'Previewing…' : 'Preview Order Triggers'}
           </Button>
         </div>
       </form>
 
-      {/* Signal results */}
+      {/* Trigger results */}
       {signalResult && (
         <div className="space-y-4">
           <SignalSummary result={signalResult} instrumentId={signalInstrumentId} />
@@ -206,6 +228,51 @@ export const SignalsTab = ({
             signalResult={signalResult}
             attachedIndicators={attachedIndicators}
           />
+
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white">Recent order triggers</p>
+                <p className="text-xs text-slate-400">Derived from evaluated rules—no indicator edits or recompute actions here.</p>
+              </div>
+              <span className="rounded-full border border-white/10 bg-black/50 px-3 py-1 text-[10px] uppercase tracking-[0.25em] text-slate-300">
+                {triggerRows.length || 0} events
+              </span>
+            </div>
+
+            {triggerRows.length === 0 ? (
+              <p className="mt-3 text-sm text-slate-500">Run a preview to see when this strategy would attempt orders.</p>
+            ) : (
+              <div className="mt-3 divide-y divide-white/5 border-t border-white/10">
+                {triggerRows.map((row) => (
+                  <div key={row.id} className="flex flex-wrap items-center gap-3 py-3">
+                    <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] ${row.direction === 'BUY' ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30' : 'bg-rose-500/15 text-rose-200 border border-rose-500/30'}`}>
+                      {row.direction}
+                    </span>
+                    <div className="flex min-w-[180px] flex-col">
+                      <span className="text-sm font-medium text-white">{row.ruleName}</span>
+                      <span className="text-[11px] text-slate-400">{row.instrument} • {row.triggerType || 'entry'}{row.matched === false ? ' (not matched)' : ''}</span>
+                    </div>
+                    <div className="flex flex-1 flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                      <span className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-slate-200">
+                        {row.timestamp || 'timestamp —'}
+                      </span>
+                      {Array.isArray(row.reasons) && row.reasons.length
+                        ? row.reasons.slice(0, 4).map((reason, idx) => (
+                          <span
+                            key={`${row.id}-reason-${idx}`}
+                            className="rounded-full border border-white/10 bg-black/40 px-2 py-0.5 text-[10px] uppercase tracking-[0.24em] text-slate-300"
+                          >
+                            {typeof reason === 'string' ? reason : reason?.label || 'reason'}
+                          </span>
+                        ))
+                        : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

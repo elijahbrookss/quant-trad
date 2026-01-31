@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Dict, Optional
 
 from sqlalchemy import create_engine, text
@@ -34,9 +35,7 @@ def _engine() -> Engine:
 def _cipher() -> Fernet:
     global _FERNET
     if _FERNET is None:
-        key = os.getenv("PROVIDER_CREDENTIAL_KEY")
-        if not key:
-            raise RuntimeError("PROVIDER_CREDENTIAL_KEY is required to encrypt provider credentials.")
+        key = _ensure_provider_key()
         try:
             _FERNET = Fernet(key)
         except Exception as exc:  # pragma: no cover - configuration error
@@ -46,6 +45,46 @@ def _cipher() -> Fernet:
 
 def _normalize(value: Optional[str]) -> str:
     return (value or "").strip().upper()
+
+
+def _env_path() -> Path:
+    # repo root: .../src/data_providers/services -> repo root is parents[3]
+    return Path(__file__).resolve().parents[3] / ".env"
+
+
+def _ensure_provider_key() -> str:
+    """Fetch PROVIDER_CREDENTIAL_KEY; generate and persist to .env if missing."""
+    existing = os.getenv("PROVIDER_CREDENTIAL_KEY")
+    if existing:
+        return existing
+
+    generated = Fernet.generate_key().decode("utf-8")
+    env_path = _env_path()
+    try:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not env_path.exists():
+            env_path.touch(mode=0o600, exist_ok=True)
+
+        # Avoid duplicating if another process just wrote it
+        should_append = True
+        try:
+            content = env_path.read_text(encoding="utf-8")
+            if "PROVIDER_CREDENTIAL_KEY" in content:
+                should_append = False
+        except OSError:
+            should_append = True
+
+        if should_append:
+            with env_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"\nPROVIDER_CREDENTIAL_KEY={generated}\n")
+
+        os.environ["PROVIDER_CREDENTIAL_KEY"] = generated
+        logger.warning("provider_credential_key_created | path=%s", env_path)
+    except Exception as exc:  # pragma: no cover - best-effort persistence
+        os.environ["PROVIDER_CREDENTIAL_KEY"] = generated
+        logger.warning("provider_credential_key_create_failed | fallback_env_only | error=%s", exc)
+
+    return generated
 
 
 def ensure_schema() -> None:

@@ -18,6 +18,7 @@ import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
+import DeleteIndicatorModal from './DeleteIndicatorModal.jsx';
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
 import { createLogger } from '../utils/logger.js';
 import LoadingOverlay from './LoadingOverlay.jsx';
@@ -135,6 +136,10 @@ const sortIndicators = (list = []) => {
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
+  const indicatorsRef = useRef(indicators)
+  useEffect(() => {
+    indicatorsRef.current = indicators
+  }, [indicators])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -152,6 +157,7 @@ export const IndicatorSection = ({ chartId }) => {
   const [jobState, setJobState] = useState({ busy: false, indicatorId: null, type: null, label: '' });
   const [notice, setNotice] = useState('');
   const noticeTimerRef = useRef(null);
+  const [deleteModal, setDeleteModal] = useState({ open: false, indicatorId: null, indicatorName: '' });
 
 
   const { updateChart, getChart } = useChartState()
@@ -162,8 +168,8 @@ export const IndicatorSection = ({ chartId }) => {
   // Read current chart slice
   const chartState = getChart(chartId)
 
-  const mergeIndicatorLists = useCallback((incoming = [], previous = indicators) => {
-    const prevList = Array.isArray(previous) ? previous : [];
+  const mergeIndicatorLists = useCallback((incoming = [], previous = undefined) => {
+    const prevList = Array.isArray(previous) ? previous : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
     const serverList = Array.isArray(incoming) ? incoming : [];
     const serverIds = new Set(serverList.map((item) => item?.id).filter(Boolean));
 
@@ -187,7 +193,7 @@ export const IndicatorSection = ({ chartId }) => {
     const sorted = sortIndicators(merged);
     updateChart(chartId, { indicators: sorted });
     return sorted;
-  }, [chartId, indicators, updateChart]);
+  }, [chartId, updateChart]);
 
   const showNotice = useCallback((message) => {
     if (!message) return;
@@ -683,7 +689,19 @@ export const IndicatorSection = ({ chartId }) => {
     }
   };
 
-  const handleDelete = async (id) => {
+  // Opens the delete confirmation modal instead of deleting directly
+  const openDeleteModal = (id) => {
+    if (!id) return;
+    const indicator = indicators.find((ind) => ind.id === id);
+    setDeleteModal({
+      open: true,
+      indicatorId: id,
+      indicatorName: indicator?.name || indicator?.type || 'this indicator',
+    });
+  };
+
+  // Actual delete logic - called from modal confirmation
+  const confirmDelete = async (id) => {
     if (!id) return;
     if (guardBusy('delete_indicator')) return;
     setIsLoading(true);
@@ -722,14 +740,21 @@ export const IndicatorSection = ({ chartId }) => {
       }
       const latest = await fetchAndSyncIndicators({ silent: true });
       await refreshEnabledOverlays(latest);
+      setDeleteModal({ open: false, indicatorId: null, indicatorName: '' });
     } catch (e) {
       setError(e.message);
       logError('indicator_delete_failed', e);
+      throw e; // Re-throw so modal can handle error state
     } finally {
       setIsLoading(false);
       finishJob();
     }
-  }
+  };
+
+  // Legacy handler - now opens modal
+  const handleDelete = (id) => {
+    openDeleteModal(id);
+  };
 
   const toggleIndicatorSelection = (id) => {
     if (!id) return
@@ -984,6 +1009,47 @@ export const IndicatorSection = ({ chartId }) => {
       finishJob();
     }
   }
+
+  // Recompute overlays for a single indicator
+  const handleRecomputeOverlays = async (id) => {
+    if (!id) return;
+    if (guardBusy('recompute_overlays')) return;
+    const indicator = indicators.find((ind) => ind.id === id);
+    if (!indicator) return;
+
+    const ctx = requireContextPayload('recompute_overlays');
+    if (!ctx) return;
+
+    startJob('Recomputing overlays…', { indicatorId: id, type: 'recompute' });
+    setIndicators((prev) => prev.map((ind) => (
+      ind.id === id ? { ...ind, _status: 'computing' } : ind
+    )));
+
+    try {
+      const payload = await fetchIndicatorOverlays(id, ctx);
+      if (payload) {
+        const currentOverlays = getChart(chartId)?.overlays || [];
+        // Remove old overlays for this indicator and add new ones
+        const filtered = currentOverlays.filter((o) => o.ind_id !== id);
+        const newOverlay = { ind_id: id, type: indicator.type, payload };
+        const merged = [...filtered, newOverlay];
+        const colored = applyIndicatorColors(merged, indColors);
+        updateChart(chartId, { overlays: colored });
+      }
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === id ? { ...ind, _status: null } : ind
+      )));
+      info('overlay_recompute_success', { indicatorId: id });
+    } catch (e) {
+      setError(e.message);
+      logError('overlay_recompute_failed', { indicatorId: id }, e);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === id ? { ...ind, _status: null } : ind
+      )));
+    } finally {
+      finishJob();
+    }
+  };
 
   const retryCreate = async (indicator) => {
     if (!indicator?._local || !indicator?._draft) return;
@@ -1334,6 +1400,7 @@ export const IndicatorSection = ({ chartId }) => {
                   onDuplicate={handleDuplicate}
                   onGenerateSignals={generateSignals}
                   onSelectColor={handleSelectColor}
+                  onRecompute={handleRecomputeOverlays}
                   colorSwatches={COLOR_SWATCHES}
                   isGeneratingSignals={isGenerating}
                   disableSignalAction={disableSignals}
@@ -1417,6 +1484,14 @@ export const IndicatorSection = ({ chartId }) => {
         initial={editing}
         onSave={handleSave}
         error={error}
+      />
+
+      <DeleteIndicatorModal
+        open={deleteModal.open}
+        indicatorId={deleteModal.indicatorId}
+        indicatorName={deleteModal.indicatorName}
+        onClose={() => setDeleteModal({ open: false, indicatorId: null, indicatorName: '' })}
+        onConfirm={confirmDelete}
       />
     </div>
   )
