@@ -6,7 +6,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 
@@ -41,11 +41,134 @@ class EvaluationContext:
     stats_snapshot: Any
 
 
+class StrategyEvaluationDependencies(Protocol):
+    """Dependency boundary for strategy evaluation adapters."""
+
+    def build_filter_gate_snapshot(
+        self,
+        *,
+        instrument_ids: Iterable[str],
+        timeframe_seconds: int,
+        start: datetime,
+        end: datetime,
+        global_filters: Sequence[FilterDefinition],
+        rule_filters_by_rule: Mapping[str, Sequence[FilterDefinition]],
+    ) -> Any: ...
+
+    def generate_indicator_payloads(
+        self,
+        *,
+        strategy_id: str,
+        instrument_id: str,
+        indicator_ids: Sequence[str],
+        indicator_rule_map: Mapping[str, Sequence[str]],
+        start: str,
+        end: str,
+        interval: str,
+        symbol: str,
+        datasource: str,
+        exchange: str | None,
+        base_config: Mapping[str, Any],
+        run_id: str,
+    ) -> tuple[Dict[str, Dict[str, Any]], List[str], int]: ...
+
+    def apply_filter_gates(
+        self,
+        *,
+        rule_results: List[Mapping[str, Any]],
+        instrument_id: str,
+        timeframe_seconds: int,
+        stats_snapshot: Any,
+        global_filters: Sequence[FilterDefinition],
+        rule_filters_by_rule: Mapping[str, Sequence[FilterDefinition]],
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
+class DefaultStrategyEvaluationDependencies:
+    """Default strategy evaluation dependencies for portal runtime."""
+
+    def build_filter_gate_snapshot(
+        self,
+        *,
+        instrument_ids: Iterable[str],
+        timeframe_seconds: int,
+        start: datetime,
+        end: datetime,
+        global_filters: Sequence[FilterDefinition],
+        rule_filters_by_rule: Mapping[str, Sequence[FilterDefinition]],
+    ) -> Any:
+        return build_filter_gate_snapshot(
+            instrument_ids=instrument_ids,
+            timeframe_seconds=timeframe_seconds,
+            start=start,
+            end=end,
+            global_filters=global_filters,
+            rule_filters_by_rule=rule_filters_by_rule,
+        )
+
+    def generate_indicator_payloads(
+        self,
+        *,
+        strategy_id: str,
+        instrument_id: str,
+        indicator_ids: Sequence[str],
+        indicator_rule_map: Mapping[str, Sequence[str]],
+        start: str,
+        end: str,
+        interval: str,
+        symbol: str,
+        datasource: str,
+        exchange: str | None,
+        base_config: Mapping[str, Any],
+        run_id: str,
+    ) -> tuple[Dict[str, Dict[str, Any]], List[str], int]:
+        return generate_indicator_payloads(
+            strategy_id=strategy_id,
+            instrument_id=instrument_id,
+            indicator_ids=indicator_ids,
+            indicator_rule_map=indicator_rule_map,
+            start=start,
+            end=end,
+            interval=interval,
+            symbol=symbol,
+            datasource=datasource,
+            exchange=exchange,
+            base_config=base_config,
+            run_id=run_id,
+        )
+
+    def apply_filter_gates(
+        self,
+        *,
+        rule_results: List[Mapping[str, Any]],
+        instrument_id: str,
+        timeframe_seconds: int,
+        stats_snapshot: Any,
+        global_filters: Sequence[FilterDefinition],
+        rule_filters_by_rule: Mapping[str, Sequence[FilterDefinition]],
+    ) -> None:
+        apply_filter_gates(
+            rule_results=rule_results,
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+            stats_snapshot=stats_snapshot,
+            global_filters=global_filters,
+            rule_filters_by_rule=rule_filters_by_rule,
+        )
+
+
 class StrategyEvaluationOrchestrator:
     """Coordinate strategy preview evaluation for indicators, rules, and filters."""
 
-    def __init__(self, record: Any) -> None:
+    def __init__(
+        self,
+        record: Any,
+        *,
+        dependencies: Optional[StrategyEvaluationDependencies] = None,
+    ) -> None:
         self._record = record
+        self._dependencies = dependencies or DefaultStrategyEvaluationDependencies()
 
     def build_inputs(
         self,
@@ -84,7 +207,7 @@ class StrategyEvaluationOrchestrator:
         rule_filters_by_rule = {
             rule_id: list(rule.filters) for rule_id, rule in self._record.rules.items()
         }
-        stats_snapshot = build_filter_gate_snapshot(
+        stats_snapshot = self._dependencies.build_filter_gate_snapshot(
             instrument_ids=inputs.instrument_ids,
             timeframe_seconds=timeframe_seconds,
             start=start_dt,
@@ -204,7 +327,7 @@ class StrategyEvaluationOrchestrator:
             raise ValueError(f"Instrument {instrument_id} is missing a datasource")
 
         run_id = uuid.uuid4().hex
-        indicator_payloads, missing_indicators, total_signals = generate_indicator_payloads(
+        indicator_payloads, missing_indicators, total_signals = self._dependencies.generate_indicator_payloads(
             strategy_id=inputs.strategy_id,
             instrument_id=instrument_id,
             indicator_ids=self._record.indicator_ids,
@@ -233,7 +356,7 @@ class StrategyEvaluationOrchestrator:
                 "reason": "signal_conditions_failed",
             }
 
-        apply_filter_gates(
+        self._dependencies.apply_filter_gates(
             rule_results=rule_results,
             instrument_id=instrument_id,
             timeframe_seconds=context.timeframe_seconds,
