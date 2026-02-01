@@ -1,8 +1,7 @@
 import React, { useState } from 'react'
-import { FilterDrawer } from '../filters/FilterDrawer.jsx'
-import { GateCard } from '../filters/GateCard.jsx'
 import { buildRuleConditionSummary } from './ruleUtils.js'
 import { RuleCard } from './RuleCard.jsx'
+import { RuleGateSection } from './RuleGateSection.jsx'
 
 /**
  * Component displaying a list of strategy rules with conditions.
@@ -23,39 +22,8 @@ export const RuleList = ({
   onAddRule,
 }) => {
   const [expanded, setExpanded] = useState(null)
-  const [filterDrawer, setFilterDrawer] = useState({ open: false, ruleId: null, filter: null })
-
   const toggleExpanded = (id) => {
     setExpanded((prev) => (prev === id ? null : id))
-  }
-
-  const handleFilterAdd = (ruleId) => {
-    setFilterDrawer({ open: true, ruleId, filter: null })
-  }
-
-  const handleFilterEdit = (ruleId, filter) => {
-    setFilterDrawer({ open: true, ruleId, filter })
-  }
-
-  const handleFilterClose = () => {
-    setFilterDrawer({ open: false, ruleId: null, filter: null })
-  }
-
-  const handleFilterSave = async (payload) => {
-    if (!filterDrawer.ruleId) return
-    if (filterDrawer.filter?.id) {
-      await onUpdateFilter?.(filterDrawer.ruleId, filterDrawer.filter.id, payload)
-    } else {
-      await onCreateFilter?.(filterDrawer.ruleId, payload)
-    }
-    handleFilterClose()
-  }
-
-  const handleFilterToggle = async (ruleId, filter) => {
-    if (!filter?.id) return
-    await onUpdateFilter?.(ruleId, filter.id, {
-      enabled: !filter.enabled,
-    })
   }
 
   if (!rules.length) {
@@ -147,41 +115,18 @@ export const RuleList = ({
                 )}
               </div>
 
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Rule gates</p>
-                  <ActionButton variant="ghost" onClick={() => handleFilterAdd(rule.id)}>
-                    Add gate
-                  </ActionButton>
-                </div>
-                {filterCount ? (
-                  <div className="mt-3 space-y-2">
-                    {rule.filters.map((filter) => (
-                      <GateCard
-                        key={filter.id}
-                        filter={filter}
-                        onToggle={(entry) => handleFilterToggle(rule.id, entry)}
-                        onEdit={() => handleFilterEdit(rule.id, filter)}
-                        onDelete={() => onDeleteFilter?.(rule.id, filter.id)}
-                        actionsLabel={`Gate actions for ${filter.name || 'filter'}`}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-[11px] text-slate-400">No gates attached to this rule.</p>
-                )}
-              </div>
+              <RuleGateSection
+                ruleId={rule.id}
+                filters={rule.filters || []}
+                onCreateFilter={onCreateFilter}
+                onUpdateFilter={onUpdateFilter}
+                onDeleteFilter={onDeleteFilter}
+                ActionButton={ActionButton}
+              />
             </RuleCard>
           )
         })}
       </div>
-      <FilterDrawer
-        open={filterDrawer.open}
-        initialFilter={filterDrawer.filter}
-        onClose={handleFilterClose}
-        onSave={handleFilterSave}
-        title={filterDrawer.filter ? 'Edit rule gate' : 'Add rule gate'}
-      />
     </>
   )
 }
