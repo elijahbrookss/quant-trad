@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { RULE_FORM_DEFAULT } from '../../utils/strategy/formDefaults.js'
 
-const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onSubmit } = {}) => {
+const useRuleForm = ({
+  open,
+  indicators,
+  ensureIndicatorMeta,
+  initialValues,
+  onSubmit,
+  getDefaultName,
+} = {}) => {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
 
   const indicatorMap = useMemo(() => {
@@ -162,8 +169,9 @@ const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onS
       return
     }
 
+    const resolvedName = form.name.trim() || getDefaultName?.(form, indicatorMap) || 'Rule'
     const payload = {
-      name: form.name.trim(),
+      name: resolvedName,
       description: form.description.trim() || null,
       action: form.action,
       match: form.match,

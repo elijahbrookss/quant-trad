@@ -39,6 +39,7 @@ const StrategyDetails = ({
   onDetachIndicator,
   onAddRule,
   onEditRule,
+  onDuplicateRule,
   onDeleteRule,
   onCreateGlobalFilter,
   onUpdateGlobalFilter,
@@ -474,6 +475,7 @@ const StrategyDetails = ({
             onDetachIndicator={onDetachIndicator}
             onAddRule={onAddRule}
             onEditRule={onEditRule}
+            onDuplicateRule={onDuplicateRule}
             onDeleteRule={onDeleteRule}
             onCreateGlobalFilter={onCreateGlobalFilter}
             onUpdateGlobalFilter={onUpdateGlobalFilter}

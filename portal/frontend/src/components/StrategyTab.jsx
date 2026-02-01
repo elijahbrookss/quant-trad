@@ -20,7 +20,7 @@ import { createInstrument } from '../adapters/instrument.adapter.js'
 import { StrategyGrid } from './strategy'
 import StrategyDetails from './strategy/StrategyDetails.jsx'
 import StrategyFormModal from './strategy/modals/StrategyFormModal.jsx'
-import RuleFormModal from './strategy/modals/RuleFormModal.jsx'
+import { RuleDrawer } from './strategy/rules/RuleDrawer.jsx'
 import InstrumentFormModal from './strategy/modals/InstrumentFormModal.jsx'
 import ActionButton from './strategy/ui/ActionButton.jsx'
 import { useChartState } from '../contexts/ChartStateContext.jsx'
@@ -40,7 +40,7 @@ const StrategyTab = ({ chartId }) => {
 
   const [errorMessage, setErrorMessage] = useState(null)
   const [strategyModal, setStrategyModal] = useState({ open: false, strategy: null })
-  const [ruleModal, setRuleModal] = useState({ open: false, rule: null })
+  const [ruleModal, setRuleModal] = useState({ open: false, rule: null, mode: 'create' })
   const [savingStrategy, setSavingStrategy] = useState(false)
   const [savingRule, setSavingRule] = useState(false)
   const [instrumentModal, setInstrumentModal] = useState({ open: false, defaults: null })
@@ -240,8 +240,11 @@ const StrategyTab = ({ chartId }) => {
     setStrategyModal({ open: false, strategy: null })
   }
 
-  const openRuleModal = (rule = null) => setRuleModal({ open: true, rule })
-  const closeRuleModal = () => setRuleModal({ open: false, rule: null })
+  const openRuleModal = (rule = null, options = {}) => {
+    const mode = options.mode || (rule ? 'edit' : 'create')
+    setRuleModal({ open: true, rule, mode })
+  }
+  const closeRuleModal = () => setRuleModal({ open: false, rule: null, mode: 'create' })
 
   const handleStrategySubmit = async (payload, options = {}) => {
     const { closeOnSuccess = true } = options || {}
@@ -351,7 +354,7 @@ const StrategyTab = ({ chartId }) => {
     setSavingRule(true)
     setErrorMessage(null)
     try {
-      if (ruleModal.rule) {
+      if (ruleModal.mode === 'edit' && ruleModal.rule?.id) {
         await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
         info('strategy_rule_updated', { strategyId: selectedStrategy.id, ruleId: ruleModal.rule.id })
       } else {
@@ -535,6 +538,7 @@ const StrategyTab = ({ chartId }) => {
               onDetachIndicator={handleDetachIndicator}
               onAddRule={() => openRuleModal(null)}
               onEditRule={(rule) => openRuleModal(rule)}
+              onDuplicateRule={(rule) => openRuleModal({ ...rule, name: `${rule?.name || 'Rule'} copy` }, { mode: 'create' })}
               onDeleteRule={handleDeleteRule}
               onCreateGlobalFilter={handleCreateGlobalFilter}
               onUpdateGlobalFilter={handleUpdateGlobalFilter}
@@ -579,7 +583,7 @@ const StrategyTab = ({ chartId }) => {
         error={errorMessage}
       />
 
-      <RuleFormModal
+      <RuleDrawer
         open={ruleModal.open}
         initialValues={ruleModal.rule}
         indicators={indicatorsForRuleModal}

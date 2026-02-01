@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useRef, useState, useEffect, useMemo } from 'react'
 import { Button } from '../../ui'
 import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
@@ -16,6 +16,7 @@ export const AttachedIndicators = ({
 }) => {
   const [selected, setSelected] = useState('')
   const [confirm, setConfirm] = useState(null) // { id, name, impact }
+  const attachRef = useRef(null)
 
   useEffect(() => {
     setSelected('')
@@ -30,6 +31,13 @@ export const AttachedIndicators = ({
     if (!selected) return
     await onAttach(selected)
     setSelected('')
+  }
+
+  const handleFocusAttach = () => {
+    if (!attachRef.current) return
+    attachRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const focusTarget = attachRef.current.querySelector('button')
+    focusTarget?.focus()
   }
 
   const handleDetachRequest = (entry) => {
@@ -61,7 +69,7 @@ export const AttachedIndicators = ({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" ref={attachRef}>
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <div className="flex-1">
             <DropdownSelect
@@ -87,7 +95,12 @@ export const AttachedIndicators = ({
 
       {entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          No indicators attached. Add signal sources from QuantLab, then attach them here.
+          <p>No indicators attached. Add signal sources from QuantLab, then attach them here.</p>
+          <div className="mt-3">
+            <ActionButton variant="ghost" onClick={handleFocusAttach}>
+              Attach indicator
+            </ActionButton>
+          </div>
         </div>
       ) : (
         <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
