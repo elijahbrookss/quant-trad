@@ -38,9 +38,9 @@ export const FilterDrawer = ({ open, initialFilter, onClose, onSave, title }) =>
 
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50" initialFocus={initialFocusRef}>
-      <DialogBackdrop className="fixed inset-0 bg-black/40" />
-      <div className="fixed inset-0 flex justify-end">
-        <DialogPanel className="flex h-full w-full max-w-3xl flex-col border-l border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
+      <DialogBackdrop className="fixed inset-0 bg-black/50" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
           <header className="flex items-start justify-between border-b border-white/10 px-5 py-4">
             <div>
               <DialogTitle className="text-base font-semibold text-white">

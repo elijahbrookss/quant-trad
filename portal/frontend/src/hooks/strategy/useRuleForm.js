@@ -154,8 +154,7 @@ const useRuleForm = ({
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleSubmit = async (event) => {
-    event.preventDefault()
+  const buildPayload = () => {
     const conditions = form.conditions
       .map((condition) => ({
         indicator_id: condition.indicator_id,
@@ -166,11 +165,11 @@ const useRuleForm = ({
       .filter((condition) => condition.indicator_id && condition.signal_type)
 
     if (!conditions.length) {
-      return
+      return null
     }
 
     const resolvedName = form.name.trim() || getDefaultName?.(form, indicatorMap) || 'Rule'
-    const payload = {
+    return {
       name: resolvedName,
       description: form.description.trim() || null,
       action: form.action,
@@ -178,6 +177,12 @@ const useRuleForm = ({
       conditions,
       enabled: Boolean(form.enabled),
     }
+  }
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const payload = buildPayload()
+    if (!payload) return
     await onSubmit(payload)
   }
 
@@ -185,6 +190,7 @@ const useRuleForm = ({
     form,
     indicatorMap,
     canSubmit,
+    buildPayload,
     handleSubmit,
     handleFieldChange,
     addCondition,

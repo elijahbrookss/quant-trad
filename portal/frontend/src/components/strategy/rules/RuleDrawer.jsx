@@ -6,6 +6,8 @@ import { Button } from '../../ui'
 import useRuleForm from '../../../hooks/strategy/useRuleForm.js'
 import { ConditionRowBuilder } from '../conditions/ConditionRowBuilder.jsx'
 import { buildRuleConditionSummary, buildRuleDefaultName } from './ruleUtils.js'
+import { FilterBuilder } from '../filters/FilterBuilder.jsx'
+import { buildFilterPayload, buildFilterPreview, createEmptyPredicate } from '../filters/filterUtils.js'
 
 export const RuleDrawer = ({
   open,
@@ -21,7 +23,7 @@ export const RuleDrawer = ({
     form,
     indicatorMap,
     canSubmit,
-    handleSubmit,
+    buildPayload,
     handleFieldChange,
     addCondition,
     removeCondition,
@@ -52,6 +54,13 @@ export const RuleDrawer = ({
     [form.conditions, form.match, indicatorMap],
   )
 
+  const [gateDrafts, setGateDrafts] = React.useState([])
+
+  React.useEffect(() => {
+    if (!open) return
+    setGateDrafts([])
+  }, [open, initialValues?.id])
+
   if (!open) return null
 
   const defaultName = buildRuleDefaultName({
@@ -61,11 +70,42 @@ export const RuleDrawer = ({
     indicatorLookup: indicatorMap,
   })
 
+  const addGate = () => {
+    setGateDrafts((prev) => ([
+      ...prev,
+      {
+        name: '',
+        description: '',
+        enabled: true,
+        groupMode: 'all',
+        predicates: [createEmptyPredicate()],
+      },
+    ]))
+  }
+
+  const updateGate = (index, next) => {
+    setGateDrafts((prev) => prev.map((gate, idx) => (idx === index ? next : gate)))
+  }
+
+  const removeGate = (index) => {
+    setGateDrafts((prev) => prev.filter((_, idx) => idx !== index))
+  }
+
+  const handleSave = async (event) => {
+    event.preventDefault()
+    const payload = buildPayload()
+    if (!payload) return
+    const gatePayloads = gateDrafts
+      .map((gate) => buildFilterPayload(gate))
+      .filter((gate) => gate?.dsl && Object.keys(gate.dsl).length)
+    await onSubmit(payload, gatePayloads)
+  }
+
   return (
     <Dialog open={open} onClose={onCancel} className="relative z-50" initialFocus={initialFocusRef}>
-      <DialogBackdrop className="fixed inset-0 bg-black/40" />
-      <div className="fixed inset-0 flex justify-end">
-        <DialogPanel className="flex h-full w-full max-w-4xl flex-col border-l border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
+      <DialogBackdrop className="fixed inset-0 bg-black/50" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
           <header className="flex items-start justify-between border-b border-white/10 px-5 py-4">
             <div>
               <DialogTitle className="text-base font-semibold text-white">
@@ -86,7 +126,7 @@ export const RuleDrawer = ({
             </button>
           </header>
 
-          <form className="flex-1 space-y-5 overflow-y-auto px-5 py-4" onSubmit={handleSubmit}>
+          <form className="flex-1 space-y-5 overflow-y-auto px-5 py-4" onSubmit={handleSave}>
             <div className="rounded-lg border border-white/10 bg-black/30 px-4 py-3">
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Condition summary</p>
               <p className="mt-1 text-sm text-slate-200">{conditionSummary}</p>
@@ -260,6 +300,83 @@ export const RuleDrawer = ({
                   },
                 ]}
               />
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-white/10 bg-black/30 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Rule gates</h4>
+                  <p className="mt-1 text-xs text-slate-400">Optional gates applied after this rule matches.</p>
+                </div>
+                <Button type="button" variant="ghost" onClick={addGate}>
+                  Add gate
+                </Button>
+              </div>
+              {gateDrafts.length ? (
+                <div className="space-y-4">
+                  {gateDrafts.map((gate, index) => {
+                    const preview = buildFilterPreview(gate)
+                    return (
+                      <div key={`gate-${index}`} className="rounded-lg border border-white/10 bg-black/40 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Gate {index + 1}</p>
+                            <p className="mt-1 text-sm text-slate-200">{preview}</p>
+                          </div>
+                          <button
+                            type="button"
+                            className="rounded p-1 text-slate-500 hover:text-rose-400"
+                            onClick={() => removeGate(index)}
+                            aria-label="Remove gate"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        <div className="mt-3">
+                          <FilterBuilder
+                            draft={gate}
+                            onChange={(next) => updateGate(index, next)}
+                          />
+                        </div>
+
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <div>
+                            <label className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Preview</label>
+                            <input
+                              className="mt-2 w-full rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200"
+                              value={gate.name}
+                              onChange={(event) => updateGate(index, { ...gate, name: event.target.value })}
+                              placeholder={preview}
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Description</label>
+                            <input
+                              className="mt-2 w-full rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-200"
+                              value={gate.description}
+                              onChange={(event) => updateGate(index, { ...gate, description: event.target.value })}
+                              placeholder="Optional"
+                            />
+                          </div>
+                        </div>
+
+                        <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-300">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-white/20 bg-black/40"
+                            checked={gate.enabled !== false}
+                            onChange={(event) => updateGate(index, { ...gate, enabled: event.target.checked })}
+                          />
+                          Enabled
+                        </label>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No gates configured for this rule yet.</p>
+              )}
             </div>
           </form>
 

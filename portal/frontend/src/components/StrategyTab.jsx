@@ -349,7 +349,7 @@ const StrategyTab = ({ chartId }) => {
     }
   }
 
-  const handleRuleSubmit = async (payload) => {
+  const handleRuleSubmit = async (payload, gatePayloads = []) => {
     if (!selectedStrategy) return
     setSavingRule(true)
     setErrorMessage(null)
@@ -357,9 +357,19 @@ const StrategyTab = ({ chartId }) => {
       if (ruleModal.mode === 'edit' && ruleModal.rule?.id) {
         await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
         info('strategy_rule_updated', { strategyId: selectedStrategy.id, ruleId: ruleModal.rule.id })
+        if (gatePayloads.length) {
+          await Promise.all(
+            gatePayloads.map((gate) => createRuleFilter(selectedStrategy.id, ruleModal.rule.id, gate)),
+          )
+        }
       } else {
-        await createStrategyRule(selectedStrategy.id, payload)
+        const created = await createStrategyRule(selectedStrategy.id, payload)
         info('strategy_rule_created', { strategyId: selectedStrategy.id })
+        if (gatePayloads.length && created?.id) {
+          await Promise.all(
+            gatePayloads.map((gate) => createRuleFilter(selectedStrategy.id, created.id, gate)),
+          )
+        }
       }
       await refreshStrategies()
       closeRuleModal()
