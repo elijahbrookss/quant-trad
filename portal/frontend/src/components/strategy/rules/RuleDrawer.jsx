@@ -1,5 +1,5 @@
 import React, { useMemo, useRef } from 'react'
-import { Dialog } from '@headlessui/react'
+import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react'
 import { Trash2, X } from 'lucide-react'
 import DropdownSelect from '../../ChartComponent/DropdownSelect.jsx'
 import { Button } from '../../ui'
@@ -63,14 +63,14 @@ export const RuleDrawer = ({
 
   return (
     <Dialog open={open} onClose={onCancel} className="relative z-50" initialFocus={initialFocusRef}>
-      <Dialog.Backdrop className="fixed inset-0 bg-black/40" />
+      <DialogBackdrop className="fixed inset-0 bg-black/40" />
       <div className="fixed inset-0 flex justify-end">
-        <Dialog.Panel className="flex h-full w-full max-w-4xl flex-col border-l border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
+        <DialogPanel className="flex h-full w-full max-w-4xl flex-col border-l border-white/10 bg-[#111622] text-slate-100 shadow-2xl">
           <header className="flex items-start justify-between border-b border-white/10 px-5 py-4">
             <div>
-              <Dialog.Title className="text-base font-semibold text-white">
+              <DialogTitle className="text-base font-semibold text-white">
                 {initialValues ? 'Edit rule' : 'Create rule'}
-              </Dialog.Title>
+              </DialogTitle>
               <p className="mt-1 text-xs text-slate-400">
                 Define how indicator signals convert into entries or exits.
               </p>
@@ -269,7 +269,7 @@ export const RuleDrawer = ({
               {submitting ? 'Saving…' : 'Save rule'}
             </Button>
           </footer>
-        </Dialog.Panel>
+        </DialogPanel>
       </div>
     </Dialog>
   )

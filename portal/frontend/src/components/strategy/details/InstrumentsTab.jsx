@@ -97,9 +97,16 @@ export const InstrumentsTab = ({
             const updatedAt = refreshStatus?.[key]?.updatedAt || record?.updated_at
             return (
               <div key={key || symbol} className="border-b border-white/5 last:border-b-0">
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => toggleExpand(key)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      toggleExpand(key)
+                    }
+                  }}
                   className="grid w-full grid-cols-[1.2fr_0.8fr_1fr_1fr_0.8fr_0.9fr_0.6fr] items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 hover:bg-white/[0.03] focus:outline-none"
                 >
                   <div className="flex items-center gap-2">
@@ -129,7 +136,7 @@ export const InstrumentsTab = ({
                       ⋯
                     </Button>
                   </div>
-                </button>
+                </div>
 
                 {isOpen && (
                   <div className="grid grid-cols-2 gap-3 border-t border-white/5 bg-white/[0.02] px-4 py-3 text-xs text-slate-200 md:grid-cols-3">
