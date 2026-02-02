@@ -1,4 +1,5 @@
 import React from 'react'
+import { Pencil, Trash2 } from 'lucide-react'
 import { buildFilterSummary } from './filterUtils.js'
 
 export const GateCard = ({
@@ -10,38 +11,70 @@ export const GateCard = ({
 }) => {
   const summary = buildFilterSummary(filter)
   const name = filter.name || summary
+  const showSummary = filter.name && summary !== filter.name
 
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-white/10 bg-black/30 px-4 py-3">
+    <div
+      className={`
+        group relative flex items-center gap-3 rounded-lg border px-4 py-3 transition-all
+        ${filter.enabled
+          ? 'border-white/10 bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]'
+          : 'border-white/5 bg-white/[0.01] opacity-60 hover:opacity-80'
+        }
+      `}
+    >
+      {/* Enable/Disable toggle */}
       <button
         type="button"
         onClick={() => onToggle?.(filter)}
-        className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] ${
-          filter.enabled
-            ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-500/30'
-            : 'bg-slate-700/60 text-slate-400 border border-white/5'
-        }`}
+        className={`
+          relative h-5 w-9 shrink-0 rounded-full transition-colors
+          ${filter.enabled ? 'bg-emerald-500/30' : 'bg-slate-700/50'}
+        `}
+        aria-label={filter.enabled ? 'Disable gate' : 'Enable gate'}
+        title={filter.enabled ? 'Click to disable' : 'Click to enable'}
       >
-        {filter.enabled ? 'Enabled' : 'Disabled'}
+        <span
+          className={`
+            absolute top-0.5 h-4 w-4 rounded-full transition-all
+            ${filter.enabled
+              ? 'left-[18px] bg-emerald-400'
+              : 'left-0.5 bg-slate-500'
+            }
+          `}
+        />
       </button>
-      <div className="min-w-[200px] flex-1">
-        <p className="text-sm font-semibold text-white">{name}</p>
-        <p className="mt-1 text-[11px] text-slate-400">{summary}</p>
+
+      {/* Content */}
+      <div className="min-w-0 flex-1">
+        <p className={`text-sm font-medium ${filter.enabled ? 'text-white' : 'text-slate-400'}`}>
+          {name}
+        </p>
+        {showSummary && (
+          <p className="mt-0.5 truncate text-xs text-slate-500">{summary}</p>
+        )}
       </div>
-      <div className="flex items-center gap-2" aria-label={actionsLabel}>
+
+      {/* Actions - visible on hover */}
+      <div
+        className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100"
+        aria-label={actionsLabel}
+      >
         <button
           type="button"
-          className="rounded border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:border-white/20"
+          className="flex h-7 w-7 items-center justify-center rounded text-slate-400 transition hover:bg-white/5 hover:text-white"
           onClick={() => onEdit?.(filter)}
+          title="Edit gate"
         >
-          Edit
+          <Pencil className="h-3.5 w-3.5" />
         </button>
         <button
           type="button"
-          className="rounded border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-rose-200 hover:border-rose-400/70"
+          className="flex h-7 w-7 items-center justify-center rounded text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-400"
           onClick={() => onDelete?.(filter)}
+          title="Delete gate"
         >
-          Delete
+          <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
     </div>

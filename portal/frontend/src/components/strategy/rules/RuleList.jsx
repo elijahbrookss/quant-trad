@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { GitBranch, Plus } from 'lucide-react'
 import { buildRuleConditionSummary } from './ruleUtils.js'
 import { RuleCard } from './RuleCard.jsx'
 import { RuleGateSection } from './RuleGateSection.jsx'
@@ -28,17 +29,22 @@ export const RuleList = ({
 
   if (!rules.length) {
     return (
-      <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-6 text-sm text-slate-400">
-        <p>No rules yet. Create at least one BUY or SELL rule to generate signals.</p>
-        <div className="mt-3">
-          <button
-            type="button"
-            className="rounded border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-200 hover:border-white/20"
-            onClick={onAddRule}
-          >
-            Create rule
-          </button>
+      <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-black/20 px-6 py-10 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5">
+          <GitBranch className="h-6 w-6 text-slate-500" />
         </div>
+        <h4 className="mt-4 text-sm font-medium text-white">No trading rules yet</h4>
+        <p className="mt-1.5 max-w-sm text-xs text-slate-500">
+          Rules define when to buy or sell based on your indicator signals. Create a rule to start building your strategy.
+        </p>
+        <button
+          type="button"
+          className="mt-5 inline-flex items-center gap-1.5 rounded-lg border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-12)] px-4 py-2 text-sm font-medium text-[color:var(--accent-text-soft)] transition hover:bg-[color:var(--accent-alpha-20)]"
+          onClick={onAddRule}
+        >
+          <Plus className="h-4 w-4" />
+          Create first rule
+        </button>
       </div>
     )
   }

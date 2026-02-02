@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react'
+import { ExternalLink, Unlink2 } from 'lucide-react'
 import { Button } from '../../ui'
 import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
@@ -127,21 +128,23 @@ export const AttachedIndicators = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
                   <a
                     href={`/quantlab/indicators/${entry.id}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="rounded border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200 hover:border-white/20"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-white/5 hover:text-white"
+                    title="Open in QuantLab"
                   >
-                    Open in QuantLab
+                    <ExternalLink className="h-4 w-4" />
                   </a>
                   <button
-                    className="rounded border border-white/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-200 hover:border-rose-400/70 hover:text-rose-100"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-400"
                     type="button"
                     onClick={() => handleDetachRequest(entry)}
+                    title="Detach indicator"
                   >
-                    Detach
+                    <Unlink2 className="h-4 w-4" />
                   </button>
                 </div>
 
