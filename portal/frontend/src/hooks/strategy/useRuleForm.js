@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { RULE_FORM_DEFAULT } from '../../utils/strategy/formDefaults.js'
 
-const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onSubmit } = {}) => {
+const useRuleForm = ({
+  open,
+  indicators,
+  ensureIndicatorMeta,
+  initialValues,
+  onSubmit,
+  getDefaultName,
+} = {}) => {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
 
   const indicatorMap = useMemo(() => {
@@ -147,8 +154,7 @@ const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onS
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleSubmit = async (event) => {
-    event.preventDefault()
+  const buildPayload = () => {
     const conditions = form.conditions
       .map((condition) => ({
         indicator_id: condition.indicator_id,
@@ -159,17 +165,24 @@ const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onS
       .filter((condition) => condition.indicator_id && condition.signal_type)
 
     if (!conditions.length) {
-      return
+      return null
     }
 
-    const payload = {
-      name: form.name.trim(),
+    const resolvedName = form.name.trim() || getDefaultName?.(form, indicatorMap) || 'Rule'
+    return {
+      name: resolvedName,
       description: form.description.trim() || null,
       action: form.action,
       match: form.match,
       conditions,
       enabled: Boolean(form.enabled),
     }
+  }
+
+  const handleSubmit = async (event) => {
+    event.preventDefault()
+    const payload = buildPayload()
+    if (!payload) return
     await onSubmit(payload)
   }
 
@@ -177,6 +190,7 @@ const useRuleForm = ({ open, indicators, ensureIndicatorMeta, initialValues, onS
     form,
     indicatorMap,
     canSubmit,
+    buildPayload,
     handleSubmit,
     handleFieldChange,
     addCondition,

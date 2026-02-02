@@ -1,186 +1,160 @@
-# Agent Guidelines (Hub)
+# Quant-Trad Agent Context
 
-## Agent TL;DR (Do Not Skip)
+This file is the **entry point for all agents and contributors**.
+
+It defines the expectations, principles, and engineering discipline required
+to work safely inside the Quant-Trad codebase.
+
+If behavior conflicts with this document or the docs under `docs/agents/`,
+the code is wrong.
+
+---
+
+## Agent TL;DR (Read This First)
 
 - QuantLab = research only
 - Strategy = decision logic only
 - Bot = execution + realism only
-- All backtests are walk-forward
-- Indicators and overlays must respect known_at timing
-- Market Profile must NEVER appear in front of price
-- Logs must tell the story of the userflow
-- Duplicate logic = refactor signal
-- Avoid indicator-specific logic in engine/runtime; use registries or adapters.
-- AVOID ADDING FALLBACKS / DEFAULTS
+- All bot runs are walk-forward
+- Derived artifacts must respect known-at timing
+- Playback is a debugger, not a demo
+- Fail loud; never swallow errors
+- Prefer simple designs early; refactor when patterns are proven
+- Abstractions belong in core components, not everywhere
+- Prefer interfaces at real boundaries
+- Duplicate logic is a refactor signal
 
-
-This repository uses a distributed agent-context model.
-Agents MUST read the documents listed below before making architectural or behavioral changes.
-
-## Required Context (Read in Order)
-- docs/agents/00_userflow.md
-- docs/agents/01_walk_forward_rules.md
-- docs/agents/02_market_profile_no_snooping.md
-- docs/agents/03_botlens_playback.md
-
-If you violate these constraints you will create incorrect simulations, data-snooping bias, or broken UX guarantees.
+> **Infrastructure Rule:** Only one DSN exists (`PG_DSN`). New persistence layers must use it directly—no additional DSN env vars or mapper layers.
 
 ---
 
-## Fallbacks
+## Canonical Context (Required Reading)
 
-Ideally we want no fallbacks. but if you're unsure prompt the user
+Agents MUST understand these documents before making architectural or behavioral changes:
 
-## Logging Standards (Readability + Traceability > Volume)
+- `docs/agents/00_core_principles.md`
+- `docs/agents/01_layer_model.md`
+- `docs/agents/02_temporal_rules.md`
+- `docs/agents/03_artifact_lifecycle.md`
+- `docs/agents/04_execution_and_playback.md`
+- `docs/agents/05_engineering_principles.md`
 
-Logging is not optional. Logs should tell the story of a user session and make it possible to trace:
-QuantLab → Strategy → Bot → Trades → Playback.
+These define the system contract.
 
-### Principles
-- Prefer structured logs (key=value or JSON) with consistent keys.
-- Log boundaries and phase transitions, not noise.
-- Every major action should be traceable by IDs and correlation fields.
-- Avoid duplicate log lines: one event, one log statement, with full context.
+---
 
-### Required Correlation Fields (include when applicable)
-Always include these when they exist:
-- `request_id` (or equivalent) and/or `session_id`
+## System Philosophy (Quant-Trad Specific)
+
+Quant-Trad models markets as **incrementally discovered systems**.
+
+Indicators, regimes, and profiles:
+- summarize observed behavior
+- do not predict or assume future state
+- become known at specific points in time
+
+Nothing “snaps into existence” retroactively.
+
+If an artifact would not exist yet in live trading, it must not exist yet in the system.
+
+---
+
+## Logging Is Part of the Product
+
+Logging is not optional and not cosmetic.
+
+Logs must make it possible to trace:
+QuantLab → Strategy → Bot → Trades → Playback
+
+### Logging Principles
+- Prefer structured logs (key=value or JSON)
+- Log lifecycle boundaries, not noise
+- One event = one log line with full context
+- Never swallow errors to “keep things running”
+
+### Debugging Guidance
+- If the root cause isn’t clear, add targeted, temporary logs to observe state transitions—do not ship workarounds that mask the issue.
+- Prefer stabilizing dependencies (refs, memoized callbacks) before adding logs; throttle diagnostics and remove them once the fix is in.
+
+### Required Correlation Fields (when applicable)
+Include these whenever they exist:
+- `run_id`, `bot_id`, `bot_mode`
+- `strategy_id`
+- `indicator_id`, `indicator_type`, `indicator_version`
 - `provider`, `venue`, `exchange`
 - `symbol`, `timeframe`
-- `indicator_id`, `indicator_type`, `indicator_version`
-- `strategy_id`
-- `bot_id`, `bot_mode` (backtest/paper/live)
-- `run_id` (bot run / backtest run identifier)
-- `trade_id` (during execution)
-- `playback_time` / `bar_time` (walk-forward step timestamp)
+- `trade_id`
+- `bar_time` / `playback_time`
 
-### Log Levels (use consistently)
-- `DEBUG`: internal mechanics that help diagnose (caches, computed counts, branching)
-- `INFO`: lifecycle events and state transitions (start/end, created/attached, run summaries)
-- `WARN`: unexpected states but recovery is possible (missing optional data, fallback path used)
-- `ERROR`: action failed or results invalid; include exception + context; never swallow
+### Log Levels
+- **DEBUG** — internal mechanics, cache behavior, counters
+- **INFO** — lifecycle events and phase transitions
+- **WARN** — unexpected but recoverable states (always explain why)
+- **ERROR** — failed actions or invalid results (never swallowed)
 
-### Required Lifecycle Events (minimum)
-Log at INFO for:
-- QuantLab:
-  - candle fetch start/end (rows, date range)
-  - indicator create/update/delete
-  - indicator overlay render/build start/end
-  - signal generation start/end (counts)
-- Strategy:
-  - strategy create/update
-  - indicator attach/detach to strategy
-  - strategy signal preview start/end (counts)
-- Bot:
-  - run start (mode, strategy_id, symbol/timeframe set, config hash/version)
-  - per-phase transitions (load data, compute indicators, generate signals, execute trades)
-  - run end summary (trades, pnl, fees, drawdown, duration)
-- Execution:
-  - trade open (entry, stop, targets, size, rationale tags)
-  - stop adjustment events (what changed + why)
-  - trade close (reason, realized pnl, fees)
-- Walk-forward:
-  - step progress sampling (not every bar unless debugging): include `bar_time`, step index, state
-
-### Auth/Error Logging (Provider-Agnostic)
-- For provider request failures (4xx/5xx), include: `method`, `path`, `authenticated`, `status_code`, `request_id` (if present), and `content_type`.
-- For auth failures (401/403), include a non-sensitive credential identifier (e.g., API key suffix) and `www_authenticate` header when available.
-- Never log full tokens, secrets, or raw API keys.
-
-### Provider Framework Contract (No Core Edits)
-- Providers MUST be pluggable: adding a provider should not require edits in core service modules (e.g., instrument_service).
-- Use registration/registry patterns for provider discovery; avoid switch statements in core.
-- Keep provider-specific logic inside provider modules or adapters; core services should consume common interfaces only.
-- Prefer small, shared helpers in provider base/registry for repeated behaviors (logging, request context) instead of copying logic.
-
-### Anti-Patterns (do not do these)
-- Logging without IDs (untraceable)
-- Logging giant payloads (entire DataFrames, full candle arrays)
-- Repeating the same message every bar at INFO
-- “silent fallback” logic without WARN + explanation
-- “works on my machine” logs that omit provider/symbol/timeframe
-
-### Implementation Guidance
-- Create a small logging helper / context builder used everywhere.
-- Prefer one-liners with structured context over multi-line narrative spam.
-- When debugging complex indicators (e.g. Market Profile), add focused DEBUG counters:
-  - `profiles_total`, `profiles_finalized`, `profiles_visible_now`, `merge_candidates`, etc.
+If a fallback is used, it must emit a WARN explaining why.
 
 ---
 
-## Commenting Standards (Explain Why, Not What)
+## Error Handling Rules
 
-Comments exist to preserve intent and prevent future regressions.
+- Do not swallow exceptions
+- Do not silently skip invalid states
+- Prefer failing early over producing incorrect output
+- Errors must include context (IDs, symbol, timeframe, phase)
 
-### Write comments for:
-- Walk-forward constraints (“why we delay visibility”, “known_at semantics”)
-- Non-obvious merges/heuristics (MPF merge criteria, overlap thresholds)
-- Anything that looks like a shortcut but is required for correctness
-- Public APIs / stable interfaces (what must remain backward compatible)
-
-### Avoid comments that:
-- Restate the code line-by-line
-- Explain obvious Python/JS syntax
-- Drift from reality (if behavior changes, update/remove the comment)
-
-### Preferred format
-- Use docstrings for module/class/function intent and invariants.
-- Use short inline comments for sharp constraints:
-  - `# MUST be known_at <= t to avoid data snooping`
+A system that hides errors cannot be trusted or improved.
 
 ---
 
-## Refactor Discipline (Avoid Spaghetti, Optimize for Iteration)
+## Engineering Discipline
 
-You do not need “perfect code.” You DO need code that stays easy to extend without fear.
+### Prefer Simplicity Early
+- Solve the current problem clearly
+- Avoid speculative abstractions
+- Refactor when duplication or pressure appears
 
-### Refactor when:
-- The same logic appears in 2+ places (especially indicator build paths)
-- A function/class grows beyond a single responsibility
-- A feature requires touching 3+ unrelated files to implement one change
-- Conditional logic becomes a pile of special cases
-- You find “one-off” code that should be a reusable pattern (providers, indicators, signals)
+### Abstractions Belong in Core
+Use interfaces and abstractions when:
+- multiple implementations already exist
+- behavior varies by environment (providers, execution)
+- testing requires substitution
 
-### Don’t refactor when:
-- You’re guessing the abstraction without real usage pressure
-- It would change core behavior without tests/log proof
-- It delays shipping a small fix (but leave a TODO with a ticket/issue)
+Do not abstract leaf logic “just in case.”
 
-### Refactor goals
-- Remove duplication first (shared helpers / shared interfaces)
-- Make flows explicit (QuantLab vs Strategy vs Bot)
-- Keep “walk-forward correctness” centralized and hard to bypass
-- Preserve readability: optimize for the next developer reading logs + code
+### Prefer Interfaces at Boundaries
+Good boundaries include:
+- data providers
+- execution adapters
+- storage layers
+- fee / margin models
 
----
+Avoid switch statements in core services.
+Use registries and explicit registration instead.
 
-## Avoid Duplicate Code: Use Registries + Decorators
-
-Prefer explicit registration over scattered imports and hardcoded maps.
-
-### Patterns to use
-- Decorator-based registration for intentionally modular components:
-  - Indicators
-  - Signal generators
-  - Data providers
-  - Execution models / fee models (if applicable)
-
-### Rules
-- If adding a new indicator/provider requires editing multiple switch statements, refactor.
-- New modules should be discoverable by registration + metadata, not hidden wiring.
-
-### Metadata expectations (per registered module)
-- stable name/type
-- version
-- supported timeframes (if relevant)
-- required inputs (columns/features)
-- determinism / walk-forward constraints (if special)
+### Schema Expectations
+- No runtime migrations or backfills live in the codebase.
+- If a table is missing, create it once and log a WARN so operators know it was provisioned.
+- If columns are missing, fail loud with an actionable error; do not attempt to patch or alter in-place.
+- All schema changes must come from clean table definitions (drop/recreate out-of-band if needed).
 
 ---
 
-## Non-Negotiable: Walk-Forward Integrity
-- Never show or use indicator artifacts before they are valid (`known_at` semantics).
-- Market Profile must follow “no brand new MPF in front of price.”
-- If unsure, default to strict incremental computation and delayed visibility.
+## Refactor Signals
 
-If you need to choose between convenience and correctness: choose correctness.
+Refactor when:
+- logic appears in 2+ places
+- a class or function has multiple responsibilities
+- adding a feature requires touching unrelated files
+- conditionals become a pile of special cases
+
+Do not refactor blindly.
+Refactor with logs, tests, or concrete pressure.
+
+---
+
+## Non-Negotiable Rule
+
+> If you must choose between convenience and correctness, choose correctness.
+
+Quant-Trad is designed to be explainable first.
+Performance, polish, and optimization come second.

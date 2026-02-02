@@ -1,6 +1,4 @@
-"""
-Coinbase Advanced Trade provider (minimal SDK-backed implementation).
-"""
+"""Coinbase Advanced Trade provider (minimal SDK-backed implementation)."""
 
 from __future__ import annotations
 
@@ -21,8 +19,32 @@ except ImportError:  # pragma: no cover - handled in __init__
     COINBASE_SDK_AVAILABLE = False
 
 from core.logger import logger
+from data_providers.registry import _REGISTRY
+from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
+
+# Register provider/venue metadata via decorator-friendly registry.
+@_REGISTRY.provider(
+    id="COINBASE",
+    label="Coinbase Direct API",
+    supported_venues=["COINBASE_DIRECT"],
+    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+)
+def _register_coinbase_provider():
+    return CoinbaseProvider
+
+
+@_REGISTRY.venue(
+    id="COINBASE_DIRECT",
+    label="Coinbase Direct API",
+    provider_id="COINBASE",
+    adapter_id=None,
+    asset_class="crypto",
+    required_secrets=["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+)
+def _register_coinbase_direct():
+    return "COINBASE_DIRECT"
 
 class CoinbaseAPIError(Exception):
     """Generic Coinbase provider error."""
@@ -131,10 +153,22 @@ class CoinbaseProvider(BaseDataProvider):
 
         self._last_product_payload: Dict[str, Any] = {}
 
-    def get_datasource(self) -> str:
-        return "COINBASE"
-
+    # Credentials / helpers -------------------------------------------------
     def _resolve_credentials(self) -> Tuple[Optional[str], Optional[str]]:
+        # First, attempt to pull credentials from the managed store.
+        try:
+            stored = load_credentials("COINBASE", "COINBASE_DIRECT")
+        except Exception as exc:
+            logger.warning("coinbase_credentials_store_error | error=%s", exc)
+            stored = None
+
+        if stored:
+            api_key = stored.get("COINBASE_API_KEY")
+            api_secret = stored.get("COINBASE_API_SECRET")
+            if api_key and api_secret:
+                return api_key, api_secret
+
+        # Fallback to legacy environment variables or secret file if present.
         api_key = os.getenv("COINBASE_API_KEY")
         api_secret = None
         secret_source = None
@@ -192,25 +226,37 @@ class CoinbaseProvider(BaseDataProvider):
             return dict(response.__dict__)
         return {}
 
-    def _load_product(self, symbol: str) -> Optional[CoinbaseProduct]:
+    def _load_product(self, symbol: str) -> CoinbaseProduct:
         if not symbol:
-            return None
+            raise ValueError("Symbol is required for Coinbase lookup.")
+        if not self._api_key or not self._api_secret:
+            raise ValueError("Coinbase API credentials are missing. Add API keys to continue.")
+
         try:
             response = self._client.get_product(product_id=symbol)
         except Exception as exc:
             logger.warning("coinbase_product_lookup_failed | symbol=%s | error=%s", symbol, exc)
-            return None
+            raise ValueError(f"Coinbase product lookup failed: {exc}") from exc
+
         data = self._response_to_dict(response)
         self._last_product_payload = data
         if not data:
-            return None
+            raise ValueError(
+                f"Coinbase did not return product metadata for '{symbol}'. "
+                "Ensure the symbol exists and API keys have sufficient access."
+            )
         return CoinbaseProduct.from_dict(data)
+
+    def get_datasource(self) -> str:
+        return "COINBASE"
 
     def validate_symbol(self, venue: str, symbol: str) -> None:
         if not symbol:
             raise ValueError("symbol is required for Coinbase validation")
-        if not self._load_product(symbol):
-            raise ValueError(f"Symbol '{symbol}' not found on Coinbase")
+        try:
+            self._load_product(symbol)
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
 
     def get_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
         try:
@@ -234,7 +280,7 @@ class CoinbaseProvider(BaseDataProvider):
     def validate_instrument_type(self, venue: str, symbol: str) -> InstrumentType:
         product = self._load_product(symbol)
         if not product:
-            raise ValueError(f"Symbol '{symbol}' not found on Coinbase")
+            raise ValueError(f"Symbol '{symbol}' not returned by Coinbase. Check API keys and spelling.")
 
         product_type = str(product.product_type or "").upper()
         if product_type == "FUTURE":
@@ -249,7 +295,7 @@ class CoinbaseProvider(BaseDataProvider):
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         product = self._load_product(symbol)
         if not product:
-            raise ValueError(f"Symbol '{symbol}' not found on Coinbase")
+            raise ValueError(f"Symbol '{symbol}' not returned by Coinbase. Verify API keys and symbol.")
 
         future_details = (
             product.future_product_details

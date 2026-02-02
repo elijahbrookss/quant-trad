@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react'
+import React, { useRef, useState, useEffect, useMemo } from 'react'
+import { ExternalLink, Unlink2 } from 'lucide-react'
 import { Button } from '../../ui'
+import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
 /**
  * Component for managing attached indicators to a strategy.
@@ -11,13 +13,19 @@ export const AttachedIndicators = ({
   onAttach,
   onDetach,
   DropdownSelect,
-  ActionButton
+  ActionButton,
 }) => {
   const [selected, setSelected] = useState('')
+  const [confirm, setConfirm] = useState(null) // { id, name, impact }
+  const attachRef = useRef(null)
 
   useEffect(() => {
     setSelected('')
+    setConfirm(null)
   }, [strategy?.id])
+
+  const entries = Array.isArray(attached) ? attached : []
+  const usageMap = useMemo(() => countIndicatorRuleUsage(strategy?.rules || []), [strategy?.rules])
 
   const handleAttach = async (event) => {
     event.preventDefault()
@@ -26,45 +34,55 @@ export const AttachedIndicators = ({
     setSelected('')
   }
 
-  const entries = Array.isArray(attached) ? attached : []
+  const handleFocusAttach = () => {
+    if (!attachRef.current) return
+    attachRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const focusTarget = attachRef.current.querySelector('button')
+    focusTarget?.focus()
+  }
+
+  const handleDetachRequest = (entry) => {
+    const impact = usageMap.get(entry.id) || 0
+    if (requiresDetachConfirm(entry.id, strategy?.rules)) {
+      setConfirm({ id: entry.id, name: entry.name || entry.type || entry.id, impact })
+      return
+    }
+    onDetach(entry.id)
+  }
+
+  const handleConfirmDetach = async () => {
+    if (!confirm?.id) return
+    await onDetach(confirm.id)
+    setConfirm(null)
+  }
 
   const renderSignalBadge = (rule, entryId) => {
-    const baseLabel = rule?.label || rule?.id || 'Signal'
-    const signalType = rule?.signal_type ? rule.signal_type.toUpperCase() : null
-    const directionHint = Array.isArray(rule?.directions) && rule.directions.length === 1
-      ? String(rule.directions[0].id || '').toLowerCase()
-      : null
-    const directionIcon = directionHint === 'long' ? '↗' : directionHint === 'short' ? '↘' : null
-    const directionText = directionHint === 'long' ? 'Long' : directionHint === 'short' ? 'Short' : null
-
+    const label = rule?.label || rule?.id || 'Signal'
     return (
       <span
-        key={`${entryId}-${rule?.id || baseLabel}`}
-        className="inline-flex items-center gap-1 rounded-lg border border-white/12 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-200"
+        key={`${entryId}-${label}`}
+        className="inline-flex items-center gap-1 rounded-md border border-white/12 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200"
       >
-        {signalType || baseLabel}
-        {directionText && (
-          <span className={directionHint === 'long' ? 'text-emerald-300' : 'text-rose-300'}>
-            {directionIcon} {directionText}
-          </span>
-        )}
+        {rule?.signal_type ? rule.signal_type.toUpperCase() : label}
       </span>
     )
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" ref={attachRef}>
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <div className="flex-1">
             <DropdownSelect
-              label="Indicator"
+              label="Attach signal source"
               value={selected}
               onChange={setSelected}
-              placeholder="Attach indicator…"
+              placeholder="Search indicators…"
               options={availableIndicators.map((indicator) => ({
                 value: indicator.id,
                 label: indicator.name || indicator.type,
+                description: indicator.type,
+                badge: Array.isArray(indicator.signal_rules) ? `${indicator.signal_rules.length} signals` : null,
               }))}
               disabled={!availableIndicators.length}
               className="w-full"
@@ -78,143 +96,83 @@ export const AttachedIndicators = ({
 
       {entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          No indicators linked yet.
+          <p>No indicators attached. Add signal sources from QuantLab, then attach them here.</p>
+          <div className="mt-3">
+            <ActionButton variant="ghost" onClick={handleFocusAttach}>
+              Attach indicator
+            </ActionButton>
+          </div>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
           {entries.map((entry) => {
-            const isMissing = entry.status !== 'active'
-            const params = entry.params || entry.snapshot?.params || {}
             const signals = Array.isArray(entry.signal_rules)
               ? entry.signal_rules
               : Array.isArray(entry.meta?.signal_rules)
                 ? entry.meta.signal_rules
                 : []
-            const related = Array.isArray(entry.strategies) ? entry.strategies : []
-            const otherStrategies = related.filter((s) => s.id && s.id !== strategy.id)
-
-            const highlightTokens = []
-            const pivotConfirm = params.pivot_breakout_confirmation_bars
-            const marketProfileConfirm = params.market_profile_breakout_confirmation_bars
-            const retestTolerance = params.market_profile_retest_tolerance_pct
-            const binSize = params.bin_size
-            const merged = params.market_profile_use_merged_value_areas
-
-            if (pivotConfirm != null && pivotConfirm !== '') {
-              highlightTokens.push(`Pivot confirm: ${pivotConfirm} bar${Number(pivotConfirm) === 1 ? '' : 's'}`)
-            }
-            if (marketProfileConfirm != null && marketProfileConfirm !== '') {
-              highlightTokens.push(`MP confirm: ${marketProfileConfirm} bar${Number(marketProfileConfirm) === 1 ? '' : 's'}`)
-            }
-            if (retestTolerance != null && retestTolerance !== '') {
-              const numeric = Number(retestTolerance)
-              const pctLabel = Number.isFinite(numeric) ? `${(numeric * 100).toFixed(2)}%` : String(retestTolerance)
-              highlightTokens.push(`Retest tolerance: ${pctLabel}`)
-            }
-            if (binSize != null && binSize !== '') {
-              highlightTokens.push(`Bin size: ${binSize}`)
-            }
-            if (merged != null && merged !== '') {
-              const mergedLabel = merged === true || String(merged).toLowerCase() === 'true'
-                ? 'Merged value areas'
-                : 'Session value areas'
-              highlightTokens.push(mergedLabel)
-            }
-
+            const impact = usageMap.get(entry.id) || 0
             return (
-              <div
-                key={entry.id}
-                className={`rounded-2xl border p-4 transition ${
-                  isMissing
-                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-100'
-                    : 'border-white/10 bg-white/5 text-slate-100'
-                }`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <h5 className="text-sm font-semibold text-white truncate">
-                      {entry.name || entry.type || entry.id}
-                    </h5>
-                    <p className="text-xs text-slate-300">
-                      {entry.type || entry.snapshot?.meta?.type || 'Custom'} • {signals.length} signal{signals.length === 1 ? '' : 's'} available
-                    </p>
-                  </div>
+              <div key={entry.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <div className="min-w-[200px] flex-1">
                   <div className="flex items-center gap-2">
-                    <span
-                      className={`rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.2em] ${
-                        isMissing
-                          ? 'border border-rose-400/60 bg-rose-500/20 text-rose-100'
-                          : 'border border-white/15 bg-black/40 text-slate-200'
-                      }`}
-                    >
-                      {isMissing ? 'Missing' : 'Active'}
+                    <p className="text-sm font-semibold text-white truncate">{entry.name || entry.type || entry.id}</p>
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-slate-300">
+                      {entry.type || entry.snapshot?.meta?.type || 'Custom'}
                     </span>
-                    <button
-                      className="rounded-full border border-white/20 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-200 hover:border-rose-400/70 hover:text-rose-200"
-                      type="button"
-                      onClick={() => onDetach(entry.id)}
-                    >
-                      Remove
-                    </button>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+                    {signals.length ? signals.map((rule) => renderSignalBadge(rule, entry.id)) : (
+                      <span className="text-slate-500">No signals</span>
+                    )}
                   </div>
                 </div>
 
-                <dl className="mt-3 grid gap-3 text-[11px] text-slate-300 md:grid-cols-3">
-                  <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Signals</dt>
-                    <dd className="mt-1 flex flex-wrap gap-1">
-                      {signals.length ? (
-                        signals.map(rule => renderSignalBadge(rule, entry.id))
-                      ) : (
-                        <span className="text-slate-500">No signals registered</span>
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Configuration</dt>
-                    <dd className="mt-1 flex flex-wrap gap-1">
-                      {highlightTokens.length ? (
-                        highlightTokens.map((token) => (
-                          <span
-                            key={`${entry.id}-${token}`}
-                            className="rounded-lg border border-white/12 bg-white/5 px-2 py-0.5 font-semibold text-[10px] uppercase tracking-[0.15em] text-slate-200"
-                          >
-                            {token}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-slate-500">Default parameters</span>
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="uppercase tracking-[0.3em] text-slate-500">Usage</dt>
-                    <dd className="mt-1 font-semibold text-slate-100">
-                      {otherStrategies.length
-                        ? `${otherStrategies.length} other strateg${otherStrategies.length === 1 ? 'y' : 'ies'}`
-                        : 'Only used here'}
-                    </dd>
-                  </div>
-                </dl>
+                <div className="flex items-center gap-1">
+                  <a
+                    href={`/quantlab/indicators/${entry.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-white/5 hover:text-white"
+                    title="Open in QuantLab"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                  </a>
+                  <button
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-400"
+                    type="button"
+                    onClick={() => handleDetachRequest(entry)}
+                    title="Detach indicator"
+                  >
+                    <Unlink2 className="h-4 w-4" />
+                  </button>
+                </div>
 
-                {otherStrategies.length > 0 && (
-                  <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-300">
-                    <p className="font-semibold text-slate-200">Also used in:</p>
-                    <ul className="mt-1 space-y-1">
-                      {otherStrategies.map((item) => (
-                        <li key={`${entry.id}-strategy-${item.id}`} className="flex items-center justify-between">
-                          <span className="truncate text-[11px] text-slate-300">{item.name || item.id}</span>
-                          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">
-                            {Array.isArray(item.rules) ? item.rules.length : 0} rules
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                {impact > 0 && (
+                  <p className="w-full text-[11px] text-amber-200">
+                    Referenced by {impact} rule{impact === 1 ? '' : 's'} — detaching will break them.
+                  </p>
                 )}
               </div>
             )
           })}
+        </div>
+      )}
+
+      {confirm && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 px-4 py-8">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#111725] p-5 shadow-xl">
+            <p className="text-sm font-semibold text-white">Detach indicator?</p>
+            <p className="mt-1 text-xs text-slate-300">
+              {confirm.impact
+                ? `Used by ${confirm.impact} rule${confirm.impact === 1 ? '' : 's'}. Detaching will break them.`
+                : 'Detach this indicator from the strategy.'}
+            </p>
+            <div className="mt-4 flex justify-end gap-2 text-sm">
+              <Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
+              <Button variant="danger" onClick={handleConfirmDetach}>Detach anyway</Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

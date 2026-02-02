@@ -10,6 +10,7 @@ class PersistenceConfig:
     dsn: Optional[str]
     candles_raw_table: str
     candle_stats_table: str
+    regime_stats_table: str
     derivatives_state_table: str
     closures_table: str
 
@@ -38,6 +39,7 @@ def runtime_config_from_env() -> ProviderRuntimeConfig:
             dsn=os.getenv("PG_DSN"),
             candles_raw_table=os.getenv("CANDLES_RAW_TABLE", "market_candles_raw"),
             candle_stats_table=os.getenv("CANDLE_STATS_TABLE", "candle_stats"),
+            regime_stats_table=os.getenv("REGIME_STATS_TABLE", "regime_stats"),
             derivatives_state_table=os.getenv("DERIVATIVES_STATE_TABLE", "derivatives_market_state"),
             closures_table=os.getenv("CANDLE_CLOSURES_TABLE", "portal_candle_closures"),
         ),

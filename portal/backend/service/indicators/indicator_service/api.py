@@ -22,6 +22,23 @@ from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 
 logger = logging.getLogger(__name__)
 
+_RUNTIME_CONTEXT_KEYS = {
+    "symbol",
+    "interval",
+    "start",
+    "end",
+    "timeframe",
+    "datasource",
+    "exchange",
+    "provider_id",
+    "venue_id",
+    "instrument_id",
+    "bot_id",
+    "strategy_id",
+    "bot_mode",
+    "run_id",
+}
+
 
 def list_types(*, ctx: IndicatorServiceContext = _context) -> List[str]:
     return list(_INDICATOR_MAP.keys())
@@ -50,6 +67,11 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
         else:
             defaults[name] = param.default
     indicator_name = getattr(Cls, "NAME", type_id)
+
+    # Remove runtime-only context fields that should not be user-configurable
+    required = [key for key in required if key not in _RUNTIME_CONTEXT_KEYS]
+    defaults = {k: v for k, v in defaults.items() if k not in _RUNTIME_CONTEXT_KEYS}
+    field_types = {k: v for k, v in field_types.items() if k not in _RUNTIME_CONTEXT_KEYS}
 
     details = {
         "id": type_id,

@@ -1,8 +1,20 @@
-// src/components/IndicatorCard.jsx
 import React, { Fragment, useMemo, useState } from "react";
-import { Switch, Popover, PopoverButton, PopoverPanel, Transition } from "@headlessui/react";
-import { MoreHorizontal, Copy } from "lucide-react";
+import { Popover, PopoverButton, PopoverPanel, Transition } from "@headlessui/react";
+import {
+  MoreHorizontal,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+  Palette,
+  RefreshCw,
+  Pencil,
+  CopyPlus,
+  Trash2,
+  Loader2,
+} from "lucide-react";
+import VisibilityToggle from "./ui/VisibilityToggle";
 
+// Keys to hide from param display
 const HIDE_KEYS = new Set([
   "symbol",
   "interval",
@@ -15,32 +27,57 @@ const HIDE_KEYS = new Set([
   "venue_id",
   "instrument_id",
 ]);
+
+// Advanced params shown only in expanded view
 const isAdvancedKey = (key) =>
   key.startsWith("ransac_") || key.includes("dedupe") || key.includes("max_windows") || key.includes("min_inliers");
 
-/**
- * IndicatorCard
- *
- * Compact, readable card for indicators with many params.
- * - Shows name, type, enable switch, actions
- * - Color swatch popover
- * - Param pills for Essentials; "+N more" expands Advanced pills inline
- * - Copy JSON action
- *
- * Parent provides all actions so this stays dumb:
- *   onToggle(id)
- *   onEdit(indicator)
- *   onDelete(id)
- *   onGenerateSignals(id)
- *   onSelectColor(id, color)
- */
+// Transient status states - only show these, not "ready" or "disabled"
+const TRANSIENT_STATUS = {
+  creating: { label: "Creating", tone: "text-amber-100 bg-amber-500/10 border-amber-400/30", dot: "bg-amber-300" },
+  computing: { label: "Computing", tone: "text-amber-100 bg-amber-500/10 border-amber-400/30", dot: "bg-amber-300" },
+  updating: { label: "Updating", tone: "text-amber-100 bg-amber-500/10 border-amber-400/30", dot: "bg-amber-300" },
+  failed: { label: "Error", tone: "text-rose-100 bg-rose-500/10 border-rose-400/30", dot: "bg-rose-400" },
+};
+
+const formatRelativeTime = (value) => {
+  if (!value) return null;
+  const ts = typeof value === "string" ? Date.parse(value) : Number(value);
+  if (!Number.isFinite(ts)) return null;
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+};
+
+const formatValue = (v) => {
+  if (Array.isArray(v)) return v.join(", ");
+  if (typeof v === "boolean") return v ? "on" : "off";
+  if (typeof v === "number") {
+    const s = v.toFixed(6);
+    return s.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+  }
+  return String(v);
+};
+
+// Convert snake_case to Title Case for display
+const formatParamKey = (key) => {
+  return key
+    .replace(/_/g, " ")
+    .replace(/([A-Z])/g, " $1")
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+};
 
 export default function IndicatorCard({
   indicator,
   color = "#60a5fa",
   colorSwatches = [
     "#facc15", "#b91c1c", "#f97316", "#a855f7", "#84cc16", "#6b7280",
-    "#3b82f6", "#10b981", "#ec4899", "#14b8a6", "#eab308", "#f43f5e"
+    "#3b82f6", "#10b981", "#ec4899", "#14b8a6", "#eab308", "#f43f5e",
   ],
   onToggle,
   onEdit,
@@ -48,27 +85,24 @@ export default function IndicatorCard({
   onDuplicate,
   onGenerateSignals,
   onSelectColor,
+  onRecompute,
   isGeneratingSignals = false,
   disableSignalAction = false,
   selected = false,
   onSelectionToggle,
   duplicatePending = false,
+  busy = false,
+  activeJobId = null,
+  onRetryCreate,
+  onRemoveLocal,
 }) {
-  const [showAllParams, setShowAllParams] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const cardBorderClass = selected
-    ? 'border border-[color:var(--accent-alpha-60)] ring-1 ring-[color:var(--accent-alpha-25)] shadow-[0_25px_60px_-45px_var(--accent-shadow-strong)]'
-    : 'border border-white/10';
-  const handleSelectionClick = () => {
-    if (typeof onSelectionToggle === 'function') {
-      onSelectionToggle();
-    }
-  };
-  const duplicateDisabled = duplicatePending || typeof onDuplicate !== 'function';
+  const [expanded, setExpanded] = useState(false);
 
+  // Process params for display
   const paramsList = useMemo(() => {
-    const entries = Object.entries(indicator?.params || {})
-      .filter(([k, v]) => !HIDE_KEYS.has(k) && v !== undefined && v !== null && String(v) !== "");
+    const entries = Object.entries(indicator?.params || {}).filter(
+      ([k, v]) => !HIDE_KEYS.has(k) && v !== undefined && v !== null && String(v) !== ""
+    );
 
     const essentials = [];
     const advanced = [];
@@ -84,27 +118,10 @@ export default function IndicatorCard({
     return [...essentials, ...advanced];
   }, [indicator?.params]);
 
-  const visibleParams = showAllParams ? paramsList : paramsList.slice(0, 5);
-  const hiddenCount = Math.max(paramsList.length - visibleParams.length, 0);
-
-  const formatVal = (v) => {
-    if (Array.isArray(v)) return v.join(",");
-    if (typeof v === "boolean") return v ? "on" : "off";
-    if (typeof v === "number") {
-      // trim unhelpful decimals
-      const s = v.toFixed(6);
-      return s.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
-    }
-    return String(v);
-  };
-
-  const copyParams = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(indicator?.params ?? {}, null, 2));
-    } catch {
-      // clipboard unavailable
-    }
-  };
+  // Show 2-3 curated params in collapsed view
+  const summaryParams = useMemo(() => {
+    return paramsList.filter((item) => !item.isAdvanced).slice(0, 3);
+  }, [paramsList]);
 
   const typeLabel = useMemo(() => {
     const raw = indicator?.type;
@@ -116,234 +133,410 @@ export default function IndicatorCard({
       .join(" ");
   }, [indicator?.type]);
 
-  const decoratedName = useMemo(() => {
-    const base = indicator?.name?.trim() || typeLabel || "Indicator";
-    return indicator?.id ? `${base} - ${indicator.id}` : base;
-  }, [indicator?.name, indicator?.id, typeLabel]);
+  const displayName = indicator?.name?.trim() || typeLabel || "Indicator";
+  const lastUpdated = indicator?.updated_at || indicator?.created_at || null;
+  const relativeTime = formatRelativeTime(lastUpdated);
+  const isVisible = !!indicator?.enabled;
+
+  // Determine status - only show transient states
+  const statusKey = useMemo(() => {
+    const raw = indicator?._status;
+    if (raw && TRANSIENT_STATUS[raw]) return raw;
+    if (activeJobId && activeJobId === indicator?.id) return "computing";
+    return null; // No status badge for stable indicators
+  }, [activeJobId, indicator?._status, indicator?.id]);
+
+  const statusMeta = statusKey ? TRANSIENT_STATUS[statusKey] : null;
+
+  // Disable actions during compute/create/update
+  const disableActions = busy || statusKey === "creating" || statusKey === "computing" || statusKey === "updating";
+  const duplicateDisabled = duplicatePending || typeof onDuplicate !== "function" || disableActions;
+  const canRetry = statusKey === "failed" && indicator?._local && typeof onRetryCreate === "function";
+  const canRemoveLocal = statusKey === "failed" && indicator?._local && typeof onRemoveLocal === "function";
+
+  const handleSelectionClick = () => {
+    if (typeof onSelectionToggle === "function") {
+      onSelectionToggle();
+    }
+  };
+
+  const copyParams = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(indicator?.params ?? {}, null, 2));
+    } catch {
+      // clipboard unavailable
+    }
+  };
+
+  const copyId = async () => {
+    if (!indicator?.id) return;
+    try {
+      await navigator.clipboard.writeText(String(indicator.id));
+    } catch {
+      // clipboard unavailable
+    }
+  };
+
+  // Hidden state styling - subtle desaturation
+  const hiddenStyles = !isVisible ? "opacity-60 saturate-[0.85]" : "";
 
   return (
-    <div className={`group flex items-start justify-between gap-4 rounded-2xl bg-[#1f2230]/80 p-4 shadow-[0_20px_60px_-40px_rgba(0,0,0,0.85)] ${cardBorderClass}`}>
-      <div className="min-w-0 flex-1 space-y-3">
-        <div className="flex items-start gap-3">
-          <button
-            type="button"
-            onClick={handleSelectionClick}
-            className={`mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-semibold uppercase tracking-[0.2em] transition ${
-              selected
-                ? 'border-[color:var(--accent-alpha-70)] bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)]'
-                : 'border-white/15 text-slate-400 hover:border-white/30'
-            }`}
-            aria-pressed={selected}
-            aria-label={selected ? 'Deselect indicator' : 'Select indicator'}
-          >
-            {selected ? '✓' : ''}
-          </button>
-          <span
-            className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/15 bg-[#131621] shadow-inner"
-            aria-hidden="true"
-          >
-            <span className="h-2.5 w-2.5 rounded-full border border-white/25" style={{ backgroundColor: color }} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-base font-semibold text-slate-100" title={decoratedName}>
-              {decoratedName}
-            </div>
-            <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.28em] text-[color:var(--accent-text-soft-alpha)]">
-              {typeLabel}
-            </p>
-          </div>
+    <div
+      className={`
+        group relative overflow-visible rounded-lg border transition-all
+        ${selected ? "border-[color:var(--accent-alpha-60)] shadow-[0_8px_30px_-20px_rgba(0,0,0,0.9)]" : "border-white/8"}
+        bg-[#0d1422]/90 hover:bg-[#0f1626] px-3 py-2.5
+        ${hiddenStyles}
+      `}
+    >
+      {/* Left color accent bar */}
+      <div
+        className="absolute left-0 top-0 h-full w-1 rounded-l-lg"
+        style={{ backgroundColor: color }}
+        aria-hidden="true"
+      />
+
+      {/* Main row layout */}
+      <div className="flex items-center gap-3 pl-3">
+        {/* Checkbox + status dot */}
+        <div className="flex items-center gap-2.5">
+          <input
+            type="checkbox"
+            className="size-4 rounded-sm border border-white/20 bg-transparent accent-[color:var(--accent-base)]"
+            checked={selected}
+            onChange={handleSelectionClick}
+            aria-label={selected ? "Deselect indicator" : "Select indicator"}
+          />
+          {statusMeta && (
+            <span
+              className={`h-2 w-2 rounded-full ${statusMeta.dot} animate-pulse`}
+              title={statusMeta.label}
+            />
+          )}
         </div>
 
-        {visibleParams.length > 0 && (
-          <div className="flex flex-wrap gap-1 text-xs text-slate-300">
-            {visibleParams.map(({ key, value, isAdvanced }) => (
-              <span
-                key={key}
-                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${
-                  isAdvanced
-                  ? 'border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-10)] text-[color:var(--accent-text-strong-alpha)]'
-                    : 'border-white/10 bg-white/5 text-slate-200'
-                }`}
-              >
-                <span className={isAdvanced ? 'text-[color:var(--accent-text-soft-alpha)]' : 'text-slate-400'}>{key}</span>
-                <span>= {formatVal(value)}</span>
+        {/* Name + Type + Params section */}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Expandable name */}
+            <button
+              type="button"
+              onClick={() => setExpanded((prev) => !prev)}
+              className="flex items-center gap-1 text-left text-sm font-semibold text-white hover:text-[color:var(--accent-text-soft)] transition"
+            >
+              <span className="truncate max-w-[180px]" title={displayName}>
+                {displayName}
               </span>
-            ))}
+              {expanded ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />}
+            </button>
 
-            {hiddenCount > 0 && !showAllParams && (
-              <button
-                className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-xs text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
-                onClick={() => setShowAllParams(true)}
+            {/* Type badge */}
+            <span className="rounded bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-400">
+              {typeLabel}
+            </span>
+
+            {/* Transient status badge - only shown during operations */}
+            {statusMeta && (
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusMeta.tone}`}
               >
-                +{hiddenCount} more
+                <Loader2 className="size-3 animate-spin" />
+                {statusMeta.label}
+              </span>
+            )}
+
+            {/* Param summary pills (collapsed view) */}
+            {!expanded && summaryParams.length > 0 && (
+              <div className="hidden sm:flex items-center gap-1.5">
+                {summaryParams.map((item) => (
+                  <span
+                    key={item.key}
+                    className="inline-flex items-center gap-1 rounded border border-white/8 bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-300"
+                  >
+                    <span className="text-slate-500">{formatParamKey(item.key)}</span>
+                    <span className="text-slate-200">{formatValue(item.value)}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Relative time */}
+          {relativeTime && !expanded && (
+            <p className="mt-0.5 text-[10px] text-slate-500">Updated {relativeTime}</p>
+          )}
+        </div>
+
+        {/* Actions section */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Generate Signals button */}
+          <button
+            type="button"
+            onClick={() => onGenerateSignals?.(indicator.id)}
+            className={`
+              inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition
+              ${
+                disableSignalAction || isGeneratingSignals
+                  ? "cursor-not-allowed border border-white/10 text-slate-500"
+                  : "border border-emerald-400/30 text-emerald-200 hover:border-emerald-300/50 hover:bg-emerald-500/10"
+              }
+            `}
+            title={isGeneratingSignals ? "Generating signals..." : "Generate signals"}
+            disabled={disableSignalAction || isGeneratingSignals}
+            aria-busy={isGeneratingSignals}
+          >
+            {isGeneratingSignals ? (
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                <span>Working</span>
+              </>
+            ) : (
+              <span>Generate</span>
+            )}
+          </button>
+
+          {/* Color picker popover */}
+          <Popover className="relative">
+            {({ close }) => (
+              <>
+                <PopoverButton
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                  title="Change color"
+                >
+                  <Palette className="size-3.5" />
+                </PopoverButton>
+                <Transition
+                  as={Fragment}
+                  enter="transition ease-out duration-100"
+                  enterFrom="opacity-0 translate-y-1"
+                  enterTo="opacity-100 translate-y-0"
+                  leave="transition ease-in duration-75"
+                  leaveFrom="opacity-100 translate-y-0"
+                  leaveTo="opacity-0 translate-y-1"
+                >
+                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-xl border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
+                    <div className="grid grid-cols-6 gap-1.5">
+                      {colorSwatches.map((c) => (
+                        <button
+                          key={c}
+                          className="h-5 w-5 rounded-sm border border-white/15 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-ring)]"
+                          style={{ backgroundColor: c }}
+                          onClick={() => {
+                            onSelectColor?.(indicator.id, c);
+                            close();
+                          }}
+                          aria-label={`Set color ${c}`}
+                          disabled={disableActions}
+                        />
+                      ))}
+                    </div>
+                  </PopoverPanel>
+                </Transition>
+              </>
+            )}
+          </Popover>
+
+          {/* Visibility toggle - allowed during compute per requirements */}
+          <VisibilityToggle
+            visible={isVisible}
+            onChange={() => onToggle?.(indicator.id)}
+            disabled={busy && statusKey !== "computing" && statusKey !== "updating"}
+            size="sm"
+          />
+
+          {/* Context menu */}
+          <Popover className="relative">
+            {({ close }) => (
+              <>
+                <PopoverButton
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                  title="More actions"
+                >
+                  <MoreHorizontal className="size-4" />
+                </PopoverButton>
+                <Transition
+                  as={Fragment}
+                  enter="transition ease-out duration-100"
+                  enterFrom="opacity-0 translate-y-1"
+                  enterTo="opacity-100 translate-y-0"
+                  leave="transition ease-in duration-75"
+                  leaveFrom="opacity-100 translate-y-0"
+                  leaveTo="opacity-0 translate-y-1"
+                >
+                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-56 rounded-xl border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                    {/* Runtime / Trading section */}
+                    <div className="mb-2">
+                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                        Runtime
+                      </p>
+                      <button
+                        onClick={() => {
+                          onRecompute?.(indicator.id);
+                          close();
+                        }}
+                        disabled={disableActions || typeof onRecompute !== "function"}
+                        className={`
+                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          ${
+                            disableActions || typeof onRecompute !== "function"
+                              ? "cursor-not-allowed text-slate-500"
+                              : "text-slate-200 hover:bg-white/5"
+                          }
+                        `}
+                      >
+                        <RefreshCw className="size-4" />
+                        Recompute Overlays
+                      </button>
+                    </div>
+
+                    <div className="h-px bg-white/8 my-1" />
+
+                    {/* Configuration section */}
+                    <div className="my-2">
+                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                        Configuration
+                      </p>
+                      <button
+                        onClick={() => {
+                          onEdit?.(indicator);
+                          close();
+                        }}
+                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                      >
+                        <Pencil className="size-4" />
+                        Edit Parameters
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!duplicateDisabled) {
+                            onDuplicate?.(indicator.id);
+                            close();
+                          }
+                        }}
+                        disabled={duplicateDisabled}
+                        className={`
+                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          ${
+                            duplicateDisabled
+                              ? "cursor-not-allowed text-slate-500"
+                              : "text-slate-200 hover:bg-white/5"
+                          }
+                        `}
+                      >
+                        <CopyPlus className="size-4" />
+                        {duplicatePending ? "Duplicating..." : "Duplicate"}
+                      </button>
+                      <button
+                        onClick={async () => {
+                          await copyParams();
+                          close();
+                        }}
+                        className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                      >
+                        <Copy className="size-4" />
+                        Copy Params JSON
+                      </button>
+                    </div>
+
+                    <div className="h-px bg-white/8 my-1" />
+
+                    {/* Danger section */}
+                    <div className="mt-2">
+                      <p className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.3em] text-slate-500">
+                        Danger
+                      </p>
+                      <button
+                        onClick={() => {
+                          if (!disableActions) {
+                            onDelete?.(indicator.id);
+                            close();
+                          }
+                        }}
+                        disabled={disableActions}
+                        className={`
+                          w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition
+                          ${
+                            disableActions
+                              ? "cursor-not-allowed text-slate-500"
+                              : "text-rose-300 hover:bg-rose-500/10"
+                          }
+                        `}
+                      >
+                        <Trash2 className="size-4" />
+                        Delete Indicator
+                      </button>
+                    </div>
+                  </PopoverPanel>
+                </Transition>
+              </>
+            )}
+          </Popover>
+        </div>
+      </div>
+
+      {/* Failed state banner */}
+      {statusKey === "failed" && (
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-500/30 bg-rose-500/8 px-3 py-2 text-xs text-rose-100">
+          <span>Indicator job failed. Keep for review or retry.</span>
+          <div className="flex items-center gap-2">
+            {canRetry && (
+              <button
+                type="button"
+                onClick={() => onRetryCreate?.(indicator)}
+                className="rounded border border-amber-400/50 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-amber-100 hover:bg-amber-500/10"
+              >
+                Retry
+              </button>
+            )}
+            {canRemoveLocal && (
+              <button
+                type="button"
+                onClick={() => onRemoveLocal?.(indicator.id)}
+                className="rounded border border-white/20 px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] text-slate-100 hover:border-white/40"
+              >
+                Remove
               </button>
             )}
           </div>
-        )}
+        </div>
+      )}
 
-        {showAllParams && paramsList.length > 5 && (
-          <button
-            className="inline-flex items-center gap-1 text-xs text-slate-300 underline-offset-4 transition hover:text-[color:var(--accent-text-strong)] hover:underline"
-            onClick={() => setShowAllParams(false)}
-          >
-            Show less
-          </button>
-        )}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-3">
-        <Switch
-          checked={!!indicator?.enabled}
-          onChange={() => onToggle?.(indicator.id)}
-          className={`${indicator?.enabled ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/70'} relative inline-flex h-6 w-11 cursor-pointer items-center rounded-full transition`}
-        >
-          <span className={`${indicator?.enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-        </Switch>
-
-        <button
-          type="button"
-          onClick={() => onGenerateSignals?.(indicator.id)}
-          className={`relative flex h-8 w-8 items-center justify-center rounded-full border border-emerald-400/40 text-emerald-200 transition ${
-            disableSignalAction ? 'cursor-not-allowed opacity-50' : 'hover:border-emerald-300/60 hover:text-emerald-100'
-          }`}
-          title={isGeneratingSignals ? 'Generating…' : 'Generate signals'}
-          disabled={disableSignalAction || isGeneratingSignals}
-          aria-busy={isGeneratingSignals}
-        >
-          {isGeneratingSignals ? (
-            <svg className="size-4 animate-spin" viewBox="0 0 24 24" role="status" aria-label="Generating signals">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-            </svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.6" stroke="currentColor" className="size-5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z" />
-            </svg>
-          )}
-        </button>
-
-        <Popover className="relative">
-          {({ close }) => (
-            <>
-              <PopoverButton
-                onClick={() => setConfirmingDelete(false)}
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-20)] hover:text-[color:var(--accent-text-strong)]"
-                title="Indicator settings"
+      {/* Expanded params view */}
+      {expanded && (
+        <div className="mt-3 rounded-lg border border-white/8 bg-[#0a0f1a]/60 p-3 text-xs">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {paramsList.map(({ key, value }) => (
+              <div
+                key={key}
+                className="flex items-start gap-2 rounded border border-white/5 bg-white/5 px-2 py-1.5"
               >
-                <MoreHorizontal className="size-4" />
-              </PopoverButton>
-              <Transition
-                as={Fragment}
-                enter="transition ease-out duration-100"
-                enterFrom="opacity-0 translate-y-1"
-                enterTo="opacity-100 translate-y-0"
-                leave="transition ease-in duration-75"
-                leaveFrom="opacity-100 translate-y-0"
-                leaveTo="opacity-0 translate-y-1"
+                <span className="text-[10px] font-mono uppercase tracking-wide text-slate-500">{key}</span>
+                <span className="text-slate-200">{formatValue(value)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400">
+            <div className="flex items-center gap-2">
+              <span className="font-mono">ID: {indicator?.id ?? "unknown"}</span>
+              <button
+                type="button"
+                onClick={copyId}
+                className="rounded border border-white/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] text-slate-300 transition hover:border-[color:var(--accent-alpha-40)]"
               >
-                <PopoverPanel className="absolute right-0 top-full z-30 mt-3 w-56 rounded-2xl border border-white/10 bg-[#202432] p-4 shadow-xl ring-1 ring-black/20">
-                  <div className="space-y-4 text-sm text-slate-200">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Color</p>
-                      <div className="mt-2 grid grid-cols-6 gap-1">
-                        {colorSwatches.map((c) => (
-                          <button
-                            key={c}
-                            className="h-5 w-5 rounded-sm border border-white/20 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-outline-soft)]"
-                            style={{ backgroundColor: c }}
-                            onClick={() => {
-                              onSelectColor?.(indicator.id, c)
-                              setConfirmingDelete(false)
-                              close()
-                            }}
-                            aria-label={`Set color ${c}`}
-                          />
-                        ))}
-                      </div>
-                  </div>
-
-                  <div className="grid gap-2 text-xs">
-                    <button
-                        onClick={() => {
-                          onEdit?.(indicator)
-                          setConfirmingDelete(false)
-                          close()
-                        }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]"
-                      >
-                        <span>Edit parameters</span>
-                        <span className="text-[10px] uppercase tracking-[0.3em] text-slate-500">E</span>
-                      </button>
-
-                      <button
-                        onClick={async () => {
-                          await copyParams()
-                          setConfirmingDelete(false)
-                          close()
-                        }}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-200 transition hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]"
-                      >
-                        <span className="inline-flex items-center gap-2"><Copy className="size-4" /> Copy params JSON</span>
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          if (duplicateDisabled) return
-                          onDuplicate?.(indicator.id)
-                          setConfirmingDelete(false)
-                          close()
-                        }}
-                        disabled={duplicateDisabled}
-                        className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left text-slate-200 transition ${
-                          duplicateDisabled
-                            ? 'cursor-not-allowed border-white/5 text-slate-500'
-                            : 'border-white/10 bg-white/5 hover:border-[color:var(--accent-alpha-30)] hover:bg-[color:var(--accent-alpha-10)]'
-                        }`}
-                      >
-                        <span>{duplicatePending ? 'Duplicating…' : 'Duplicate indicator'}</span>
-                      </button>
-
-                      {!confirmingDelete && (
-                        <button
-                          onClick={() => setConfirmingDelete(true)}
-                          className="flex items-center justify-between rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-left text-rose-200 transition hover:border-rose-400/50 hover:bg-rose-500/20"
-                        >
-                          <span>Delete indicator</span>
-                        </button>
-                      )}
-
-                      {confirmingDelete && (
-                        <div className="flex items-center justify-between gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
-                          <span>Confirm delete?</span>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => {
-                                onDelete?.(indicator.id)
-                                setConfirmingDelete(false)
-                                close()
-                              }}
-                              className="rounded border border-rose-400/40 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-rose-200 hover:bg-rose-500/20"
-                            >
-                              Yes
-                            </button>
-                            <button
-                              onClick={() => setConfirmingDelete(false)}
-                              className="rounded border border-white/10 px-2 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-300 hover:border-white/20"
-                            >
-                              No
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </PopoverPanel>
-              </Transition>
-            </>
-          )}
-        </Popover>
-      </div>
+                Copy
+              </button>
+            </div>
+            {relativeTime && <span>Updated {relativeTime}</span>}
+            <button
+              type="button"
+              onClick={() => setExpanded(false)}
+              className="font-semibold uppercase tracking-wider text-[color:var(--accent-text-soft)] hover:text-[color:var(--accent-text-strong)]"
+            >
+              Collapse
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

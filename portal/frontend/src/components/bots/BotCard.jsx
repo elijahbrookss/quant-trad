@@ -1,5 +1,5 @@
-import { Play, Square, Eye, Trash2, Pause, RotateCw, TriangleAlert } from 'lucide-react'
-import { memo, useMemo, useState } from 'react'
+import { Play, Square, Eye, Trash2, Pause, RotateCw, TriangleAlert, X } from 'lucide-react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
@@ -77,12 +77,40 @@ export const BotCard = memo(function BotCard({
 }) {
   const navigate = useNavigate()
   const [errorOpen, setErrorOpen] = useState(false)
+  const [warningsOpen, setWarningsOpen] = useState(false)
   const assignedNames = useMemo(
     () =>
       (bot.strategy_ids || [])
         .map((id) => strategyLookup.get(id)?.name || id)
         .filter(Boolean),
     [bot.strategy_ids, strategyLookup],
+  )
+  const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
+  const warningCount = runtimeWarnings.length
+  const warningMessages = runtimeWarnings
+    .slice(0, 3)
+    .map((warning) => (warning?.message ? String(warning.message) : 'Warning'))
+  const warningOverflow = Math.max(0, warningCount - warningMessages.length)
+  const warningTooltip =
+    warningMessages.length > 0
+      ? `${warningMessages.join(' • ')}${warningOverflow > 0 ? ` • +${warningOverflow} more` : ''}`
+      : null
+  useEffect(() => {
+    if (!warningCount && warningsOpen) {
+      setWarningsOpen(false)
+    }
+  }, [warningCount, warningsOpen])
+
+  const toggleWarningsOpen = useCallback(
+    (event) => {
+      if (!warningCount) return
+      const modifierActivated = event?.altKey || event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.detail > 1
+      if (!modifierActivated) return
+      event.preventDefault()
+      event.stopPropagation()
+      setWarningsOpen((prev) => !prev)
+    },
+    [warningCount],
   )
 
   const runtimeStatus = computeStatus(bot)
@@ -179,6 +207,23 @@ export const BotCard = memo(function BotCard({
                   {modeLabel}
                 </span>
               ) : null}
+              {warningCount > 0 && (
+                <div
+                  className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
+                  title={warningTooltip ? `${warningTooltip} • Alt/Option or double-click to inspect all warnings` : 'Alt/Option or double-click to inspect all warnings'}
+                  role="button"
+                  tabIndex={0}
+                  onClick={toggleWarningsOpen}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      toggleWarningsOpen(event)
+                    }
+                  }}
+                >
+                  <TriangleAlert className="size-3 text-amber-300" />
+                  <span>{warningCount}</span>
+                </div>
+              )}
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
               {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}
@@ -374,6 +419,36 @@ export const BotCard = memo(function BotCard({
           </div>
         </div>
       ) : null}
+      {warningsOpen && warningCount > 0 ? (
+        <div className="pointer-events-auto fixed right-4 top-4 z-40 w-[min(28rem,calc(100%-1.5rem))] rounded-2xl border border-amber-500/40 bg-slate-950/95 p-4 shadow-2xl shadow-amber-900/40 backdrop-blur md:right-6 md:top-6">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-200">
+              <TriangleAlert className="size-4 text-amber-300" />
+              <span>Warnings ({warningCount})</span>
+            </div>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded-md border border-amber-800/40 bg-amber-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-100 transition hover:border-amber-700/50 hover:bg-amber-900/50"
+              onClick={() => setWarningsOpen(false)}
+            >
+              <X className="size-3" />
+              Close
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] text-amber-200/70">Alt/Option + click badge to toggle this panel.</p>
+          <div className="mt-3 max-h-60 space-y-2 overflow-y-auto pr-1">
+            {runtimeWarnings.map((warning) => (
+              <div
+                key={warning.id || warning.timestamp || warning.message}
+                className="rounded-xl border border-amber-800/50 bg-amber-950/60 px-3 py-2"
+              >
+                <p className="text-sm font-semibold text-amber-50">{warning.message || 'Warning issued'}</p>
+                <WarningContextChips context={warning.context} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </article>
   )
 })
@@ -506,6 +581,31 @@ function buildStats(bot) {
       return { ...entry, value: entry.value }
     })
     .filter(Boolean)
+}
+
+function WarningContextChips({ context }) {
+  if (!context || typeof context !== 'object') return null
+  const entries = Object.entries(context).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  if (!entries.length) return null
+  return (
+    <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-amber-100/80">
+      {entries.map(([key, value]) => (
+        <span key={key} className="rounded-full border border-amber-500/40 px-2 py-0.5">
+          {formatWarningLabel(key)}: {String(value)}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function formatWarningLabel(label) {
+  if (!label) return ''
+  return label
+    .toString()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ')
 }
 
 function buildWalletEntries(bot) {

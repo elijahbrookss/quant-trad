@@ -1,12 +1,18 @@
-from indicators.config import DataContext
+import logging
 from typing import Optional
 
 import pandas as pd
 
 from data_providers.providers.factory import get_provider
+from data_providers.utils.ohlcv import interval_to_timedelta
+from indicators.config import DataContext
 
 from ..providers import persistence_bootstrap  # noqa: F401
 from . import instrument_service
+from .stats_queue import enqueue_stats_job
+
+logger = logging.getLogger(__name__)
+
 
 def fetch_ohlcv(
     symbol: str,
@@ -29,7 +35,9 @@ def fetch_ohlcv(
         instrument_id=instrument_id,
     )
     provider = get_provider(datasource, exchange=exchange)
-    return provider.get_ohlcv(ctx)
+    df = provider.get_ohlcv(ctx)
+    _schedule_stats_for_context(df, ctx)
+    return df
 
 
 def fetch_ohlcv_by_instrument(
@@ -58,4 +66,38 @@ def fetch_ohlcv_by_instrument(
         instrument_id=instrument_id,
     )
     provider = get_provider(datasource, exchange=exchange)
-    return provider.get_ohlcv(ctx)
+    df = provider.get_ohlcv(ctx)
+    _schedule_stats_for_context(df, ctx)
+    return df
+
+
+def _schedule_stats_for_context(df: pd.DataFrame, ctx: DataContext) -> None:
+    """Enqueue asynchronous stats work for the requested range once candles are available."""
+
+    if ctx.instrument_id is None or not ctx.interval or df is None or df.empty:
+        return
+
+    try:
+        timeframe_seconds = int(interval_to_timedelta(ctx.interval).total_seconds())
+    except Exception as exc:
+        logger.warning(
+            "stats_job_interval_invalid | instrument_id=%s interval=%s error=%s",
+            ctx.instrument_id,
+            ctx.interval,
+            exc,
+        )
+        return
+
+    if timeframe_seconds <= 0:
+        return
+
+    timestamps = pd.to_datetime(df.index, utc=True)
+    if timestamps.empty:
+        return
+
+    enqueue_stats_job(
+        instrument_id=ctx.instrument_id,
+        timeframe_seconds=timeframe_seconds,
+        time_min=timestamps.min(),
+        time_max=timestamps.max(),
+    )

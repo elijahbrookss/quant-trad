@@ -17,7 +17,8 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
 # Production build stage
 FROM base AS build
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    VITE_LOG_LEVEL=debug
 RUN npm run build
 
 # Final production image served by nginx

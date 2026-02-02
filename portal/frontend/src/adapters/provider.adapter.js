@@ -28,11 +28,14 @@ async function handleResponse(res) {
 }
 
 export async function fetchProviders() {
+  log.debug('providers_fetch_request')
   const res = await fetch(`${BASE}/api/providers/`, { mode: 'cors' })
+  log.debug('providers_fetch_response', { status: res.status })
   return handleResponse(res)
 }
 
 export async function validateProviderSelection(payload) {
+  log.debug('provider_validate_request', payload)
   const res = await fetch(`${BASE}/api/providers/validate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -43,7 +46,18 @@ export async function validateProviderSelection(payload) {
 }
 
 export async function fetchTickMetadata(payload) {
+  log.debug('provider_tick_metadata_request', payload)
   const res = await fetch(`${BASE}/api/providers/tick-metadata`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    mode: 'cors',
+    })
+  return handleResponse(res)
+}
+
+export async function saveProviderCredentials(payload) {
+  const res = await fetch(`${BASE}/api/providers/credentials`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

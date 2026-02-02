@@ -90,22 +90,32 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
   return (
     <>
       <div
-        className={`fixed inset-0 z-30 bg-black/40 transition lg:hidden ${
-          open ? 'opacity-100' : 'pointer-events-none opacity-0'
-        }`}
+        className={`fixed inset-0 z-30 bg-black/40 transition lg:hidden ${open ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
         onClick={onClose}
         aria-hidden={!open}
       />
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-white/5 bg-[#151924]/95 px-4 py-6 backdrop-blur transition lg:static lg:z-auto ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-white/5 bg-[#151924]/95 px-3 py-6 backdrop-blur transition lg:static lg:z-auto ${
           open ? 'translate-x-0' : '-translate-x-full'
-        } ${collapsed ? 'lg:w-20' : 'lg:w-64'} lg:translate-x-0`}
+        } ${collapsed ? 'lg:w-24' : 'lg:w-64'} lg:translate-x-0`}
       >
-        <div className={`flex items-center ${collapsed ? 'justify-center lg:justify-between' : 'justify-between'}`}>
-          <div className={`flex items-center gap-3 ${collapsed ? 'lg:gap-0' : ''}`}>
-            <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-soft)]">
-              QT
-            </span>
+        <div className={`${collapsed ? 'flex flex-col items-center gap-3' : 'flex items-center justify-between'}`}>
+          <div className={`flex items-center gap-3 ${collapsed ? '' : ''}`}>
+            {collapsed ? (
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                className="group relative inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-18)]"
+                aria-label="Expand sidebar"
+              >
+                <span className="transition group-hover:opacity-0">QT</span>
+                <ChevronRight className="pointer-events-none absolute h-4 w-4 opacity-0 transition group-hover:opacity-100" />
+              </button>
+            ) : (
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-[color:var(--accent-alpha-12)] text-[color:var(--accent-text-soft)]">
+                QT
+              </span>
+            )}
             {!collapsed ? (
               <div className="space-y-1">
                 <div className="text-sm font-semibold text-slate-100">QuantTrad</div>
@@ -113,24 +123,26 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
               </div>
             ) : null}
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onToggleCollapse}
-              className="hidden h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:inline-flex"
-              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            >
-              {collapsed ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
-              aria-label="Close sidebar"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
+          {!collapsed ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                className="hidden h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:inline-flex"
+                aria-label="Collapse sidebar"
+              >
+                <ChevronLeft className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)] lg:hidden"
+                aria-label="Close sidebar"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <nav className="mt-8 space-y-2 text-sm">
@@ -144,11 +156,11 @@ function Sidebar({ collapsed, open, onClose, onToggleCollapse }) {
                 className={({ isActive }) =>
                   [
                     'flex items-center gap-3 rounded-2xl border px-3 py-3 transition',
-                    collapsed ? 'justify-center lg:px-2' : '',
+                    collapsed ? 'justify-center lg:px-3' : '',
                     isActive
                       ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-[0_20px_40px_-24px_var(--accent-shadow-strong)]'
                       : 'border-transparent text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-10)] hover:text-[color:var(--accent-text-strong)]',
-                  ]
+                 ]
                     .filter(Boolean)
                     .join(' ')
                 }
@@ -285,7 +297,7 @@ function AppShell({ chartId }) {
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-20 border-b border-white/5 bg-[#1c1f2b]/90 px-6 py-4 backdrop-blur lg:px-10">
+          <header className="sticky top-0 z-30 border-b border-white/5 bg-[#1c1f2b]/90 px-6 py-4 backdrop-blur lg:px-10">
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -301,7 +313,6 @@ function AppShell({ chartId }) {
               </div>
               <div className="ml-auto hidden items-center gap-3 text-xs text-slate-400 md:flex">
                 <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 uppercase tracking-[0.2em]">QuantTrad</span>
-                <span className="text-slate-500">Walk-forward only</span>
               </div>
             </div>
           </header>
@@ -342,7 +353,7 @@ function AppShell({ chartId }) {
                       <div className="space-y-6">
                         <ChartComponent chartId={chartId} />
 
-                        <section className="rounded-2xl border border-white/10 bg-[#151a28]/90 p-4 shadow-[0_35px_110px_-80px_rgba(0,0,0,0.85)]">
+                        <section className="rounded-3xl border border-white/10 bg-gradient-to-br from-[#0f1320]/95 via-[#0c101a]/95 to-[#0b0f18]/95 p-5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.85)]">
                           <header className="flex items-center justify-between border-b border-white/5 pb-3">
                             <div>
                               <h3 className="text-sm font-semibold text-slate-100">Indicators</h3>

@@ -782,6 +782,7 @@ def list_reports(
                 "trades": summary.get("total_trades"),
                 "status": run.get("status"),
                 "completed_at": run.get("ended_at"),
+                "run_duration_seconds": _runtime_seconds(run),
             }
         )
     return {"items": items, "total": total, "limit": limit, "offset": offset}

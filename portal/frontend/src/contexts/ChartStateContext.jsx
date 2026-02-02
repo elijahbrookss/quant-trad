@@ -6,6 +6,21 @@ const LOG_NS = 'ChartStateContext'; // file namespace
 
 // State shape: { [chartId]: { ...chartData, handles?, _version? } }
 function reducer(state, action) {
+  const indicatorsEqual = (a = [], b = []) => {
+    if (a === b) return true;
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      const x = a[i]; const y = b[i];
+      if (x === y) continue;
+      if (!x || !y || typeof x !== 'object' || typeof y !== 'object') return false;
+      if (x.id !== y.id) return false;
+      if (x.enabled !== y.enabled) return false;
+      if (x.type !== y.type) return false;
+      if (x._status !== y._status) return false;
+    }
+    return true;
+  };
   switch (action.type) {
     case 'REGISTER': {
       const { id, handles } = action;
@@ -16,13 +31,19 @@ function reducer(state, action) {
     case 'UPDATE': {
       const { id, patch } = action;
       const curr = state[id] || {};
+      const nextPatch = { ...patch };
+      if (Object.prototype.hasOwnProperty.call(patch, 'indicators')) {
+        if (indicatorsEqual(curr.indicators, patch.indicators)) {
+          delete nextPatch.indicators; // avoid churn on identical indicator lists
+        }
+      }
       // only update if at least one patched field changes
       let changed = false;
-      for (const k of Object.keys(patch)) {
-        if (curr[k] !== patch[k]) { changed = true; break; }
+      for (const k of Object.keys(nextPatch)) {
+        if (curr[k] !== nextPatch[k]) { changed = true; break; }
       }
       if (!changed) return state; // no-op
-      return { ...state, [id]: { ...curr, ...patch } };
+      return { ...state, [id]: { ...curr, ...nextPatch } };
     }
     case 'BUMP': {
       const { id } = action;
@@ -78,12 +99,6 @@ export function ChartStateProvider({ children }) {
   }, [info]);
 
   const updateChart = useCallback((id, patch) => {
-    console.log('[ChartStateContext] event=chart_update', {
-      chartId: id,
-      keys: Object.keys(patch),
-      hasOverlays: !!patch?.overlays,
-      overlayCount: patch?.overlays?.length || 0,
-    });
     debug('chart_update', { chartId: id, keys: Object.keys(patch) });
     dispatch({ type: 'UPDATE', id, patch });
   }, [debug]);

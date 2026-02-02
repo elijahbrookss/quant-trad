@@ -21,11 +21,29 @@ class ProviderVenueRequest(BaseModel):
     strategy_id: Optional[str] = None
 
 
+class ProviderCredentialsRequest(BaseModel):
+    provider_id: Optional[str] = None
+    venue_id: Optional[str] = None
+    credentials: Dict[str, str]
+
+
 @router.get("/")
 async def list_providers() -> Dict[str, Any]:
     """Return all providers and their venues."""
 
-    return {"providers": provider_service.provider_payloads()}
+    payload = provider_service.provider_payloads()
+    try:
+        # Structured logging for tracing venue/provider payloads
+        import logging
+
+        logging.getLogger(__name__).info(
+            "providers_list_served | providers=%s",
+            [p.get("id") for p in payload],
+        )
+    except Exception:
+        pass
+
+    return {"providers": payload}
 
 
 @router.post("/validate")
@@ -55,3 +73,15 @@ async def tick_metadata(body: ProviderVenueRequest) -> Dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/credentials")
+async def upsert_credentials(body: ProviderCredentialsRequest) -> Dict[str, Any]:
+    """Persist provider credentials and return the updated status."""
+
+    try:
+        return provider_service.upsert_provider_secrets(body.provider_id, body.venue_id, body.credentials or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, str(exc)) from exc

@@ -1,14 +1,15 @@
 import datetime as dt
 import os
 import pandas as pd
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass
 from alpaca.common.exceptions import APIError
 from core.logger import logger
+from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
 
 class AlpacaProvider(BaseDataProvider):
@@ -167,3 +168,24 @@ class AlpacaProvider(BaseDataProvider):
     def _paper_trading_enabled() -> bool:
         flag = os.getenv("ALPACA_PAPER", "true").strip().lower()
         return flag in {"1", "true", "yes", "on"}
+
+
+@_REGISTRY.provider(
+    id="ALPACA",
+    label="Alpaca API",
+    supported_venues=["ALPACA"],
+    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities"]},
+)
+def _register_alpaca_provider():
+    return AlpacaProvider
+
+
+@_REGISTRY.venue(
+    id="ALPACA",
+    label="Alpaca",
+    provider_id="ALPACA",
+    adapter_id=None,
+    asset_class="equities",
+)
+def _register_alpaca_venue():
+    return "ALPACA"

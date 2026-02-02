@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 from core.logger import logger
@@ -22,28 +23,80 @@ from .interactive_brokers import InteractiveBrokersProvider
 from .yahoo import YahooFinanceProvider
 
 
-_PROVIDER_CACHE: Dict[Tuple[str, str], BaseDataProvider] = {}
-_RUNTIME_CONFIG = runtime_config_from_env()
-_PERSISTENCE: DataPersistence | None = None
-_PERSISTENCE_FACTORY = None
+@dataclass
+class ProviderRegistry:
+    """Registry for provider instances and persistence wiring."""
+
+    runtime_config: object = field(default_factory=runtime_config_from_env)
+    persistence_factory: Optional[callable] = None
+    persistence: Optional[DataPersistence] = None
+    cache: Dict[Tuple[str, str], BaseDataProvider] = field(default_factory=dict)
+
+    def configure_persistence_factory(self, factory) -> None:
+        self.persistence_factory = factory
+        self.persistence = None
+        self.cache = {}
+        logger.debug("provider_registry_configured persistence_factory=%s", bool(factory))
+
+    def get_persistence(self) -> DataPersistence:
+        if self.persistence is None:
+            if self.persistence_factory is None:
+                self.persistence = NullPersistence()
+            else:
+                self.persistence = self.persistence_factory()
+        return self.persistence
+
+    def get_provider(
+        self,
+        provider_id: Optional[str] = None,
+        *,
+        venue: Optional[str] = None,
+        exchange: Optional[str] = None,
+    ) -> BaseDataProvider:
+        provider, resolved_venue = _resolve_ids(provider_id, venue or exchange)
+        cache_key = (provider, resolved_venue or "")
+
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        provider_cfg = get_provider_config(provider)
+        if not provider_cfg:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+        persistence = self.get_persistence()
+
+        if provider == DataSource.ALPACA.value or provider == "ALPACA":
+            instance = AlpacaProvider(persistence=persistence, settings=self.runtime_config)
+        elif provider == DataSource.YFINANCE.value or provider == "YAHOO":
+            instance = YahooFinanceProvider(persistence=persistence, settings=self.runtime_config)
+        elif provider == DataSource.IBKR.value or provider == "INTERACTIVE_BROKERS":
+            instance = InteractiveBrokersProvider(
+                exchange=exchange or resolved_venue,
+                persistence=persistence,
+                settings=self.runtime_config,
+            )
+        elif provider == DataSource.CCXT.value or provider == "CCXT":
+            slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()
+            if not slug:
+                raise ValueError("CCXT provider requires a venue/exchange identifier")
+            instance = CCXTProvider(slug, persistence=persistence, settings=self.runtime_config)
+        elif provider == DataSource.COINBASE.value or provider == "COINBASE":
+            instance = CoinbaseProvider(persistence=persistence, settings=self.runtime_config)
+        else:
+            raise ValueError(f"No provider implementation for {provider}")
+
+        self.cache[cache_key] = instance
+        logger.debug("provider_factory_cached provider=%s venue=%s", provider, resolved_venue)
+        return instance
+
+
+_REGISTRY = ProviderRegistry()
 
 
 def configure_persistence_factory(factory):
     """Provide a service-layer persistence builder for provider instances."""
 
-    global _PERSISTENCE_FACTORY, _PERSISTENCE
-    _PERSISTENCE_FACTORY = factory
-    _PERSISTENCE = None
-
-
-def _get_persistence() -> DataPersistence:
-    global _PERSISTENCE
-    if _PERSISTENCE is None:
-        if _PERSISTENCE_FACTORY is None:
-            _PERSISTENCE = NullPersistence()
-        else:
-            _PERSISTENCE = _PERSISTENCE_FACTORY()
-    return _PERSISTENCE
+    _REGISTRY.configure_persistence_factory(factory)
 
 
 def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -70,38 +123,4 @@ def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[s
 def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = None, exchange: Optional[str] = None) -> BaseDataProvider:
     """Return a data provider instance for the requested provider/venue."""
 
-    provider, resolved_venue = _resolve_ids(provider_id, venue or exchange)
-    cache_key = (provider, resolved_venue or "")
-
-    if cache_key in _PROVIDER_CACHE:
-        return _PROVIDER_CACHE[cache_key]
-
-    provider_cfg = get_provider_config(provider)
-    if not provider_cfg:
-        raise ValueError(f"Unsupported provider: {provider}")
-
-    persistence = _get_persistence()
-
-    if provider == DataSource.ALPACA.value or provider == "ALPACA":
-        instance = AlpacaProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
-    elif provider == DataSource.YFINANCE.value or provider == "YAHOO":
-        instance = YahooFinanceProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
-    elif provider == DataSource.IBKR.value or provider == "INTERACTIVE_BROKERS":
-        instance = InteractiveBrokersProvider(
-            exchange=exchange or resolved_venue,
-            persistence=persistence,
-            settings=_RUNTIME_CONFIG,
-        )
-    elif provider == DataSource.CCXT.value or provider == "CCXT":
-        slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()
-        if not slug:
-            raise ValueError("CCXT provider requires a venue/exchange identifier")
-        instance = CCXTProvider(slug, persistence=persistence, settings=_RUNTIME_CONFIG)
-    elif provider == DataSource.COINBASE.value or provider == "COINBASE":
-        instance = CoinbaseProvider(persistence=persistence, settings=_RUNTIME_CONFIG)
-    else:
-        raise ValueError(f"No provider implementation for {provider}")
-
-    _PROVIDER_CACHE[cache_key] = instance
-    logger.debug("provider_factory_cached provider=%s venue=%s", provider, resolved_venue)
-    return instance
+    return _REGISTRY.get_provider(provider_id, venue=venue, exchange=exchange)
