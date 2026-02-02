@@ -109,6 +109,8 @@ export const buildFilterPayload = (draft) => {
   }
 }
 
+export const buildFilterPreview = (draft) => buildFilterSummary({ dsl: buildFilterPayload(draft).dsl })
+
 export const normalizeValue = (predicate) => {
   const operator = predicate.operator
   const raw = predicate.value

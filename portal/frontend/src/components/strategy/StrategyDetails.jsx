@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Popover, PopoverButton, PopoverPanel, Transition } from '@headlessui/react'
+import { MoreVertical, Pencil, Trash2 } from 'lucide-react'
 
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 import { DateRangePickerComponent } from '../ChartComponent/DateTimePickerComponent.jsx'
@@ -39,6 +41,7 @@ const StrategyDetails = ({
   onDetachIndicator,
   onAddRule,
   onEditRule,
+  onDuplicateRule,
   onDeleteRule,
   onCreateGlobalFilter,
   onUpdateGlobalFilter,
@@ -257,115 +260,106 @@ const StrategyDetails = ({
 
   return (
     <div className="space-y-4">
-      {/* Consolidated Header Card */}
-      <div className="rounded-xl border border-white/[0.08] bg-black/40">
-        {/* Top row: Name, exchange badge, actions */}
-        <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
-          <div className="flex items-center gap-3">
-            <h2 className="text-base font-semibold text-white">{strategy.name}</h2>
-            <span className="rounded bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">
-              {strategy.exchange || strategy.datasource || 'Exchange'}
-            </span>
-            <span className="text-xs text-slate-500">{strategy.timeframe}</span>
+      {/* Compact Header */}
+      <div className="rounded-xl border border-white/[0.08] bg-black/30">
+        {/* Main header row */}
+        <div className="flex items-center justify-between gap-4 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-3">
+              <h2 className="truncate text-lg font-semibold text-white">{strategy.name}</h2>
+              <span className="shrink-0 rounded bg-white/[0.06] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+                {strategy.exchange || strategy.datasource || 'Exchange'}
+              </span>
+              {strategy.timeframe && (
+                <span className="shrink-0 text-xs text-slate-500">{strategy.timeframe}</span>
+              )}
+            </div>
+            {/* Inline stats */}
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+              <span>{ruleCount} rule{ruleCount === 1 ? '' : 's'}</span>
+              <span className="text-slate-600">•</span>
+              <span>{indicatorCount} indicator{indicatorCount === 1 ? '' : 's'}</span>
+              <span className="text-slate-600">•</span>
+              <span>{atmTargets.length} TP target{atmTargets.length === 1 ? '' : 's'}</span>
+            </div>
           </div>
+
+          {/* Actions: Edit button + kebab menu */}
           <div className="flex items-center gap-2">
             <ActionButton variant="ghost" onClick={onEdit}>
               Edit
             </ActionButton>
-            <ActionButton variant="danger" onClick={onDelete}>
-              Delete
-            </ActionButton>
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  <PopoverButton
+                    className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-slate-400 transition hover:bg-white/5 hover:text-white focus:outline-none"
+                    title="More actions"
+                  >
+                    <MoreVertical className="h-4 w-4" />
+                  </PopoverButton>
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 scale-95"
+                    enterTo="opacity-100 scale-100"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 scale-100"
+                    leaveTo="opacity-0 scale-95"
+                  >
+                    <PopoverPanel className="absolute right-0 top-full z-50 mt-1 w-44 origin-top-right rounded-lg border border-white/10 bg-[#131a2b] p-1.5 shadow-xl">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onEdit?.()
+                          close()
+                        }}
+                        className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/5"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit strategy
+                      </button>
+                      <div className="my-1 h-px bg-white/10" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onDelete?.()
+                          close()
+                        }}
+                        className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm text-rose-300 transition hover:bg-rose-500/10"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete strategy
+                      </button>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
           </div>
         </div>
 
-        {/* Statistics row - clickable cards that navigate to tabs */}
-        <div className="grid grid-cols-3 gap-px bg-white/[0.04]">
-          <button
-            onClick={() => setActiveTab('logic')}
-            className={`group flex flex-col items-center justify-center bg-black/40 px-4 py-3 transition hover:bg-white/[0.03] ${activeTab === 'logic' ? 'bg-white/[0.02]' : ''}`}
-          >
-            <div className="flex items-center gap-2">
-              <svg className="h-4 w-4 text-slate-500 transition group-hover:text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-              </svg>
-              <span className="text-xl font-semibold text-white">{ruleCount}</span>
-            </div>
-            <span className="mt-0.5 text-[10px] uppercase tracking-wider text-slate-500">Decision Logic</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('logic')}
-            className={`group flex flex-col items-center justify-center bg-black/40 px-4 py-3 transition hover:bg-white/[0.03] ${activeTab === 'logic' ? 'bg-white/[0.02]' : ''}`}
-          >
-            <div className="flex items-center gap-2">
-              <svg className="h-4 w-4 text-slate-500 transition group-hover:text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
-              </svg>
-              <span className="text-xl font-semibold text-white">{indicatorCount}</span>
-            </div>
-            <span className="mt-0.5 text-[10px] uppercase tracking-wider text-slate-500">Indicators</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('atm')}
-            className={`group flex flex-col items-center justify-center bg-black/40 px-4 py-3 transition hover:bg-white/[0.03] ${activeTab === 'atm' ? 'bg-white/[0.02]' : ''}`}
-          >
-            <div className="flex items-center gap-2">
-              <svg className="h-4 w-4 text-slate-500 transition group-hover:text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-              </svg>
-              <span className="text-xl font-semibold text-white">{atmTargets.length}</span>
-            </div>
-            <span className="mt-0.5 text-[10px] uppercase tracking-wider text-slate-500">TP Targets</span>
-          </button>
-        </div>
-
-        {/* Inline summary row - replaces Quick Edits */}
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-white/[0.06] px-4 py-2.5 text-xs">
-          {/* Base Risk - editable on click */}
-          <div className="group flex items-center gap-2">
+        {/* Configuration row */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-white/[0.06] px-5 py-3 text-sm">
+          {/* Base Risk */}
+          <div className="flex items-center gap-2">
             <span className="text-slate-500">Risk:</span>
-            <div className="flex items-center gap-1">
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={quickBaseRisk}
-                onChange={(e) => setQuickBaseRisk(e.target.value)}
-                onBlur={handleQuickBaseRiskSave}
-                onKeyDown={(e) => e.key === 'Enter' && handleQuickBaseRiskSave()}
-                className="w-16 rounded bg-transparent px-1 py-0.5 text-white transition hover:bg-white/5 focus:bg-white/10 focus:outline-none"
-                placeholder="—"
-              />
-              <span className="text-slate-600">USD</span>
-            </div>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={quickBaseRisk}
+              onChange={(e) => setQuickBaseRisk(e.target.value)}
+              onBlur={handleQuickBaseRiskSave}
+              onKeyDown={(e) => e.key === 'Enter' && handleQuickBaseRiskSave()}
+              className="w-16 rounded bg-white/5 px-2 py-1 text-white transition hover:bg-white/10 focus:bg-white/10 focus:outline-none focus:ring-1 focus:ring-[color:var(--accent-alpha-40)]"
+              placeholder="—"
+            />
+            <span className="text-slate-500">USD</span>
           </div>
 
-          <div className="h-3 w-px bg-white/10" />
-
-          {/* ATM Template - dropdown */}
-          <div className="flex items-center gap-2">
-            <span className="text-slate-500">ATM:</span>
-            <select
-              value={quickTemplateId}
-              onChange={handleTemplateChange}
-              className="rounded bg-transparent px-1 py-0.5 text-white transition hover:bg-white/5 focus:bg-white/10 focus:outline-none"
-            >
-              <option value="" className="bg-slate-900">{atmTemplateName}</option>
-              {atmTemplateOptions.filter(opt => opt.value !== strategy?.atm_template_id).map((opt) => (
-                <option key={opt.value} value={opt.value} className="bg-slate-900">{opt.label}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="h-3 w-px bg-white/10" />
-
-          {/* Symbols count with popover-style interaction */}
-          <div className="flex items-center gap-2">
-            <span className="text-slate-500">Symbols:</span>
-            <span className="text-white">{strategySymbols.length}</span>
-          </div>
-
-          {/* Save status indicator */}
-          <div className="ml-auto text-[10px]">
+          {/* Save status */}
+          <div className="ml-auto text-xs">
             {quickUpdateStatus?.saving ? (
               <span className="text-slate-400">Saving...</span>
             ) : quickUpdateStatus?.error ? (
@@ -376,12 +370,12 @@ const StrategyDetails = ({
           </div>
         </div>
 
-        {/* Symbols chips - compact display, uses base_currency when available */}
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] px-4 py-2">
+        {/* Symbols row */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] px-5 py-3">
           {(strategy?.instrument_slots || []).map((slot) => (
             <span
               key={`header-slot-${slot.symbol}`}
-              className="group inline-flex items-center gap-1 rounded bg-white/[0.04] px-2 py-0.5 text-[11px] text-slate-300"
+              className="group inline-flex items-center gap-1.5 rounded-md bg-white/[0.05] px-2.5 py-1 text-xs font-medium text-slate-300"
               title={slot.symbol}
             >
               {getSymbolDisplay(slot.symbol, instrumentMap)}
@@ -394,17 +388,15 @@ const StrategyDetails = ({
               </button>
             </span>
           ))}
-          <div className="flex items-center gap-1">
-            <input
-              type="text"
-              placeholder="+ Add"
-              value={quickSymbol}
-              onChange={(e) => setQuickSymbol(e.target.value)}
-              onKeyDown={handleQuickSymbolKey}
-              className="w-14 rounded bg-transparent px-1 py-0.5 text-[11px] text-slate-400 placeholder-slate-600 transition hover:bg-white/5 focus:w-20 focus:bg-white/10 focus:text-white focus:outline-none"
-            />
-          </div>
-          {quickError && <span className="text-[10px] text-rose-400">{quickError}</span>}
+          <input
+            type="text"
+            placeholder="+ Add symbol"
+            value={quickSymbol}
+            onChange={(e) => setQuickSymbol(e.target.value)}
+            onKeyDown={handleQuickSymbolKey}
+            className="w-24 rounded-md bg-transparent px-2 py-1 text-xs text-slate-400 placeholder-slate-600 transition hover:bg-white/5 focus:w-28 focus:bg-white/5 focus:text-white focus:outline-none"
+          />
+          {quickError && <span className="text-xs text-rose-400">{quickError}</span>}
         </div>
       </div>
 
@@ -460,8 +452,12 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'atm'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Define sizing, risk limits, and order management.</p>
-          <ATMTab template={strategy.atm_template} />
+          <ATMTab
+            template={strategy.atm_template}
+            templateOptions={atmTemplateOptions}
+            currentTemplateId={strategy.atm_template_id}
+            onTemplateChange={handleTemplateChange}
+          />
         </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
@@ -474,6 +470,7 @@ const StrategyDetails = ({
             onDetachIndicator={onDetachIndicator}
             onAddRule={onAddRule}
             onEditRule={onEditRule}
+            onDuplicateRule={onDuplicateRule}
             onDeleteRule={onDeleteRule}
             onCreateGlobalFilter={onCreateGlobalFilter}
             onUpdateGlobalFilter={onUpdateGlobalFilter}

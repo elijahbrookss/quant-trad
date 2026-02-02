@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useRef, useState, useEffect, useMemo } from 'react'
+import { ExternalLink, Unlink2 } from 'lucide-react'
 import { Button } from '../../ui'
 import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
@@ -16,6 +17,7 @@ export const AttachedIndicators = ({
 }) => {
   const [selected, setSelected] = useState('')
   const [confirm, setConfirm] = useState(null) // { id, name, impact }
+  const attachRef = useRef(null)
 
   useEffect(() => {
     setSelected('')
@@ -30,6 +32,13 @@ export const AttachedIndicators = ({
     if (!selected) return
     await onAttach(selected)
     setSelected('')
+  }
+
+  const handleFocusAttach = () => {
+    if (!attachRef.current) return
+    attachRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const focusTarget = attachRef.current.querySelector('button')
+    focusTarget?.focus()
   }
 
   const handleDetachRequest = (entry) => {
@@ -61,7 +70,7 @@ export const AttachedIndicators = ({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2" ref={attachRef}>
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <div className="flex-1">
             <DropdownSelect
@@ -87,7 +96,12 @@ export const AttachedIndicators = ({
 
       {entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          No indicators attached. Add signal sources from QuantLab, then attach them here.
+          <p>No indicators attached. Add signal sources from QuantLab, then attach them here.</p>
+          <div className="mt-3">
+            <ActionButton variant="ghost" onClick={handleFocusAttach}>
+              Attach indicator
+            </ActionButton>
+          </div>
         </div>
       ) : (
         <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
@@ -114,21 +128,23 @@ export const AttachedIndicators = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
                   <a
                     href={`/quantlab/indicators/${entry.id}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="rounded border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200 hover:border-white/20"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-white/5 hover:text-white"
+                    title="Open in QuantLab"
                   >
-                    Open in QuantLab
+                    <ExternalLink className="h-4 w-4" />
                   </a>
                   <button
-                    className="rounded border border-white/15 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-rose-200 hover:border-rose-400/70 hover:text-rose-100"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-rose-500/10 hover:text-rose-400"
                     type="button"
                     onClick={() => handleDetachRequest(entry)}
+                    title="Detach indicator"
                   >
-                    Detach
+                    <Unlink2 className="h-4 w-4" />
                   </button>
                 </div>
 

@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
-import { TriangleAlert, X } from 'lucide-react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { TriangleAlert, X, Check } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
@@ -42,6 +42,8 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [bootDots, setBootDots] = useState(1)
   const [activeSymbol, setActiveSymbol] = useState(null)
   const [statsTab, setStatsTab] = useState('overview')
+  const [showAllWarnings, setShowAllWarnings] = useState(false)
+  const [warningsCollapsed, setWarningsCollapsed] = useState(true)
   const { getChart } = useChartState()
 
   const {
@@ -58,10 +60,28 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   } = useBotPerformance({ bot, open, onRefresh })
 
   const logs = payload?.logs || []
-  const warnings = payload?.warnings || []
+  const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
+  const warnings = useMemo(() => {
+    const fromPayload = Array.isArray(payload?.warnings) ? payload.warnings : []
+    if (!fromPayload.length && !runtimeWarnings.length) return []
+    if (!fromPayload.length) return runtimeWarnings
+    if (!runtimeWarnings.length) return fromPayload
+    const seen = new Set()
+    const merged = []
+    for (const entry of [...fromPayload, ...runtimeWarnings]) {
+      const key = entry?.id || entry?.timestamp || entry?.message || JSON.stringify(entry)
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(entry)
+    }
+    return merged
+  }, [payload?.warnings, runtimeWarnings])
   const strategies = payload?.meta?.strategies || []
   const runtime = payload?.runtime || {}
   const seriesList = Array.isArray(payload?.series) ? payload.series : []
+  const isBacktestRun = (bot?.run_type || '').toLowerCase() === 'backtest'
+  const visibleWarnings = showAllWarnings ? warnings : warnings.slice(0, 5)
+  const chartSectionRef = useRef(null)
   const seriesBySymbol = useMemo(() => {
     const map = new Map()
     for (const series of seriesList) {
@@ -72,6 +92,64 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return map
   }, [seriesList])
   const seriesSymbols = useMemo(() => seriesList.map((series) => series?.symbol).filter(Boolean), [seriesList])
+  const isSeriesCompleted = useCallback(
+    (series) => {
+      if (!isBacktestRun || !series) return false
+
+      // If the overall backtest is done, treat all series as done.
+      const overallStatus = (runtimeStatus || '').toLowerCase()
+      if (['completed', 'stopped'].includes(overallStatus)) return true
+
+      const status = (series.status || series.runtime_status || '').toLowerCase()
+      if (status === 'completed' || status === 'stopped') return true
+      if (series.completed === true) return true
+
+      const progress = Number(
+        series.progress
+        ?? series.stats?.progress
+        ?? series.stats?.completion
+        ?? series.stats?.progress_fraction,
+      )
+      if (Number.isFinite(progress) && progress >= 1) return true
+
+      // Fallback: compare last bar time to known backtest end
+      const endCandidates = [
+        series.backtest_end,
+        series.stats?.backtest_end,
+        runtime?.backtest_end,
+        runtime?.backtest?.end,
+        payload?.backtest_end,
+        payload?.meta?.backtest_end,
+        bot?.backtest_end,
+        bot?.last_run_artifact?.backtest_end,
+      ]
+      const endAt = endCandidates.map(toSec).find((v) => Number.isFinite(v))
+      const candles = Array.isArray(series.candles) ? series.candles : []
+      const lastCandleSec = candles.length ? toSec(candles[candles.length - 1]?.time) : null
+      if (Number.isFinite(endAt) && Number.isFinite(lastCandleSec)) {
+        // allow generous tolerance (one bar of 1h plus buffer)
+        const tolerance = 3600 * 2 // seconds
+        if (lastCandleSec + tolerance >= endAt) return true
+      }
+
+      return false
+    },
+    [
+      isBacktestRun,
+      runtimeStatus,
+      runtime?.backtest_end,
+      runtime?.backtest?.end,
+      bot?.backtest_end,
+      bot?.last_run_artifact?.backtest_end,
+      payload?.backtest_end,
+      payload?.meta?.backtest_end,
+    ],
+  )
+  const scrollChartIntoView = useCallback(() => {
+    const node = chartSectionRef.current
+    if (!node) return
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [])
 
   useEffect(() => {
     if (!seriesSymbols.length) {
@@ -86,6 +164,17 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       handleFocusSymbolChange?.(activeSymbol)
     }
   }, [activeSymbol, handleFocusSymbolChange, open])
+
+  useEffect(() => {
+    if (!open) {
+      setShowAllWarnings(false)
+      setWarningsCollapsed(true)
+      return
+    }
+    if (warnings.length <= 5 && showAllWarnings) {
+      setShowAllWarnings(false)
+    }
+  }, [open, warnings.length, showAllWarnings])
 
   const activeSeries = activeSymbol ? seriesBySymbol.get(activeSymbol) : null
   const activeSymbolTrades = Array.isArray(activeSeries?.trades) ? activeSeries.trades : []
@@ -231,6 +320,20 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     [activeSymbol, chartHandle],
   )
 
+  const toggleWarningScope = useCallback(
+    (event) => {
+      const modifierActivated = event?.altKey || event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.detail > 1
+      if (modifierActivated) {
+        event?.preventDefault?.()
+        setWarningsCollapsed(false)
+        setShowAllWarnings((prev) => !prev)
+      } else {
+        setWarningsCollapsed((prev) => !prev)
+      }
+    },
+    [],
+  )
+
   const loadingLabel = runtimeInitialising ? 'Spinning up runtime…' : 'Loading bot performance…'
   const statusDisplay = isBooting ? 'booting' : runtimeStatus
   const bootOverlayVisible = isBooting && !error && !showInactiveState
@@ -317,6 +420,18 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       handles.focusAtTime(time, price)
     },
     [bot?.id, chartHandle, getChart, seriesBySymbol],
+  )
+
+  const handleTradeClick = useCallback(
+    (trade) => {
+      if (!trade) return
+      if (trade.symbol) {
+        setActiveSymbol(trade.symbol)
+      }
+      scrollChartIntoView()
+      focusChartAt(trade.entry_time || trade?.legs?.[0]?.entry_time || trade.closed_at, trade.entry_price, trade.symbol)
+    },
+    [focusChartAt, scrollChartIntoView],
   )
 
   // Aggregate stats across all symbols
@@ -432,27 +547,41 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
 
           {warnings.length > 0 && (
             <div className="rounded-lg border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-xs text-amber-100">
-              <div className="flex items-center justify-between gap-2">
+              <div
+                className="flex items-center justify-between gap-2"
+                title="Click to expand/collapse. Alt/Option or double-click to show all."
+                onClick={toggleWarningScope}
+              >
                 <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-amber-200">
                   <TriangleAlert className="size-4 text-amber-300" />
                   <span>Warnings</span>
                 </div>
-                <span className="text-[10px] uppercase tracking-wider text-amber-200/70">{warnings.length} active</span>
+                <div className="flex items-center gap-3 text-[10px] uppercase tracking-wider text-amber-200/70">
+                  <span>{warnings.length} active</span>
+                  {warnings.length > 5 ? (
+                    <span className="cursor-default text-amber-300/80">
+                      {showAllWarnings ? 'Showing all (⌥ click to collapse)' : '⌥ click or double-click to view all'}
+                    </span>
+                  ) : null}
+                  <span className="text-amber-300/70">{warningsCollapsed ? 'Collapsed' : 'Expanded'}</span>
+                </div>
               </div>
-              <div className="mt-3 space-y-3">
-                {warnings.slice(0, 5).map((warning) => (
-                  <div
-                    key={warning.id || warning.timestamp || warning.message}
-                    className="rounded-xl border border-amber-700/60 bg-amber-950/60 px-3 py-2 shadow-inner"
-                  >
-                    <p className="text-sm font-medium text-amber-100">{warning.message || 'Warning issued'}</p>
-                    <WarningContext context={warning.context} />
-                  </div>
-                ))}
-                {warnings.length > 5 && (
-                  <p className="text-[10px] text-amber-200/70">Showing first 5 warnings.</p>
-                )}
-              </div>
+              {!warningsCollapsed && (
+                <div className="mt-3 space-y-3">
+                  {visibleWarnings.map((warning) => (
+                    <div
+                      key={warning.id || warning.timestamp || warning.message}
+                      className="rounded-xl border border-amber-700/60 bg-amber-950/60 px-3 py-2 shadow-inner"
+                    >
+                      <p className="text-sm font-medium text-amber-100">{warning.message || 'Warning issued'}</p>
+                      <WarningContext context={warning.context} />
+                    </div>
+                  ))}
+                  {warnings.length > 5 && !showAllWarnings && (
+                    <p className="text-[10px] text-amber-200/70">Showing first 5 warnings. Alt/Option or double-click the header to expand fully.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -591,6 +720,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                       isActiveSymbol={trade.symbol === activeSymbol}
                       visible
                       onHover={(hovering) => handleTradeHover(trade, hovering)}
+                      onClick={() => handleTradeClick(trade)}
                     />
                   )
                 })}
@@ -600,7 +730,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             )}
           </div>
 
-          <section className="space-y-3">
+          <section className="space-y-3" ref={chartSectionRef}>
             <div className="flex items-center justify-between">
               <p className="text-xs font-medium text-slate-400">Context Chart</p>
               {activeSymbol ? <span className="text-xs font-medium text-slate-500">{activeSymbol}</span> : null}
@@ -618,7 +748,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                         : 'border-slate-800 bg-slate-950/50 text-slate-500 hover:border-slate-700 hover:bg-slate-950 hover:text-slate-400'
                     }`}
                   >
-                    {symbol}
+                    <span className="inline-flex items-center gap-1">
+                      {symbol}
+                      {isSeriesCompleted(seriesBySymbol.get(symbol)) ? (
+                        <Check className="size-3 text-emerald-400" />
+                      ) : null}
+                    </span>
                   </button>
                 ))}
               </div>

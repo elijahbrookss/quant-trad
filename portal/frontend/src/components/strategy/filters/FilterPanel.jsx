@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
+import { Filter, Plus } from 'lucide-react'
 import { Button } from '../../ui'
-import { FilterModal } from './FilterModal.jsx'
-import { buildFilterSummary } from './filterUtils.js'
+import { FilterDrawer } from './FilterDrawer.jsx'
+import { GateCard } from './GateCard.jsx'
 
 export const FilterPanel = ({
   title,
@@ -13,15 +14,15 @@ export const FilterPanel = ({
   ActionButton,
   emptyState,
 }) => {
-  const [modalState, setModalState] = useState({ open: false, filter: null })
+  const [drawerState, setDrawerState] = useState({ open: false, filter: null })
 
-  const handleAdd = () => setModalState({ open: true, filter: null })
-  const handleEdit = (filter) => setModalState({ open: true, filter })
-  const handleClose = () => setModalState({ open: false, filter: null })
+  const handleAdd = () => setDrawerState({ open: true, filter: null })
+  const handleEdit = (filter) => setDrawerState({ open: true, filter })
+  const handleClose = () => setDrawerState({ open: false, filter: null })
 
   const handleSave = async (payload) => {
-    if (modalState.filter?.id) {
-      await onUpdate(modalState.filter.id, payload)
+    if (drawerState.filter?.id) {
+      await onUpdate(drawerState.filter.id, payload)
     } else {
       await onCreate(payload)
     }
@@ -38,61 +39,61 @@ export const FilterPanel = ({
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-semibold text-white">{title}</h4>
-          {description && <p className="mt-1 text-xs text-slate-400">{description}</p>}
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-semibold text-white">{title}</h3>
+          {filters.length > 0 && (
+            <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-slate-400">
+              {filters.length} gate{filters.length === 1 ? '' : 's'}
+            </span>
+          )}
         </div>
-        <Button onClick={handleAdd}>Add Filter</Button>
+        <Button onClick={handleAdd} className="gap-1.5">
+          <Plus className="h-4 w-4" />
+          Add gate
+        </Button>
       </div>
+      {description && <p className="text-xs text-slate-500">{description}</p>}
 
       {filters.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          {emptyState || 'No filters configured yet.'}
+        <div className="flex items-center gap-4 rounded-lg border border-dashed border-white/10 bg-black/20 px-5 py-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/5">
+            <Filter className="h-5 w-5 text-slate-500" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm text-slate-400">
+              {emptyState || 'No gates configured yet.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdd}
+            className="shrink-0 text-xs font-medium text-[color:var(--accent-text-soft)] transition hover:text-[color:var(--accent-text-strong)]"
+          >
+            Add gate
+          </button>
         </div>
       ) : (
-        <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-white/5">
+        <div className="space-y-3">
           {filters.map((filter) => (
-            <div key={filter.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <button
-                type="button"
-                onClick={() => handleToggle(filter)}
-                className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] ${
-                  filter.enabled
-                    ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-500/30'
-                    : 'bg-slate-700/60 text-slate-400 border border-white/5'
-                }`}
-              >
-                {filter.enabled ? 'Enabled' : 'Disabled'}
-              </button>
-              <div className="min-w-[200px] flex-1">
-                <p className="text-sm font-semibold text-white">
-                  {filter.name || buildFilterSummary(filter)}
-                </p>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  {buildFilterSummary(filter)}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <ActionButton variant="ghost" onClick={() => handleEdit(filter)}>
-                  Edit
-                </ActionButton>
-                <ActionButton variant="danger" onClick={() => onDelete(filter.id)}>
-                  Delete
-                </ActionButton>
-              </div>
-            </div>
+            <GateCard
+              key={filter.id}
+              filter={filter}
+              onToggle={handleToggle}
+              onEdit={handleEdit}
+              onDelete={(entry) => onDelete(entry.id)}
+            />
           ))}
         </div>
       )}
 
-      <FilterModal
-        open={modalState.open}
-        initialFilter={modalState.filter}
+      <FilterDrawer
+        open={drawerState.open}
+        initialFilter={drawerState.filter}
         onClose={handleClose}
         onSave={handleSave}
-        title={modalState.filter ? 'Edit filter' : 'Add filter'}
+        title={drawerState.filter ? 'Edit gate' : 'Add gate'}
       />
     </div>
   )
