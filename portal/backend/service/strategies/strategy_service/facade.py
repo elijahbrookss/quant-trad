@@ -7,13 +7,18 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
 from ...risk.atm import normalise_template
-from ...indicators.indicator_service import generate_signals_for_instance, get_instance_meta
-from strategies import evaluator, markers
+from ...indicators.indicator_service import get_instance_meta
+from strategies import evaluator
 from . import persistence
+from .filters import (
+    FilterDefinition,
+    validate_filter_dsl,
+)
+from .evaluation_orchestrator import StrategyEvaluationDependencies, StrategyEvaluationOrchestrator
 
 
 logger = logging.getLogger(__name__)
@@ -49,7 +54,6 @@ _format_counter = evaluator._format_counter
 _collect_rule_identifiers = evaluator._collect_rule_identifiers
 _normalise_match_mode = evaluator._normalise_match_mode
 _normalise_action = evaluator._normalise_action
-_extract_signal_epoch = evaluator._extract_signal_epoch
 _evaluate_condition = evaluator._evaluate_condition
 
 storage_load_strategies = persistence.load_strategies
@@ -59,13 +63,18 @@ storage_upsert_strategy_indicator = persistence.upsert_strategy_indicator
 storage_delete_strategy_indicator = persistence.delete_strategy_indicator
 storage_upsert_strategy_rule = persistence.upsert_strategy_rule
 storage_delete_strategy_rule = persistence.delete_strategy_rule
+storage_list_strategy_filters = persistence.list_strategy_filters
+storage_list_rule_filters = persistence.list_rule_filters
+storage_upsert_strategy_filter = persistence.upsert_strategy_filter
+storage_upsert_rule_filter = persistence.upsert_rule_filter
+storage_delete_strategy_filter = persistence.delete_strategy_filter
+storage_delete_rule_filter = persistence.delete_rule_filter
 list_symbol_presets = persistence.list_symbol_presets
 upsert_symbol_preset = persistence.upsert_symbol_preset
 delete_symbol_preset = persistence.delete_symbol_preset
 load_atm_templates = persistence.list_atm_templates
 get_atm_template = persistence.get_atm_template
 upsert_atm_template = persistence.upsert_atm_template
-build_chart_markers = markers.build_chart_markers
 storage_upsert_strategy_instrument = persistence.upsert_strategy_instrument
 storage_delete_strategy_instrument = persistence.delete_strategy_instrument
 storage_list_strategy_instrument_symbols = persistence.list_strategy_instrument_symbols
@@ -209,6 +218,7 @@ class StrategyRule:
     match: str = "all"
     description: Optional[str] = None
     enabled: bool = True
+    filters: List[FilterDefinition] = field(default_factory=list)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -223,6 +233,7 @@ class StrategyRule:
             "match": self.match,
             "description": self.description,
             "enabled": self.enabled,
+            "filters": [flt.to_dict() for flt in self.filters],
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
@@ -306,6 +317,7 @@ class StrategyDefinition:
     indicator_ids: List[str] = field(default_factory=list)
     # REMOVED: indicator_snapshots - strategies now load indicators fresh from DB
     rules: MutableMapping[str, StrategyRule] = field(default_factory=dict)
+    global_filters: List[FilterDefinition] = field(default_factory=list)
     instrument_messages: List[Dict[str, str]] = field(default_factory=list)
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
@@ -427,6 +439,7 @@ class StrategyDefinition:
             "instruments": instruments,
             "instrument_messages": instrument_messages,
             "rules": [rule.to_dict() for rule in self.rules.values()],
+            "global_filters": [flt.to_dict() for flt in self.global_filters],
             "atm_template": atm_template or {},
             "atm_template_id": self.atm_template_id,
             "base_risk_per_trade": self.base_risk_per_trade,
@@ -608,6 +621,49 @@ class StrategyRegistry:
                     updated_at=_parse_timestamp(rule_entry.get("updated_at")),
                 )
                 base.rules[rule_id] = rule
+
+            for filter_entry in entry.get("strategy_filters_raw", []):
+                filter_id = str(filter_entry.get("id") or "").strip()
+                if not filter_id:
+                    continue
+                dsl_payload = filter_entry.get("dsl") or {}
+                base.global_filters.append(
+                    FilterDefinition(
+                        id=filter_id,
+                        scope=str(filter_entry.get("scope") or "GLOBAL").upper(),
+                        name=str(filter_entry.get("name") or filter_id),
+                        description=filter_entry.get("description"),
+                        dsl=dict(dsl_payload),
+                        enabled=bool(filter_entry.get("enabled", True)),
+                        created_at=_parse_timestamp(filter_entry.get("created_at")),
+                        updated_at=_parse_timestamp(filter_entry.get("updated_at")),
+                    )
+                )
+
+            rule_filters_by_rule: Dict[str, List[FilterDefinition]] = {}
+            for filter_entry in entry.get("rule_filters_raw", []):
+                filter_id = str(filter_entry.get("id") or "").strip()
+                rule_id = str(filter_entry.get("rule_id") or "").strip()
+                if not filter_id or not rule_id:
+                    continue
+                dsl_payload = filter_entry.get("dsl") or {}
+                rule_filters_by_rule.setdefault(rule_id, []).append(
+                    FilterDefinition(
+                        id=filter_id,
+                        scope=str(filter_entry.get("scope") or "RULE").upper(),
+                        name=str(filter_entry.get("name") or filter_id),
+                        description=filter_entry.get("description"),
+                        dsl=dict(dsl_payload),
+                        enabled=bool(filter_entry.get("enabled", True)),
+                        created_at=_parse_timestamp(filter_entry.get("created_at")),
+                        updated_at=_parse_timestamp(filter_entry.get("updated_at")),
+                    )
+                )
+
+            for rule_id, filters in rule_filters_by_rule.items():
+                rule = base.rules.get(rule_id)
+                if rule:
+                    rule.filters = filters
 
             self._records[strategy_id] = base
 
@@ -976,6 +1032,185 @@ class StrategyRegistry:
         )
         return record.to_dict()
 
+    def list_strategy_filters(self, strategy_id: str) -> List[Dict[str, Any]]:
+        record = self.get(strategy_id)
+        return [flt.to_dict() for flt in record.global_filters]
+
+    def list_rule_filters(self, strategy_id: str, rule_id: str) -> List[Dict[str, Any]]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        return [flt.to_dict() for flt in rule.filters]
+
+    def add_strategy_filter(
+        self,
+        strategy_id: str,
+        *,
+        name: str,
+        dsl: Mapping[str, Any],
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        validate_filter_dsl(dsl)
+        filter_id = str(uuid.uuid4())
+        now = _utcnow()
+        flt = FilterDefinition(
+            id=filter_id,
+            scope="GLOBAL",
+            name=str(name).strip() or filter_id,
+            description=str(description).strip() if description else None,
+            dsl=dict(dsl),
+            enabled=bool(enabled),
+            created_at=now,
+            updated_at=now,
+        )
+        record.global_filters.append(flt)
+        storage_upsert_strategy_filter(flt.to_storage_payload(strategy_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_created | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+        return flt.to_dict()
+
+    def update_strategy_filter(
+        self,
+        strategy_id: str,
+        filter_id: str,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        target = next((flt for flt in record.global_filters if flt.id == filter_id), None)
+        if target is None:
+            raise KeyError("Filter not found")
+        if "name" in fields and fields["name"] is not None:
+            target.name = str(fields["name"]).strip()
+        if "description" in fields:
+            description = fields.get("description")
+            target.description = str(description).strip() if description else None
+        if "enabled" in fields and fields["enabled"] is not None:
+            target.enabled = bool(fields["enabled"])
+        if "dsl" in fields and fields["dsl"] is not None:
+            validate_filter_dsl(fields["dsl"])
+            target.dsl = dict(fields["dsl"])
+        target.updated_at = _utcnow()
+        storage_upsert_strategy_filter(target.to_storage_payload(strategy_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_updated | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+        return target.to_dict()
+
+    def remove_strategy_filter(self, strategy_id: str, filter_id: str) -> None:
+        record = self.get(strategy_id)
+        before = len(record.global_filters)
+        record.global_filters = [flt for flt in record.global_filters if flt.id != filter_id]
+        if len(record.global_filters) == before:
+            raise KeyError("Filter not found")
+        storage_delete_strategy_filter(filter_id)
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "strategy_filter_deleted | strategy=%s filter=%s",
+            strategy_id,
+            filter_id,
+        )
+
+    def add_rule_filter(
+        self,
+        strategy_id: str,
+        rule_id: str,
+        *,
+        name: str,
+        dsl: Mapping[str, Any],
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        validate_filter_dsl(dsl)
+        filter_id = str(uuid.uuid4())
+        now = _utcnow()
+        flt = FilterDefinition(
+            id=filter_id,
+            scope="RULE",
+            name=str(name).strip() or filter_id,
+            description=str(description).strip() if description else None,
+            dsl=dict(dsl),
+            enabled=bool(enabled),
+            created_at=now,
+            updated_at=now,
+        )
+        rule.filters.append(flt)
+        storage_upsert_rule_filter(flt.to_storage_payload(rule_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_created | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+        return flt.to_dict()
+
+    def update_rule_filter(
+        self,
+        strategy_id: str,
+        rule_id: str,
+        filter_id: str,
+        **fields: Any,
+    ) -> Dict[str, Any]:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        target = next((flt for flt in rule.filters if flt.id == filter_id), None)
+        if target is None:
+            raise KeyError("Filter not found")
+        if "name" in fields and fields["name"] is not None:
+            target.name = str(fields["name"]).strip()
+        if "description" in fields:
+            description = fields.get("description")
+            target.description = str(description).strip() if description else None
+        if "enabled" in fields and fields["enabled"] is not None:
+            target.enabled = bool(fields["enabled"])
+        if "dsl" in fields and fields["dsl"] is not None:
+            validate_filter_dsl(fields["dsl"])
+            target.dsl = dict(fields["dsl"])
+        target.updated_at = _utcnow()
+        storage_upsert_rule_filter(target.to_storage_payload(rule_id))
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_updated | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+        return target.to_dict()
+
+    def remove_rule_filter(self, strategy_id: str, rule_id: str, filter_id: str) -> None:
+        record = self.get(strategy_id)
+        rule = record.rules.get(rule_id)
+        if rule is None:
+            raise KeyError("Rule not found")
+        before = len(rule.filters)
+        rule.filters = [flt for flt in rule.filters if flt.id != filter_id]
+        if len(rule.filters) == before:
+            raise KeyError("Filter not found")
+        storage_delete_rule_filter(filter_id)
+        storage_upsert_strategy(record.to_storage_payload())
+        logger.info(
+            "rule_filter_deleted | strategy=%s rule=%s filter=%s",
+            strategy_id,
+            rule_id,
+            filter_id,
+        )
+
     def evaluate(
         self,
         strategy_id: str,
@@ -985,408 +1220,22 @@ class StrategyRegistry:
         interval: str,
         instrument_ids: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None,
+        dependencies: Optional[StrategyEvaluationDependencies] = None,
     ) -> Dict[str, Any]:
         """Evaluate a strategy against current indicator signals."""
 
         record = self.get(strategy_id)
-
-        requested_ids = [str(item).strip() for item in (instrument_ids or []) if item]
-        if not requested_ids:
-            raise ValueError("instrument_ids is required for signal preview")
-
-        allowed_instruments: Dict[str, InstrumentSlot] = {}
-        for slot in record.instruments:
-            inst_id = None
-            if isinstance(slot.metadata, dict):
-                inst_id = slot.metadata.get("instrument_id")
-            if not inst_id:
-                raise ValueError(f"Instrument id missing for strategy slot {slot.symbol}")
-            allowed_instruments[str(inst_id)] = slot
-
-        for inst_id in requested_ids:
-            if inst_id not in allowed_instruments:
-                raise ValueError(f"Instrument {inst_id} is not attached to this strategy")
-
-        # Validate that the strategy has indicators attached
-        if not record.indicator_ids:
-            logger.error(
-                "strategy_signal_preview_no_indicators | strategy=%s instrument_ids=%s rules=%d "
-                "message='Strategy has no indicators attached. Please attach indicators to this strategy before running signal preview.'",
-                strategy_id,
-                requested_ids,
-                len(record.rules),
-            )
-            raise ValueError(
-                "Strategy has no indicators attached. Please attach indicators to this strategy before running signal preview."
-            )
-
-        indicator_rule_map: Dict[str, List[str]] = {}
-        for rule in record.rules.values():
-            for condition in rule.conditions:
-                indicator_id = condition.indicator_id
-                rule_id = condition.rule_id
-                if not indicator_id or not rule_id:
-                    continue
-                bucket = indicator_rule_map.setdefault(indicator_id, [])
-                if rule_id not in bucket:
-                    bucket.append(rule_id)
-
-        # Validate that all indicators referenced in rules are actually attached to the strategy
-        orphaned_indicators = [ind_id for ind_id in indicator_rule_map.keys() if ind_id not in record.indicator_ids]
-        if orphaned_indicators:
-            logger.error(
-                "strategy_signal_preview_orphaned_indicators | strategy=%s orphaned_indicators=%s attached_indicators=%s "
-                "message='Strategy rules reference indicators that are not attached to the strategy.'",
-                strategy_id,
-                orphaned_indicators,
-                record.indicator_ids,
-            )
-            raise ValueError(
-                f"Strategy rules reference indicators that are not attached to the strategy: {', '.join(orphaned_indicators)}. "
-                "Please attach these indicators to the strategy or update the rules."
-            )
-
-        def _merge_enabled_rules(existing: Any, extras: Iterable[str]) -> List[str]:
-            ordered: List[str] = []
-            seen: Set[str] = set()
-
-            sources: List[Any] = []
-            if existing is not None:
-                sources.append(existing)
-            sources.append(extras)
-
-            for source in sources:
-                if not source:
-                    continue
-                if isinstance(source, Mapping):
-                    iterable = source.values()
-                elif isinstance(source, (str, bytes)):
-                    iterable = [source]
-                else:
-                    iterable = source
-
-                for item in iterable:
-                    text = str(item).strip()
-                    if not text:
-                        continue
-                    key = text.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    ordered.append(text)
-
-            return ordered
-
-        def _config_diff(base: Mapping[str, Any], derived: Mapping[str, Any]) -> Dict[str, Any]:
-            diff: Dict[str, Any] = {}
-            base_keys = set(base.keys())
-            for key, value in derived.items():
-                if key not in base_keys or base.get(key) != value:
-                    diff[key] = value
-            removed = [key for key in base_keys if key not in derived]
-            if removed:
-                diff["_removed"] = sorted(removed)
-            return diff
-
-        def _evaluate_for_instrument(instrument_id: str) -> Dict[str, Any]:
-            instrument_rec = instrument_service.get_instrument_record(instrument_id)
-            if not instrument_rec:
-                raise ValueError(f"Instrument record not found: {instrument_id}")
-
-            effective_symbol = instrument_rec.get("symbol")
-            effective_datasource = instrument_rec.get("datasource")
-            effective_exchange = instrument_rec.get("exchange")
-            if not effective_symbol:
-                raise ValueError(f"Instrument {instrument_id} is missing a symbol")
-            if not effective_datasource:
-                raise ValueError(f"Instrument {instrument_id} is missing a datasource")
-
-            indicator_payloads: Dict[str, Dict[str, Any]] = {}
-            missing_indicators: List[str] = []
-            run_id = uuid.uuid4().hex
-            base_config = dict(config or {})
-
-            logger.info(
-                "strategy_signal_preview_start | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s config_keys=%s indicator_count=%d",
-                run_id,
-                strategy_id,
-                instrument_id,
-                start,
-                end,
-                interval,
-                effective_symbol,
-                effective_datasource,
-                effective_exchange,
-                sorted(base_config.keys()),
-                len(record.indicator_ids),
-            )
-
-            total_signals = 0
-            for inst_id in record.indicator_ids:
-                try:
-                    per_config = dict(base_config)
-                    rule_filters = indicator_rule_map.get(inst_id)
-                    if rule_filters:
-                        merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
-                        if merged_rules:
-                            per_config["enabled_rules"] = merged_rules
-                        else:
-                            per_config.pop("enabled_rules", None)
-                    logger.info(
-                        "strategy_signal_preview_generate | run_id=%s strategy=%s instrument_id=%s indicator=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s enabled_rules=%s config_diff=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        start,
-                        end,
-                        interval,
-                        effective_symbol,
-                        effective_datasource,
-                        effective_exchange,
-                        per_config.get("enabled_rules"),
-                        _config_diff(base_config, per_config),
-                    )
-                    payload = generate_signals_for_instance(
-                        inst_id,
-                        start=start,
-                        end=end,
-                        interval=interval,
-                        symbol=effective_symbol,
-                        datasource=effective_datasource,
-                        exchange=effective_exchange,
-                        config=per_config,
-                    )
-                    indicator_payloads[inst_id] = payload
-                    signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
-                    signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
-                    total_signals += signal_count
-                    error_hint = payload.get("error") if isinstance(payload, Mapping) else None
-                    logger.info(
-                        "strategy_signal_preview_result | run_id=%s strategy=%s instrument_id=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        signal_count,
-                        start,
-                        end,
-                        interval,
-                        error_hint,
-                    )
-                    if isinstance(signals_obj, list):
-                        for signal in signals_obj:
-                            if isinstance(signal, dict):
-                                _ensure_signal_direction(signal)
-                        summary = _summarise_signal_population(signals_obj)
-                        logger.debug(
-                            "strategy_indicator_signal_summary | strategy=%s instrument_id=%s indicator=%s total=%d types=[%s] rules=[%s] directions=[%s]",
-                            strategy_id,
-                            instrument_id,
-                            inst_id,
-                            len(signals_obj),
-                            _format_counter(summary["types"]),
-                            _format_counter(summary["rules"]),
-                            _format_counter(summary["directions"]),
-                        )
-                except KeyError:
-                    missing_indicators.append(inst_id)
-                    indicator_payloads[inst_id] = {"error": "Indicator not available"}
-                    logger.warning(
-                        "strategy_indicator_missing | strategy=%s instrument_id=%s indicator=%s",
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                    )
-                    continue
-                except Exception as exc:  # noqa: BLE001 - propagate failures as payload errors
-                    logger.warning(
-                        "strategy_signal_preview_failed | run_id=%s strategy=%s instrument_id=%s indicator=%s error=%s",
-                        run_id,
-                        strategy_id,
-                        instrument_id,
-                        inst_id,
-                        exc,
-                    )
-                    indicator_payloads[inst_id] = {"error": str(exc)}
-
-            logger.info(
-                "strategy_signal_preview_complete | run_id=%s strategy=%s instrument_id=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s indicators=%d missing=%s total_signals=%d",
-                run_id,
-                strategy_id,
-                instrument_id,
-                start,
-                end,
-                interval,
-                effective_symbol,
-                effective_datasource,
-                effective_exchange,
-                len(record.indicator_ids),
-                missing_indicators,
-                total_signals,
-            )
-
-            rule_results = [rule.evaluate(indicator_payloads) for rule in record.rules.values()]
-            for res in rule_results:
-                conditions = res.get("conditions") or []
-                matched_count = sum(1 for cond in conditions if cond.get("matched"))
-                total_conditions = len(conditions)
-                logger.debug(
-                    "strategy_rule_evaluated | strategy=%s instrument_id=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
-                    strategy_id,
-                    instrument_id,
-                    res.get("rule_id"),
-                    res.get("action"),
-                    res.get("matched"),
-                    matched_count,
-                    total_conditions,
-                    res.get("reason"),
-                )
-                for cond in conditions:
-                    logger.debug(
-                        "strategy_rule_condition | strategy=%s instrument_id=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
-                        strategy_id,
-                        instrument_id,
-                        res.get("rule_id"),
-                        cond.get("indicator_id"),
-                        cond.get("signal_type"),
-                        cond.get("direction"),
-                        cond.get("direction_detected"),
-                        cond.get("matched"),
-                        cond.get("reason"),
-                        cond.get("stats"),
-                        cond.get("observed_rules"),
-                        cond.get("observed_directions"),
-                    )
-
-            buy_signals = [res for res in rule_results if res["matched"] and res["action"] == "buy"]
-            sell_signals = [res for res in rule_results if res["matched"] and res["action"] == "sell"]
-
-            chart_markers = build_chart_markers(buy_signals, sell_signals)
-
-            logger.info(
-                "strategy_signals_generated | strategy=%s instrument_id=%s symbol=%s interval=%s start=%s end=%s buys=%d sells=%d",
-                strategy_id,
-                instrument_id,
-                effective_symbol,
-                interval,
-                start,
-                end,
-                len(buy_signals),
-                len(sell_signals),
-            )
-
-            if not buy_signals and not sell_signals:
-                aggregate_stats = {
-                    "signals": 0,
-                    "type_matches": 0,
-                    "rule_matches": 0,
-                    "direction_matches": 0,
-                    "final_matches": 0,
-                }
-                aggregate_rules: set[str] = set()
-                aggregate_directions: set[str] = set()
-                for res in rule_results:
-                    for cond in res.get("conditions") or []:
-                        stats = cond.get("stats") or {}
-                        for key in aggregate_stats:
-                            try:
-                                aggregate_stats[key] += int(stats.get(key, 0) or 0)
-                            except (TypeError, ValueError):  # pragma: no cover - defensive
-                                continue
-                        observed_rules = cond.get("observed_rules") or []
-                        observed_directions = cond.get("observed_directions") or []
-                        aggregate_rules.update(map(str, observed_rules))
-                        aggregate_directions.update(map(str, observed_directions))
-
-                logger.info(
-                    "strategy_signals_none | strategy=%s instrument_id=%s symbol=%s interval=%s start=%s end=%s indicators=%d rules=%d stats=%s observed_rules=%s observed_directions=%s",
-                    strategy_id,
-                    instrument_id,
-                    effective_symbol,
-                    interval,
-                    start,
-                    end,
-                    len(indicator_payloads),
-                    len(rule_results),
-                    aggregate_stats,
-                    sorted(aggregate_rules),
-                    sorted(aggregate_directions),
-                )
-                for res in rule_results:
-                    conditions = res.get("conditions") or []
-                    matched_count = sum(1 for cond in conditions if cond.get("matched"))
-                    total_conditions = len(conditions)
-                    logger.info(
-                        "strategy_rule_trace | strategy=%s instrument_id=%s rule=%s action=%s matched=%s matched_conditions=%d/%d reason=%s",
-                        strategy_id,
-                        instrument_id,
-                        res.get("rule_id"),
-                        res.get("action"),
-                        res.get("matched"),
-                        matched_count,
-                        total_conditions,
-                        res.get("reason"),
-                    )
-                    for cond in conditions:
-                        logger.info(
-                            "strategy_condition_trace | strategy=%s instrument_id=%s rule=%s indicator=%s signal_type=%s expected_direction=%s detected_direction=%s matched=%s reason=%s stats=%s observed_rules=%s observed_directions=%s",
-                            strategy_id,
-                            instrument_id,
-                            res.get("rule_id"),
-                            cond.get("indicator_id"),
-                            cond.get("signal_type"),
-                            cond.get("direction"),
-                            cond.get("direction_detected"),
-                            cond.get("matched"),
-                            cond.get("reason"),
-                            cond.get("stats"),
-                            cond.get("observed_rules"),
-                            cond.get("observed_directions"),
-                        )
-
-            status = "ok"
-            if missing_indicators:
-                status = "missing_indicators"
-
-            return {
-                "instrument_id": instrument_id,
-                "symbol": effective_symbol,
-                "window": {
-                    "start": start,
-                    "end": end,
-                    "interval": interval,
-                    "instrument_id": instrument_id,
-                    "symbol": effective_symbol,
-                    "datasource": effective_datasource,
-                    "exchange": effective_exchange,
-                },
-                "indicator_results": indicator_payloads,
-                "rule_results": rule_results,
-                "buy_signals": buy_signals,
-                "sell_signals": sell_signals,
-                "chart_markers": chart_markers,
-                "applied_inputs": {
-                    "instrument_id": instrument_id,
-                    "symbol": effective_symbol,
-                    "timeframe": record.timeframe,
-                    "datasource": effective_datasource,
-                    "exchange": effective_exchange,
-                },
-                "missing_indicators": missing_indicators,
-                "status": status,
-            }
-
-        instrument_payloads = {
-            instrument_id: _evaluate_for_instrument(instrument_id)
-            for instrument_id in requested_ids
-        }
-
-        return {
-            "strategy_id": record.id,
-            "strategy_name": record.name,
-            "instruments": instrument_payloads,
-        }
+        orchestrator = StrategyEvaluationOrchestrator(record, dependencies=dependencies)
+        inputs = orchestrator.build_inputs(
+            strategy_id=strategy_id,
+            start=start,
+            end=end,
+            interval=interval,
+            instrument_ids=instrument_ids,
+            config=config,
+        )
+        context = orchestrator.build_context(inputs)
+        return orchestrator.evaluate(inputs, context)
 
 
 _REGISTRY = StrategyRegistry()
@@ -1516,6 +1365,82 @@ def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
     return _REGISTRY.remove_rule(strategy_id, rule_id)
 
 
+def list_strategy_filters(strategy_id: str) -> List[Dict[str, Any]]:
+    """Return global filters for a strategy."""
+
+    return _REGISTRY.list_strategy_filters(strategy_id)
+
+
+def list_rule_filters(strategy_id: str, rule_id: str) -> List[Dict[str, Any]]:
+    """Return filters for a specific rule."""
+
+    return _REGISTRY.list_rule_filters(strategy_id, rule_id)
+
+
+def create_strategy_filter(
+    strategy_id: str,
+    *,
+    name: str,
+    dsl: Mapping[str, Any],
+    description: Optional[str] = None,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """Create a strategy-wide filter."""
+
+    return _REGISTRY.add_strategy_filter(
+        strategy_id,
+        name=name,
+        dsl=dsl,
+        description=description,
+        enabled=enabled,
+    )
+
+
+def update_strategy_filter(strategy_id: str, filter_id: str, **fields: Any) -> Dict[str, Any]:
+    """Update a strategy-wide filter."""
+
+    return _REGISTRY.update_strategy_filter(strategy_id, filter_id, **fields)
+
+
+def delete_strategy_filter(strategy_id: str, filter_id: str) -> None:
+    """Remove a strategy-wide filter."""
+
+    _REGISTRY.remove_strategy_filter(strategy_id, filter_id)
+
+
+def create_rule_filter(
+    strategy_id: str,
+    rule_id: str,
+    *,
+    name: str,
+    dsl: Mapping[str, Any],
+    description: Optional[str] = None,
+    enabled: bool = True,
+) -> Dict[str, Any]:
+    """Create a rule-scoped filter."""
+
+    return _REGISTRY.add_rule_filter(
+        strategy_id,
+        rule_id,
+        name=name,
+        dsl=dsl,
+        description=description,
+        enabled=enabled,
+    )
+
+
+def update_rule_filter(strategy_id: str, rule_id: str, filter_id: str, **fields: Any) -> Dict[str, Any]:
+    """Update a rule-scoped filter."""
+
+    return _REGISTRY.update_rule_filter(strategy_id, rule_id, filter_id, **fields)
+
+
+def delete_rule_filter(strategy_id: str, rule_id: str, filter_id: str) -> None:
+    """Remove a rule-scoped filter."""
+
+    _REGISTRY.remove_rule_filter(strategy_id, rule_id, filter_id)
+
+
 def generate_strategy_signals(
     strategy_id: str,
     *,
@@ -1524,6 +1449,7 @@ def generate_strategy_signals(
     interval: str,
     instrument_ids: Optional[List[str]] = None,
     config: Optional[Dict[str, Any]] = None,
+    dependencies: Optional[StrategyEvaluationDependencies] = None,
 ) -> Dict[str, Any]:
     """Evaluate the strategy rules for the requested window."""
 
@@ -1534,6 +1460,7 @@ def generate_strategy_signals(
         interval=interval,
         instrument_ids=instrument_ids,
         config=config,
+        dependencies=dependencies,
     )
 
 
