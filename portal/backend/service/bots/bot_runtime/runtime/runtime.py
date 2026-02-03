@@ -55,6 +55,7 @@ MAX_LOG_ENTRIES = 500
 MAX_WARNING_ENTRIES = 20
 INTRABAR_BASE_SECONDS = 0.4
 WALK_FORWARD_SAMPLE_INTERVAL = 50
+OVERLAY_SUMMARY_INTERVAL = 50
 
 register_overlay_type(
     "bot_trade_rays",
@@ -132,6 +133,7 @@ class BotRuntime:
         self._prepared: bool = False
         self._run_context: Optional[RunContext] = None
         self._chart_overlays: List[Dict[str, Any]] = []
+        self._overlay_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._last_stats: Dict[str, Any] = {}
         self._next_bar_at: Optional[datetime] = None
         self._policy = RuntimeModePolicy.for_run_type(self.run_type)
@@ -340,7 +342,6 @@ class BotRuntime:
         # Calculate total bars as max across all series (for multi-instrument support)
         self._total_bars = max(len(series.candles) for series in self._series) if self._series else 0
         self._build_series_states()
-        self._rebuild_overlay_cache()
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
@@ -353,6 +354,10 @@ class BotRuntime:
     def _rebuild_overlay_cache(self) -> None:
         """Rebuild overlays synchronously and signal the aggregator."""
 
+        if self._overlay_aggregator_thread and self._overlay_aggregator_thread.is_alive():
+            # Let the aggregator do the work to avoid duplicate passes.
+            self._notify_overlay_aggregation_needed()
+            return
         self._aggregate_overlays_to_cache()
         self._notify_overlay_aggregation_needed()
 
@@ -805,7 +810,8 @@ class BotRuntime:
             state.next_step_at = None
         else:
             self._schedule_next_step(state, self._bar_interval())
-        self._log_overlay_summary(state, candle)
+        if state.done or state.bar_index % OVERLAY_SUMMARY_INTERVAL == 0:
+            self._log_overlay_summary(state, candle)
         if self._should_update_state_for(state.series):
             self._update_state(self._state_candle_for(state.series, candle))
         self._push_update("bar")
@@ -845,7 +851,45 @@ class BotRuntime:
             current_epoch,
         )
         summary = self._overlay_summary(visible)
+        signature = (
+            summary.get("total_overlays"),
+            tuple(sorted(summary.get("type_counts", {}).items())),
+            tuple(sorted(summary.get("payload_counts", {}).items())),
+            tuple(sorted(summary.get("type_payload_counts", {}).items())),
+            tuple(
+                (key, tuple(sorted((k, v) for k, v in (value or {}).items())))
+                for key, value in (summary.get("transform_counts") or {}).items()
+            ),
+        )
+        series_key = self._strategy_key(series)
+        cached = self._overlay_summary_cache.get(series_key)
+        if cached and cached.get("signature") == signature and not state.done:
+            return
+        self._overlay_summary_cache[series_key] = {
+            "signature": signature,
+            "bar_index": state.bar_index,
+        }
         instrument = series.instrument or {}
+        regime_payload = (summary.get("type_payload_counts") or {}).get("regime_overlay", {})
+        regime_overlay_count = summary.get("type_counts", {}).get("regime_overlay", 0)
+        regime_marker_count = summary.get("type_counts", {}).get("regime_markers", 0)
+        # Extract first/last times to make log inspection easier in BotLens
+        start_epoch = None
+        end_epoch = None
+        for ov in visible:
+            if not isinstance(ov, Mapping):
+                continue
+            payload = ov.get("payload") if isinstance(ov, Mapping) else {}
+            boxes = payload.get("boxes") if isinstance(payload, Mapping) else None
+            if isinstance(boxes, list) and boxes:
+                starts = [b.get("x1") or b.get("start") for b in boxes if isinstance(b, Mapping)]
+                ends = [b.get("x2") or b.get("end") for b in boxes if isinstance(b, Mapping)]
+                starts = [s for s in starts if isinstance(s, (int, float))]
+                ends = [e for e in ends if isinstance(e, (int, float))]
+                if starts:
+                    start_epoch = min(start_epoch, min(starts)) if start_epoch is not None else min(starts)
+                if ends:
+                    end_epoch = max(end_epoch, max(ends)) if end_epoch is not None else max(ends)
         context = self._series_log_context(
             series,
             instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
@@ -857,12 +901,67 @@ class BotRuntime:
             overlay_profiles=summary.get("profile_counts"),
             overlay_profile_params=summary.get("profile_params_present"),
             overlay_transform=summary.get("transform_counts"),
+            regime_overlay=regime_overlay_count,
+            regime_overlay_boxes=regime_payload.get("boxes"),
+            regime_overlay_segments=regime_payload.get("segments"),
+            regime_markers=regime_marker_count,
+            overlay_type_payloads=summary.get("type_payload_counts"),
+            overlay_start=_isoformat(datetime.fromtimestamp(start_epoch, tz=timezone.utc)) if start_epoch else None,
+            overlay_end=_isoformat(datetime.fromtimestamp(end_epoch, tz=timezone.utc)) if end_epoch else None,
         )
         logger.info(with_log_context("instrument_overlay_summary", context))
+        self._log_event(
+            "overlay_summary",
+            series=series,
+            candle=candle,
+            overlays=summary.get("total_overlays"),
+            overlay_types=summary.get("type_counts"),
+            overlay_payloads=summary.get("payload_counts"),
+            overlay_profiles=summary.get("profile_counts"),
+            overlay_profile_params=summary.get("profile_params_present"),
+            overlay_transform=summary.get("transform_counts"),
+            regime_overlay=regime_overlay_count,
+            regime_overlay_boxes=regime_payload.get("boxes"),
+            regime_overlay_segments=regime_payload.get("segments"),
+            regime_markers=regime_marker_count,
+            overlay_type_payloads=summary.get("type_payload_counts"),
+            overlay_start=_isoformat(datetime.fromtimestamp(start_epoch, tz=timezone.utc)) if start_epoch else None,
+            overlay_end=_isoformat(datetime.fromtimestamp(end_epoch, tz=timezone.utc)) if end_epoch else None,
+        )
         self._notify_overlay_aggregation_needed()
 
     @staticmethod
     def _overlay_summary(overlays: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        def _payload_has_content(payload: Mapping[str, Any]) -> bool:
+            if not isinstance(payload, Mapping):
+                return False
+            list_keys = {
+                "price_lines",
+                "markers",
+                "touchPoints",
+                "touch_points",
+                "boxes",
+                "segments",
+                "polylines",
+                "bubbles",
+            }
+            for key in list_keys:
+                entries = payload.get(key)
+                if isinstance(entries, list) and entries:
+                    return True
+            for key, value in payload.items():
+                if key in list_keys:
+                    continue
+                if isinstance(value, list) and value:
+                    return True
+                if isinstance(value, Mapping) and value:
+                    return True
+                if isinstance(value, (int, float)) and value != 0:
+                    return True
+                if isinstance(value, str) and value.strip():
+                    return True
+            return False
+
         type_counts: Dict[str, int] = {}
         payload_counts = {
             "boxes": 0,
@@ -874,6 +973,7 @@ class BotRuntime:
         }
         profile_counts: Dict[str, int] = {}
         profile_params_present: Dict[str, int] = {}
+        type_payload_counts: Dict[str, Dict[str, int]] = {}
         transform_counts: Dict[str, Dict[str, int]] = {
             "known_profiles": {},
             "merged_profiles": {},
@@ -885,6 +985,9 @@ class BotRuntime:
             type_counts[overlay_type] = type_counts.get(overlay_type, 0) + 1
             payload = overlay.get("payload")
             if not isinstance(payload, Mapping):
+                continue
+            if not _payload_has_content(payload):
+                # Skip empty overlays so counts reflect visible artefacts
                 continue
             profiles = payload.get("profiles")
             if isinstance(profiles, list):
@@ -902,12 +1005,18 @@ class BotRuntime:
                 entries = payload.get(key)
                 if isinstance(entries, list):
                     payload_counts[key] += len(entries)
+                    per_type = type_payload_counts.setdefault(
+                        overlay_type,
+                        {name: 0 for name in payload_counts.keys()},
+                    )
+                    per_type[key] += len(entries)
         return {
             "total_overlays": len(overlays or []),
             "type_counts": type_counts,
             "payload_counts": payload_counts,
             "profile_counts": profile_counts,
             "profile_params_present": profile_params_present,
+            "type_payload_counts": type_payload_counts,
             "transform_counts": transform_counts,
         }
 
@@ -936,6 +1045,7 @@ class BotRuntime:
             self._primary_series_key = None
             self._total_bars = 0
             self._chart_overlays = []
+            self._overlay_summary_cache = {}
             self._last_stats = {}
             self._next_bar_at = None
             self._logs.clear()
@@ -2079,6 +2189,60 @@ class BotRuntime:
         payload["warnings"] = self.warnings()
         payload["runtime"] = self.snapshot()
         return payload
+
+    def regime_overlay_dump(self) -> Dict[str, Any]:
+        """Return raw and visible regime overlays for debugging (no trimming on raw)."""
+
+        self._ensure_prepared()
+        # Ensure overlay cache is current.
+        self._aggregate_overlays_to_cache()
+        raw_overlays = [
+            ov
+            for ov in self._chart_overlays or []
+            if isinstance(ov, Mapping) and str(ov.get("type") or "").lower() in {"regime_overlay", "regime_markers"}
+        ]
+
+        current_candle = self._primary_state_candle()
+        current_epoch = int(current_candle.time.timestamp()) if current_candle else None
+        status = str(self.state.get("status") or "").lower()
+        visible = self._chart_state_builder.visible_overlays(raw_overlays, status, current_epoch)
+
+        def _start_end(overlay: Mapping[str, Any]) -> Tuple[Optional[int], Optional[int]]:
+            payload = overlay.get("payload") if isinstance(overlay, Mapping) else {}
+            boxes = payload.get("boxes") if isinstance(payload, Mapping) else None
+            if isinstance(boxes, list) and boxes:
+                starts = [b.get("x1") or b.get("start") for b in boxes if isinstance(b, Mapping)]
+                ends = [b.get("x2") or b.get("end") for b in boxes if isinstance(b, Mapping)]
+                starts = [s for s in starts if isinstance(s, (int, float))]
+                ends = [e for e in ends if isinstance(e, (int, float))]
+                return (int(min(starts)) if starts else None, int(max(ends)) if ends else None)
+            segments = payload.get("segments") if isinstance(payload, Mapping) else None
+            if isinstance(segments, list) and segments:
+                starts = [s.get("x1") for s in segments if isinstance(s, Mapping)]
+                ends = [s.get("x2") for s in segments if isinstance(s, Mapping)]
+                starts = [s for s in starts if isinstance(s, (int, float))]
+                ends = [e for e in ends if isinstance(e, (int, float))]
+                return (int(min(starts)) if starts else None, int(max(ends)) if ends else None)
+            return (None, None)
+
+        def _with_meta(overlay: Mapping[str, Any]) -> Dict[str, Any]:
+            start_epoch, end_epoch = _start_end(overlay)
+            return {
+                "type": overlay.get("type"),
+                "instrument_id": overlay.get("instrument_id"),
+                "symbol": overlay.get("symbol"),
+                "timeframe": overlay.get("timeframe"),
+                "strategy_id": overlay.get("strategy_id"),
+                "start_time": _isoformat(datetime.fromtimestamp(start_epoch, tz=timezone.utc)) if start_epoch else None,
+                "end_time": _isoformat(datetime.fromtimestamp(end_epoch, tz=timezone.utc)) if end_epoch else None,
+                "payload": overlay.get("payload"),
+            }
+
+        return {
+            "current_epoch": current_epoch,
+            "raw": [_with_meta(ov) for ov in raw_overlays],
+            "visible": [_with_meta(ov) for ov in visible],
+        }
 
     def subscribe(self) -> Tuple[str, Queue]:
         """Register a streaming subscriber and return its token/queue."""
