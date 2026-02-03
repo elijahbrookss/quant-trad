@@ -6,6 +6,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
 from indicators.runtime.incremental_cache_registry import is_incremental_cacheable
+from signals.overlays.schema import build_overlay
 
 from .context import IndicatorServiceContext, _context
 from ...market import instrument_service
@@ -73,7 +74,23 @@ class IndicatorOverlayBuilder:
         )
         if cached_payload is not None:
             logger.info("event=overlay_cache_hit indicator_id=%s", inst_id)
-            return cached_payload
+            if isinstance(cached_payload, dict) and "type" in cached_payload and "payload" in cached_payload:
+                return cached_payload
+            logger.warning(
+                "event=overlay_cache_payload_invalid indicator_id=%s cache_key=%s message='cached payload missing type/payload'",
+                inst_id,
+                self._cache_key(
+                    inst_id,
+                    entry,
+                    sym,
+                    interval,
+                    data_ctx.start,
+                    data_ctx.end,
+                    effective_datasource,
+                    effective_exchange,
+                    overlay_options,
+                ),
+            )
         if cache_enabled:
             logger.info("event=overlay_cache_miss indicator_id=%s", inst_id)
         logger.info(
@@ -114,6 +131,7 @@ class IndicatorOverlayBuilder:
         )
         self._validate_payload(payload)
         self._log_counts(inst_id, payload, raw_payload)
+        overlay = build_overlay(str(entry.meta.get("type")), payload)
         self._maybe_store_cached(
             inst_id,
             entry,
@@ -124,13 +142,13 @@ class IndicatorOverlayBuilder:
             effective_datasource,
             effective_exchange,
             overlay_options,
-            payload,
+            overlay,
         )
         logger.info(
             "event=overlay_build_complete indicator_id=%s",
             inst_id,
         )
-        return payload
+        return overlay
 
     def _load_entry(
         self,

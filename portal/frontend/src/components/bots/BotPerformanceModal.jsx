@@ -7,6 +7,8 @@ import LoadingOverlay from '../LoadingOverlay.jsx'
 import { ActiveTradeChip } from './ActiveTradeChip.jsx'
 import { useBotPerformance } from './hooks/useBotPerformance.js'
 import DecisionTrace from './DecisionTrace'
+import { OverlayToggleBar } from './OverlayToggleBar.jsx'
+import { useOverlayControls } from './hooks/useOverlayControls.js'
 
 const BOOTLINE_POOL = {
   runtime: ['Spinning up bot runtime', 'Teaching the bot patience'],
@@ -207,6 +209,14 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!Array.isArray(activeSeries?.candles) || activeSeries.candles.length === 0) return null
     return activeSeries.candles[activeSeries.candles.length - 1]
   }, [activeSeries?.candles])
+
+  const baseOverlays = useMemo(() => {
+    return Array.isArray(activeSeries?.overlays) ? activeSeries.overlays : []
+  }, [activeSeries?.overlays])
+
+  const { overlayOptions, visibility: overlayVisibility, visibleOverlays, toggleOverlay } = useOverlayControls({
+    overlays: baseOverlays,
+  })
 
   // Build a map of latest prices and bar times per symbol for active trade chips
   const latestDataBySymbol = useMemo(() => {
@@ -759,6 +769,12 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
               </div>
             ) : null}
 
+            <OverlayToggleBar
+              overlays={overlayOptions}
+              visibility={overlayVisibility}
+              onToggle={toggleOverlay}
+            />
+
             <div className="relative min-h-[360px] rounded-lg border border-slate-800 bg-slate-900/40 p-4">
               <div
                 className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
@@ -788,7 +804,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                     chartId={activeChartId}
                     candles={activeSeries?.candles || []}
                     trades={activeSymbolTrades}
-                    overlays={activeSeries?.overlays || []}
+                    overlays={visibleOverlays}
                     playbackSpeed={chartPlaybackSpeed}
                     mode={chartMode}
                   />

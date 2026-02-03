@@ -1,16 +1,28 @@
 import { PaneViewType } from '../paneViews/factory';
 
-const INDICATOR_PANEVIEWS = {
-  default: [PaneViewType.TOUCH],
-  pivot_level: [PaneViewType.SIGNAL_BUBBLE, PaneViewType.TOUCH],
-  market_profile: [PaneViewType.VA_BOX, PaneViewType.TOUCH],
-  trendline: [PaneViewType.SEGMENT, PaneViewType.TOUCH],
-  vwap: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
-  bot_trade_rays: [PaneViewType.SEGMENT],
+const toPaneView = (value) => {
+  if (!value) return null;
+  const normalized = String(value).toLowerCase();
+  const candidates = Object.values(PaneViewType);
+  return candidates.includes(normalized) ? normalized : null;
 };
 
-export function getPaneViewsFor(type) {
-  return INDICATOR_PANEVIEWS[type] || INDICATOR_PANEVIEWS.default;
+export function getPaneViewsForOverlay(overlay) {
+  if (!overlay || !Array.isArray(overlay.pane_views) || !overlay.pane_views.length) {
+    console.error('[OverlayRegistry] Missing pane_views for overlay', {
+      type: overlay?.type,
+      overlay,
+    });
+    return [];
+  }
+  const mapped = overlay.pane_views.map(toPaneView).filter(Boolean);
+  if (!mapped.length) {
+    console.error('[OverlayRegistry] Invalid pane_views for overlay', {
+      type: overlay?.type,
+      pane_views: overlay?.pane_views,
+    });
+  }
+  return mapped;
 }
 
 const toSec = (value) => {

@@ -24,7 +24,11 @@ from engines.bot_runtime.core.domain import (
     normalize_epoch,
     timeframe_duration,
 )
+from portal.backend.service.market.stats_repository import build_stats_snapshot
+from portal.backend.service.market.stats_queue import REGIME_VERSION
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context, with_log_context
+from signals.overlays.schema import build_overlay
+from .regime_overlay import build_regime_overlays
 from .models import Strategy
 from ..reporting.reporting import instrument_key
 from .strategy_loader import StrategyLoader
@@ -199,6 +203,17 @@ class SeriesBuilder:
                     series.exchange,
                 )
             )
+            instrument_id = None
+            if isinstance(series.instrument, Mapping):
+                instrument_id = series.instrument.get("id")
+            regime_overlays = self._build_regime_overlays(
+                instrument_id=instrument_id or "",
+                candles=series.candles,
+                timeframe=series.timeframe,
+                strategy_id=series.strategy_id,
+                symbol=series.symbol,
+            )
+            overlays.extend(regime_overlays)
             series.overlays = overlays
             chart_markers = evaluation.get("chart_markers") or {}
             marker_context = self._series_log_context(
@@ -847,6 +862,15 @@ class SeriesBuilder:
             exchange,
         )
         overlays = overlays + overlay_entries
+        regime_overlays = self._build_regime_overlays(
+            instrument_id=instrument_id,
+            candles=candles,
+            timeframe=timeframe,
+            strategy_id=strategy.id,
+            symbol=symbol,
+        )
+        if regime_overlays:
+            overlays.extend(regime_overlays)
         return StrategySeries(
             strategy_id=strategy.id,
             name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
@@ -1149,11 +1173,16 @@ class SeriesBuilder:
                 )
                 logger.error(with_log_context("bot_indicator_overlay_failed", error_context))
                 continue
-            overlays.append(
+            if isinstance(payload, Mapping) and "type" in payload and "payload" in payload:
+                if payload.get("pane_views"):
+                    overlay = dict(payload)
+                else:
+                    overlay = build_overlay(str(payload.get("type") or indicator_type), payload.get("payload"))
+            else:
+                overlay = build_overlay(indicator_type, payload)
+            overlay.update(
                 {
                     "ind_id": indicator_id,
-                    "type": indicator_type,
-                    "payload": payload,
                     "color": color,
                     "source": "indicator",
                     "bot_id": self.bot_id,
@@ -1161,6 +1190,7 @@ class SeriesBuilder:
                     "symbol": window_symbol,
                 }
             )
+            overlays.append(overlay)
             appended_context = self._runtime_log_context(
                 indicator_id=indicator_id,
                 total_overlays=len(overlays),
@@ -1168,6 +1198,158 @@ class SeriesBuilder:
             logger.info(with_log_context("bot_overlay_appended", appended_context))
             with self._indicator_overlay_lock:
                 self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
+        return overlays
+
+    def _build_regime_overlays(
+        self,
+        *,
+        instrument_id: str,
+        candles: Sequence[Candle],
+        timeframe: str,
+        strategy_id: Optional[str],
+        symbol: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not instrument_id:
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_missing_instrument",
+                    self._runtime_log_context(
+                        bot_id=self.bot_id,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                    ),
+                )
+            )
+            return []
+        if not candles:
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_no_candles",
+                    self._runtime_log_context(
+                        bot_id=self.bot_id,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                    ),
+                )
+            )
+            return []
+        try:
+            timeframe_seconds = int(timeframe_duration(timeframe).total_seconds())
+        except Exception as exc:
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_timeframe_invalid",
+                    self._runtime_log_context(
+                        bot_id=self.bot_id,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                        error=str(exc),
+                    ),
+                )
+            )
+            return []
+        if timeframe_seconds <= 0:
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_timeframe_nonpositive",
+                    self._runtime_log_context(
+                        bot_id=self.bot_id,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                        timeframe_seconds=timeframe_seconds,
+                    ),
+                )
+            )
+            return []
+        start_dt = candles[0].time
+        end_dt = candles[-1].time
+        stats_snapshot = build_stats_snapshot(
+            instrument_ids=[instrument_id],
+            timeframe_seconds=timeframe_seconds,
+            start=start_dt,
+            end=end_dt,
+            regime_versions=[REGIME_VERSION],
+            include_latest_regime=True,
+        )
+        logger.debug(
+            with_log_context(
+                "bot_regime_overlay_snapshot_built",
+                self._runtime_log_context(
+                    bot_id=self.bot_id,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    timeframe_seconds=timeframe_seconds,
+                    regime_rows=len(stats_snapshot.regime_stats_by_version),
+                    start=start_dt,
+                    end=end_dt,
+                ),
+            )
+        )
+        regime_rows: Dict[datetime, Mapping[str, Any]] = {}
+        for (inst_id, candle_time, version), regime in stats_snapshot.regime_stats_by_version.items():
+            if inst_id != instrument_id or str(version) != str(REGIME_VERSION):
+                continue
+            if candle_time:
+                regime_rows[candle_time] = regime
+        overlays = build_regime_overlays(
+            candles=candles,
+            regime_rows=regime_rows,
+            timeframe_seconds=timeframe_seconds,
+            regime_version=str(REGIME_VERSION),
+        )
+        if not overlays:
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_empty",
+                    self._runtime_log_context(
+                        bot_id=self.bot_id,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                    ),
+                )
+            )
+            return []
+        overlay_counts = {
+            "overlays": len(overlays),
+            "boxes": sum(len(o.get("payload", {}).get("boxes", []) or []) for o in overlays),
+            "segments": sum(len(o.get("payload", {}).get("segments", []) or []) for o in overlays),
+            "markers": sum(len(o.get("payload", {}).get("markers", []) or []) for o in overlays),
+        }
+        logger.debug(
+            with_log_context(
+                "bot_regime_overlay_built",
+                self._runtime_log_context(
+                    bot_id=self.bot_id,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    **overlay_counts,
+                ),
+            )
+        )
+        for overlay in overlays:
+            overlay.update(
+                {
+                    "source": "regime_stats",
+                    "bot_id": self.bot_id,
+                    "strategy_id": strategy_id,
+                    "symbol": symbol,
+                    "instrument_id": instrument_id,
+                }
+            )
         return overlays
 
     @staticmethod

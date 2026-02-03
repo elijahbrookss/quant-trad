@@ -9,6 +9,7 @@ import pandas as pd
 from .indicator import VWAPIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
+from signals.overlays.registry import overlay_type
 from signals.overlays.schema import build_overlay, PolylinePayload
 
 
@@ -26,6 +27,15 @@ def _aligned_series(indicator: VWAPIndicator, plot_df: pd.DataFrame, column: str
     return [float(x) for x in values.reindex(plot_df.index, method="nearest").values]
 
 
+@overlay_type(
+    VWAPIndicator.NAME,
+    label="VWAP",
+    pane_views=("polyline", "touch"),
+    description="VWAP and deviation bands with touch markers.",
+    renderers={"lightweight": "polyline", "mpl": "line"},
+    payload_keys=("polylines", "markers"),
+    ui_color="#f97316",
+)
 @overlay_adapter(VWAPIndicator)
 def vwap_overlay_adapter(
     signals: Sequence[BaseSignal],

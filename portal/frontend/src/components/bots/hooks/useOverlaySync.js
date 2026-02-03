@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react'
-import { adaptPayload, getPaneViewsFor } from '../../../chart/indicators/registry.js'
+import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/registry.js'
 import { coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
 const toRgba = (hex, alpha = 0.16) => {
@@ -72,7 +72,7 @@ export const useOverlaySync = ({
       for (const overlay of overlayPayloads || []) {
         const { type, payload, color, ind_id } = overlay || {}
         if (!payload) continue
-        const paneViews = getPaneViewsFor(type)
+        const paneViews = getPaneViewsForOverlay(overlay)
         const paneSet = new Set(paneViews || [])
         const norm = adaptPayload(type, payload, color)
         if (Array.isArray(payload.price_lines)) {

@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
 
 from signals.base import BaseSignal
+from signals.overlays.registry import get_overlay_spec
 from signals.overlays.schema import build_overlay, normalize_overlays
 from signals.rules.common.utils import bias_label_from_direction, clean_numeric, to_epoch_seconds
 
@@ -647,6 +648,10 @@ def build_signal_overlays(
     **kwargs: Any,
 ) -> List[Mapping[str, Any]]:
     indicator_type = _normalise_indicator_type(indicator)
+    if not get_overlay_spec(indicator_type):
+        raise ValueError(
+            f"overlay spec missing for type '{indicator_type}'. Register with overlay_type/register_overlay_type."
+        )
     registration = _REGISTRY.get(indicator_type)
     if registration is None:
         logger.warning(

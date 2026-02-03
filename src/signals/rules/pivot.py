@@ -12,6 +12,7 @@ import pandas as pd
 from indicators.pivot_level import Level, PivotLevelIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter, signal_rule
+from signals.overlays.registry import overlay_type
 from signals.overlays.schema import build_overlay
 from signals.rules.breakout import (
     BreakoutRunState,
@@ -852,6 +853,15 @@ def _readable_text_color(color: str) -> str:
     return "#0f172a" if luminance > 0.55 else "#f8fafc"
 
 
+@overlay_type(
+    PivotLevelIndicator.NAME,
+    label="Pivot Levels",
+    pane_views=("signal_bubble", "touch"),
+    description="Pivot level retest/breakout bubbles and touches.",
+    renderers={"lightweight": "signal_bubble", "mpl": "scatter"},
+    payload_keys=("bubbles", "markers", "price_lines"),
+    ui_color="#facc15",
+)
 @overlay_adapter(PivotLevelIndicator)
 def pivot_signals_to_overlays(
     signals: Sequence[BaseSignal],

@@ -22,6 +22,9 @@ from engines.bot_runtime.core.domain import (
     normalize_epoch,
     timeframe_to_seconds,
 )
+from signals.overlays.registry import register_overlay_type
+from signals.overlays.builtins import ensure_builtin_overlays_registered
+from signals.overlays.schema import build_overlay
 from ..reporting.reporting import (
     TRADE_OVERLAY_SOURCE,
     TRADE_STOP_COLOR,
@@ -52,6 +55,16 @@ MAX_LOG_ENTRIES = 500
 MAX_WARNING_ENTRIES = 20
 INTRABAR_BASE_SECONDS = 0.4
 WALK_FORWARD_SAMPLE_INTERVAL = 50
+
+register_overlay_type(
+    "bot_trade_rays",
+    label="Trade Rays",
+    pane_views=("segment",),
+    description="Active trade stop/target rays for bot playback.",
+    renderers={"lightweight": "segment", "mpl": "line"},
+    payload_keys=("segments",),
+    ui_color="#22d3ee",
+)
 
 
 @dataclass
@@ -89,6 +102,7 @@ class BotRuntime:
         config: Dict[str, object],
         state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
+        ensure_builtin_overlays_registered()
         self.bot_id = bot_id
         self.config = dict(config)
         self.mode = (self.config.get("mode") or "instant").lower()
@@ -590,11 +604,9 @@ class BotRuntime:
         if not segments:
             return None
 
-        return {
-            "type": "bot_trade_rays",
-            "source": TRADE_OVERLAY_SOURCE,
-            "payload": {"segments": segments},
-        }
+        overlay = build_overlay("bot_trade_rays", {"segments": segments})
+        overlay["source"] = TRADE_OVERLAY_SOURCE
+        return overlay
 
     @staticmethod
     def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:

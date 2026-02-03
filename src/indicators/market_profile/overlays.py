@@ -10,6 +10,7 @@ from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
 from signals.overlays.schema import build_overlay
+from signals.overlays.registry import overlay_type
 from signals.overlays.transformers import overlay_transformer, normalize_overlay_epoch
 from signals.rules.common.utils import (
     bias_label_from_direction,
@@ -203,6 +204,15 @@ def _apply_collision_avoidance(
         })
 
 
+@overlay_type(
+    ["market_profile", "market-profile", "mpf"],
+    label="Market Profile",
+    pane_views=("va_box", "touch"),
+    description="Market profile value area boxes and touch markers.",
+    renderers={"lightweight": "va_box", "mpl": "box"},
+    payload_keys=("boxes", "markers", "bubbles"),
+    ui_color="#38bdf8",
+)
 @overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],

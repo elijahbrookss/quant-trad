@@ -8,17 +8,20 @@ import { toSec } from '../../bots/chartDataUtils.js'
 const buildSignalOverlay = ({ strategyId, instrumentId, markers }) => ({
   id: `strategy-${strategyId}-${instrumentId}-signals`,
   source: 'strategy',
-  type: 'strategy',
+  type: 'strategy_signal',
+  pane_views: ['marker'],
   payload: { markers },
 })
 
-const buildIndicatorOverlay = ({ indicator, instrumentId, payload }) => ({
-  id: `indicator-${indicator.id}-${instrumentId}`,
-  source: 'indicator',
-  type: indicator.type || 'indicator',
-  color: indicator.color,
-  payload,
-})
+const buildIndicatorOverlay = ({ indicator, instrumentId, payload }) => {
+  const baseOverlay = payload && payload.type && payload.payload ? payload : { type: indicator.type || 'indicator', payload }
+  return {
+    ...baseOverlay,
+    id: `indicator-${indicator.id}-${instrumentId}`,
+    source: 'indicator',
+    color: indicator.color,
+  }
+}
 
 export const SignalPreviewCharts = ({
   strategy,
