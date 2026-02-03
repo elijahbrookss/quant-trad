@@ -477,7 +477,18 @@ export const IndicatorSection = ({ chartId }) => {
             instrument_id: chartState?.instrument_id,
             hasPayload: Boolean(payload),
           });
-          return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
+          if (!payload) return null;
+          if (payload?.type && payload?.payload) {
+            return {
+              ...payload,
+              ind_id: ind.id,
+              type: payload.type || ind.type,
+              payload: payload.payload,
+              color: payload.color ?? ind.color,
+              source: payload.source ?? 'indicator',
+            };
+          }
+          return { ind_id: ind.id, type: ind.type, payload };
         } catch (e) {
           const msg = String(e?.message ?? e);
           if (
