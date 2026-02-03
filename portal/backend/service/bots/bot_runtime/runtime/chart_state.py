@@ -64,11 +64,115 @@ class ChartStateBuilder:
         visible: List[Dict[str, Any]] = []
         for overlay in overlays_list:
             transformed = apply_overlay_transform(overlay, current_epoch)
+            overlay_type = str(overlay.get("type") if isinstance(overlay, Mapping) else "") or ""
             if transformed is None:
+                if overlay_type in {"regime_overlay", "regime_markers"}:
+                    logger.debug(
+                        "regime_overlay_skipped_transform | epoch=%s | type=%s",
+                        current_epoch,
+                        overlay_type,
+                    )
                 continue
             trimmed = self._trim_overlay_to_epoch(transformed, current_epoch)
             if trimmed and self._overlay_is_ready(trimmed, current_epoch):
+                if overlay_type in {"regime_overlay", "regime_markers"}:
+                    payload = trimmed.get("payload") if isinstance(trimmed, Mapping) else {}
+                    boxes = len(payload.get("boxes", []) if isinstance(payload, Mapping) else [])
+                    segments = len(payload.get("segments", []) if isinstance(payload, Mapping) else [])
+                    markers = len(payload.get("markers", []) if isinstance(payload, Mapping) else [])
+                    instrument_id = overlay.get("instrument_id") if isinstance(overlay, Mapping) else None
+                    symbol = overlay.get("symbol") if isinstance(overlay, Mapping) else None
+                    known_at = None
+                    if isinstance(payload, Mapping):
+                        known_at = payload.get("known_at") or payload.get("knownAt")
+                    logger.debug(
+                        "regime_overlay_visible | epoch=%s | type=%s | boxes=%s | segments=%s | markers=%s | instrument_id=%s | symbol=%s | known_at=%s",
+                        current_epoch,
+                        overlay_type,
+                        boxes,
+                        segments,
+                        markers,
+                        instrument_id,
+                        symbol,
+                        known_at,
+                    )
                 visible.append(trimmed)
+            else:
+                if overlay_type in {"regime_overlay", "regime_markers"}:
+                    payload = overlay.get("payload") if isinstance(overlay, Mapping) else {}
+                    instrument_id = overlay.get("instrument_id") if isinstance(overlay, Mapping) else None
+                    symbol = overlay.get("symbol") if isinstance(overlay, Mapping) else None
+                    known_at = None
+                    if isinstance(payload, Mapping):
+                        known_at = payload.get("known_at") or payload.get("knownAt")
+                    logger.debug(
+                        "regime_overlay_trimmed_out | epoch=%s | type=%s | known_at=%s | payload_keys=%s | instrument_id=%s | symbol=%s",
+                        current_epoch,
+                        overlay_type,
+                        known_at,
+                        list((payload or {}).keys()) if isinstance(payload, Mapping) else [],
+                        instrument_id,
+                        symbol,
+                    )
+        # Summarize per-call visibility for regime overlays to spot look-ahead issues
+        regime_visible = [ov for ov in visible if isinstance(ov, Mapping) and ov.get("type") in {"regime_overlay", "regime_markers"}]
+        if regime_visible:
+            box_list = []
+            seg_list = []
+            mark_total = 0
+            inst_ids = set()
+            symbols = set()
+            known_ats = []
+            for ov in regime_visible:
+                if isinstance(ov, Mapping):
+                    inst_id = ov.get("instrument_id")
+                    symbol = ov.get("symbol")
+                    if inst_id:
+                        inst_ids.add(inst_id)
+                    if symbol:
+                        symbols.add(symbol)
+                    payload = ov.get("payload") if isinstance(ov.get("payload"), Mapping) else {}
+                    if isinstance(payload, Mapping):
+                        boxes = payload.get("boxes") or []
+                        segments = payload.get("segments") or []
+                        markers = payload.get("markers") or []
+                        box_list.extend(boxes)
+                        seg_list.extend(segments)
+                        mark_total += len(markers or [])
+                        known = payload.get("known_at") or payload.get("knownAt")
+                        if known is not None:
+                            known_ats.append(known)
+
+            def _extents(entries, a_key, b_key):
+                times = []
+                for item in entries or []:
+                    if not isinstance(item, Mapping):
+                        continue
+                    a = item.get(a_key)
+                    b = item.get(b_key)
+                    if isinstance(a, (int, float)):
+                        times.append(a)
+                    if isinstance(b, (int, float)):
+                        times.append(b)
+                if not times:
+                    return (None, None)
+                return (min(times), max(times))
+
+            box_span = _extents(box_list, "x1", "x2")
+            seg_span = _extents(seg_list, "x1", "x2")
+            logger.debug(
+                "regime_overlay_visible_summary | epoch=%s | overlays=%s | boxes=%s | segments=%s | markers=%s | instruments=%s | symbols=%s | box_span=%s | segment_span=%s | known_at=%s",
+                current_epoch,
+                len(regime_visible),
+                len(box_list),
+                len(seg_list),
+                mark_total,
+                sorted(inst_ids) if inst_ids else [],
+                sorted(symbols) if symbols else [],
+                box_span,
+                seg_span,
+                known_ats if known_ats else None,
+            )
         return visible
 
     def chart_state(
