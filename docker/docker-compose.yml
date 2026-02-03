@@ -12,6 +12,7 @@ services:
     environment:
       - VITE_API_BASE_URL=/api
       - VITE_API_PROXY_TARGET=http://backend.quanttrad:8000
+      - VITE_BOTLENS_DEBUG=true
     ports:
       - "5173:5173"
     volumes:
