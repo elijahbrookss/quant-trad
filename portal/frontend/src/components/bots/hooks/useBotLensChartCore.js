@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts'
 import { PaneViewManager } from '../../../chart/paneViews/factory.js'
+import { BOTLENS_DEBUG } from '../chartDataUtils.js'
 
 export const useBotLensChartCore = ({
   chartId,
@@ -67,14 +68,16 @@ export const useBotLensChartCore = ({
           : 'deps-changed'
         : 'strict-reinvoke'
 
-    console.info('[BotLensChartCore] effect run', {
-      chartId,
-      runId: effectRunSeqRef.current,
-      reason,
-      changed,
-      hasContainer: depSnapshot.hasContainer,
-      hasChart: Boolean(chartRef.current),
-    })
+    if (BOTLENS_DEBUG) {
+      console.info('[BotLensChartCore] effect run', {
+        chartId,
+        runId: effectRunSeqRef.current,
+        reason,
+        changed,
+        hasContainer: depSnapshot.hasContainer,
+        hasChart: Boolean(chartRef.current),
+      })
+    }
 
     lastDepsRef.current = depSnapshot
 
@@ -128,11 +131,13 @@ export const useBotLensChartCore = ({
       mountId: effectRunSeqRef.current,
     })
 
-    console.info('[BotLensChartCore] chart created', {
-      chartId,
-      seq: creationSeqRef.current,
-      runId: effectRunSeqRef.current,
-    })
+    if (BOTLENS_DEBUG) {
+      console.info('[BotLensChartCore] chart created', {
+        chartId,
+        seq: creationSeqRef.current,
+        runId: effectRunSeqRef.current,
+      })
+    }
 
     const cleanupGuards = attachRangeGuards(el)
 
@@ -144,15 +149,17 @@ export const useBotLensChartCore = ({
     resizeObserverRef.current.observe(el)
 
     return () => {
-      console.info('[BotLensChartCore] chart cleanup', {
-        chartId,
-        seq: creationSeqRef.current,
-        runId: effectRunSeqRef.current,
-        hasContainer: Boolean(containerRef?.current),
-        lastDepHasContainer: depSnapshot.hasContainer,
-        lastRunReason: reason,
-        changed,
-      })
+      if (BOTLENS_DEBUG) {
+        console.info('[BotLensChartCore] chart cleanup', {
+          chartId,
+          seq: creationSeqRef.current,
+          runId: effectRunSeqRef.current,
+          hasContainer: Boolean(containerRef?.current),
+          lastDepHasContainer: depSnapshot.hasContainer,
+          lastRunReason: reason,
+          changed,
+        })
+      }
       cleanupGuards?.()
       resizeObserverRef.current?.disconnect()
       resizeObserverRef.current = null
@@ -200,4 +207,3 @@ export const useBotLensChartCore = ({
     barSpacingRef,
   }
 }
-

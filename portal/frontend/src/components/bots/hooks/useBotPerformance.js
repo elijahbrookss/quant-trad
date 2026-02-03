@@ -6,7 +6,7 @@ import {
   resumeBot,
   updateBot,
 } from '../../../adapters/bot.adapter.js'
-import { toSec } from '../chartDataUtils.js'
+import { BOTLENS_DEBUG, toSec } from '../chartDataUtils.js'
 
 const logCandleDiagnostics = (label, seriesList, botId) => {
   if (!Array.isArray(seriesList) || seriesList.length === 0) {
@@ -43,7 +43,7 @@ const logCandleDiagnostics = (label, seriesList, botId) => {
     }
     if (violation) {
       console.error('[BotPerformanceModal] Candle order violation', { ...context, ...violation })
-    } else {
+    } else if (BOTLENS_DEBUG) {
       console.debug('[BotPerformanceModal] Candle payload received', context)
     }
   }
@@ -74,8 +74,13 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     [],
   )
 
+  const payloadRef = useRef(null)
+
   const applyPayload = useCallback((incoming) => {
     if (!incoming) return
+    // Avoid re-render loops when the stream replays the same snapshot
+    if (payloadRef.current === incoming) return
+    payloadRef.current = incoming
     setPayload(incoming)
   }, [])
 

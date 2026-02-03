@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { createSeriesMarkers } from 'lightweight-charts'
+import { BOTLENS_DEBUG } from '../chartDataUtils.js'
 
 export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) => {
   const layersRef = useRef(new Map())
@@ -49,7 +50,9 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
     if (markerCacheRef) {
       markerCacheRef.current = merged
     }
-    console.debug('[BotLensChart] marker flush', { counts, total: merged.length })
+    if (BOTLENS_DEBUG) {
+      console.debug('[BotLensChart] marker flush', { counts, total: merged.length })
+    }
   }, [ensureApi, markerCacheRef])
 
   useEffect(() => () => markersApiRef && (markersApiRef.current = null), [markersApiRef])

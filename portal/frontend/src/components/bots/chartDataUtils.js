@@ -15,6 +15,9 @@ export const toFiniteNumber = (value) => {
   return Number.isFinite(num) ? num : null
 }
 
+// Toggle verbose BotLens console diagnostics with VITE_BOTLENS_DEBUG=true
+export const BOTLENS_DEBUG = Boolean(import.meta?.env?.VITE_BOTLENS_DEBUG === 'true')
+
 export const coalesce = (...values) => {
   for (const value of values) {
     if (value !== undefined && value !== null) {

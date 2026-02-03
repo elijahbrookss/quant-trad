@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
-import { buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
+import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
 import { useOverlaySync } from './hooks/useOverlaySync.js'
 import { useTradeMarkers } from './hooks/useTradeMarkers.js'
@@ -76,6 +76,18 @@ export function BotLensChart({
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
 
+  useEffect(() => {
+    if (!BOTLENS_DEBUG) return
+    const summary = resolvedOverlays.reduce((acc, ov) => {
+      const type = ov?.type || 'unknown'
+      acc[type] = (acc[type] || 0) + 1
+      return acc
+    }, {})
+    const regime = summary.regime_overlay || 0
+    const regimeMarkers = summary.regime_markers || 0
+    console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
+  }, [resolvedOverlays])
+
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
   const candleLookupRef = useRef(candleLookup)
@@ -133,7 +145,7 @@ export function BotLensChart({
       })
       return
     }
-    if (!diagLoggedRef.current) {
+    if (BOTLENS_DEBUG && !diagLoggedRef.current) {
       const first = candleData[0]?.time
       const last = candleData[candleData.length - 1]?.time
       console.debug('[BotLensChart] Candle range', {
@@ -221,7 +233,9 @@ export function BotLensChart({
         if (event.state === AnimatorStates.CANCELLED || event.state === AnimatorStates.COMMITTED) {
           setAnimationActive(false)
         }
-        console.debug('[BotLensChart] intrabar animator', event)
+        if (BOTLENS_DEBUG) {
+          console.debug('[BotLensChart] intrabar animator', event)
+        }
       }),
     [onLifecycleEvent, setAnimationActive],
   )
@@ -282,7 +296,9 @@ export function BotLensChart({
     sample.count += 1
     if (!sample.logged && sample.count >= 30 && next.length >= 200) {
       const avgMs = Number((sample.total / sample.count).toFixed(2))
-      console.debug('[BotLensChart] Candle frame average', { chartId, samples: sample.count, avgMs, candles: next.length })
+      if (BOTLENS_DEBUG) {
+        console.debug('[BotLensChart] Candle frame average', { chartId, samples: sample.count, avgMs, candles: next.length })
+      }
       sample.logged = true
     }
 

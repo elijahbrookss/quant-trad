@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { BOTLENS_DEBUG } from '../chartDataUtils.js'
 
 const toTitleCase = (value) => {
   if (!value) return ''
@@ -33,7 +34,12 @@ export const useOverlayControls = ({ overlays = [] } = {}) => {
         defaultVisible: overlay?.ui?.default_visible ?? null,
       })
     }
-    return Array.from(seen.values())
+    const options = Array.from(seen.values())
+    if (BOTLENS_DEBUG) {
+      const labels = options.map((o) => `${o.type}:${o.label}`).join(', ')
+      console.debug('[BotLens] overlay options resolved', { count: options.length, labels })
+    }
+    return options
   }, [overlays])
 
   useEffect(() => {
@@ -61,11 +67,20 @@ export const useOverlayControls = ({ overlays = [] } = {}) => {
   }, [overlayOptions])
 
   const visibleOverlays = useMemo(() => {
-    return overlays.filter((overlay) => {
+    const visible = overlays.filter((overlay) => {
       const type = overlay?.type
       if (!type) return false
       return visibility[type] !== false
     })
+    if (BOTLENS_DEBUG) {
+      const summary = visible.reduce((acc, ov) => {
+        const key = ov?.type || 'unknown'
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+      console.debug('[BotLens] visible overlays', { summary })
+    }
+    return visible
   }, [overlays, visibility])
 
   const toggleOverlay = (type) => {
@@ -74,6 +89,9 @@ export const useOverlayControls = ({ overlays = [] } = {}) => {
       ...prev,
       [type]: prev[type] === false,
     }))
+    if (BOTLENS_DEBUG) {
+      console.debug('[BotLens] overlay toggled', { type })
+    }
   }
 
   return {

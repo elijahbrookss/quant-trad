@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/registry.js'
-import { coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
+import { BOTLENS_DEBUG, coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
 const toRgba = (hex, alpha = 0.16) => {
   if (typeof hex !== 'string') return undefined
@@ -74,6 +74,37 @@ export const useOverlaySync = ({
         if (!payload) continue
         const paneViews = getPaneViewsForOverlay(overlay)
         const paneSet = new Set(paneViews || [])
+        if (BOTLENS_DEBUG && type === 'regime_overlay') {
+          const boxes = Array.isArray(payload?.boxes) ? payload.boxes.length : 0
+          const segmentsLen = Array.isArray(payload?.segments) ? payload.segments.length : 0
+          const markersLen = Array.isArray(payload?.markers) ? payload.markers.length : 0
+          const times = []
+          if (Array.isArray(payload?.boxes)) {
+            payload.boxes.forEach((b) => {
+              if (Number.isFinite(b?.x1)) times.push(toSec(b.x1))
+              if (Number.isFinite(b?.x2)) times.push(toSec(b.x2))
+            })
+          }
+          if (Array.isArray(payload?.segments)) {
+            payload.segments.forEach((s) => {
+              if (Number.isFinite(s?.x1)) times.push(toSec(s.x1))
+              if (Number.isFinite(s?.x2)) times.push(toSec(s.x2))
+            })
+          }
+          const span =
+            times.length > 0
+              ? { from: Math.min(...times.filter(Number.isFinite)), to: Math.max(...times.filter(Number.isFinite)) }
+              : null
+          console.debug('[BotLensChart] regime_overlay_payload', {
+            pane_views: paneViews,
+            boxes,
+            segments: segmentsLen,
+            markers: markersLen,
+            span,
+            instrument_id: overlay?.instrument_id,
+            symbol: overlay?.symbol,
+          })
+        }
         const norm = adaptPayload(type, payload, color)
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
@@ -344,7 +375,7 @@ export const useOverlaySync = ({
       paneMgrRef.current.setSignalBubbles(bubbles || [])
 
       const extentChanged = extentSignature && extentSignature !== tradeViewportSignatureRef.current
-      if (extentChanged) {
+      if (extentChanged && BOTLENS_DEBUG) {
         console.debug('[BotLensChart] overlay extents changed', { signature: extentSignature, extents })
       }
       tradeViewportSignatureRef.current = extentSignature || null
