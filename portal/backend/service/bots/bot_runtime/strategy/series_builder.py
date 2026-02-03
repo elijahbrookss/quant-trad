@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -76,11 +75,11 @@ class SeriesBuilder:
         self.bot_id = bot_id
         self.config = config
         self.run_type = run_type
+        # Default to including indicator overlays during bot runs; callers can disable if they truly want a lighter path.
+        self._include_indicator_overlays = bool(config.get("include_indicator_overlays", True))
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
         self._warning_sink = warning_sink
-        self._indicator_overlay_cache: Dict[str, Dict[str, Any]] = {}
-        self._indicator_overlay_lock = threading.RLock()
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, **fields)
@@ -106,8 +105,9 @@ class SeriesBuilder:
         )
 
     def reset(self) -> None:
-        with self._indicator_overlay_lock:
-            self._indicator_overlay_cache.clear()
+        # Overlay caching now handled by shared IndicatorOverlayCache in the service context.
+        # Nothing local to reset.
+        return
 
     def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
         """Build series from strategy IDs (clean DB-based approach).
@@ -192,17 +192,18 @@ class SeriesBuilder:
                 config=config,
             )
             overlays = self._extract_indicator_overlays(evaluation)
-            overlays.extend(
-                self._indicator_overlay_entries(
-                    series.meta or {},
-                    series.window_start or start_iso,
-                    end_iso,
-                    series.timeframe,
-                    series.symbol,
-                    series.datasource,
-                    series.exchange,
+            if self._include_indicator_overlays:
+                overlays.extend(
+                    self._indicator_overlay_entries(
+                        series.meta or {},
+                        series.window_start or start_iso,
+                        end_iso,
+                        series.timeframe,
+                        series.symbol,
+                        series.datasource,
+                        series.exchange,
+                    )
                 )
-            )
             instrument_id = None
             if isinstance(series.instrument, Mapping):
                 instrument_id = series.instrument.get("id")
@@ -852,16 +853,18 @@ class SeriesBuilder:
         )
         logger.info(with_log_context("bot_runtime_series_ready", ready_context))
 
-        overlay_entries = self._indicator_overlay_entries(
-            series_meta,  # Use dict for backward compatibility
-            start_iso,
-            end_iso,
-            timeframe,
-            symbol,
-            datasource,
-            exchange,
-        )
-        overlays = overlays + overlay_entries
+        overlay_entries: List[Dict[str, Any]] = []
+        if self._include_indicator_overlays:
+            overlay_entries = self._indicator_overlay_entries(
+                series_meta,  # Use dict for backward compatibility
+                start_iso,
+                end_iso,
+                timeframe,
+                symbol,
+                datasource,
+                exchange,
+            )
+            overlays = overlays + overlay_entries
         regime_overlays = self._build_regime_overlays(
             instrument_id=instrument_id,
             candles=candles,
@@ -870,6 +873,12 @@ class SeriesBuilder:
             symbol=symbol,
         )
         if regime_overlays:
+            for ov in regime_overlays:
+                if isinstance(ov, dict):
+                    ov.setdefault("instrument_id", instrument_id)
+                    ov.setdefault("symbol", symbol)
+                    ov.setdefault("timeframe", timeframe)
+                    ov.setdefault("strategy_id", strategy.id)
             overlays.extend(regime_overlays)
         return StrategySeries(
             strategy_id=strategy.id,
@@ -1020,6 +1029,9 @@ class SeriesBuilder:
     ) -> List[Dict[str, Any]]:
         from ....indicators import indicator_service
 
+        if not self._include_indicator_overlays:
+            return []
+
         overlays: List[Dict[str, Any]] = []
         strategy_meta = strategy or {}
         links = list(strategy_meta.get("indicator_links") or [])
@@ -1093,29 +1105,6 @@ class SeriesBuilder:
             # which is circular and unnecessary. Overlay options are for UI-level temporary
             # overrides, not for reading stored configuration.
             overlay_options = None
-            overlay_signature = ""
-            cache_key = self._indicator_overlay_cache_key(
-                indicator_id,
-                start_iso,
-                end_iso,
-                interval,
-                window_symbol,
-                ds,
-                ex,
-                overlay_signature,
-            )
-            with self._indicator_overlay_lock:
-                cached = self._indicator_overlay_cache.get(cache_key)
-            if cached:
-                context = self._runtime_log_context(
-                    indicator_id=indicator_id,
-                    indicator_type=indicator_type,
-                    symbol=window_symbol,
-                    timeframe=interval,
-                )
-                logger.info(with_log_context("bot_overlay_cache_hit", context))
-                overlays.append(deepcopy(cached))
-                continue
             if overlay_options:
                 context = self._runtime_log_context(
                     indicator_id=indicator_id,
@@ -1196,8 +1185,6 @@ class SeriesBuilder:
                 total_overlays=len(overlays),
             )
             logger.info(with_log_context("bot_overlay_appended", appended_context))
-            with self._indicator_overlay_lock:
-                self._indicator_overlay_cache[cache_key] = deepcopy(overlays[-1])
         return overlays
 
     def _build_regime_overlays(
@@ -1210,6 +1197,13 @@ class SeriesBuilder:
         symbol: Optional[str],
     ) -> List[Dict[str, Any]]:
         if not instrument_id:
+            self._emit_warning(
+                "regime_overlay_missing_instrument",
+                "Regime overlay skipped: instrument metadata missing",
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
             logger.warning(
                 with_log_context(
                     "bot_regime_overlay_missing_instrument",
@@ -1223,6 +1217,13 @@ class SeriesBuilder:
             )
             return []
         if not candles:
+            self._emit_warning(
+                "regime_overlay_no_candles",
+                "Regime overlay skipped: no candles available for window",
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
             logger.warning(
                 with_log_context(
                     "bot_regime_overlay_no_candles",
@@ -1296,6 +1297,20 @@ class SeriesBuilder:
                 continue
             if candle_time:
                 regime_rows[candle_time] = regime
+        logger.info(
+            with_log_context(
+                "bot_regime_rows_collected",
+                self._runtime_log_context(
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    timeframe_seconds=timeframe_seconds,
+                    regime_version=str(REGIME_VERSION),
+                    regime_rows=len(regime_rows),
+                ),
+            )
+        )
         overlays = build_regime_overlays(
             candles=candles,
             regime_rows=regime_rows,
@@ -1303,6 +1318,13 @@ class SeriesBuilder:
             regime_version=str(REGIME_VERSION),
         )
         if not overlays:
+            self._emit_warning(
+                "regime_overlay_empty",
+                "Regime overlay unavailable: no regime stats found for window",
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
             logger.warning(
                 with_log_context(
                     "bot_regime_overlay_empty",
@@ -1329,6 +1351,21 @@ class SeriesBuilder:
                     symbol=symbol,
                     instrument_id=instrument_id,
                     timeframe=timeframe,
+                    **overlay_counts,
+                ),
+            )
+        )
+        # Emit a clear trace when overlays are produced so operators can correlate with frontend counts.
+        logger.info(
+            with_log_context(
+                "bot_regime_overlay_emitted",
+                self._runtime_log_context(
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    timeframe_seconds=timeframe_seconds,
+                    regime_version=str(REGIME_VERSION),
                     **overlay_counts,
                 ),
             )

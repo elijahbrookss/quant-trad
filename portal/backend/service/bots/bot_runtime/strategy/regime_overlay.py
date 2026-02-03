@@ -332,6 +332,14 @@ def build_regime_overlays(
         include_change_markers=include_change_markers,
         include_regime_points=False,
     )
+    if include_change_markers:
+        change_epochs = detect_regime_changes(points)
+        logger.debug(
+            "regime_overlay_change_markers | points=%s | changes=%s | epochs=%s",
+            len(points),
+            len(change_epochs),
+            change_epochs[:12],
+        )
     from signals.overlays.schema import build_overlay
 
     overlays = [build_overlay("regime_overlay", payload)]
