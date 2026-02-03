@@ -241,7 +241,18 @@ class RegimeStatsService:
                 "volume": _to_float(candle.get("volume")),
                 "trade_count": _to_float(candle.get("trade_count")),
             }
-            regime = self._engine_impl.classify(candle_payload, stats).as_dict()
+            try:
+                regime = self._engine_impl.classify(candle_payload, stats).as_dict()
+            except ValueError as exc:
+                # Skip warmup rows that lack required stats instead of failing the batch.
+                logger.debug(
+                    "regime_stats_skip_row | instrument_id=%s timeframe_seconds=%s candle_time=%s reason=%s",
+                    instrument_id,
+                    timeframe_seconds,
+                    candle_time,
+                    exc,
+                )
+                continue
             rows.append(
                 {
                     "instrument_id": instrument_id,
