@@ -1214,7 +1214,6 @@ class SeriesBuilder:
                 with_log_context(
                     "bot_regime_overlay_missing_instrument",
                     self._runtime_log_context(
-                        bot_id=self.bot_id,
                         strategy_id=strategy_id,
                         symbol=symbol,
                         instrument_id=instrument_id,
@@ -1228,7 +1227,6 @@ class SeriesBuilder:
                 with_log_context(
                     "bot_regime_overlay_no_candles",
                     self._runtime_log_context(
-                        bot_id=self.bot_id,
                         strategy_id=strategy_id,
                         symbol=symbol,
                         instrument_id=instrument_id,
@@ -1244,7 +1242,6 @@ class SeriesBuilder:
                 with_log_context(
                     "bot_regime_overlay_timeframe_invalid",
                     self._runtime_log_context(
-                        bot_id=self.bot_id,
                         strategy_id=strategy_id,
                         symbol=symbol,
                         instrument_id=instrument_id,
@@ -1259,7 +1256,6 @@ class SeriesBuilder:
                 with_log_context(
                     "bot_regime_overlay_timeframe_nonpositive",
                     self._runtime_log_context(
-                        bot_id=self.bot_id,
                         strategy_id=strategy_id,
                         symbol=symbol,
                         instrument_id=instrument_id,
@@ -1283,7 +1279,6 @@ class SeriesBuilder:
             with_log_context(
                 "bot_regime_overlay_snapshot_built",
                 self._runtime_log_context(
-                    bot_id=self.bot_id,
                     strategy_id=strategy_id,
                     symbol=symbol,
                     instrument_id=instrument_id,
@@ -1312,7 +1307,6 @@ class SeriesBuilder:
                 with_log_context(
                     "bot_regime_overlay_empty",
                     self._runtime_log_context(
-                        bot_id=self.bot_id,
                         strategy_id=strategy_id,
                         symbol=symbol,
                         instrument_id=instrument_id,
@@ -1331,7 +1325,6 @@ class SeriesBuilder:
             with_log_context(
                 "bot_regime_overlay_built",
                 self._runtime_log_context(
-                    bot_id=self.bot_id,
                     strategy_id=strategy_id,
                     symbol=symbol,
                     instrument_id=instrument_id,
