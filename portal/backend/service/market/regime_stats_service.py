@@ -11,6 +11,9 @@ from core.logger import logger
 from data_providers.config.runtime import PersistenceConfig
 
 from .regime_engine import RegimeEngineV1
+from .regime_blocks import build_regime_blocks
+from .regime_config import default_regime_runtime_config
+from .regime_stabilizer import RegimeStabilizer
 
 
 LOOKBACK_BARS = 200
@@ -30,6 +33,9 @@ class RegimeStatsService:
         self._config = config
         self._engine = engine
         self._engine_impl = RegimeEngineV1()
+        regime_runtime = default_regime_runtime_config()
+        self._stabilizer = RegimeStabilizer(regime_runtime.stabilizer)
+        self._block_config = regime_runtime.blocks
 
     def compute_range(
         self,
@@ -228,21 +234,22 @@ class RegimeStatsService:
             for _, row in stats_df.iterrows()
         }
         rows: list[Dict[str, Any]] = []
-        for _, candle in candles.iterrows():
-            candle_time = candle["candle_time"]
+        points: list[Dict[str, Any]] = []
+        for _, candle_row in candles.iterrows():
+            candle_time = candle_row["candle_time"]
             stats = stats_map.get(candle_time)
             if stats is None:
                 continue
             candle_payload = {
-                "open": _to_float(candle.get("open")),
-                "high": _to_float(candle.get("high")),
-                "low": _to_float(candle.get("low")),
-                "close": _to_float(candle.get("close")),
-                "volume": _to_float(candle.get("volume")),
-                "trade_count": _to_float(candle.get("trade_count")),
+                "open": _to_float(candle_row.get("open")),
+                "high": _to_float(candle_row.get("high")),
+                "low": _to_float(candle_row.get("low")),
+                "close": _to_float(candle_row.get("close")),
+                "volume": _to_float(candle_row.get("volume")),
+                "trade_count": _to_float(candle_row.get("trade_count")),
             }
             try:
-                regime = self._engine_impl.classify(candle_payload, stats).as_dict()
+                raw_regime = self._engine_impl.classify(candle_payload, stats).as_dict()
             except ValueError as exc:
                 # Skip warmup rows that lack required stats instead of failing the batch.
                 logger.debug(
@@ -253,15 +260,59 @@ class RegimeStatsService:
                     exc,
                 )
                 continue
+            stabilized = self._stabilizer.stabilize(
+                raw_regime,
+                bar_time=candle_time,
+                instrument_id=instrument_id,
+                timeframe_seconds=timeframe_seconds,
+            )
+            row_idx = len(rows)
             rows.append(
                 {
                     "instrument_id": instrument_id,
                     "timeframe_seconds": timeframe_seconds,
                     "candle_time": candle_time,
                     "regime_version": regime_version,
-                    "regime": regime,
+                    "regime": stabilized,
                 }
             )
+            structure_state = (stabilized.get("structure") or {}).get("state")
+            points.append(
+                {
+                    "idx": row_idx,
+                    "time": candle_time,
+                    "structure_state": structure_state,
+                    "volatility_state": (stabilized.get("volatility") or {}).get("state"),
+                    "liquidity_state": (stabilized.get("liquidity") or {}).get("state"),
+                    "expansion_state": (stabilized.get("expansion") or {}).get("state"),
+                    "confidence": stabilized.get("confidence"),
+                }
+            )
+
+        if not rows:
+            return rows
+
+        blocks, block_ids = build_regime_blocks(
+            points,
+            timeframe_seconds=timeframe_seconds,
+            config=self._block_config,
+            instrument_id=instrument_id,
+        )
+        if blocks:
+            logger.debug(
+                "regime_blocks_built | instrument_id=%s timeframe_seconds=%s blocks=%s first_block_id=%s",
+                instrument_id,
+                timeframe_seconds,
+                len(blocks),
+                blocks[0].get("block_id"),
+            )
+
+        for row_idx, row in enumerate(rows):
+            block_id = block_ids.get(row_idx)
+            if block_id:
+                row_regime = row.get("regime") or {}
+                row_regime["regime_block_id"] = block_id
+                row["regime"] = row_regime
         return rows
 
     def _upsert(self, rows: Iterable[Dict[str, Any]]) -> None:

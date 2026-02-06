@@ -200,6 +200,8 @@ def build_entry_metrics(context: Optional[EntryContext]) -> Dict[str, Any]:
         "entry_expansion_state": expansion.get("state"),
         "entry_liquidity_state": liquidity.get("state"),
         "entry_regime_confidence": regime.get("confidence"),
+        "entry_regime_key": regime.get("regime_key"),
+        "entry_regime_block_id": regime.get("regime_block_id"),
         "entry_regime_missing": context.regime is None,
         "entry_fallback_used": context.stats_fallback or context.regime_fallback,
     }
