@@ -50,6 +50,8 @@ export function BotLensChart({
   mode,
   debugRanges = false,
   className = '',
+  heightClass = 'h-[360px]',
+  overlayVisibility = {},
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -168,6 +170,10 @@ export function BotLensChart({
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, priceLines: tradePriceLines } =
     useTradeMarkers(resolvedTrades, candleLookup, candleData)
+
+  const showTradeMarkers = overlayVisibility.trade_markers !== false
+  const showTradeRays = overlayVisibility.trade_rays !== false
+  const showTradeRegions = overlayVisibility.trade_regions !== false
 
   const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
 
@@ -339,10 +345,10 @@ export function BotLensChart({
   useEffect(() => {
     const artifacts = computeArtifacts({
       overlayPayloads: resolvedOverlays,
-      tradeMarkers,
-      tradeTooltips: tradeMarkerTooltips,
-      tradeRegions,
-      tradePriceLines,
+      tradeMarkers: showTradeMarkers ? tradeMarkers : [],
+      tradeTooltips: showTradeMarkers ? tradeMarkerTooltips : [],
+      tradeRegions: showTradeRegions ? tradeRegions : [],
+      tradePriceLines: showTradeRays ? tradePriceLines : [],
       candleData,
     })
     const overlayResult = applyArtifacts(artifacts)
@@ -377,7 +383,8 @@ export function BotLensChart({
   }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions])
 
   const containerClasses = [
-    'relative h-[360px] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]',
+    'relative w-full overflow-hidden rounded-2xl border border-white/10 bg-[#0f1118]',
+    heightClass,
     className,
   ]
     .filter(Boolean)

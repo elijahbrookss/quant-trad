@@ -10,19 +10,53 @@ from engines.bot_runtime.core.domain import Candle, normalize_epoch
 logger = logging.getLogger(__name__)
 
 STATE_COLORS = {
-    "trend": "#16a34a",
-    "range": "#64748b",
-    "transition": "#f59e0b",
-    "chop": "#ef4444",
+    "structure": {
+        "trend": "#16a34a",
+        "range": "#64748b",
+        "transition": "#f59e0b",
+        "chop": "#ef4444",
+    },
+    "expansion": {
+        "expanding": "#22c55e",
+        "compressing": "#a855f7",
+        "stable": "#38bdf8",
+    },
+    "liquidity": {
+        "heavy": "#22d3ee",
+        "normal": "#64748b",
+        "light": "#c084fc",
+    },
+    "volatility": {
+        "high": "#f97316",
+        "normal": "#0ea5e9",
+        "quiet": "#38bdf8",
+        "low": "#38bdf8",
+    },
 }
 
 
-def state_color(state: Optional[str]) -> str:
+def _palette_for_lens(lens: str) -> Mapping[str, str]:
+    key = (lens or "").strip().lower()
+    return STATE_COLORS.get(key, {})
+
+
+def state_color(state: Optional[str], *, lens: str = "structure") -> str:
+    palette = _palette_for_lens(lens)
     key = (state or "").strip().lower()
-    return STATE_COLORS.get(key, "#94a3b8")
+    if key in palette:
+        return palette[key]
+    # stable deterministic fallback per lens to keep UX predictable when new states appear
+    base_palette = [
+        "#38bdf8",
+        "#f59e0b",
+        "#22c55e",
+        "#c084fc",
+        "#94a3b8",
+    ]
+    return base_palette[hash(key + lens) % len(base_palette)]
 
 
-def confidence_to_opacity(confidence: Optional[float], *, min_alpha: float = 0.06, max_alpha: float = 0.22) -> float:
+def confidence_to_opacity(confidence: Optional[float], *, min_alpha: float = 0.03, max_alpha: float = 0.14) -> float:
     if confidence is None:
         return min_alpha
     try:
@@ -275,6 +309,72 @@ def _build_regime_payload(
     return payload
 
 
+def _build_lens_boxes(
+    *,
+    points: Sequence[Mapping[str, Any]],
+    lens: str,
+    min_low: float,
+    max_high: float,
+    timeframe_seconds: int,
+) -> List[Dict[str, Any]]:
+    boxes: List[Dict[str, Any]] = []
+    current_state: Optional[str] = None
+    current_start: Optional[int] = None
+    confidence_sum = 0.0
+    confidence_count = 0
+
+    def flush(end_epoch: int) -> None:
+        nonlocal current_state, current_start, confidence_sum, confidence_count
+        if current_state is None or current_start is None:
+            return
+        avg_conf = confidence_sum / confidence_count if confidence_count else None
+        base_color = state_color(current_state, lens=lens)
+        opacity = confidence_to_opacity(avg_conf)
+        boxes.append(
+            {
+                "x1": current_start,
+                "x2": end_epoch + timeframe_seconds,
+                "y1": min_low,
+                "y2": max_high,
+                "color": _to_rgba(base_color, opacity),
+                "border": {"color": _to_rgba(base_color, min(opacity + 0.1, 0.32)), "width": 1},
+                "precision": 4,
+                "known_at": current_start,
+                "state": current_state,
+                "lens": lens,
+                "confidence": avg_conf,
+            }
+        )
+        current_state = None
+        current_start = None
+        confidence_sum = 0.0
+        confidence_count = 0
+
+    state_key = f"{lens}_state"
+    for idx, entry in enumerate(points):
+        lens_state = (entry.get(lens) or {}).get("state") if isinstance(entry.get(lens), Mapping) else None
+        # allow either nested "{lens}" dict or precomputed "{lens}_state"
+        state = (entry.get(state_key) or lens_state or "").strip().lower()
+        epoch = entry.get("time")
+        if not isinstance(epoch, int):
+            continue
+        confidence = entry.get("confidence")
+        if current_state is None:
+            current_state = state or None
+            current_start = epoch
+        if state and state != current_state:
+            flush(epoch)
+            current_state = state
+            current_start = epoch
+        if isinstance(confidence, (int, float)):
+            confidence_sum += float(confidence)
+            confidence_count += 1
+        if idx == len(points) - 1:
+            flush(epoch)
+
+    return boxes
+
+
 def build_regime_overlay(
     *,
     candles: Sequence[Candle],
@@ -343,6 +443,37 @@ def build_regime_overlays(
     from signals.overlays.schema import build_overlay
 
     overlays = [build_overlay("regime_overlay", payload)]
+
+    lenses = [
+        ("structure", True),
+        ("expansion", True),
+        ("liquidity", True),
+        ("volatility", True),
+    ]
+
+    for lens, include in lenses:
+        if not include:
+            continue
+        boxes = _build_lens_boxes(
+            points=points,
+            lens=lens,
+            min_low=min_low,
+            max_high=max_high,
+            timeframe_seconds=timeframe_seconds,
+        )
+        if not boxes:
+            continue
+        overlay_payload = {
+            "boxes": boxes,
+            "summary": {
+                "regime_version": regime_version,
+                "lens": lens,
+                "segments": 0,
+                "boxes": len(boxes),
+            },
+        }
+        overlays.append(build_overlay(f"regime_overlay_{lens}", overlay_payload))
+
     if include_marker_overlay:
         marker_overlay = build_regime_marker_overlay(points, candles)
         if marker_overlay:

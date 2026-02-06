@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { TriangleAlert, X, Check } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { TriangleAlert, X, Check, Maximize2, Minimize2 } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
@@ -46,6 +47,9 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [statsTab, setStatsTab] = useState('overview')
   const [showAllWarnings, setShowAllWarnings] = useState(false)
   const [warningsCollapsed, setWarningsCollapsed] = useState(true)
+  const [chartFullscreen, setChartFullscreen] = useState(false)
+  const [overlayPanelOpen, setOverlayPanelOpen] = useState(false)
+  const [fullscreenHost, setFullscreenHost] = useState(null)
   const { getChart } = useChartState()
 
   const {
@@ -171,12 +175,57 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     if (!open) {
       setShowAllWarnings(false)
       setWarningsCollapsed(true)
+      setOverlayPanelOpen(false)
       return
     }
     if (warnings.length <= 5 && showAllWarnings) {
       setShowAllWarnings(false)
     }
   }, [open, warnings.length, showAllWarnings])
+
+  useEffect(() => {
+    if (!chartFullscreen) return undefined
+    if (typeof document === 'undefined') return undefined
+    const node = document.createElement('div')
+    node.className = 'fixed inset-0 z-[9999] bg-[#050712]'
+    document.body.appendChild(node)
+    setFullscreenHost(node)
+    return () => {
+      setFullscreenHost((current) => (current === node ? null : current))
+      if (node.parentNode) {
+        node.parentNode.removeChild(node)
+      }
+    }
+  }, [chartFullscreen])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    const body = document.body
+    if (!body) return undefined
+    if (chartFullscreen) {
+      body.classList.add('overflow-hidden')
+    } else {
+      body.classList.remove('overflow-hidden')
+    }
+    return () => body.classList.remove('overflow-hidden')
+  }, [chartFullscreen])
+
+  useEffect(() => {
+    if (!chartFullscreen) return undefined
+    const handler = (event) => {
+      if (event.key === 'Escape') {
+        setChartFullscreen(false)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [chartFullscreen])
+
+  useEffect(() => {
+    if (!open && chartFullscreen) {
+      setChartFullscreen(false)
+    }
+  }, [open, chartFullscreen])
 
   const activeSeries = activeSymbol ? seriesBySymbol.get(activeSymbol) : null
   const activeSymbolTrades = Array.isArray(activeSeries?.trades) ? activeSeries.trades : []
@@ -214,8 +263,17 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     return Array.isArray(activeSeries?.overlays) ? activeSeries.overlays : []
   }, [activeSeries?.overlays])
 
+  const extraOverlayOptions = useMemo(
+    () => [
+      { type: 'trade_markers', label: 'Trade Markers', group: 'trade', ui: { default_visible: true } },
+      { type: 'trade_rays', label: 'Stop / Target Rays', group: 'trade', ui: { default_visible: true } },
+    ],
+    [],
+  )
+
   const { overlayOptions, visibility: overlayVisibility, visibleOverlays, toggleOverlay } = useOverlayControls({
     overlays: baseOverlays,
+    extraOptions: extraOverlayOptions,
   })
 
   // Build a map of latest prices and bar times per symbol for active trade chips
@@ -442,6 +500,141 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
       focusChartAt(trade.entry_time || trade?.legs?.[0]?.entry_time || trade.closed_at, trade.entry_price, trade.symbol)
     },
     [focusChartAt, scrollChartIntoView],
+  )
+
+  const renderChartPanel = useCallback(
+    (fullscreen = false) => {
+      const chartHeightClass = fullscreen ? 'h-[80vh]' : 'h-[360px]'
+      const shellHeightClass = fullscreen ? 'min-h-[82vh]' : 'min-h-[360px]'
+      return (
+        <section className="space-y-3" ref={fullscreen ? null : chartSectionRef}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-medium text-slate-400">Context Chart</p>
+              {activeSymbol ? (
+                <span className="rounded-md border border-slate-800 bg-slate-900/70 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200">
+                  {activeSymbol}
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setChartFullscreen((value) => !value)}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800"
+            >
+              {chartFullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+              <span className="hidden sm:inline">{chartFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
+            </button>
+          </div>
+          {seriesSymbols.length > 1 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {seriesSymbols.map((symbol) => (
+                <button
+                  key={`bot-series-${symbol}`}
+                  type="button"
+                  onClick={() => setActiveSymbol(symbol)}
+                  className={`rounded-md border px-2.5 py-1 text-xs font-medium uppercase tracking-wider transition-colors ${
+                    symbol === activeSymbol
+                      ? 'border-slate-700 bg-slate-800/80 text-slate-200'
+                      : 'border-slate-800 bg-slate-950/50 text-slate-500 hover:border-slate-700 hover:bg-slate-950 hover:text-slate-400'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    {symbol}
+                    {isSeriesCompleted(seriesBySymbol.get(symbol)) ? (
+                      <Check className="size-3 text-emerald-400" />
+                    ) : null}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <OverlayToggleBar
+            overlays={overlayOptions}
+            visibility={overlayVisibility}
+            onToggle={toggleOverlay}
+            collapsed={!overlayPanelOpen}
+            onToggleCollapse={() => setOverlayPanelOpen((prev) => !prev)}
+          />
+
+          <div className={`relative ${shellHeightClass} rounded-lg border border-slate-800 bg-slate-900/40 p-4`}>
+            <div
+              className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
+                bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
+              }`}
+            >
+              <div className="animate-pulse rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-medium text-slate-200 shadow-sm">
+                {bootLineDisplay}
+              </div>
+            </div>
+            <div
+              className={`h-full transition-opacity duration-300 ${
+                bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
+              }`}
+            >
+              {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
+              {error ? (
+                <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-300">
+                  {error}
+                </div>
+              ) : showInactiveState ? (
+                <div className={`flex ${chartHeightClass} items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500`}>
+                  {idleMessage}
+                </div>
+              ) : chartHasData ? (
+                <BotLensChart
+                  chartId={activeChartId}
+                  candles={activeSeries?.candles || []}
+                  trades={activeSymbolTrades}
+                  overlays={visibleOverlays}
+                  playbackSpeed={chartPlaybackSpeed}
+                  mode={chartMode}
+                  heightClass={chartHeightClass}
+                  overlayVisibility={overlayVisibility}
+                />
+              ) : (
+                <div className={`flex ${chartHeightClass} items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500`}>
+                  Awaiting the first candle…
+                </div>
+              )}
+            </div>
+            {bootLineVisible ? (
+              <div className="pointer-events-none absolute right-4 top-4 rounded-md border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-sm">
+                Establishing live feed…
+              </div>
+            ) : null}
+          </div>
+        </section>
+      )
+    },
+    [
+      activeChartId,
+      activeSeries?.candles,
+      activeSymbol,
+      activeSymbolTrades,
+      bootLineDisplay,
+      bootLineVisible,
+      bootOverlayVisible,
+      chartFullscreen,
+      chartMode,
+      chartPlaybackSpeed,
+      chartHasData,
+      chartSectionRef,
+      error,
+      idleMessage,
+      isSeriesCompleted,
+      loading,
+      loadingLabel,
+      overlayOptions,
+      overlayVisibility,
+      overlayPanelOpen,
+      seriesBySymbol,
+      seriesSymbols,
+      showInactiveState,
+      toggleOverlay,
+      visibleOverlays,
+    ],
   )
 
   // Aggregate stats across all symbols
@@ -740,87 +933,22 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
             )}
           </div>
 
-          <section className="space-y-3" ref={chartSectionRef}>
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-medium text-slate-400">Context Chart</p>
-              {activeSymbol ? <span className="text-xs font-medium text-slate-500">{activeSymbol}</span> : null}
+          {chartFullscreen ? (
+            <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4 text-sm text-slate-400">
+              Context chart is open in fullscreen. Press Esc or "Exit Fullscreen" to return.
             </div>
-            {seriesSymbols.length > 1 ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {seriesSymbols.map((symbol) => (
-                  <button
-                    key={`bot-series-${symbol}`}
-                    type="button"
-                    onClick={() => setActiveSymbol(symbol)}
-                    className={`rounded-md border px-2.5 py-1 text-xs font-medium uppercase tracking-wider transition-colors ${
-                      symbol === activeSymbol
-                        ? 'border-slate-700 bg-slate-800/80 text-slate-200'
-                        : 'border-slate-800 bg-slate-950/50 text-slate-500 hover:border-slate-700 hover:bg-slate-950 hover:text-slate-400'
-                    }`}
-                  >
-                    <span className="inline-flex items-center gap-1">
-                      {symbol}
-                      {isSeriesCompleted(seriesBySymbol.get(symbol)) ? (
-                        <Check className="size-3 text-emerald-400" />
-                      ) : null}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
+          ) : (
+            renderChartPanel(false)
+          )}
 
-            <OverlayToggleBar
-              overlays={overlayOptions}
-              visibility={overlayVisibility}
-              onToggle={toggleOverlay}
-            />
-
-            <div className="relative min-h-[360px] rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-              <div
-                className={`absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-300 ${
-                  bootOverlayVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
-                }`}
-              >
-                <div className="animate-pulse rounded-lg border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-sm font-medium text-slate-200 shadow-sm">
-                  {bootLineDisplay}
-                </div>
-              </div>
-              <div
-                className={`transition-opacity duration-300 ${
-                  bootOverlayVisible ? 'pointer-events-none opacity-0' : 'opacity-100'
-                }`}
-              >
-                {!bootOverlayVisible && loading ? <LoadingOverlay label={loadingLabel} /> : null}
-                {error ? (
-                  <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-300">
-                    {error}
-                  </div>
-                ) : showInactiveState ? (
-                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
-                    {idleMessage}
-                  </div>
-                ) : chartHasData ? (
-                  <BotLensChart
-                    chartId={activeChartId}
-                    candles={activeSeries?.candles || []}
-                    trades={activeSymbolTrades}
-                    overlays={visibleOverlays}
-                    playbackSpeed={chartPlaybackSpeed}
-                    mode={chartMode}
-                  />
-                ) : (
-                  <div className="flex h-[360px] items-center justify-center rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-sm text-slate-500">
-                    Awaiting the first candle…
-                  </div>
-                )}
-              </div>
-              {bootLineVisible ? (
-                <div className="pointer-events-none absolute right-4 top-4 rounded-md border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-300 backdrop-blur-sm">
-                  Establishing live feed…
-                </div>
-              ) : null}
-            </div>
-          </section>
+          {chartFullscreen && fullscreenHost
+            ? createPortal(
+                <div className="fixed inset-0 z-[9999] overflow-auto bg-[#050712] p-3 sm:p-4">
+                  <div className="h-full w-full">{renderChartPanel(true)}</div>
+                </div>,
+                fullscreenHost,
+              )
+            : null}
 
           <div className="space-y-1 border-t border-slate-800 pt-5">
             <p className="text-xs font-medium text-slate-400">Decision Ledger</p>

@@ -81,6 +81,25 @@ def ensure_builtin_overlays_registered() -> None:
         ui_default_visible=False,
     )
 
+    # Per-lens regime overlays (structure, expansion, liquidity, volatility, etc.)
+    lens_colors = {
+        "structure": "#f59e0b",
+        "expansion": "#a855f7",
+        "liquidity": "#22d3ee",
+        "volatility": "#0ea5e9",
+    }
+    for lens in ("structure", "expansion", "liquidity", "volatility"):
+        register_overlay_type(
+            f"regime_overlay_{lens}",
+            label=f"{lens.title()} Overlay",
+            pane_views=("va_box",),
+            description=f"Regime {lens} lens bands.",
+            renderers={"lightweight": "va_box", "mpl": "box"},
+            payload_keys=("boxes",),
+            ui_color=lens_colors.get(lens, "#94a3b8"),
+            ui_default_visible=True,
+        )
+
     _REGISTERED = True
     logger.info("overlay_registry_initialized | overlay_types=%d", len(list_overlay_specs()))
 

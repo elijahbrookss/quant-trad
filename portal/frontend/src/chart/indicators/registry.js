@@ -129,6 +129,9 @@ export function adaptPayload(type, payload, colorHex) {
   const normBoxes = boxesRaw
     .map((box) => {
       const baseColor = colorHex || box.color;
+      const isRegime = typeof type === "string" && type.includes("regime_overlay");
+      const fillAlpha = isRegime ? 0.05 : 0.08;
+      const borderAlpha = isRegime ? 0.16 : 0.25;
       return {
         ...box,
         x1: toSec(box.x1 ?? box.start ?? box.start_date ?? box.startDate),
@@ -136,9 +139,9 @@ export function adaptPayload(type, payload, colorHex) {
         y1: toFiniteNumber(box.y1 ?? box.val ?? box.VAL),
         y2: toFiniteNumber(box.y2 ?? box.vah ?? box.VAH),
         // Apply subtle opacity to make boxes see-through
-        color: toRgba(baseColor, 0.08) || box.color,
+        color: toRgba(baseColor, fillAlpha) || box.color,
         border: box.border || {
-          color: toRgba(baseColor, 0.25) || baseColor,
+          color: toRgba(baseColor, borderAlpha) || baseColor,
           width: 1,
         },
       };

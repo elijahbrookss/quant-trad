@@ -12,35 +12,56 @@ const toTitleCase = (value) => {
 
 const resolveOverlayLabel = (overlay) => {
   if (!overlay) return 'Overlay'
-  return overlay?.ui?.label || toTitleCase(String(overlay.type || 'Overlay'))
+  return overlay?.label || overlay?.ui?.label || toTitleCase(String(overlay.type || 'Overlay'))
 }
 
 const resolveOverlayColor = (overlay) => {
-  return overlay?.ui?.color || null
+  return overlay?.color || overlay?.ui?.color || null
 }
 
-export const useOverlayControls = ({ overlays = [] } = {}) => {
+const resolveOverlayGroup = (overlay) => {
+  const explicit = overlay?.ui?.group || overlay?.group
+  if (explicit) return explicit
+
+  const type = (overlay?.type || '').toString().toLowerCase()
+
+  const isTrade = ['trade', 'tp', 'sl', 'stop', 'target', 'ray', 'leg', 'exit', 'entry'].some((token) =>
+    type.includes(token),
+  )
+  if (isTrade) return 'trade'
+
+  const isRegime = ['regime', 'context', 'session'].some((token) => type.includes(token))
+  if (isRegime) return 'regime'
+
+  // default bucket
+  return 'indicator'
+}
+
+export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) => {
   const [visibility, setVisibility] = useState({})
 
   const overlayOptions = useMemo(() => {
     const seen = new Map()
-    for (const overlay of overlays) {
+    const push = (overlay) => {
       const type = overlay?.type
-      if (!type || seen.has(type)) continue
+      if (!type || seen.has(type)) return
       seen.set(type, {
         type,
         label: resolveOverlayLabel(overlay),
         color: resolveOverlayColor(overlay),
+        group: resolveOverlayGroup(overlay),
         defaultVisible: overlay?.ui?.default_visible ?? null,
       })
     }
+    for (const overlay of overlays) push(overlay)
+    for (const option of extraOptions) push(option)
     const options = Array.from(seen.values())
     if (BOTLENS_DEBUG) {
       const labels = options.map((o) => `${o.type}:${o.label}`).join(', ')
       console.debug('[BotLens] overlay options resolved', { count: options.length, labels })
     }
     return options
-  }, [overlays])
+  }, [extraOptions, overlays])
 
   useEffect(() => {
     if (!overlayOptions.length) {
