@@ -365,6 +365,7 @@ class RegimeStatsService:
             end_ts = block.get("end_ts")
             if not block_id or start_ts is None or end_ts is None:
                 continue
+            payload = _json_safe(block)
             rows.append(
                 {
                     "block_id": block_id,
@@ -373,7 +374,7 @@ class RegimeStatsService:
                     "start_ts": start_ts,
                     "end_ts": end_ts,
                     "regime_version": regime_version,
-                    "block": block,
+                    "block": payload,
                 }
             )
         if not rows:
@@ -408,3 +409,16 @@ def _to_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return value
