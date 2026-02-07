@@ -38,6 +38,11 @@ These defaults are defined in `RegimeStabilizerConfig` and `RegimeBlockConfig`
 - regime blocks:
   - minimum block length: **10 bars**
 
+## Persistence
+
+Regime blocks are stored in the `regime_blocks` table (configurable via `REGIME_BLOCKS_TABLE`).
+Each block row includes `block_id`, start/end timestamps, regime version, and the full block JSON.
+
 ## Tuning Guidance
 
 - **Reduce flicker**: increase `confirm_bars` and/or `min_block_bars`.

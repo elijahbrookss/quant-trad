@@ -306,6 +306,12 @@ class RegimeStatsService:
                 len(blocks),
                 blocks[0].get("block_id"),
             )
+            self._upsert_blocks(
+                blocks,
+                instrument_id=instrument_id,
+                timeframe_seconds=timeframe_seconds,
+                regime_version=regime_version,
+            )
 
         for row_idx, row in enumerate(rows):
             block_id = block_ids.get(row_idx)
@@ -329,6 +335,58 @@ class RegimeStatsService:
         ).bindparams(bindparam("regime", type_=JSONB))
         with self._engine.begin() as conn:
             conn.execute(query, list(rows))
+
+    def _upsert_blocks(
+        self,
+        blocks: Iterable[Dict[str, Any]],
+        *,
+        instrument_id: str,
+        timeframe_seconds: int,
+        regime_version: str,
+    ) -> None:
+        if not blocks:
+            return
+        query = text(
+            f"""
+            INSERT INTO {self._config.regime_blocks_table}
+                (block_id, instrument_id, timeframe_seconds, start_ts, end_ts, regime_version, block)
+            VALUES (:block_id, :instrument_id, :timeframe_seconds, :start_ts, :end_ts, :regime_version, :block)
+            ON CONFLICT (block_id)
+            DO UPDATE SET
+                computed_at = now(),
+                end_ts = EXCLUDED.end_ts,
+                block = EXCLUDED.block
+            """
+        ).bindparams(bindparam("block", type_=JSONB))
+        rows = []
+        for block in blocks:
+            block_id = block.get("block_id")
+            start_ts = block.get("start_ts")
+            end_ts = block.get("end_ts")
+            if not block_id or start_ts is None or end_ts is None:
+                continue
+            rows.append(
+                {
+                    "block_id": block_id,
+                    "instrument_id": instrument_id,
+                    "timeframe_seconds": timeframe_seconds,
+                    "start_ts": start_ts,
+                    "end_ts": end_ts,
+                    "regime_version": regime_version,
+                    "block": block,
+                }
+            )
+        if not rows:
+            return
+        with self._engine.begin() as conn:
+            conn.execute(query, rows)
+        logger.debug(
+            "regime_blocks_upserted | instrument_id=%s timeframe_seconds=%s regime_version=%s blocks=%s",
+            instrument_id,
+            timeframe_seconds,
+            regime_version,
+            len(rows),
+        )
 
     @staticmethod
     def _count_gaps(candle_times: pd.Series, timeframe_seconds: int) -> int:

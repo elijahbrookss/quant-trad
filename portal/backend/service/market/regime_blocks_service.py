@@ -9,8 +9,6 @@ from sqlalchemy.engine import Engine
 
 from data_providers.config.runtime import PersistenceConfig, runtime_config_from_env
 
-from .regime_blocks import build_regime_blocks
-from .regime_config import RegimeBlockConfig
 from .stats_queue import REGIME_VERSION
 
 
@@ -20,11 +18,9 @@ class RegimeBlocksService:
         *,
         engine: Optional[Engine] = None,
         config: Optional[PersistenceConfig] = None,
-        block_config: Optional[RegimeBlockConfig] = None,
     ) -> None:
         self._config = config or runtime_config_from_env().persistence
         self._engine = engine or (create_engine(self._config.dsn) if self._config.dsn else None)
-        self._block_config = block_config or RegimeBlockConfig()
 
     def fetch_blocks(
         self,
@@ -39,13 +35,14 @@ class RegimeBlocksService:
             return []
         query = text(
             f"""
-            SELECT candle_time, regime
-            FROM {self._config.regime_stats_table}
+            SELECT block
+            FROM {self._config.regime_blocks_table}
             WHERE instrument_id = :instrument_id
               AND timeframe_seconds = :timeframe_seconds
               AND regime_version = :regime_version
-              AND candle_time BETWEEN :start AND :end
-            ORDER BY candle_time
+              AND end_ts >= :start
+              AND start_ts <= :end
+            ORDER BY start_ts
             """
         )
         with self._engine.begin() as conn:
@@ -61,45 +58,19 @@ class RegimeBlocksService:
             )
             rows = result.mappings().all()
 
-        points: List[Dict[str, Any]] = []
+        blocks: List[Dict[str, Any]] = []
         for row in rows:
-            candle_time = row.get("candle_time")
-            regime = row.get("regime")
-            if isinstance(regime, str):
+            block = row.get("block")
+            if isinstance(block, str):
                 try:
-                    regime = json.loads(regime)
+                    block = json.loads(block)
                 except ValueError:
-                    regime = {}
-            if not isinstance(regime, dict):
+                    block = {}
+            if not isinstance(block, dict):
                 continue
-            structure = regime.get("structure") or {}
-            volatility = regime.get("volatility") or {}
-            liquidity = regime.get("liquidity") or {}
-            expansion = regime.get("expansion") or {}
-            points.append(
-                {
-                    "time": candle_time,
-                    "structure_state": structure.get("state"),
-                    "volatility_state": volatility.get("state"),
-                    "liquidity_state": liquidity.get("state"),
-                    "expansion_state": expansion.get("state"),
-                    "confidence": regime.get("confidence"),
-                }
-            )
+            blocks.append(block)
 
-        if not points:
-            return []
-        blocks, _ = build_regime_blocks(
-            points,
-            timeframe_seconds=timeframe_seconds,
-            config=self._block_config,
-            instrument_id=instrument_id,
-        )
-        return [
-            block
-            for block in blocks
-            if block.get("start_ts") <= end and block.get("end_ts") >= start
-        ]
+        return blocks
 
 
 __all__ = ["RegimeBlocksService"]
