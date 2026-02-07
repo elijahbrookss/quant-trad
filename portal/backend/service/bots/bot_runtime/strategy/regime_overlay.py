@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
-from portal.backend.service.market.regime_blocks import build_regime_blocks
+from portal.backend.service.market.regime_blocks import RegimeBlockConfig, build_regime_blocks
 from portal.backend.service.market.regime_config import default_regime_runtime_config
 logger = logging.getLogger(__name__)
 
