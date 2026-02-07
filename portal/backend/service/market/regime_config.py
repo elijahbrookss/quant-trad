@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 @dataclass(frozen=True)
 class RegimeStabilizerConfig:
     min_confidence: float = 0.60
+    structure_min_confidence: float = 0.45
     confirm_bars: Mapping[str, int] = field(
         default_factory=lambda: {
             "structure": 3,
@@ -42,7 +43,7 @@ class RegimeStabilizerConfig:
 
 @dataclass(frozen=True)
 class RegimeBlockConfig:
-    min_block_bars: int = 10
+    min_block_bars: int = 6
 
 
 @dataclass(frozen=True)

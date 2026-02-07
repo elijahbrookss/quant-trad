@@ -66,6 +66,10 @@ class RegimeStabilizer:
         liquidity = raw_regime.get("liquidity") or {}
         confidence = raw_regime.get("confidence")
         confidence_value = float(confidence) if isinstance(confidence, (int, float)) else 0.0
+        structure_confidence = _as_float(structure.get("confidence"))
+        volatility_confidence = _as_float(volatility.get("confidence"))
+        expansion_confidence = _as_float(expansion.get("confidence"))
+        liquidity_confidence = _as_float(liquidity.get("confidence"))
 
         raw_features: Dict[str, Optional[float]] = {
             "directional_efficiency": _as_float(structure.get("directional_efficiency")),
@@ -117,6 +121,7 @@ class RegimeStabilizer:
             structure_features["directional_efficiency"],
             structure_features["slope_stability"],
             structure_features["range_position"],
+            expansion_features["overlap_pct"],
         )
         desired_structure = self._apply_structure_hysteresis(
             self._states["structure"].current_state,
@@ -150,7 +155,8 @@ class RegimeStabilizer:
         stabilized_structure, structure_meta = self._confirm_state(
             axis="structure",
             desired_state=desired_structure,
-            confidence=confidence_value,
+            confidence=structure_confidence if structure_confidence is not None else confidence_value,
+            min_confidence=self._config.structure_min_confidence,
             allow_override=False,
             bar_time=bar_time,
             instrument_id=instrument_id,
@@ -159,7 +165,8 @@ class RegimeStabilizer:
         stabilized_volatility, volatility_meta = self._confirm_state(
             axis="volatility",
             desired_state=desired_volatility,
-            confidence=confidence_value,
+            confidence=volatility_confidence if volatility_confidence is not None else confidence_value,
+            min_confidence=self._config.min_confidence,
             allow_override=self._hard_volatility_override(volatility_features),
             bar_time=bar_time,
             instrument_id=instrument_id,
@@ -168,7 +175,8 @@ class RegimeStabilizer:
         stabilized_expansion, expansion_meta = self._confirm_state(
             axis="expansion",
             desired_state=desired_expansion,
-            confidence=confidence_value,
+            confidence=expansion_confidence if expansion_confidence is not None else confidence_value,
+            min_confidence=self._config.min_confidence,
             allow_override=False,
             bar_time=bar_time,
             instrument_id=instrument_id,
@@ -177,7 +185,8 @@ class RegimeStabilizer:
         stabilized_liquidity, liquidity_meta = self._confirm_state(
             axis="liquidity",
             desired_state=desired_liquidity,
-            confidence=confidence_value,
+            confidence=liquidity_confidence if liquidity_confidence is not None else confidence_value,
+            min_confidence=self._config.min_confidence,
             allow_override=False,
             bar_time=bar_time,
             instrument_id=instrument_id,
@@ -303,6 +312,7 @@ class RegimeStabilizer:
         axis: str,
         desired_state: str,
         confidence: float,
+        min_confidence: float,
         allow_override: bool,
         bar_time: Optional[datetime],
         instrument_id: Optional[str],
@@ -324,7 +334,7 @@ class RegimeStabilizer:
             axis_state.candidate_count = 0
             return current_state, self._axis_meta(axis_state, confirm_required)
 
-        if confidence < self._config.min_confidence and not allow_override:
+        if confidence < min_confidence and not allow_override:
             axis_state.candidate_state = None
             axis_state.candidate_count = 0
             if previous_state != desired_state:
@@ -334,7 +344,7 @@ class RegimeStabilizer:
                     previous_state,
                     desired_state,
                     round(confidence, 4),
-                    self._config.min_confidence,
+                    min_confidence,
                     bar_time.isoformat() if bar_time else None,
                     instrument_id,
                     timeframe_seconds,
@@ -358,7 +368,7 @@ class RegimeStabilizer:
                     previous_state,
                     axis_state.current_state,
                     round(confidence, 4),
-                    self._config.min_confidence,
+                    min_confidence,
                     confirm_required,
                     bar_time.isoformat() if bar_time else None,
                     instrument_id,
