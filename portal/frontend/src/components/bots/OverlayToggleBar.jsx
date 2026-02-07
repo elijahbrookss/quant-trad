@@ -1,7 +1,7 @@
 const groupLabel = {
   indicator: 'Indicator Overlays',
   trade: 'Trade Overlays',
-  regime: 'Regime / Context Overlays',
+  regime: 'Regime Context',
 }
 
 const deriveGroup = (overlay) => {

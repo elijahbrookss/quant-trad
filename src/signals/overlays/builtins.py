@@ -63,11 +63,11 @@ def ensure_builtin_overlays_registered() -> None:
     )
     register_overlay_type(
         "regime_overlay",
-        label="Regime Overlay",
+        label="Market Structure",
         pane_views=("va_box", "segment"),
         description="Regime structure bands with optional change markers.",
         renderers={"lightweight": "va_box", "mpl": "box"},
-        payload_keys=("boxes", "segments"),
+        payload_keys=("boxes", "segments", "regime_points"),
         ui_color="#94a3b8",
     )
     register_overlay_type(
@@ -91,13 +91,13 @@ def ensure_builtin_overlays_registered() -> None:
     for lens in ("structure", "expansion", "liquidity", "volatility"):
         register_overlay_type(
             f"regime_overlay_{lens}",
-            label=f"{lens.title()} Overlay",
+            label=f"{lens.title()} Band",
             pane_views=("va_box",),
             description=f"Regime {lens} lens bands.",
             renderers={"lightweight": "va_box", "mpl": "box"},
             payload_keys=("boxes",),
             ui_color=lens_colors.get(lens, "#94a3b8"),
-            ui_default_visible=True,
+            ui_default_visible=False,
         )
 
     _REGISTERED = True

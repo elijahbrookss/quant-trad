@@ -95,7 +95,7 @@ def _to_rgba(color: str, alpha: float) -> str:
 
 def _lens_band_bounds(lens: str, *, min_low: float, max_high: float) -> Tuple[float, float]:
     span = max(max_high - min_low, 1e-6)
-    band_height = span * 0.035
+    band_height = span * 0.055
     lens_key = (lens or "").strip().lower()
     band_positions = {
         "volatility": ("top", 0),
@@ -212,6 +212,38 @@ def build_regime_markers(
     markers: List[Dict[str, Any]] = []
     last_state: Optional[str] = None
 
+    block_points = [
+        {
+            "time": entry.get("candle_time"),
+            "structure_state": entry.get("structure_state"),
+            "volatility_state": entry.get("volatility_state"),
+            "liquidity_state": entry.get("liquidity_state"),
+            "expansion_state": entry.get("expansion_state"),
+            "confidence": entry.get("confidence"),
+        }
+        for entry in points
+        if isinstance(entry.get("candle_time"), datetime)
+    ]
+    transition_epochs = []
+    if block_points:
+        blocks, _ = build_regime_blocks(
+            block_points,
+            timeframe_seconds=1,
+            config=RegimeBlockConfig(),
+        )
+        for block in blocks:
+            if (block.get("structure_state") or "").strip().lower() != "transition":
+                continue
+            epoch = _to_epoch(block.get("start_ts"))
+            if epoch is None:
+                continue
+            transition_epochs.append(
+                {
+                    "epoch": int(epoch),
+                    "confidence": block.get("avg_confidence"),
+                }
+            )
+
     for entry in points:
         state = (entry.get("structure_state") or entry.get("state") or "").strip().lower()
         block_id = entry.get("regime_block_id")
@@ -245,6 +277,28 @@ def build_regime_markers(
             }
         )
         last_state = block_id or state
+
+    for transition in transition_epochs:
+        epoch = transition["epoch"]
+        price = price_by_time.get(epoch)
+        if price is None:
+            continue
+        confidence = transition.get("confidence")
+        confidence_label = ""
+        if isinstance(confidence, (int, float)):
+            confidence_label = f" ({round(float(confidence) * 100)}%)"
+        markers.append(
+            {
+                "time": epoch,
+                "price": price,
+                "color": "#f59e0b",
+                "shape": "circle",
+                "size": 5,
+                "text": f"Transition{confidence_label} — Structure invalidated; acceptance pending",
+                "position": "aboveBar",
+                "subtype": "regime_transition",
+            }
+        )
     logger.debug(
         "regime_markers_built | points=%s | markers=%s",
         len(points),
@@ -295,11 +349,25 @@ def _build_regime_payload(
         config=regime_config.blocks,
     )
 
+    transition_segments: List[Dict[str, Any]] = []
     for block in blocks:
         start_epoch = _to_epoch(block.get("start_ts"))
         end_epoch = _to_epoch(block.get("end_ts"))
         known_at_epoch = _to_epoch(block.get("known_at"))
         if start_epoch is None or end_epoch is None:
+            continue
+        if (block.get("structure_state") or "").strip().lower() == "transition":
+            transition_segments.append(
+                {
+                    "x1": int(start_epoch),
+                    "x2": int(start_epoch),
+                    "y1": min_low,
+                    "y2": max_high,
+                    "color": "rgba(245,158,11,0.45)",
+                    "lineWidth": 1,
+                    "lineStyle": 0,
+                }
+            )
             continue
         base_color = state_color(block.get("structure_state"))
         opacity = confidence_to_opacity(block.get("avg_confidence"))
@@ -334,6 +402,7 @@ def _build_regime_payload(
                     "lineStyle": 2,
                 }
             )
+    segments.extend(transition_segments)
 
     current_block = blocks[-1] if blocks else None
     regime_label = None
@@ -473,7 +542,7 @@ def build_regime_overlays(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
-        include_regime_points=False,
+        include_regime_points=True,
     )
     if include_change_markers:
         change_epochs = detect_regime_changes(points)
@@ -488,7 +557,6 @@ def build_regime_overlays(
     overlays = [build_overlay("regime_overlay", payload)]
 
     lenses = [
-        ("structure", True),
         ("expansion", True),
         ("liquidity", True),
         ("volatility", True),

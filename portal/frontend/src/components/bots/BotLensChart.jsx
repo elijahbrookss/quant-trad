@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
@@ -11,7 +11,9 @@ import { useIntrabarCandleAnimator, AnimatorStates } from './hooks/useIntrabarCa
 import { useMarkerManager } from './hooks/useMarkerManager.js'
 import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
+import { RegimeReadoutBar } from './RegimeReadoutBar.jsx'
 import { createLogger } from '../../utils/logger.js'
+import { buildRegimeSnapshots, nearestSnapshot } from './regimeReadoutUtils.js'
 
 const chartOptions = {
   layout: {
@@ -62,6 +64,7 @@ export function BotLensChart({
   const overlayHandlesRef = useRef({ priceLines: [] })
   const barSpacingRef = useRef(null)
   const latestCandlesRef = useRef([])
+  const [hoveredEpoch, setHoveredEpoch] = useState(null)
   const seriesInstanceRef = useRef(null)
   const markerCacheRef = useRef([])
   const prevPriceLinesRef = useRef([])
@@ -77,6 +80,7 @@ export function BotLensChart({
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
+  const showRegimeReadout = overlayVisibility.regime_readout !== false
 
   useEffect(() => {
     if (!BOTLENS_DEBUG) return
@@ -190,6 +194,44 @@ export function BotLensChart({
     seriesRef,
     markerManager,
   })
+
+  const regimeOverlay = useMemo(
+    () => resolvedOverlays.find((overlay) => overlay?.type === 'regime_overlay'),
+    [resolvedOverlays],
+  )
+  const regimePoints = regimeOverlay?.payload?.regime_points || []
+  const regimeSnapshots = useMemo(() => buildRegimeSnapshots(regimePoints), [regimePoints])
+
+  const readoutSnapshot = useMemo(() => {
+    if (!regimeSnapshots.length) return null
+    if (Number.isFinite(hoveredEpoch)) {
+      return nearestSnapshot(regimeSnapshots, hoveredEpoch)
+    }
+    return regimeSnapshots[regimeSnapshots.length - 1]
+  }, [regimeSnapshots, hoveredEpoch])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return undefined
+
+    const handleCrosshair = (param) => {
+      if (!param?.time) {
+        setHoveredEpoch(null)
+        return
+      }
+      const epoch = typeof param.time === 'number' ? param.time : param.time.timestamp?.()
+      if (!Number.isFinite(epoch)) {
+        setHoveredEpoch(null)
+        return
+      }
+      setHoveredEpoch(Math.floor(epoch))
+    }
+
+    chart.subscribeCrosshairMove(handleCrosshair)
+    return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshair)
+    }
+  }, [chartRef])
 
   useBotLensChartCore({
     chartId,
@@ -392,6 +434,7 @@ export function BotLensChart({
 
   return (
     <div ref={containerRef} className={containerClasses}>
+      {showRegimeReadout ? <RegimeReadoutBar snapshot={readoutSnapshot} /> : null}
       <MarkerTooltip markerTooltip={markerTooltip} />
     </div>
   )

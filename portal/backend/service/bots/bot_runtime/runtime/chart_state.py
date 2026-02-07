@@ -256,6 +256,7 @@ class ChartStateBuilder:
         process_list("segments", lambda entry: self._trim_segment_entry(entry, current_epoch))
         process_list("polylines", lambda entry: self._trim_polyline_entry(entry, current_epoch))
         process_list("boxes", lambda entry: self._trim_box_entry(entry, current_epoch))
+        process_list("regime_points", lambda entry: self._trim_time_entry(entry, current_epoch, ("time",)))
 
         has_content = self._payload_has_content(trimmed)
         return (trimmed if changed else payload, has_content)
@@ -272,6 +273,7 @@ class ChartStateBuilder:
             "segments",
             "polylines",
             "bubbles",
+            "regime_points",
         }
         for key in list_keys:
             entries = payload.get(key)
