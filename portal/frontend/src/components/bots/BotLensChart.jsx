@@ -13,7 +13,7 @@ import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { RegimeReadoutBar } from './RegimeReadoutBar.jsx'
 import { createLogger } from '../../utils/logger.js'
-import { buildRegimeSnapshots, nearestSnapshot } from './regimeReadoutUtils.js'
+import { buildRegimeSnapshots, findSnapshotForTime } from './regimeReadoutUtils.js'
 
 const chartOptions = {
   layout: {
@@ -199,16 +199,18 @@ export function BotLensChart({
     () => resolvedOverlays.find((overlay) => overlay?.type === 'regime_overlay'),
     [resolvedOverlays],
   )
-  const regimePoints = regimeOverlay?.payload?.regime_points || []
-  const regimeSnapshots = useMemo(() => buildRegimeSnapshots(regimePoints), [regimePoints])
+  const regimeBlocks = regimeOverlay?.payload?.regime_blocks || []
+  const regimeSnapshots = useMemo(() => buildRegimeSnapshots(regimeBlocks), [regimeBlocks])
+  const lastCandleEpoch = candleData[candleData.length - 1]?.time
 
   const readoutSnapshot = useMemo(() => {
     if (!regimeSnapshots.length) return null
-    if (Number.isFinite(hoveredEpoch)) {
-      return nearestSnapshot(regimeSnapshots, hoveredEpoch)
+    const targetEpoch = Number.isFinite(hoveredEpoch) ? hoveredEpoch : lastCandleEpoch
+    if (Number.isFinite(targetEpoch)) {
+      return findSnapshotForTime(regimeSnapshots, targetEpoch) || regimeSnapshots[regimeSnapshots.length - 1]
     }
     return regimeSnapshots[regimeSnapshots.length - 1]
-  }, [regimeSnapshots, hoveredEpoch])
+  }, [regimeSnapshots, hoveredEpoch, lastCandleEpoch])
 
   useEffect(() => {
     const chart = chartRef.current

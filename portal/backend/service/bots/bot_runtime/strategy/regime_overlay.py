@@ -436,6 +436,7 @@ def _build_regime_payload(
         config=regime_config.blocks,
     )
 
+    regime_blocks: List[Dict[str, Any]] = []
     transition_segments: List[Dict[str, Any]] = []
     for block in blocks:
         start_epoch = _to_epoch(block.get("start_ts"))
@@ -443,6 +444,20 @@ def _build_regime_payload(
         known_at_epoch = _to_epoch(block.get("known_at"))
         if start_epoch is None or end_epoch is None:
             continue
+        regime_blocks.append(
+            {
+                "x1": int(start_epoch),
+                "x2": int(end_epoch) + timeframe_seconds,
+                "known_at": int(known_at_epoch) if known_at_epoch is not None else int(start_epoch),
+                "structure": {"state": block.get("structure_state")},
+                "volatility": {"state": block.get("volatility_state")},
+                "liquidity": {"state": block.get("liquidity_state")},
+                "expansion": {"state": block.get("expansion_state")},
+                "confidence": block.get("avg_confidence"),
+                "regime_key": block.get("regime_key"),
+                "block_id": block.get("block_id"),
+            }
+        )
         if (block.get("structure_state") or "").strip().lower() == "transition":
             transition_segments.append(
                 {
@@ -498,6 +513,7 @@ def _build_regime_payload(
     payload: Dict[str, Any] = {
         "boxes": boxes,
         "segments": segments,
+        "regime_blocks": regime_blocks,
         "summary": {
             "regime_version": regime_version,
             "points": len(points),
@@ -629,7 +645,7 @@ def build_regime_overlays(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
-        include_regime_points=True,
+        include_regime_points=False,
     )
     if include_change_markers:
         change_epochs = detect_regime_changes(points)

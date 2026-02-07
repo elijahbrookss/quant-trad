@@ -67,7 +67,7 @@ def ensure_builtin_overlays_registered() -> None:
         pane_views=("va_box", "segment"),
         description="Regime structure bands with optional change markers.",
         renderers={"lightweight": "va_box", "mpl": "box"},
-        payload_keys=("boxes", "segments", "regime_points"),
+        payload_keys=("boxes", "segments", "regime_blocks", "regime_points"),
         ui_color="#94a3b8",
     )
     register_overlay_type(

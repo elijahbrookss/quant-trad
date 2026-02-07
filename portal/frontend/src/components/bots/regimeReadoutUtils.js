@@ -25,45 +25,43 @@ export const glyphForAxisState = (axis, state) => {
   return ''
 }
 
-export const buildRegimeSnapshots = (points = []) => {
-  if (!Array.isArray(points) || points.length === 0) return []
-  return points
-    .filter((point) => Number.isFinite(point?.time))
-    .map((point) => ({
-      ts: point.time,
-      structure: point.structure || {},
-      volatility: point.volatility || {},
-      liquidity: point.liquidity || {},
-      expansion: point.expansion || {},
-      confidence: point.confidence ?? null,
+export const buildRegimeSnapshots = (blocks = []) => {
+  if (!Array.isArray(blocks) || blocks.length === 0) return []
+  return blocks
+    .filter((block) => Number.isFinite(block?.x1) && Number.isFinite(block?.x2))
+    .map((block) => ({
+      x1: block.x1,
+      x2: block.x2,
+      known_at: Number.isFinite(block?.known_at) ? block.known_at : block.x1,
+      structure: block.structure || {},
+      volatility: block.volatility || {},
+      liquidity: block.liquidity || {},
+      expansion: block.expansion || {},
+      confidence: block.confidence ?? null,
+      regime_key: block.regime_key,
+      block_id: block.block_id,
     }))
+    .sort((a, b) => (a.x1 ?? 0) - (b.x1 ?? 0))
 }
 
-export const nearestSnapshot = (snapshots, ts) => {
+export const findSnapshotForTime = (snapshots, ts) => {
   if (!Array.isArray(snapshots) || snapshots.length === 0 || !Number.isFinite(ts)) return null
-  let low = 0
-  let high = snapshots.length - 1
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2)
-    const midTs = snapshots[mid]?.ts
-    if (!Number.isFinite(midTs)) {
-      return null
+  let lastKnown = null
+  for (const snapshot of snapshots) {
+    const start = snapshot?.x1
+    const end = snapshot?.x2
+    const knownAt = Number.isFinite(snapshot?.known_at) ? snapshot.known_at : snapshot?.x1
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(knownAt)) {
+      continue
     }
-    if (midTs === ts) {
-      return snapshots[mid]
+    if (knownAt <= ts) {
+      lastKnown = snapshot
     }
-    if (midTs < ts) {
-      low = mid + 1
-    } else {
-      high = mid - 1
+    if (ts >= start && ts <= end && knownAt <= ts) {
+      return snapshot
     }
   }
-  if (low <= 0) return snapshots[0]
-  if (low >= snapshots.length) return snapshots[snapshots.length - 1]
-  const prev = snapshots[low - 1]
-  const next = snapshots[low]
-  if (!prev || !next) return prev || next || null
-  return Math.abs((prev.ts ?? 0) - ts) <= Math.abs((next.ts ?? 0) - ts) ? prev : next
+  return lastKnown
 }
 
 export const buildAxisTooltip = (axis, payload = {}) => {
