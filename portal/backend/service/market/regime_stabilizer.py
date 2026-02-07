@@ -133,6 +133,8 @@ class RegimeStabilizer:
             self._states["volatility"].current_state,
             desired_volatility,
             volatility_features["atr_ratio"],
+            volatility_features["tr_pct"],
+            volatility_features["atr_zscore"],
         )
 
         desired_expansion = _classify_expansion(
@@ -259,21 +261,40 @@ class RegimeStabilizer:
         current_state: Optional[str],
         desired_state: str,
         atr_ratio: Optional[float],
+        tr_pct: Optional[float],
+        atr_zscore: Optional[float],
     ) -> str:
-        if atr_ratio is None:
+        if atr_ratio is None or tr_pct is None or atr_zscore is None:
             return desired_state
-        if current_state == "high" and desired_state != "high":
-            if atr_ratio > self._config.volatility_exit_high:
-                return "high"
-        if current_state != "high" and desired_state == "high":
-            if atr_ratio < self._config.volatility_enter_high:
-                return current_state or desired_state
-        if current_state == "low" and desired_state != "low":
-            if atr_ratio < self._config.volatility_exit_low:
-                return "low"
-        if current_state != "low" and desired_state == "low":
-            if atr_ratio > self._config.volatility_enter_low:
-                return current_state or desired_state
+        high_enter = (
+            atr_ratio >= self._config.volatility_enter_high
+            or tr_pct >= self._config.volatility_enter_high_tr_pct
+            or atr_zscore >= 0.75
+        )
+        high_exit = (
+            atr_ratio <= self._config.volatility_exit_high
+            and tr_pct <= self._config.volatility_exit_high_tr_pct
+            and atr_zscore < 0.75
+        )
+        low_enter = (
+            atr_ratio <= self._config.volatility_enter_low
+            and tr_pct <= self._config.volatility_enter_low_tr_pct
+            and atr_zscore <= -0.75
+        )
+        low_exit = (
+            atr_ratio >= self._config.volatility_exit_low
+            or tr_pct >= self._config.volatility_exit_low_tr_pct
+            or atr_zscore > -0.75
+        )
+
+        if current_state == "high":
+            return "high" if not high_exit else desired_state
+        if current_state == "low":
+            return "low" if not low_exit else desired_state
+        if desired_state == "high" and not high_enter:
+            return current_state or desired_state
+        if desired_state == "low" and not low_enter:
+            return current_state or desired_state
         return desired_state
 
     def _confirm_state(

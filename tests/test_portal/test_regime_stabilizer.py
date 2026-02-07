@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 from portal.backend.service.market.regime_blocks import RegimeBlockConfig, build_regime_blocks
+from portal.backend.service.market.regime_engine import _classify_volatility
 from portal.backend.service.market.regime_stabilizer import RegimeStabilizer, RegimeStabilizerConfig
 
 
@@ -123,3 +124,37 @@ def test_short_blocks_merge_into_previous_block():
     assert len(blocks) == 1
     assert blocks[0]["regime_key"] == "trend|normal|normal|compressing"
     assert len(set(block_ids.values())) == 1
+
+
+def test_raw_volatility_thresholds_use_updated_atr_ratio():
+    assert _classify_volatility(atr_z=-1.0, tr_pct=0.006, atr_ratio=0.85) == "low"
+    assert _classify_volatility(atr_z=0.0, tr_pct=0.01, atr_ratio=0.86) == "normal"
+    assert _classify_volatility(atr_z=0.0, tr_pct=0.01, atr_ratio=1.15) == "high"
+
+
+def test_volatility_hysteresis_respects_tr_pct_and_atr_zscore():
+    config = RegimeStabilizerConfig(
+        min_confidence=0.0,
+        confirm_bars={"structure": 1, "volatility": 1, "liquidity": 1, "expansion": 1},
+        smoothing_axes=(),
+        smoothing_features=(),
+    )
+    stabilizer = RegimeStabilizer(config)
+
+    first = stabilizer.stabilize(_regime(directional_efficiency=0.7, confidence=0.9, atr_ratio=1.0, tr_pct=0.012, atr_zscore=0.0))
+    assert first["volatility"]["state"] == "normal"
+
+    high = stabilizer.stabilize(
+        _regime(directional_efficiency=0.7, confidence=0.9, atr_ratio=1.02, tr_pct=0.021, atr_zscore=0.2)
+    )
+    assert high["volatility"]["state"] == "high"
+
+    still_high = stabilizer.stabilize(
+        _regime(directional_efficiency=0.7, confidence=0.9, atr_ratio=1.08, tr_pct=0.017, atr_zscore=0.2)
+    )
+    assert still_high["volatility"]["state"] == "high"
+
+    exit_high = stabilizer.stabilize(
+        _regime(directional_efficiency=0.7, confidence=0.9, atr_ratio=1.05, tr_pct=0.014, atr_zscore=0.2)
+    )
+    assert exit_high["volatility"]["state"] == "normal"

@@ -17,7 +17,7 @@ This keeps regime analysis aligned with walk-forward timing while reducing flick
 These defaults are defined in `RegimeStabilizerConfig` and `RegimeBlockConfig`
 (see `portal/backend/service/market/regime_config.py`):
 
-- `min_confidence`: **0.55**
+- `min_confidence`: **0.60**
 - `confirm_bars`:
   - structure: **3**
   - volatility: **4**
@@ -27,10 +27,15 @@ These defaults are defined in `RegimeStabilizerConfig` and `RegimeBlockConfig`
   - enter trend: **0.62**
   - exit trend: **0.52**
 - volatility hysteresis (`atr_ratio`):
-  - enter high: **1.20**
-  - exit high: **1.05**
-  - enter low: **0.80**
-  - exit low: **0.95**
+  - enter high: **1.15**
+  - exit high: **1.10**
+  - enter low: **0.85**
+  - exit low: **0.90**
+- volatility hysteresis (`tr_pct`):
+  - enter high: **0.02**
+  - exit high: **0.015**
+  - enter low: **0.008**
+  - exit low: **0.010**
 - smoothing:
   - EMA alpha: **0.25**
   - default axes: **structure + volatility**

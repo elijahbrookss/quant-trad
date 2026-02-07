@@ -6,7 +6,7 @@ from typing import Mapping, Sequence
 
 @dataclass(frozen=True)
 class RegimeStabilizerConfig:
-    min_confidence: float = 0.55
+    min_confidence: float = 0.60
     confirm_bars: Mapping[str, int] = field(
         default_factory=lambda: {
             "structure": 3,
@@ -17,10 +17,14 @@ class RegimeStabilizerConfig:
     )
     structure_enter_trend: float = 0.62
     structure_exit_trend: float = 0.52
-    volatility_enter_high: float = 1.2
-    volatility_exit_high: float = 1.05
-    volatility_enter_low: float = 0.8
-    volatility_exit_low: float = 0.95
+    volatility_enter_high: float = 1.15
+    volatility_exit_high: float = 1.10
+    volatility_enter_low: float = 0.85
+    volatility_exit_low: float = 0.90
+    volatility_enter_high_tr_pct: float = 0.02
+    volatility_exit_high_tr_pct: float = 0.015
+    volatility_enter_low_tr_pct: float = 0.008
+    volatility_exit_low_tr_pct: float = 0.010
     smoothing_alpha: float = 0.25
     smoothing_features: Sequence[str] = (
         "directional_efficiency",

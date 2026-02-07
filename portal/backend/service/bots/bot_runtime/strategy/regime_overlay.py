@@ -95,12 +95,12 @@ def _to_rgba(color: str, alpha: float) -> str:
 
 def _lens_band_bounds(lens: str, *, min_low: float, max_high: float) -> Tuple[float, float]:
     span = max(max_high - min_low, 1e-6)
-    band_height = span * 0.045
+    band_height = span * 0.035
     lens_key = (lens or "").strip().lower()
     band_positions = {
         "volatility": ("top", 0),
-        "expansion": ("top", 1),
-        "liquidity": ("bottom", 0),
+        "liquidity": ("top", 1),
+        "expansion": ("top", 2),
     }
     side, offset = band_positions.get(lens_key, ("bottom", 0))
     if side == "top":

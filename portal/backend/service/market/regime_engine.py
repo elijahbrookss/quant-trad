@@ -103,9 +103,9 @@ class RegimeEngineV1:
 
 
 def _classify_volatility(atr_z: float, tr_pct: float, atr_ratio: float) -> str:
-    if atr_z <= -0.75 and atr_ratio <= 0.8 and tr_pct <= 0.008:
+    if atr_z <= -0.75 and atr_ratio <= 0.85 and tr_pct <= 0.008:
         return "low"
-    if atr_z >= 0.75 or atr_ratio >= 1.2 or tr_pct >= 0.02:
+    if atr_z >= 0.75 or atr_ratio >= 1.15 or tr_pct >= 0.02:
         return "high"
     return "normal"
 
