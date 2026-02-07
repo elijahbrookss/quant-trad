@@ -454,6 +454,8 @@ def _build_regime_payload(
                 "liquidity": {"state": block.get("liquidity_state")},
                 "expansion": {"state": block.get("expansion_state")},
                 "confidence": block.get("avg_confidence"),
+                "entry_confidence": block.get("entry_confidence"),
+                "bars": block.get("bars"),
                 "regime_key": block.get("regime_key"),
                 "block_id": block.get("block_id"),
             }
@@ -645,7 +647,7 @@ def build_regime_overlays(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
-        include_regime_points=False,
+        include_regime_points=True,
     )
     if include_change_markers:
         change_epochs = detect_regime_changes(points)

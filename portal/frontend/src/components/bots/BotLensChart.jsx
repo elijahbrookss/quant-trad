@@ -13,7 +13,12 @@ import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { RegimeReadoutBar } from './RegimeReadoutBar.jsx'
 import { createLogger } from '../../utils/logger.js'
-import { buildRegimeSnapshots, findSnapshotForTime } from './regimeReadoutUtils.js'
+import {
+  buildCandleSnapshots,
+  buildReadoutSnapshot,
+  buildRegimeBlockSnapshots,
+  findNearestCandleTime,
+} from './regimeReadoutUtils.js'
 
 const chartOptions = {
   layout: {
@@ -200,17 +205,28 @@ export function BotLensChart({
     [resolvedOverlays],
   )
   const regimeBlocks = regimeOverlay?.payload?.regime_blocks || []
-  const regimeSnapshots = useMemo(() => buildRegimeSnapshots(regimeBlocks), [regimeBlocks])
+  const regimePoints = regimeOverlay?.payload?.regime_points || []
+  const blockSnapshots = useMemo(() => buildRegimeBlockSnapshots(regimeBlocks), [regimeBlocks])
+  const candleSnapshots = useMemo(() => buildCandleSnapshots(regimePoints), [regimePoints])
   const lastCandleEpoch = candleData[candleData.length - 1]?.time
+  const lastReadoutSnapshotRef = useRef(null)
 
   const readoutSnapshot = useMemo(() => {
-    if (!regimeSnapshots.length) return null
-    const targetEpoch = Number.isFinite(hoveredEpoch) ? hoveredEpoch : lastCandleEpoch
-    if (Number.isFinite(targetEpoch)) {
-      return findSnapshotForTime(regimeSnapshots, targetEpoch) || regimeSnapshots[regimeSnapshots.length - 1]
+    const focusEpoch = Number.isFinite(hoveredEpoch)
+      ? findNearestCandleTime(candleData, hoveredEpoch)
+      : lastCandleEpoch
+    const snapshot = buildReadoutSnapshot({
+      focusTs: focusEpoch,
+      blocks: blockSnapshots,
+      points: candleSnapshots,
+      lastSnapshot: lastReadoutSnapshotRef.current,
+    })
+    if (snapshot) {
+      lastReadoutSnapshotRef.current = snapshot
+      return snapshot
     }
-    return regimeSnapshots[regimeSnapshots.length - 1]
-  }, [regimeSnapshots, hoveredEpoch, lastCandleEpoch])
+    return lastReadoutSnapshotRef.current
+  }, [blockSnapshots, candleSnapshots, hoveredEpoch, lastCandleEpoch, candleData])
 
   useEffect(() => {
     const chart = chartRef.current

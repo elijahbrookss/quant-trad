@@ -26,7 +26,7 @@ export const RegimeReadoutBar = ({ snapshot }) => {
         <span className="font-semibold">Structure</span>
         <span>{glyphForAxisState('structure', structure?.state)}</span>
         <span className="text-slate-200">{structure?.state ?? 'unknown'}</span>
-        <span className="text-slate-400">({formatConfidence(snapshot?.confidence)})</span>
+        <span className="text-slate-400">({formatConfidence(structure?.confidence)})</span>
       </div>
       <div
         className={`flex items-center gap-1 rounded-md border px-2 py-1 ${pillStyles.volatility}`}
@@ -35,7 +35,7 @@ export const RegimeReadoutBar = ({ snapshot }) => {
         <span className="font-semibold">Vol</span>
         <span>{glyphForAxisState('volatility', volatility?.state)}</span>
         <span>{volatility?.state ?? 'unknown'}</span>
-        <span className="text-slate-400">({formatConfidence(snapshot?.confidence)})</span>
+        <span className="text-slate-400">({formatConfidence(volatility?.confidence)})</span>
       </div>
       <div
         className={`flex items-center gap-1 rounded-md border px-2 py-1 ${pillStyles.liquidity}`}
@@ -44,7 +44,7 @@ export const RegimeReadoutBar = ({ snapshot }) => {
         <span className="font-semibold">Liq</span>
         <span>{glyphForAxisState('liquidity', liquidity?.state)}</span>
         <span>{liquidity?.state ?? 'unknown'}</span>
-        <span className="text-slate-400">({formatConfidence(snapshot?.confidence)})</span>
+        <span className="text-slate-400">({formatConfidence(liquidity?.confidence)})</span>
       </div>
       <div
         className={`flex items-center gap-1 rounded-md border px-2 py-1 ${pillStyles.expansion}`}
@@ -53,7 +53,7 @@ export const RegimeReadoutBar = ({ snapshot }) => {
         <span className="font-semibold">Exp</span>
         <span>{glyphForAxisState('expansion', expansion?.state)}</span>
         <span>{expansion?.state ?? 'unknown'}</span>
-        <span className="text-slate-400">({formatConfidence(snapshot?.confidence)})</span>
+        <span className="text-slate-400">({formatConfidence(expansion?.confidence)})</span>
       </div>
     </div>
   )
