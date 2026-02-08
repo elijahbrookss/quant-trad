@@ -16,8 +16,9 @@ class RegimeStabilizerConfig:
             "expansion": 3,
         }
     )
-    structure_enter_trend: float = 0.62
+    structure_enter_trend: float = 0.59
     structure_exit_trend: float = 0.52
+    overlap_block_trend: float = 0.60
     volatility_enter_high: float = 1.15
     volatility_exit_high: float = 1.10
     volatility_enter_low: float = 0.85

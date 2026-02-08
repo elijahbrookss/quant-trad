@@ -127,6 +127,7 @@ class RegimeStabilizer:
             self._states["structure"].current_state,
             desired_structure,
             structure_features["directional_efficiency"],
+            expansion_features["overlap_pct"],
         )
 
         desired_volatility = _classify_volatility(
@@ -254,9 +255,13 @@ class RegimeStabilizer:
         current_state: Optional[str],
         desired_state: str,
         directional_efficiency: Optional[float],
+        overlap_pct: Optional[float],
     ) -> str:
         if directional_efficiency is None:
             return desired_state
+        if desired_state == "trend" and current_state != "trend":
+            if overlap_pct is not None and overlap_pct >= self._config.overlap_block_trend:
+                return current_state or "transition"
         if current_state == "trend" and desired_state != "trend":
             if directional_efficiency > self._config.structure_exit_trend:
                 return "trend"
