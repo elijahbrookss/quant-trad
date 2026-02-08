@@ -235,23 +235,30 @@ class EntryRequest:
 
 
 @dataclass
+class CandleSnapshot:
+    """Minimal candle context for execution fills."""
+
+    time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    atr: Optional[float] = None
+    lookback_15: Optional[Dict[str, Optional[float]]] = None
+
+
+@dataclass
 class EntryFill:
     """Normalized entry fill event for execution adapters."""
 
     order_intent_id: str
     trade_id: str
-    candle_time: Optional[datetime]
-    candle_open: Optional[float]
-    candle_high: Optional[float]
-    candle_low: Optional[float]
-    candle_close: Optional[float]
-    candle_atr: Optional[float]
+    candle: Optional[CandleSnapshot]
     filled_qty: float
     fill_price: float
     fee_paid: float
     liquidity_role: Optional[str]
     fill_time: Optional[str]
-    candle_lookback_15: Optional[Dict[str, Optional[float]]] = None
     raw: Optional[Dict[str, Any]] = None
 
 
@@ -1475,13 +1482,15 @@ class LadderRiskEngine:
         return EntryFill(
             order_intent_id=str(pending.order_intent_id),
             trade_id=str(pending.trade_id),
-            candle_time=candle.time,
-            candle_open=candle.open,
-            candle_high=candle.high,
-            candle_low=candle.low,
-            candle_close=candle.close,
-            candle_atr=candle.atr,
-            candle_lookback_15=candle.lookback_15,
+            candle=CandleSnapshot(
+                time=candle.time,
+                open=float(candle.open),
+                high=float(candle.high),
+                low=float(candle.low),
+                close=float(candle.close),
+                atr=candle.atr,
+                lookback_15=candle.lookback_15,
+            ),
             filled_qty=float(outcome.filled_qty or 0.0),
             fill_price=fill_price,
             fee_paid=float(outcome.fee_paid or 0.0),
@@ -1547,13 +1556,7 @@ class LadderRiskEngine:
         outcome_payload = {}
         if isinstance(fill.raw, dict):
             outcome_payload = dict(fill.raw.get("outcome") or {})
-        if (
-            fill.candle_time is None
-            or fill.candle_open is None
-            or fill.candle_high is None
-            or fill.candle_low is None
-            or fill.candle_close is None
-        ):
+        if fill.candle is None:
             return EntryFillResult(
                 status="rejected",
                 pending=None,
@@ -1564,13 +1567,13 @@ class LadderRiskEngine:
                 rejection_detail={"order_intent_id": pending.order_intent_id},
             )
         candle = Candle(
-            time=fill.candle_time,
-            open=float(fill.candle_open),
-            high=float(fill.candle_high),
-            low=float(fill.candle_low),
-            close=float(fill.candle_close),
-            atr=fill.candle_atr,
-            lookback_15=fill.candle_lookback_15,
+            time=fill.candle.time,
+            open=float(fill.candle.open),
+            high=float(fill.candle.high),
+            low=float(fill.candle.low),
+            close=float(fill.candle.close),
+            atr=fill.candle.atr,
+            lookback_15=fill.candle.lookback_15,
         )
 
         pending.filled_qty = filled_qty_total

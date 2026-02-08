@@ -1,6 +1,7 @@
 """Core execution and domain logic for bot runtime."""
 
 from .domain import (
+    CandleSnapshot,
     Candle,
     EntryFill,
     EntryFillResult,
@@ -32,6 +33,7 @@ from .wallet_gateway import LedgerWalletGateway, WalletGateway
 
 __all__ = [
     "Candle",
+    "CandleSnapshot",
     "EntryFill",
     "EntryFillResult",
     "EntryRequest",

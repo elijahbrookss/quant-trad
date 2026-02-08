@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from engines.bot_runtime.core import EntryFill, EntryFillResult, PendingEntry
+from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
@@ -108,6 +108,18 @@ def _build_pending(request: EntryRequest, validity_remaining: int = 0) -> Pendin
     )
 
 
+def _snapshot(candle: Candle) -> CandleSnapshot:
+    return CandleSnapshot(
+        time=candle.time,
+        open=float(candle.open),
+        high=float(candle.high),
+        low=float(candle.low),
+        close=float(candle.close),
+        atr=candle.atr,
+        lookback_15=candle.lookback_15,
+    )
+
+
 def test_build_entry_request_matches_expected_values():
     engine = _build_spot_engine()
     candle = _build_candle(close=100.0, atr=2.0)
@@ -194,13 +206,7 @@ def test_apply_entry_fill_accumulates_partial_fills():
     fill_one = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
-        candle_time=candle.time,
-        candle_open=candle.open,
-        candle_high=candle.high,
-        candle_low=candle.low,
-        candle_close=candle.close,
-        candle_atr=candle.atr,
-        candle_lookback_15=candle.lookback_15,
+        candle=_snapshot(candle),
         filled_qty=1.0,
         fill_price=100.0,
         fee_paid=0.05,
@@ -218,13 +224,7 @@ def test_apply_entry_fill_accumulates_partial_fills():
     fill_two = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
-        candle_time=candle.time,
-        candle_open=candle.open,
-        candle_high=candle.high,
-        candle_low=candle.low,
-        candle_close=candle.close,
-        candle_atr=candle.atr,
-        candle_lookback_15=candle.lookback_15,
+        candle=_snapshot(candle),
         filled_qty=1.0,
         fill_price=110.0,
         fee_paid=0.05,
@@ -248,13 +248,7 @@ def test_apply_entry_fill_opens_position_with_expected_stop():
     fill = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
-        candle_time=candle.time,
-        candle_open=candle.open,
-        candle_high=candle.high,
-        candle_low=candle.low,
-        candle_close=candle.close,
-        candle_atr=candle.atr,
-        candle_lookback_15=candle.lookback_15,
+        candle=_snapshot(candle),
         filled_qty=request.requested_qty,
         fill_price=100.0,
         fee_paid=0.2,
