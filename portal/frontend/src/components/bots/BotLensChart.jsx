@@ -85,6 +85,15 @@ export function BotLensChart({
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
+  const playbackProfile = useMemo(() => {
+    const speed = Number(playbackSpeed)
+    const isFast = Number.isFinite(speed) && speed > 1
+    return {
+      speed,
+      isFast,
+      allowIntrabar: !isFast && !instantPlayback,
+    }
+  }, [instantPlayback, playbackSpeed])
   const showRegimeReadout = overlayVisibility.regime_readout !== false
 
   useEffect(() => {
@@ -110,25 +119,6 @@ export function BotLensChart({
   useEffect(() => {
     candleLookupRef.current = candleLookup
   }, [candleLookup])
-
-  const activeTradeAtLastCandle = useMemo(() => {
-    const lastTime = candleData[candleData.length - 1]?.time
-    if (!Number.isFinite(lastTime)) return false
-    return resolvedTrades.some((trade) => {
-      const entry = toSec(trade?.entry_time)
-      if (!Number.isFinite(entry) || entry > lastTime) return false
-      const closed = toSec(trade?.closed_at)
-      const legs = Array.isArray(trade?.legs) ? trade.legs : []
-      const openLeg = legs.some((leg) => {
-        const exit = toSec(leg?.exit_time)
-        if (!Number.isFinite(exit)) return true
-        return exit >= lastTime
-      })
-      if (openLeg) return true
-      if (!Number.isFinite(closed)) return true
-      return closed >= lastTime
-    })
-  }, [candleData, resolvedTrades])
 
   useEffect(() => {
     if (!candleData.length) {
@@ -328,7 +318,7 @@ export function BotLensChart({
       Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
     const longJump = next.length > previous.length + 1
     const requiresReset = !previous.length || !next.length || historyRewound || longJump
-    const shouldAnimate = isSameCandle && !instantPlayback && !activeTradeAtLastCandle
+    const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -385,7 +375,7 @@ export function BotLensChart({
         logicalRange,
       })
     }
-  }, [activeTradeAtLastCandle, cancelAnimator, candleData, debugRanges, instantPlayback, logger, playbackSpeed, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
