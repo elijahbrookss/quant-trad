@@ -48,6 +48,7 @@ class StrategySeries:
     timeframe: str
     datasource: Optional[str]
     exchange: Optional[str]
+    # NOTE: Per-series in-memory cache of candles/signals for runtime execution.
     candles: List[Candle]
     signals: Deque[StrategySignal] = field(default_factory=deque)
     overlays: List[Dict[str, Any]] = field(default_factory=list)
@@ -195,29 +196,41 @@ class SeriesBuilder:
             )
             logger.info(with_log_context("append_series_updates_call", call_context))
 
+            # NOTE: NO CACHE – strategy evaluation re-computes per call.
+            cache_key_summary = f"{series.symbol}:{series.timeframe}:{series.window_start or start_iso}->{end_iso}"
             with perf_log(
-                "bot_runtime_strategy_evaluate",
+                "cache.absent",
                 logger=logger,
                 base_context=series_context,
                 enabled=self._obs_enabled,
                 slow_ms=self._obs_slow_ms,
-                strategy_id=series.strategy_id,
-            ) as perf:
-                evaluation = strategy_service.evaluate(
+                operation_name="strategy_service.evaluate",
+                cache_scope="none",
+                cache_key_summary=cache_key_summary,
+            ):
+                with perf_log(
+                    "bot_runtime_strategy_evaluate",
+                    logger=logger,
+                    base_context=series_context,
+                    enabled=self._obs_enabled,
+                    slow_ms=self._obs_slow_ms,
                     strategy_id=series.strategy_id,
-                    start=series.window_start or start_iso,
-                    end=end_iso,
-                    interval=series.timeframe,
-                    symbol=series.symbol,
-                    datasource=series.datasource,
-                    exchange=series.exchange,
-                    config=config,
-                )
-                chart_markers = evaluation.get("chart_markers") or {}
-                perf.add_fields(
-                    buy_markers_count=len(chart_markers.get("buy", [])),
-                    sell_markers_count=len(chart_markers.get("sell", [])),
-                )
+                ) as perf:
+                    evaluation = strategy_service.evaluate(
+                        strategy_id=series.strategy_id,
+                        start=series.window_start or start_iso,
+                        end=end_iso,
+                        interval=series.timeframe,
+                        symbol=series.symbol,
+                        datasource=series.datasource,
+                        exchange=series.exchange,
+                        config=config,
+                    )
+                    chart_markers = evaluation.get("chart_markers") or {}
+                    perf.add_fields(
+                        buy_markers_count=len(chart_markers.get("buy", [])),
+                        sell_markers_count=len(chart_markers.get("sell", [])),
+                    )
             overlays = self._extract_indicator_overlays(evaluation)
             if self._include_indicator_overlays:
                 overlays.extend(
@@ -1311,14 +1324,31 @@ class SeriesBuilder:
             return []
         start_dt = candles[0].time
         end_dt = candles[-1].time
-        stats_snapshot = build_stats_snapshot(
-            instrument_ids=[instrument_id],
-            timeframe_seconds=timeframe_seconds,
-            start=start_dt,
-            end=end_dt,
-            regime_versions=[REGIME_VERSION],
-            include_latest_regime=True,
-        )
+        # NOTE: NO CACHE – stats snapshot fetch hits backing store per call.
+        stats_cache_key = f"{instrument_id}:{timeframe_seconds}:{start_dt.isoformat()}->{end_dt.isoformat()}"
+        with perf_log(
+            "cache.absent",
+            logger=logger,
+            base_context=self._runtime_log_context(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+            ),
+            enabled=self._obs_enabled,
+            slow_ms=self._obs_slow_ms,
+            operation_name="build_stats_snapshot",
+            cache_scope="none",
+            cache_key_summary=stats_cache_key,
+        ):
+            stats_snapshot = build_stats_snapshot(
+                instrument_ids=[instrument_id],
+                timeframe_seconds=timeframe_seconds,
+                start=start_dt,
+                end=end_dt,
+                regime_versions=[REGIME_VERSION],
+                include_latest_regime=True,
+            )
         logger.debug(
             with_log_context(
                 "bot_regime_overlay_snapshot_built",

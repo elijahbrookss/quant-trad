@@ -7,10 +7,17 @@ any intermediate computation results, enabling efficient incremental updates.
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
+import os
+import threading
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Hashable, Optional, Tuple
 
+from utils.perf_log import get_obs_enabled
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class IncrementalCache:
@@ -51,6 +58,7 @@ class IncrementalCache:
     def __post_init__(self) -> None:
         # Cache key: (inst_id, symbol, key) -> value
         # Key can be anything: date string, timestamp, session ID, etc.
+        # NOTE: In-memory LRU cache; per-process only, no locks for concurrent writers.
         self._cache: "OrderedDict[Tuple[str, str, Hashable], Any]" = OrderedDict()
 
     def _build_key(
@@ -167,8 +175,21 @@ class IncrementalCache:
 
     def _enforce_limit(self) -> None:
         """Remove oldest entries when cache exceeds max size."""
+        should_log = get_obs_enabled()
         while len(self._cache) > self.max_entries:
-            self._cache.popitem(last=False)
+            evict_start = time.perf_counter() if should_log else 0.0
+            cache_key, _ = self._cache.popitem(last=False)
+            if should_log:
+                evict_ms = (time.perf_counter() - evict_start) * 1000.0
+                cache_key_summary = f"{cache_key[0]}:{cache_key[1]}:{cache_key[2]}"
+                logger.debug(
+                    "cache.eviction | event=cache.eviction cache_name=incremental_profile_cache cache_scope=process "
+                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                    cache_key_summary,
+                    evict_ms,
+                    os.getpid(),
+                    threading.current_thread().name,
+                )
 
 
 def default_incremental_cache() -> IncrementalCache:

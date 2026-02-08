@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
 from indicators.runtime.incremental_cache_registry import is_incremental_cacheable
 from signals.overlays.schema import build_overlay
+from utils.log_context import build_log_context, with_log_context
+from utils.perf_log import get_obs_enabled
 
 from .context import IndicatorServiceContext, _context
 from ...market import instrument_service
@@ -27,6 +32,7 @@ class IndicatorOverlayBuilder:
 
     def __init__(self, ctx: IndicatorServiceContext = _context) -> None:
         self._ctx = ctx
+        self._obs_enabled = get_obs_enabled()
 
     def build(
         self,
@@ -301,6 +307,8 @@ class IndicatorOverlayBuilder:
         indicator_type = entry.meta.get("type") if entry else None
         if not cache or not cache.is_enabled(indicator_type):
             return None
+        # NOTE: In-memory overlay cache (LRU). Key includes inst_id/type/symbol/interval/window/datasource/exchange/signature.
+        # NOTE: Per-process cache; no cross-process sharing, eviction by max_entries only.
         signature = cache.build_signature(
             scrub_runtime_params(entry.meta.get("params") or {}),
             overlay_options,
@@ -317,7 +325,38 @@ class IndicatorOverlayBuilder:
             signature=signature,
             updated_at=getattr(entry, "updated_at", ""),
         )
-        return cache.get(cache_key)
+        cache_key_summary = f"{symbol}:{interval}:{start}->{end}"
+        get_started = time.perf_counter() if self._obs_enabled else 0.0
+        cached = cache.get(cache_key)
+        if self._obs_enabled:
+            get_ms = (time.perf_counter() - get_started) * 1000.0
+            base_context = build_log_context(
+                cache_name="indicator_overlay_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=get_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=symbol,
+                timeframe=interval,
+                datasource=datasource,
+                exchange=exchange,
+                indicator_id=inst_id,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.get",
+                    build_log_context(event="cache.get", **base_context),
+                )
+            )
+            hit_event = "cache.hit" if cached is not None else "cache.miss"
+            logger.debug(
+                with_log_context(
+                    hit_event,
+                    build_log_context(event=hit_event, **base_context),
+                )
+            )
+        return cached
 
     def _maybe_store_cached(
         self,
@@ -352,7 +391,30 @@ class IndicatorOverlayBuilder:
             signature=signature,
             updated_at=getattr(entry, "updated_at", ""),
         )
+        cache_key_summary = f"{symbol}:{interval}:{start}->{end}"
+        set_started = time.perf_counter() if self._obs_enabled else 0.0
         cache.set(cache_key, payload)
+        if self._obs_enabled:
+            set_ms = (time.perf_counter() - set_started) * 1000.0
+            base_context = build_log_context(
+                cache_name="indicator_overlay_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=set_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=symbol,
+                timeframe=interval,
+                datasource=datasource,
+                exchange=exchange,
+                indicator_id=inst_id,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.set",
+                    build_log_context(event="cache.set", **base_context),
+                )
+            )
 
     def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):
         logger.info(

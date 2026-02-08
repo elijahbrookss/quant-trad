@@ -6,6 +6,9 @@ No dependencies on visualization libraries, signal decorators, or UI concerns.
 """
 
 import logging
+import os
+import threading
+import time
 from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
@@ -17,6 +20,8 @@ from indicators.config import DataContext
 from indicators.registry import indicator
 from indicators.runtime.overlay_cache_registry import overlay_cacheable
 from indicators.runtime.incremental_cache_registry import incremental_cacheable
+from utils.log_context import build_log_context, with_log_context
+from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 from .domain import Profile, ValueArea
 from ._internal.computation import build_tpo_histogram, extract_value_area
@@ -258,8 +263,46 @@ class MarketProfileIndicator(ComputeIndicator):
             date_keys.append(current.strftime("%Y-%m-%d"))
             current += timedelta(days=1)
 
+        # NOTE: Incremental cache is per-process; key=(inst_id, symbol, date).
+        # NOTE: No eviction beyond max_entries; multiprocessing/container-per-bot will duplicate work.
+        should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
+        get_started = time.perf_counter() if should_log else 0.0
         # Check cache for existing daily profiles
         cached_profiles_dict = cache.get_range(inst_id, ctx.symbol, date_keys)
+        if should_log:
+            get_ms = (time.perf_counter() - get_started) * 1000.0
+            cache_key_summary = f"{ctx.symbol}:{days_back}d"
+            base_context = build_log_context(
+                cache_name="incremental_profile_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=get_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=ctx.symbol,
+                timeframe=ctx.interval,
+                indicator_id=inst_id,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.get",
+                    build_log_context(event="cache.get", **base_context),
+                )
+            )
+            if cached_profiles_dict:
+                logger.debug(
+                    with_log_context(
+                        "cache.hit",
+                        build_log_context(event="cache.hit", **base_context),
+                    )
+                )
+            if len(cached_profiles_dict) < len(date_keys):
+                logger.debug(
+                    with_log_context(
+                        "cache.miss",
+                        build_log_context(event="cache.miss", **base_context),
+                    )
+                )
 
         logger.info(
             "Incremental cache check | inst_id=%s symbol=%s | cached_days=%d | total_days=%d",
@@ -336,9 +379,30 @@ class MarketProfileIndicator(ComputeIndicator):
         )
 
         # Cache the newly computed profiles by date
+        set_started = time.perf_counter() if should_log else 0.0
         for profile in instance._profiles:
             date_key = profile.start.strftime("%Y-%m-%d")
             cache.set(inst_id, ctx.symbol, date_key, profile)
+        if should_log:
+            set_ms = (time.perf_counter() - set_started) * 1000.0
+            cache_key_summary = f"{ctx.symbol}:{days_back}d"
+            set_context = build_log_context(
+                cache_name="incremental_profile_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=set_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=ctx.symbol,
+                timeframe=ctx.interval,
+                indicator_id=inst_id,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.set",
+                    build_log_context(event="cache.set", **set_context),
+                )
+            )
 
         logger.info(
             "Cached %d daily profiles | inst_id=%s symbol=%s",

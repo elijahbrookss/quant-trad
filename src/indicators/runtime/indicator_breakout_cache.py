@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 import math
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -23,6 +26,8 @@ from signals.rules.market_profile import (
     _BREAKOUT_READY_FLAG,
 )
 from signals.rules.pivot import PivotBreakoutConfig, _PIVOT_BREAKOUT_READY_FLAG
+from utils.log_context import build_log_context, with_log_context
+from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,11 @@ class IndicatorBreakoutCache:
     """Cache breakout signals and build overlay-friendly indicators."""
 
     def __init__(self) -> None:
+        self._obs_enabled = get_obs_enabled()
+        self._obs_sample_rate = get_obs_step_sample_rate()
+        # NOTE: In-memory breakout cache keyed by inst_id/indicator/symbol/interval/window/signature.
+        # NOTE: Per-process cache with no eviction; no locks for concurrent writers.
+        # NOTE: Multiprocessing/container-per-bot will duplicate work.
         self._cache: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
         self._specs: Dict[str, BreakoutCacheSpec] = self._build_specs()
 
@@ -71,7 +81,36 @@ class IndicatorBreakoutCache:
     def get_cached_breakouts(
         self, cache_key: Tuple[Any, ...]
     ) -> Optional[List[Dict[str, Any]]]:
+        should_log = self._obs_enabled and should_sample(self._obs_sample_rate)
+        started = time.perf_counter() if should_log else 0.0
         cached = self._cache.get(cache_key)
+        if should_log:
+            get_ms = (time.perf_counter() - started) * 1000.0
+            cache_key_summary = f"{cache_key[2]}:{cache_key[3]}:{cache_key[4]}->{cache_key[5]}"
+            base_context = build_log_context(
+                cache_name="indicator_breakout_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=get_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=cache_key[2],
+                timeframe=cache_key[3],
+                indicator_id=cache_key[0],
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.get",
+                    build_log_context(event="cache.get", **base_context),
+                )
+            )
+            hit_event = "cache.hit" if cached is not None else "cache.miss"
+            logger.debug(
+                with_log_context(
+                    hit_event,
+                    build_log_context(event=hit_event, **base_context),
+                )
+            )
         if cached is None:
             return None
         return deepcopy(cached)
@@ -79,7 +118,29 @@ class IndicatorBreakoutCache:
     def store_breakout_cache(
         self, cache_key: Tuple[Any, ...], breakouts: Sequence[Mapping[str, Any]]
     ) -> None:
+        should_log = self._obs_enabled and should_sample(self._obs_sample_rate)
+        started = time.perf_counter() if should_log else 0.0
         self._cache[cache_key] = deepcopy(list(breakouts)) if breakouts else []
+        if should_log:
+            set_ms = (time.perf_counter() - started) * 1000.0
+            cache_key_summary = f"{cache_key[2]}:{cache_key[3]}:{cache_key[4]}->{cache_key[5]}"
+            base_context = build_log_context(
+                cache_name="indicator_breakout_cache",
+                cache_scope="process",
+                cache_key_summary=cache_key_summary,
+                time_taken_ms=set_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+                symbol=cache_key[2],
+                timeframe=cache_key[3],
+                indicator_id=cache_key[0],
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.set",
+                    build_log_context(event="cache.set", **base_context),
+                )
+            )
 
     def flatten_breakout_signal(self, signal: BaseSignal) -> Dict[str, Any]:
         metadata = dict(signal.metadata or {})

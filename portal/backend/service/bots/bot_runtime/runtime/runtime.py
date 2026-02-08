@@ -148,6 +148,7 @@ class BotRuntime:
         self._prepared: bool = False
         self._run_context: Optional[RunContext] = None
         self._chart_overlays: List[Dict[str, Any]] = []
+        # NOTE: Runtime-scoped overlay summary cache; key=strategy_key, no eviction.
         self._overlay_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._last_stats: Dict[str, Any] = {}
         self._next_bar_at: Optional[datetime] = None
@@ -203,6 +204,8 @@ class BotRuntime:
             build_candles=SeriesBuilder._build_candles,
             timeframe_seconds=_timeframe_to_seconds,
             strategy_key_fn=self._strategy_key,
+            obs_enabled=self._obs_enabled,
+            obs_sample_rate=self._obs_step_sample_rate,
         )
         self._run_started_at: Optional[datetime] = None
         self._chart_state_builder = ChartStateBuilder(
@@ -903,13 +906,57 @@ class BotRuntime:
             ),
         )
         series_key = self._strategy_key(series)
+        should_log = self._obs_enabled and should_sample(self._obs_step_sample_rate)
+        get_started = time.perf_counter() if should_log else 0.0
         cached = self._overlay_summary_cache.get(series_key)
+        if should_log:
+            get_ms = (time.perf_counter() - get_started) * 1000.0
+            cache_context = self._series_log_context(
+                series,
+                cache_name="overlay_summary_cache",
+                cache_scope="runtime",
+                cache_key_summary=series_key,
+                time_taken_ms=get_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.get",
+                    merge_log_context(cache_context, build_log_context(event="cache.get")),
+                )
+            )
+            hit_event = "cache.hit" if cached is not None else "cache.miss"
+            logger.debug(
+                with_log_context(
+                    hit_event,
+                    merge_log_context(cache_context, build_log_context(event=hit_event)),
+                )
+            )
         if cached and cached.get("signature") == signature and not state.done:
             return
+        set_started = time.perf_counter() if should_log else 0.0
         self._overlay_summary_cache[series_key] = {
             "signature": signature,
             "bar_index": state.bar_index,
         }
+        if should_log:
+            set_ms = (time.perf_counter() - set_started) * 1000.0
+            set_context = self._series_log_context(
+                series,
+                cache_name="overlay_summary_cache",
+                cache_scope="runtime",
+                cache_key_summary=series_key,
+                time_taken_ms=set_ms,
+                pid=os.getpid(),
+                thread_name=threading.current_thread().name,
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.set",
+                    merge_log_context(set_context, build_log_context(event="cache.set")),
+                )
+            )
         instrument = series.instrument or {}
         regime_payload = (summary.get("type_payload_counts") or {}).get("regime_overlay", {})
         regime_overlay_count = summary.get("type_counts", {}).get("regime_overlay", 0)

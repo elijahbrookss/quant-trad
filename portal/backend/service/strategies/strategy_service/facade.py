@@ -533,6 +533,8 @@ class StrategyRegistry:
     """Holds all strategies for the running FastAPI instance."""
 
     def __init__(self) -> None:
+        # NOTE: In-memory registry cache (per-process). Requires reload to sync external updates.
+        # NOTE: No locks; concurrent mutations may race.
         self._records: Dict[str, StrategyDefinition] = {}
         self._bootstrap_from_storage()
 

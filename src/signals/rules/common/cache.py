@@ -17,6 +17,7 @@ def ensure_cache(
 ) -> Optional[MutableMapping[str, Any]]:
     """Ensure a cache exists within the mutable context and reset readiness flags."""
 
+    # NOTE: Context-scoped cache (per evaluation). No persistence across runs.
     mutable = maybe_mutable_context(context)
     if mutable is None:
         return None
