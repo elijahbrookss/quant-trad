@@ -1,0 +1,405 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "P8E80F9AEF21F6940"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "ms",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "red", "value": 250 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (event) (quantile_over_time(0.95, {service=\"backend\"} | logfmt | event=~\"(bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate|bot_runtime_persistence_flush|bot_runtime_step_series_state|bot_runtime_settlement_apply)\" | event=~\"$event\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | label_format event=\"{{.event}}\" | unwrap time_taken_ms [$__auto]))",
+          "queryType": "range"
+        }
+      ],
+      "title": "Perf latency p95 (ms)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisLabel": "events/min",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate({service=\"backend\"} | logfmt | event=~\"(bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate|bot_runtime_persistence_flush|bot_runtime_step_series_state|bot_runtime_settlement_apply)\" | event=~\"$event\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | label_format event=\"{{.event}}\" [$__auto])) * 60",
+          "queryType": "range"
+        }
+      ],
+      "title": "Perf event rate (events/min)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisLabel": "errors/min", "drawStyle": "bars" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate({service=\"backend\"} | logfmt | event=~\"(bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate|bot_runtime_persistence_flush|bot_runtime_step_series_state|bot_runtime_settlement_apply)\" | ok=\"False\" | event=~\"$event\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | label_format event=\"{{.event}}\" [$__auto])) * 60",
+          "queryType": "range"
+        }
+      ],
+      "title": "Perf error rate (ok=false, events/min)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisLabel": "ms" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {service=\"backend\"} | logfmt | event=\"bot_runtime_fetch_ohlcv\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | unwrap time_taken_ms [$__auto])",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_fetch_ohlcv\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | unwrap rows_returned [$__auto])",
+          "queryType": "range"
+        }
+      ],
+      "title": "OHLCV fetch p95 + avg rows",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisLabel": "ms" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 14 },
+      "id": 5,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {service=\"backend\"} | logfmt | event=\"bot_runtime_strategy_evaluate\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | unwrap time_taken_ms [$__auto])",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_strategy_evaluate\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | unwrap buy_markers_count [$__auto])",
+          "queryType": "range"
+        },
+        {
+          "refId": "C",
+          "expr": "avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_strategy_evaluate\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | symbol=~\"$symbol\" | timeframe=~\"$timeframe\" | unwrap sell_markers_count [$__auto])",
+          "queryType": "range"
+        }
+      ],
+      "title": "Strategy evaluate p95 + markers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisLabel": "ms" } },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 14 },
+      "id": 6,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "quantile_over_time(0.95, {service=\"backend\"} | logfmt | event=\"bot_runtime_persistence_flush\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | unwrap time_taken_ms [$__auto])",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "expr": "avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_persistence_flush\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | unwrap trade_entries_written [$__auto])",
+          "queryType": "range"
+        },
+        {
+          "refId": "C",
+          "expr": "avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_persistence_flush\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | unwrap trade_events_written [$__auto])",
+          "queryType": "range"
+        }
+      ],
+      "title": "Persistence flush p95 + counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] } }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 20 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (cache_name, event) (rate({service=\"backend\"} | logfmt | event=~\"cache.hit|cache.miss|cache.absent\" | cache_name=~\"$cache_name\" | label_format cache_name=\"{{.cache_name}}\" event=\"{{.event}}\" [$__auto])) * 60",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (event) (rate({service=\"backend\"} | logfmt | event=\"cache.absent\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | label_format event=\"{{.event}}\" cache_name=\"absent\" [$__auto])) * 60",
+          "queryType": "range"
+        }
+      ],
+      "title": "Cache rates (hit/miss/absent per min)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] } }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 20 },
+      "id": 8,
+      "options": {},
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (flush_reason) (rate({service=\"backend\"} | logfmt | event=\"bot_runtime_persistence_flush\" | label_format flush_reason=\"{{.flush_reason}}\" [$__auto])) * 60",
+          "queryType": "range"
+        }
+      ],
+      "title": "Flush reason rate (events/min)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": { "defaults": { "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }] } }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "id": 9,
+      "options": {
+        "showHeader": true
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(20, avg by (symbol, timeframe, event) (avg_over_time({service=\"backend\"} | logfmt | event=~\"bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | label_format symbol=\"{{.symbol}}\" timeframe=\"{{.timeframe}}\" event=\"{{.event}}\" | unwrap time_taken_ms [$__auto])))",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "expr": "topk(20, count_over_time({service=\"backend\"} | logfmt | event=~\"bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | label_format symbol=\"{{.symbol}}\" timeframe=\"{{.timeframe}}\" event=\"{{.event}}\" [$__auto]))",
+          "queryType": "range"
+        }
+      ],
+      "title": "Top offenders (avg ms + count)",
+      "type": "table",
+      "transformations": [
+        {
+          "id": "join",
+          "options": { "fields": {} }
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisLabel": "ms" } }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 34 },
+      "id": 10,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (pid) (avg_over_time({service=\"backend\"} | logfmt | event=\"bot_runtime_step_series_state\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | label_format pid=\"{{.pid}}\" | unwrap time_taken_ms [$__auto]))",
+          "queryType": "range"
+        }
+      ],
+      "title": "Step series state avg by pid",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisLabel": "events/min" } }, "overrides": [] },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 34 },
+      "id": 11,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (rate({service=\"backend\"} | logfmt | event=~\"bot_runtime_fetch_ohlcv|bot_runtime_strategy_evaluate|bot_runtime_persistence_flush|bot_runtime_step_series_state|bot_runtime_settlement_apply\" | bot_id=~\"$bot_id\" | run_id=~\"$run_id\" | label_format event=\"{{.event}}\" | unwrap time_taken_ms | __error__=\"\" [$__auto]) >= 250) * 60",
+          "queryType": "range"
+        }
+      ],
+      "title": "Slow events >= 250ms (events/min)",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "schemaVersion": 41,
+  "tags": ["observability", "io", "db"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | bot_id!=\"\", bot_id)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | run_id!=\"\", run_id)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "symbol",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | symbol!=\"\", symbol)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "timeframe",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | timeframe!=\"\", timeframe)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "event",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | event=~\"bot_runtime_.*\", event)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "cache_name",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "refresh": 2,
+        "query": "label_values({service=\"backend\"} | logfmt | cache_name!=\"\", cache_name)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Quant-Trad: IO + DB Observability",
+  "uid": "qt-io-db-observability",
+  "version": 1
+}
