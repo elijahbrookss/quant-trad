@@ -10,9 +10,10 @@ from utils.log_context import build_log_context, merge_log_context, with_log_con
 from .execution_intent import ExecutionIntent, ExecutionOutcome
 from .entry_settlement import EntrySettlementContext
 from .execution_intent import LimitParams
+from .domain import LadderPosition
 
 if TYPE_CHECKING:
-    from .domain import Candle, LadderPosition, LadderRiskEngine
+    from .domain import Candle, LadderRiskEngine
 
 logger = logging.getLogger(__name__)
 
