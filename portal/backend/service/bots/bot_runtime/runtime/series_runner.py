@@ -74,14 +74,7 @@ class InlineSeriesRunner:
                     continue
                 break
             for state in due_states:
-                try:
-                    self._ctx.step_series_state(state)
-                except Exception as exc:
-                    self._ctx.log_error(
-                        "series_step_failed",
-                        state,
-                        {"error": str(exc), "exception": repr(exc)},
-                    )
+                if not _safe_step(self._ctx, state):
                     stop_event.set()
                     break
 
@@ -152,14 +145,7 @@ class ThreadedSeriesRunner:
                     {"bar_index": state.bar_index, "total_bars": state.total_bars},
                 )
                 break
-            try:
-                self._ctx.step_series_state(state)
-            except Exception as exc:
-                self._ctx.log_error(
-                    "series_step_failed",
-                    state,
-                    {"error": str(exc), "exception": repr(exc)},
-                )
+            if not _safe_step(self._ctx, state):
                 stop_event.set()
                 break
             self._log_step_heartbeat(state)
@@ -216,16 +202,9 @@ class PoolSeriesRunner:
                         self._ctx.pace(interval, True)
                         continue
                     break
-                futures = [executor.submit(self._ctx.step_series_state, state) for state in due_states]
+                futures = [executor.submit(_safe_step, self._ctx, state) for state in due_states]
                 for future, state in zip(futures, due_states):
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        self._ctx.log_error(
-                            "series_step_failed",
-                            state,
-                            {"error": str(exc), "exception": repr(exc)},
-                        )
+                    if not future.result():
                         stop_event.set()
                         for pending in futures:
                             pending.cancel()
@@ -233,3 +212,16 @@ class PoolSeriesRunner:
 
     def stop(self) -> None:
         return
+
+
+def _safe_step(ctx: SeriesRunnerContext, state: SeriesState) -> bool:
+    try:
+        ctx.step_series_state(state)
+    except Exception as exc:
+        ctx.log_error(
+            "series_step_failed",
+            state,
+            {"error": str(exc), "exception": repr(exc)},
+        )
+        return False
+    return True
