@@ -14,7 +14,7 @@ import risk as risk_math
 from atm import merge_templates
 from .execution import FillRejection, FillResult
 from .execution_adapter import ExecutionAdapter
-from .execution_intent import LimitParams
+from .execution_intent import ExecutionIntent, LimitParams
 from .execution_model import ExecutionModel
 from .execution_runtime import DeterministicExecutionModel
 from .entry_execution import EntryExecutionCoordinator
@@ -199,6 +199,38 @@ class StrategySignal:
 
     epoch: int
     direction: str
+
+
+@dataclass
+class EntryValidation:
+    """Validation result for entry sizing and intent construction."""
+
+    ok: bool
+    rejection_reason: Optional[str] = None
+    rejection_detail: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class EntryRequest:
+    """Prepared entry sizing and intent information for execution."""
+
+    trade_id: Optional[str]
+    order_intent_id: Optional[str]
+    direction: str
+    requested_qty: float
+    qty_raw: float
+    r_ticks: float
+    r_value: Optional[float]
+    atr_at_entry: Optional[float]
+    r_multiple_at_entry: Optional[float]
+    order_type: str
+    limit_params: Optional[LimitParams]
+    side: str
+    requested_price: float
+    intent: Optional[ExecutionIntent]
+    validation: EntryValidation
+    margin_info: Optional[Dict[str, Any]]
+    was_margin_capped: bool
 
 
 @dataclass
@@ -1217,6 +1249,184 @@ class LadderRiskEngine:
             validity_window=max(validity_window, 1),
             fallback=fallback,
             limit_price=float(limit_price),
+        )
+
+    def build_entry_request(self, candle: Candle, direction: str) -> EntryRequest:
+        atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
+        r_ticks = self._compute_r_ticks(candle)
+
+        r_value = self._r_value(candle)
+        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
+            r_value = float(self.stop_r_multiple) * float(r_value)
+
+        risk_based_qty = self._calculate_total_contracts(r_ticks)
+        capped_qty, was_margin_capped, margin_info = self._cap_qty_by_margin(
+            risk_qty=risk_based_qty,
+            price=candle.close,
+            direction=direction,
+        )
+
+        if margin_info and margin_info.get("reason") == "margin_calculation_failed":
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="MARGIN_CALCULATION_FAILED",
+                error=margin_info.get("error"),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=float(capped_qty),
+                qty_raw=float(capped_qty),
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason="MARGIN_CALCULATION_FAILED",
+                    rejection_detail=margin_info,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        if capped_qty <= 0:
+            rejection_detail = margin_info or {"risk_qty": risk_based_qty}
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="QTY_CAPPED_TO_ZERO",
+                risk_qty=risk_based_qty,
+                capped_qty=capped_qty,
+                was_margin_capped=was_margin_capped,
+                price=candle.close,
+                direction=direction,
+                margin_reason=margin_info.get("reason") if margin_info else None,
+                margin_error=margin_info.get("error") if margin_info else None,
+                available_collateral=margin_info.get("available_collateral") if margin_info else None,
+                max_qty_by_margin=margin_info.get("max_qty_by_margin") if margin_info else None,
+                cost_per_contract=margin_info.get("cost_per_contract") if margin_info else None,
+                margin_per_contract=margin_info.get("margin_per_contract") if margin_info else None,
+                fee_per_contract=margin_info.get("fee_per_contract") if margin_info else None,
+                margin_rate=margin_info.get("margin_rate") if margin_info else None,
+                margin_method=margin_info.get("calculation_method") if margin_info else None,
+                balance_trace=margin_info.get("balance_trace") if margin_info else None,
+                qty_step=self.qty_step,
+                min_qty=self.min_qty,
+                max_qty=self.max_qty,
+                min_notional=self.min_notional,
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=float(capped_qty),
+                qty_raw=float(capped_qty),
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason="QTY_CAPPED_TO_ZERO",
+                    rejection_detail=rejection_detail,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        qty_raw = float(capped_qty)
+        requested_qty = float(capped_qty)
+        normalization = self._normalize_qty(requested_qty)
+        if not normalization.ok:
+            rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
+            rejection_detail = normalization.to_log_dict()
+            context = merge_log_context(
+                build_log_context(
+                    symbol=self.instrument.get("symbol"),
+                    reason=rejection_reason,
+                ),
+                build_log_context(**rejection_detail),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=requested_qty,
+                qty_raw=qty_raw,
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason=rejection_reason,
+                    rejection_detail=rejection_detail,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        requested_qty = float(normalization.qty_final)
+
+        order_type = "market" if self.execution_mode != "limit_maker" else "limit_maker"
+        limit_params: Optional[LimitParams] = None
+        if order_type == "limit_maker":
+            limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
+
+        order_intent_id = self._new_order_intent_id()
+        trade_id = self._new_trade_id()
+        side = "buy" if direction == "long" else "sell"
+        intent = ExecutionIntent(
+            order_id=order_intent_id,
+            side=side,
+            qty=requested_qty,
+            symbol=str(self.instrument.get("symbol") or ""),
+            order_type=order_type,
+            requested_price=float(candle.close),
+            limit_params=limit_params,
+            metadata={
+                "direction": direction,
+                "symbol": self.instrument.get("symbol"),
+            },
+        )
+
+        return EntryRequest(
+            trade_id=trade_id,
+            order_intent_id=order_intent_id,
+            direction=direction,
+            requested_qty=requested_qty,
+            qty_raw=qty_raw,
+            r_ticks=float(r_ticks),
+            r_value=r_value,
+            atr_at_entry=atr_at_entry,
+            r_multiple_at_entry=self.r_multiple,
+            order_type=order_type,
+            limit_params=limit_params,
+            side=side,
+            requested_price=float(candle.close),
+            intent=intent,
+            validation=EntryValidation(ok=True),
+            margin_info=margin_info,
+            was_margin_capped=was_margin_capped,
         )
 
     @staticmethod

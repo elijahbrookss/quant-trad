@@ -6,10 +6,9 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Optional, TYPE_CHECKING
 
-from utils.log_context import build_log_context, merge_log_context, with_log_context
+from utils.log_context import build_log_context, with_log_context
 from .execution_intent import ExecutionIntent, ExecutionOutcome
 from .entry_settlement import EntrySettlementContext
-from .execution_intent import LimitParams
 if TYPE_CHECKING:
     from .domain import Candle, LadderPosition, LadderRiskEngine
 
@@ -46,98 +45,22 @@ class EntryExecutionCoordinator:
 
     def submit_entry(self, candle: Candle, direction: str) -> Optional[LadderPosition]:
         engine = self._engine
-        atr_at_entry = candle.atr if engine._has_valid_atr(candle.atr) else None
-        r_ticks = engine._compute_r_ticks(candle)
+        request = engine.build_entry_request(candle, direction)
+        if not request.validation.ok:
+            engine.last_rejection_reason = request.validation.rejection_reason
+            engine.last_rejection_detail = request.validation.rejection_detail
+            return None
 
-        r_value = engine._r_value(candle)
-        if engine.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
-            r_value = float(engine.stop_r_multiple) * float(r_value)
-
-        risk_based_qty = engine._calculate_total_contracts(r_ticks)
-        capped_qty, was_margin_capped, margin_info = engine._cap_qty_by_margin(
-            risk_qty=risk_based_qty,
-            price=candle.close,
-            direction=direction,
-        )
-
-        if margin_info and margin_info.get("reason") == "margin_calculation_failed":
-            engine.last_rejection_reason = "MARGIN_CALCULATION_FAILED"
-            engine.last_rejection_detail = margin_info
+        intent = request.intent
+        if intent is None:
+            engine.last_rejection_reason = "ENTRY_REQUEST_INVALID"
+            engine.last_rejection_detail = {"reason": "intent_missing"}
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
-                reason="MARGIN_CALCULATION_FAILED",
-                error=margin_info.get("error"),
+                reason="ENTRY_REQUEST_INVALID",
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
-
-        if capped_qty <= 0:
-            engine.last_rejection_reason = "QTY_CAPPED_TO_ZERO"
-            engine.last_rejection_detail = margin_info or {"risk_qty": risk_based_qty}
-            context = build_log_context(
-                symbol=engine.instrument.get("symbol"),
-                reason="QTY_CAPPED_TO_ZERO",
-                risk_qty=risk_based_qty,
-                capped_qty=capped_qty,
-                was_margin_capped=was_margin_capped,
-                price=candle.close,
-                direction=direction,
-                margin_reason=margin_info.get("reason") if margin_info else None,
-                margin_error=margin_info.get("error") if margin_info else None,
-                available_collateral=margin_info.get("available_collateral") if margin_info else None,
-                max_qty_by_margin=margin_info.get("max_qty_by_margin") if margin_info else None,
-                cost_per_contract=margin_info.get("cost_per_contract") if margin_info else None,
-                margin_per_contract=margin_info.get("margin_per_contract") if margin_info else None,
-                fee_per_contract=margin_info.get("fee_per_contract") if margin_info else None,
-                margin_rate=margin_info.get("margin_rate") if margin_info else None,
-                margin_method=margin_info.get("calculation_method") if margin_info else None,
-                balance_trace=margin_info.get("balance_trace") if margin_info else None,
-                qty_step=engine.qty_step,
-                min_qty=engine.min_qty,
-                max_qty=engine.max_qty,
-                min_notional=engine.min_notional,
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-
-        order_intent_id = engine._new_order_intent_id()
-        trade_id = engine._new_trade_id()
-        qty_raw = capped_qty
-        requested_qty = capped_qty
-        normalization = engine._normalize_qty(requested_qty)
-        if not normalization.ok:
-            engine.last_rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
-            engine.last_rejection_detail = normalization.to_log_dict()
-            context = merge_log_context(
-                build_log_context(
-                    symbol=engine.instrument.get("symbol"),
-                    reason=engine.last_rejection_reason,
-                ),
-                build_log_context(**normalization.to_log_dict()),
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-        requested_qty = float(normalization.qty_final)
-
-        order_type = "market" if engine.execution_mode != "limit_maker" else "limit_maker"
-        limit_params: Optional[LimitParams] = None
-        if order_type == "limit_maker":
-            limit_params = engine._build_limit_params(candle, direction=direction, r_value=r_value)
-
-        side = "buy" if direction == "long" else "sell"
-        intent = ExecutionIntent(
-            order_id=order_intent_id,
-            side=side,
-            qty=requested_qty,
-            symbol=str(engine.instrument.get("symbol") or ""),
-            order_type=order_type,
-            requested_price=float(candle.close),
-            limit_params=limit_params,
-            metadata={
-                "direction": direction,
-                "symbol": engine.instrument.get("symbol"),
-            },
-        )
 
         execution_model = engine._resolve_execution_model()
         outcome, rejection = execution_model.evaluate(
@@ -149,39 +72,39 @@ class EntryExecutionCoordinator:
         )
         if rejection:
             engine.last_rejection_reason = rejection.reason
-            engine.last_rejection_detail = {"requested_qty": requested_qty, **(rejection.metadata or {})}
+            engine.last_rejection_detail = {"requested_qty": request.requested_qty, **(rejection.metadata or {})}
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
                 reason=rejection.reason,
-                requested_qty=requested_qty,
-                order_type=order_type,
+                requested_qty=request.requested_qty,
+                order_type=request.order_type,
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
 
         if outcome.status == "open":
-            validity_remaining = limit_params.validity_window if limit_params else 1
+            validity_remaining = request.limit_params.validity_window if request.limit_params else 1
             pending = PendingEntry(
                 intent=intent,
-                direction=direction,
-                qty_raw=qty_raw,
-                requested_qty=requested_qty,
-                r_ticks=float(r_ticks),
-                r_value=r_value,
-                atr_at_entry=atr_at_entry,
-                r_multiple_at_entry=engine.r_multiple,
-                order_intent_id=order_intent_id,
-                trade_id=trade_id,
+                direction=request.direction,
+                qty_raw=request.qty_raw,
+                requested_qty=request.requested_qty,
+                r_ticks=float(request.r_ticks),
+                r_value=request.r_value,
+                atr_at_entry=request.atr_at_entry,
+                r_multiple_at_entry=request.r_multiple_at_entry,
+                order_intent_id=str(request.order_intent_id),
+                trade_id=str(request.trade_id),
                 validity_remaining=max(int(validity_remaining) - 1, 0),
-                fallback=limit_params.fallback if limit_params else "cancel",
+                fallback=request.limit_params.fallback if request.limit_params else "cancel",
             )
             if pending.validity_remaining <= 0:
                 return self._apply_entry_fallback(candle, pending, outcome)
             self.pending_entry = pending
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
-                order_id=order_intent_id,
-                order_type=order_type,
+                order_id=request.order_intent_id,
+                order_type=request.order_type,
                 limit_price=outcome.limit_price,
                 validity_remaining=pending.validity_remaining,
                 fallback=pending.fallback,
@@ -194,7 +117,7 @@ class EntryExecutionCoordinator:
             engine.last_rejection_detail = {"status": outcome.status}
             context = build_log_context(
                 symbol=engine.instrument.get("symbol"),
-                order_id=order_intent_id,
+                order_id=request.order_intent_id,
                 status=outcome.status,
             )
             logger.warning(with_log_context("entry_rejected", context))
@@ -202,17 +125,17 @@ class EntryExecutionCoordinator:
 
         pending = PendingEntry(
             intent=intent,
-            direction=direction,
-            qty_raw=qty_raw,
-            requested_qty=requested_qty,
-            r_ticks=float(r_ticks),
-            r_value=r_value,
-            atr_at_entry=atr_at_entry,
-            r_multiple_at_entry=engine.r_multiple,
-            order_intent_id=order_intent_id,
-            trade_id=trade_id,
+            direction=request.direction,
+            qty_raw=request.qty_raw,
+            requested_qty=request.requested_qty,
+            r_ticks=float(request.r_ticks),
+            r_value=request.r_value,
+            atr_at_entry=request.atr_at_entry,
+            r_multiple_at_entry=request.r_multiple_at_entry,
+            order_intent_id=str(request.order_intent_id),
+            trade_id=str(request.trade_id),
             validity_remaining=0,
-            fallback=limit_params.fallback if limit_params else "cancel",
+            fallback=request.limit_params.fallback if request.limit_params else "cancel",
         )
         return self._finalize_entry(candle, pending, outcome)
 

@@ -1,6 +1,6 @@
 """Core execution and domain logic for bot runtime."""
 
-from .domain import Candle, LadderPosition, LadderRiskEngine, Leg, StrategySignal
+from .domain import Candle, EntryRequest, EntryValidation, LadderPosition, LadderRiskEngine, Leg, StrategySignal
 from .execution import (
     FillRejection,
     FillResult,
@@ -22,6 +22,8 @@ from .wallet_gateway import LedgerWalletGateway, WalletGateway
 
 __all__ = [
     "Candle",
+    "EntryRequest",
+    "EntryValidation",
     "LadderPosition",
     "LadderRiskEngine",
     "Leg",
