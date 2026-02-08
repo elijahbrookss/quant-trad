@@ -1323,6 +1323,71 @@ class LadderRiskEngine:
             )
         return adjustments
 
+    def _build_position(
+        self,
+        *,
+        candle: Candle,
+        entry_price: float,
+        stop_price: float,
+        direction: str,
+        entry_order: Dict[str, Any],
+        entry_outcome: Dict[str, Any],
+        legs: List[Leg],
+        breakeven_ticks: float,
+        trailing_activation_ticks: Optional[float],
+        trailing_distance_ticks: Optional[float],
+        runtime_stop_adjustments: List[Dict[str, Any]],
+        base_currency: Optional[str],
+        quote_currency: Optional[str],
+        atr_at_entry: Optional[float],
+        r_multiple_at_entry: Optional[float],
+        r_value: Optional[float],
+        r_ticks: Optional[float],
+        trade_id: str,
+        pre_entry_context: Optional[Dict[str, Optional[float]]],
+        use_wallet_execution: bool,
+    ) -> LadderPosition:
+        self.trailing_config = (
+            self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), dict) else {}
+        )
+        self._last_tp_allocation = None
+        trailing_atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
+
+        return LadderPosition(
+            entry_time=candle.time,
+            entry_price=entry_price,
+            entry_order=entry_order,
+            entry_outcome=entry_outcome,
+            direction=direction,
+            stop_price=stop_price,
+            tick_size=self.tick_size,
+            execution_model=self.execution_model if use_wallet_execution else None,
+            execution_adapter=self.execution_adapter if use_wallet_execution else None,
+            wallet_gateway=self._wallet_gateway if use_wallet_execution else None,
+            exit_settlement=self.exit_settlement,
+            base_currency=base_currency,
+            quote_currency_code=quote_currency,
+            legs=legs,
+            breakeven_trigger_ticks=breakeven_ticks,
+            tick_value=self.tick_value,
+            contract_size=self.contract_size,
+            maker_fee_rate=self.maker_fee,
+            taker_fee_rate=self.taker_fee,
+            quote_currency=self.quote_currency,
+            short_requires_borrow=bool(self.short_requires_borrow),
+            instrument=self.instrument if use_wallet_execution else None,
+            atr_at_entry=atr_at_entry,
+            r_multiple_at_entry=r_multiple_at_entry,
+            r_value=r_value,
+            r_ticks=r_ticks,
+            trailing_activation_ticks=trailing_activation_ticks,
+            trailing_distance_ticks=trailing_distance_ticks,
+            trailing_atr_multiple=trailing_atr_multiple,
+            pre_entry_context=pre_entry_context,
+            stop_adjustments=runtime_stop_adjustments,
+            trade_id=trade_id,
+        )
+
     def _r_value(self, candle: Candle) -> Optional[float]:
         """Calculate the monetary value of 1R (ATR * multiplier * tick_value)."""
         if not self._has_valid_atr(candle.atr):

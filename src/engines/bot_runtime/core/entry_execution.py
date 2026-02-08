@@ -362,46 +362,27 @@ class EntryExecutionCoordinator:
         breakeven_ticks = 0.0 if runtime_stop_adjustments else engine._breakeven_threshold(legs, pending.r_ticks)
         trailing_activation_ticks = engine._trailing_activation_ticks(legs, pending.r_ticks)
         trailing_distance_ticks = engine._trailing_distance_ticks(pending.atr_at_entry)
-        engine.trailing_config = (
-            engine.template.get("trailing_stop") if isinstance(engine.template.get("trailing_stop"), dict) else {}
-        )
-        engine._last_tp_allocation = None
-
-        from .domain import LadderPosition
-
-        position = LadderPosition(
-            entry_time=candle.time,
+        position = engine._build_position(
+            candle=candle,
             entry_price=entry_price,
+            stop_price=stop_price,
+            direction=pending.direction,
             entry_order=asdict(pending.intent),
             entry_outcome=asdict(outcome),
-            direction=pending.direction,
-            stop_price=stop_price,
-            tick_size=engine.tick_size,
-            execution_model=engine.execution_model if use_wallet_execution else None,
-            execution_adapter=engine.execution_adapter if use_wallet_execution else None,
-            wallet_gateway=engine._wallet_gateway if use_wallet_execution else None,
-            exit_settlement=engine.exit_settlement,
-            base_currency=base_currency,
-            quote_currency_code=quote_currency,
             legs=legs,
-            breakeven_trigger_ticks=breakeven_ticks,
-            tick_value=engine.tick_value,
-            contract_size=engine.contract_size,
-            maker_fee_rate=engine.maker_fee,
-            taker_fee_rate=engine.taker_fee,
-            quote_currency=engine.quote_currency,
-            short_requires_borrow=bool(engine.short_requires_borrow),
-            instrument=engine.instrument if use_wallet_execution else None,
+            breakeven_ticks=breakeven_ticks,
+            trailing_activation_ticks=trailing_activation_ticks,
+            trailing_distance_ticks=trailing_distance_ticks,
+            runtime_stop_adjustments=runtime_stop_adjustments,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
             atr_at_entry=pending.atr_at_entry,
             r_multiple_at_entry=pending.r_multiple_at_entry,
             r_value=pending.r_value,
             r_ticks=pending.r_ticks,
-            trailing_activation_ticks=trailing_activation_ticks,
-            trailing_distance_ticks=trailing_distance_ticks,
-            trailing_atr_multiple=float(engine.trailing_config.get("atr_multiplier") or 0.0),
-            pre_entry_context=getattr(candle, "lookback_15", None),
-            stop_adjustments=runtime_stop_adjustments,
             trade_id=pending.trade_id,
+            pre_entry_context=getattr(candle, "lookback_15", None),
+            use_wallet_execution=use_wallet_execution,
         )
         position.apply_entry_fee(outcome.fee_paid)
         return position
