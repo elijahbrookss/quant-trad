@@ -7,6 +7,7 @@ import os
 import threading
 import uuid
 import time
+from contextlib import nullcontext
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,13 @@ from .settlement import SettlementApplier
 from .signal_consumption import SignalConsumption, consume_signals
 from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
 from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
+from utils.perf_log import (
+    get_obs_enabled,
+    get_obs_step_sample_rate,
+    get_obs_slow_ms,
+    perf_log,
+    should_sample,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +179,9 @@ class BotRuntime:
             indicator_context,
             overlay_cache,
         )
+        self._obs_enabled = get_obs_enabled(self.config)
+        self._obs_step_sample_rate = get_obs_step_sample_rate(self.config)
+        self._obs_slow_ms = get_obs_slow_ms(self.config)
         self._series_builder = SeriesBuilder(
             self.bot_id,
             self.config,
@@ -179,7 +190,10 @@ class BotRuntime:
             indicator_ctx=self._indicator_ctx,
             warning_sink=self._record_runtime_warning,
         )
-        self._settlement_applier = SettlementApplier()
+        self._settlement_applier = SettlementApplier(
+            obs_enabled=self._obs_enabled,
+            obs_slow_ms=self._obs_slow_ms,
+        )
         self._persistence_buffer = TradePersistenceBuffer.from_config(
             self.config,
             self._runtime_log_context,
@@ -300,6 +314,12 @@ class BotRuntime:
         if not payload:
             return
         self.config.update(payload)
+        if "OBS_ENABLED" in payload or "obs_enabled" in payload:
+            self._obs_enabled = get_obs_enabled(self.config)
+        if "OBS_STEP_SAMPLE_RATE" in payload or "obs_step_sample_rate" in payload:
+            self._obs_step_sample_rate = get_obs_step_sample_rate(self.config)
+        if "OBS_SLOW_MS" in payload or "obs_slow_ms" in payload:
+            self._obs_slow_ms = get_obs_slow_ms(self.config)
         if "mode" in payload:
             self.mode = str(payload.get("mode") or "instant").lower()
             with self._lock:
@@ -1234,243 +1254,261 @@ class BotRuntime:
             state.done = True
             return
         series = state.series
-        candle = series.candles[state.bar_index]
-        state.active_candle = candle
-        epoch = int(candle.time.timestamp())
-
-        # Debug: Log signal queue status
-        signals_pending = len(series.signals) if series.signals else 0
-        context = self._series_log_context(
+        sample_enabled = self._obs_enabled and should_sample(self._obs_step_sample_rate)
+        base_context = self._series_log_context(
             series,
             bar_index=state.bar_index,
-            epoch=epoch,
-            signals_pending=signals_pending,
+            total_bars=state.total_bars,
         )
-        logger.debug(with_log_context("apply_bar", context))
-        if state.bar_index % WALK_FORWARD_SAMPLE_INTERVAL == 0:
-            info_context = self._series_log_context(
-                series,
-                bar_index=state.bar_index,
-                bar_time=isoformat(candle.time),
-                status=self.state.get("status"),
+        perf_context = (
+            perf_log(
+                "bot_runtime_step_series_state",
+                logger=logger,
+                base_context=base_context,
+                enabled=sample_enabled,
+                slow_ms=self._obs_slow_ms,
             )
-            logger.info(with_log_context("walk_forward_step", info_context))
+            if sample_enabled
+            else nullcontext()
+        )
+        with perf_context:
+            candle = series.candles[state.bar_index]
+            state.active_candle = candle
+            epoch = int(candle.time.timestamp())
 
-        consumed_signals, direction = self._next_signal_for(series, epoch)
-        self._record_signal_consumption(state, epoch, consumed_signals, direction)
-
-        # Debug: Log signal consumption result
-        if direction is not None:
+            # Debug: Log signal queue status
+            signals_pending = len(series.signals) if series.signals else 0
             context = self._series_log_context(
                 series,
                 bar_index=state.bar_index,
                 epoch=epoch,
-                direction=direction,
+                signals_pending=signals_pending,
             )
-            logger.debug(with_log_context("signal_consumed", context))
-            signal_event_id = self._record_ledger_event(
-                event_type="signal",
-                event_subtype="strategy_signal",
-                event_ts=_isoformat(candle.time),
-                reason_code="SIGNAL_STRATEGY_SIGNAL",
-                series=series,
-                side=direction,
-                price=candle.close,
-                evidence_refs=[
-                    {
-                        "ref_type": "indicator",
-                        "ref_id": "strategy_signal",
-                        "summary": f"direction={direction} price={round(candle.close, 4)}",
-                    }
-                ],
-            )
-            self._signal_event_ids[
-                self._signal_key(series, "strategy_signal", direction, None)
-            ] = signal_event_id
+            logger.debug(with_log_context("apply_bar", context))
+            if state.bar_index % WALK_FORWARD_SAMPLE_INTERVAL == 0:
+                info_context = self._series_log_context(
+                    series,
+                    bar_index=state.bar_index,
+                    bar_time=isoformat(candle.time),
+                    status=self.state.get("status"),
+                )
+                logger.info(with_log_context("walk_forward_step", info_context))
 
-        # Attempt to create trade from signal
-        blocking_trade = None
-        new_trade = None
-        if direction is not None:
-            instrument_id = None
-            if isinstance(series.instrument, Mapping):
-                instrument_id = series.instrument.get("id")
-            if not instrument_id:
-                self._log_decision_event(
-                    event="signal_rejected",
+            consumed_signals, direction = self._next_signal_for(series, epoch)
+            self._record_signal_consumption(state, epoch, consumed_signals, direction)
+
+            # Debug: Log signal consumption result
+            if direction is not None:
+                context = self._series_log_context(
+                    series,
+                    bar_index=state.bar_index,
+                    epoch=epoch,
+                    direction=direction,
+                )
+                logger.debug(with_log_context("signal_consumed", context))
+                signal_event_id = self._record_ledger_event(
+                    event_type="signal",
+                    event_subtype="strategy_signal",
+                    event_ts=_isoformat(candle.time),
+                    reason_code="SIGNAL_STRATEGY_SIGNAL",
                     series=series,
-                    candle=candle,
-                    signal_type="strategy_signal",
-                    signal_direction=direction,
-                    signal_price=candle.close,
-                    rule_id=None,
-                    decision="rejected",
-                    reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
-                    reason_detail="Instrument id missing.",
-                    context={
+                    side=direction,
+                    price=candle.close,
+                    evidence_refs=[
+                        {
+                            "ref_type": "indicator",
+                            "ref_id": "strategy_signal",
+                            "summary": f"direction={direction} price={round(candle.close, 4)}",
+                        }
+                    ],
+                )
+                self._signal_event_ids[
+                    self._signal_key(series, "strategy_signal", direction, None)
+                ] = signal_event_id
+
+            # Attempt to create trade from signal
+            blocking_trade = None
+            new_trade = None
+            if direction is not None:
+                instrument_id = None
+                if isinstance(series.instrument, Mapping):
+                    instrument_id = series.instrument.get("id")
+                if not instrument_id:
+                    self._log_decision_event(
+                        event="signal_rejected",
+                        series=series,
+                        candle=candle,
+                        signal_type="strategy_signal",
+                        signal_direction=direction,
+                        signal_price=candle.close,
+                        rule_id=None,
+                        decision="rejected",
+                        reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
+                        reason_detail="Instrument id missing.",
+                        context={
+                            "signal_type": "strategy_signal",
+                            "signal_direction": direction,
+                            "signal_price": candle.close,
+                            "blocked_instrument_id": None,
+                        },
+                        instrument_id=None,
+                    )
+                    direction = None
+                else:
+                    with self._trade_lock:
+                        blocking_trade = self._active_trade_for_instrument(
+                            instrument_id,
+                            skip_series=series,
+                        )
+                        if blocking_trade is None:
+                            new_trade = series.risk_engine.maybe_enter(candle, direction)
+
+            # Log decision event
+            if direction is not None:
+                if new_trade is not None:
+                    # Signal was accepted and trade was opened
+                    self._log_decision_event(
+                        event="signal_accepted",
+                        series=series,
+                        candle=candle,
+                        signal_type="strategy_signal",  # Generic type for now
+                        signal_direction=direction,
+                        signal_price=candle.close,
+                        rule_id=None,  # Not available in current signal queue
+                        decision="accepted",
+                        reason_code="DECISION_ACCEPTED",
+                        trade_id=new_trade.trade_id,
+                        trade_time=_isoformat(new_trade.entry_time),
+                    )
+                else:
+                    # Signal was rejected (no trade opened)
+                    # Determine rejection reason
+                    rejection_reason = "Active trade already open"
+                    rejection_meta: Optional[Dict[str, Any]] = None
+                    blocking_trade_id: Optional[str] = None
+                    rejection_code: Optional[str] = None
+                    rejection_context: Dict[str, Any] = {
                         "signal_type": "strategy_signal",
                         "signal_direction": direction,
                         "signal_price": candle.close,
-                        "blocked_instrument_id": None,
-                    },
-                    instrument_id=None,
-                )
-                direction = None
-            else:
-                with self._trade_lock:
-                    blocking_trade = self._active_trade_for_instrument(
-                        instrument_id,
-                        skip_series=series,
+                    }
+                    if blocking_trade is not None:
+                        rejection_reason = "Active trade already open for instrument"
+                        rejection_code = "DECISION_REJECTED_ACTIVE_TRADE"
+                        blocked_instrument_id = None
+                        if isinstance(series.instrument, Mapping):
+                            blocked_instrument_id = series.instrument.get("id")
+                        blocking_trade_id = getattr(blocking_trade, "trade_id", None)
+                        rejection_meta = {
+                            "active_trade_id": blocking_trade_id,
+                            "blocked_instrument_id": blocked_instrument_id,
+                        }
+                        rejection_context.update(rejection_meta)
+                    elif series.risk_engine.active_trade is None:
+                        rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
+                        rejection_code = "DECISION_REJECTED_RISK_ENGINE"
+                        rejection_meta = series.risk_engine.last_rejection_detail
+                        if isinstance(rejection_meta, Mapping):
+                            rejection_context.update(rejection_meta)
+                        rejection_context["risk_engine_reason"] = rejection_reason
+                    if rejection_meta and "reason" in rejection_meta:
+                        rejection_meta = {k: v for k, v in rejection_meta.items() if k != "reason"}
+    
+                    self._log_decision_event(
+                        event="signal_rejected",
+                        series=series,
+                        candle=candle,
+                        signal_type="strategy_signal",
+                        signal_direction=direction,
+                        signal_price=candle.close,
+                        rule_id=None,
+                        decision="rejected",
+                        reason_code=rejection_code or "DECISION_REJECTED",
+                        reason_detail=rejection_reason,
+                        context=rejection_context,
+                        **(rejection_meta or {}),
+                        trade_id=blocking_trade_id,
                     )
-                    if blocking_trade is None:
-                        new_trade = series.risk_engine.maybe_enter(candle, direction)
-
-        # Log decision event
-        if direction is not None:
+    
             if new_trade is not None:
-                # Signal was accepted and trade was opened
-                self._log_decision_event(
-                    event="signal_accepted",
-                    series=series,
-                    candle=candle,
-                    signal_type="strategy_signal",  # Generic type for now
-                    signal_direction=direction,
-                    signal_price=candle.close,
-                    rule_id=None,  # Not available in current signal queue
-                    decision="accepted",
-                    reason_code="DECISION_ACCEPTED",
+                targets = [
+                    {"name": leg.name, "price": round(leg.target_price, 4)}
+                    for leg in new_trade.legs
+                ]
+                self._log_event(
+                    "entry",
+                    series,
+                    candle,
                     trade_id=new_trade.trade_id,
+                    direction=direction,
+                    entry_price=round(new_trade.entry_price, 4),
+                    stop_price=round(new_trade.stop_price, 4),
+                    targets=targets,
+                    bar_index=state.bar_index,
+                    contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
                     trade_time=_isoformat(new_trade.entry_time),
                 )
-            else:
-                # Signal was rejected (no trade opened)
-                # Determine rejection reason
-                rejection_reason = "Active trade already open"
-                rejection_meta: Optional[Dict[str, Any]] = None
-                blocking_trade_id: Optional[str] = None
-                rejection_code: Optional[str] = None
-                rejection_context: Dict[str, Any] = {
-                    "signal_type": "strategy_signal",
-                    "signal_direction": direction,
-                    "signal_price": candle.close,
-                }
-                if blocking_trade is not None:
-                    rejection_reason = "Active trade already open for instrument"
-                    rejection_code = "DECISION_REJECTED_ACTIVE_TRADE"
-                    blocked_instrument_id = None
-                    if isinstance(series.instrument, Mapping):
-                        blocked_instrument_id = series.instrument.get("id")
-                    blocking_trade_id = getattr(blocking_trade, "trade_id", None)
-                    rejection_meta = {
-                        "active_trade_id": blocking_trade_id,
-                        "blocked_instrument_id": blocked_instrument_id,
-                    }
-                    rejection_context.update(rejection_meta)
-                elif series.risk_engine.active_trade is None:
-                    rejection_reason = series.risk_engine.last_rejection_reason or "Risk engine declined entry"
-                    rejection_code = "DECISION_REJECTED_RISK_ENGINE"
-                    rejection_meta = series.risk_engine.last_rejection_detail
-                    if isinstance(rejection_meta, Mapping):
-                        rejection_context.update(rejection_meta)
-                    rejection_context["risk_engine_reason"] = rejection_reason
-                if rejection_meta and "reason" in rejection_meta:
-                    rejection_meta = {k: v for k, v in rejection_meta.items() if k != "reason"}
-
-                self._log_decision_event(
-                    event="signal_rejected",
-                    series=series,
-                    candle=candle,
-                    signal_type="strategy_signal",
-                    signal_direction=direction,
-                    signal_price=candle.close,
-                    rule_id=None,
-                    decision="rejected",
-                    reason_code=rejection_code or "DECISION_REJECTED",
-                    reason_detail=rejection_reason,
-                    context=rejection_context,
-                    **(rejection_meta or {}),
-                    trade_id=blocking_trade_id,
-                )
-
-        if new_trade is not None:
-            targets = [
-                {"name": leg.name, "price": round(leg.target_price, 4)}
-                for leg in new_trade.legs
-            ]
-            self._log_event(
-                "entry",
-                series,
-                candle,
-                trade_id=new_trade.trade_id,
-                direction=direction,
-                entry_price=round(new_trade.entry_price, 4),
-                stop_price=round(new_trade.stop_price, 4),
-                targets=targets,
-                bar_index=state.bar_index,
-                contracts=sum(max(leg.contracts, 0) for leg in new_trade.legs),
-                trade_time=_isoformat(new_trade.entry_time),
-            )
-            self._record_execution_ledger_event(
-                series,
-                event_subtype="entry",
-                event_ts=_isoformat(new_trade.entry_time),
-                trade_id=new_trade.trade_id,
-                side=direction,
-                qty=sum(max(leg.contracts, 0) for leg in new_trade.legs),
-                price=new_trade.entry_price,
-                evidence_details={
-                    "stop_price": round(new_trade.stop_price, 4),
-                    "targets": targets,
-                },
-            )
-            self._persist_trade_entry(series, new_trade)
-            self._update_trade_overlay(series)
-        trade_events = self._prime_intrabar_or_step_bar(state, candle)
-        exit_settlement = getattr(series.risk_engine, "exit_settlement", None) if series.risk_engine else None
-        self._settlement_applier.apply(trade_events, exit_settlement)
-        for event in trade_events:
-            trade_time = self._trade_entry_time(series, event.get("trade_id"))
-            self._log_event(
-                event.get("type", "event"),
-                series,
-                candle,
-                trade_id=event.get("trade_id"),
-                leg=event.get("leg"),
-                price=event.get("price"),
-                event_time=event.get("time"),
-                bar_index=state.bar_index,
-                contracts=event.get("contracts"),
-                pnl=event.get("pnl"),
-                net_pnl=event.get("net_pnl"),
-                gross_pnl=event.get("gross_pnl"),
-                fees_paid=event.get("fees_paid"),
-                currency=event.get("currency"),
-                trade_time=trade_time,
-            )
-            raw_subtype = event.get("type")
-            event_ts = event.get("time")
-            if raw_subtype and event_ts:
-                event_subtype = str(raw_subtype)
-                impact_pnl = event.get("pnl") if event_subtype in {"target", "stop"} else None
-                trade_net_pnl = event.get("net_pnl") if event_subtype == "close" else None
                 self._record_execution_ledger_event(
                     series,
-                    event_subtype=event_subtype,
-                    event_ts=event_ts,
-                    trade_id=event.get("trade_id"),
-                    side=event.get("direction"),
-                    qty=event.get("contracts"),
-                    price=event.get("price"),
-                    event_impact_pnl=impact_pnl,
-                    trade_net_pnl=trade_net_pnl,
-                    evidence_details=event,
+                    event_subtype="entry",
+                    event_ts=_isoformat(new_trade.entry_time),
+                    trade_id=new_trade.trade_id,
+                    side=direction,
+                    qty=sum(max(leg.contracts, 0) for leg in new_trade.legs),
+                    price=new_trade.entry_price,
+                    evidence_details={
+                        "stop_price": round(new_trade.stop_price, 4),
+                        "targets": targets,
+                    },
                 )
-            self._persist_trade_event(series, event)
-        self._update_trade_overlay(series)
-        series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
-        if not state.intrabar_active():
-            self._finalize_bar_step(state, candle)
-
+                self._persist_trade_entry(series, new_trade)
+                self._update_trade_overlay(series)
+            trade_events = self._prime_intrabar_or_step_bar(state, candle)
+            exit_settlement = getattr(series.risk_engine, "exit_settlement", None) if series.risk_engine else None
+            self._settlement_applier.apply(trade_events, exit_settlement)
+            for event in trade_events:
+                trade_time = self._trade_entry_time(series, event.get("trade_id"))
+                self._log_event(
+                    event.get("type", "event"),
+                    series,
+                    candle,
+                    trade_id=event.get("trade_id"),
+                    leg=event.get("leg"),
+                    price=event.get("price"),
+                    event_time=event.get("time"),
+                    bar_index=state.bar_index,
+                    contracts=event.get("contracts"),
+                    pnl=event.get("pnl"),
+                    net_pnl=event.get("net_pnl"),
+                    gross_pnl=event.get("gross_pnl"),
+                    fees_paid=event.get("fees_paid"),
+                    currency=event.get("currency"),
+                    trade_time=trade_time,
+                )
+                raw_subtype = event.get("type")
+                event_ts = event.get("time")
+                if raw_subtype and event_ts:
+                    event_subtype = str(raw_subtype)
+                    impact_pnl = event.get("pnl") if event_subtype in {"target", "stop"} else None
+                    trade_net_pnl = event.get("net_pnl") if event_subtype == "close" else None
+                    self._record_execution_ledger_event(
+                        series,
+                        event_subtype=event_subtype,
+                        event_ts=event_ts,
+                        trade_id=event.get("trade_id"),
+                        side=event.get("direction"),
+                        qty=event.get("contracts"),
+                        price=event.get("price"),
+                        event_impact_pnl=impact_pnl,
+                        trade_net_pnl=trade_net_pnl,
+                        evidence_details=event,
+                    )
+                self._persist_trade_event(series, event)
+            self._update_trade_overlay(series)
+            series.last_consumed_epoch = max(series.last_consumed_epoch, epoch)
+            if not state.intrabar_active():
+                self._finalize_bar_step(state, candle)
+    
     def _next_signal_for(
         self, series: StrategySeries, epoch: int
     ) -> Tuple[List[Dict[str, object]], Optional[str]]:
@@ -1481,7 +1519,7 @@ class BotRuntime:
         )
         series.last_consumed_epoch = updated_last
         return consumed, chosen
-
+    
     def _record_signal_consumption(
         self,
         state: SeriesExecutionState,

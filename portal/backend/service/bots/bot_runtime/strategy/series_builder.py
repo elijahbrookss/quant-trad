@@ -26,6 +26,7 @@ from engines.bot_runtime.core.domain import (
 from portal.backend.service.market.stats_repository import build_stats_snapshot
 from portal.backend.service.market.stats_queue import REGIME_VERSION
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context, with_log_context
+from utils.perf_log import get_obs_enabled, get_obs_slow_ms, perf_log
 from signals.overlays.schema import build_overlay
 from .regime_overlay import build_regime_overlays
 from .models import Strategy
@@ -80,6 +81,8 @@ class SeriesBuilder:
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
         self._warning_sink = warning_sink
+        self._obs_enabled = get_obs_enabled(config)
+        self._obs_slow_ms = get_obs_slow_ms(config)
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, **fields)
@@ -137,14 +140,25 @@ class SeriesBuilder:
         from ....market.candle_service import fetch_ohlcv
         from ....strategies import strategy_service
 
-        df = fetch_ohlcv(
-            series.symbol,
-            start_iso,
-            end_iso,
-            series.timeframe,
-            datasource=series.datasource,
-            exchange=series.exchange,
-        )
+        series_context = self._series_log_context(series)
+        with perf_log(
+            "bot_runtime_fetch_ohlcv",
+            logger=logger,
+            base_context=series_context,
+            enabled=self._obs_enabled,
+            slow_ms=self._obs_slow_ms,
+            start_iso=start_iso,
+            end_iso=end_iso,
+        ) as perf:
+            df = fetch_ohlcv(
+                series.symbol,
+                start_iso,
+                end_iso,
+                series.timeframe,
+                datasource=series.datasource,
+                exchange=series.exchange,
+            )
+            perf.add_fields(rows_returned=len(df) if df is not None else 0)
         if df is None or getattr(df, "empty", False):
             return False
         self._maybe_emit_data_limit_warning(
@@ -181,16 +195,29 @@ class SeriesBuilder:
             )
             logger.info(with_log_context("append_series_updates_call", call_context))
 
-            evaluation = strategy_service.evaluate(
+            with perf_log(
+                "bot_runtime_strategy_evaluate",
+                logger=logger,
+                base_context=series_context,
+                enabled=self._obs_enabled,
+                slow_ms=self._obs_slow_ms,
                 strategy_id=series.strategy_id,
-                start=series.window_start or start_iso,
-                end=end_iso,
-                interval=series.timeframe,
-                symbol=series.symbol,
-                datasource=series.datasource,
-                exchange=series.exchange,
-                config=config,
-            )
+            ) as perf:
+                evaluation = strategy_service.evaluate(
+                    strategy_id=series.strategy_id,
+                    start=series.window_start or start_iso,
+                    end=end_iso,
+                    interval=series.timeframe,
+                    symbol=series.symbol,
+                    datasource=series.datasource,
+                    exchange=series.exchange,
+                    config=config,
+                )
+                chart_markers = evaluation.get("chart_markers") or {}
+                perf.add_fields(
+                    buy_markers_count=len(chart_markers.get("buy", [])),
+                    sell_markers_count=len(chart_markers.get("sell", [])),
+                )
             overlays = self._extract_indicator_overlays(evaluation)
             if self._include_indicator_overlays:
                 overlays.extend(
@@ -216,7 +243,6 @@ class SeriesBuilder:
             )
             overlays.extend(regime_overlays)
             series.overlays = overlays
-            chart_markers = evaluation.get("chart_markers") or {}
             marker_context = self._series_log_context(
                 series,
                 chart_markers_keys=sorted(chart_markers.keys()),
@@ -256,14 +282,31 @@ class SeriesBuilder:
         from ....market.candle_service import fetch_ohlcv
 
         try:
-            df = fetch_ohlcv(
-                symbol,
-                start_iso,
-                end_iso,
-                timeframe,
+            runtime_context = self._runtime_log_context(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
                 datasource=datasource,
                 exchange=exchange,
             )
+            with perf_log(
+                "bot_runtime_fetch_ohlcv",
+                logger=logger,
+                base_context=runtime_context,
+                enabled=self._obs_enabled,
+                slow_ms=self._obs_slow_ms,
+                start_iso=start_iso,
+                end_iso=end_iso,
+            ) as perf:
+                df = fetch_ohlcv(
+                    symbol,
+                    start_iso,
+                    end_iso,
+                    timeframe,
+                    datasource=datasource,
+                    exchange=exchange,
+                )
+                perf.add_fields(rows_returned=len(df) if df is not None else 0)
         except Exception as exc:
             message = f"Failed to fetch OHLCV data: {exc}"
             raise RuntimeError(message) from exc
