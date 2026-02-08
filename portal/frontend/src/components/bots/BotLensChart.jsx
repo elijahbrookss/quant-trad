@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
 import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
@@ -11,7 +11,14 @@ import { useIntrabarCandleAnimator, AnimatorStates } from './hooks/useIntrabarCa
 import { useMarkerManager } from './hooks/useMarkerManager.js'
 import { CameraIntents } from './hooks/useViewportController.js'
 import { MarkerTooltip } from './MarkerTooltip.jsx'
+import { RegimeReadoutBar } from './RegimeReadoutBar.jsx'
 import { createLogger } from '../../utils/logger.js'
+import {
+  buildCandleSnapshots,
+  buildReadoutSnapshot,
+  buildRegimeBlockSnapshots,
+  findNearestCandleTime,
+} from './regimeReadoutUtils.js'
 
 const chartOptions = {
   layout: {
@@ -62,6 +69,7 @@ export function BotLensChart({
   const overlayHandlesRef = useRef({ priceLines: [] })
   const barSpacingRef = useRef(null)
   const latestCandlesRef = useRef([])
+  const [hoveredEpoch, setHoveredEpoch] = useState(null)
   const seriesInstanceRef = useRef(null)
   const markerCacheRef = useRef([])
   const prevPriceLinesRef = useRef([])
@@ -77,6 +85,16 @@ export function BotLensChart({
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const resolvedOverlays = Array.isArray(overlays) ? overlays : []
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
+  const playbackProfile = useMemo(() => {
+    const speed = Number(playbackSpeed)
+    const isFast = Number.isFinite(speed) && speed > 1
+    return {
+      speed,
+      isFast,
+      allowIntrabar: !isFast && !instantPlayback,
+    }
+  }, [instantPlayback, playbackSpeed])
+  const showRegimeReadout = overlayVisibility.regime_readout !== false
 
   useEffect(() => {
     if (!BOTLENS_DEBUG) return
@@ -101,25 +119,6 @@ export function BotLensChart({
   useEffect(() => {
     candleLookupRef.current = candleLookup
   }, [candleLookup])
-
-  const activeTradeAtLastCandle = useMemo(() => {
-    const lastTime = candleData[candleData.length - 1]?.time
-    if (!Number.isFinite(lastTime)) return false
-    return resolvedTrades.some((trade) => {
-      const entry = toSec(trade?.entry_time)
-      if (!Number.isFinite(entry) || entry > lastTime) return false
-      const closed = toSec(trade?.closed_at)
-      const legs = Array.isArray(trade?.legs) ? trade.legs : []
-      const openLeg = legs.some((leg) => {
-        const exit = toSec(leg?.exit_time)
-        if (!Number.isFinite(exit)) return true
-        return exit >= lastTime
-      })
-      if (openLeg) return true
-      if (!Number.isFinite(closed)) return true
-      return closed >= lastTime
-    })
-  }, [candleData, resolvedTrades])
 
   useEffect(() => {
     if (!candleData.length) {
@@ -190,6 +189,57 @@ export function BotLensChart({
     seriesRef,
     markerManager,
   })
+
+  const regimeOverlay = useMemo(
+    () => resolvedOverlays.find((overlay) => overlay?.type === 'regime_overlay'),
+    [resolvedOverlays],
+  )
+  const regimeBlocks = regimeOverlay?.payload?.regime_blocks || []
+  const regimePoints = regimeOverlay?.payload?.regime_points || []
+  const blockSnapshots = useMemo(() => buildRegimeBlockSnapshots(regimeBlocks), [regimeBlocks])
+  const candleSnapshots = useMemo(() => buildCandleSnapshots(regimePoints), [regimePoints])
+  const lastCandleEpoch = candleData[candleData.length - 1]?.time
+  const lastReadoutSnapshotRef = useRef(null)
+
+  const readoutSnapshot = useMemo(() => {
+    const focusEpoch = Number.isFinite(hoveredEpoch)
+      ? findNearestCandleTime(candleData, hoveredEpoch)
+      : lastCandleEpoch
+    const snapshot = buildReadoutSnapshot({
+      focusTs: focusEpoch,
+      blocks: blockSnapshots,
+      points: candleSnapshots,
+      lastSnapshot: lastReadoutSnapshotRef.current,
+    })
+    if (snapshot) {
+      lastReadoutSnapshotRef.current = snapshot
+      return snapshot
+    }
+    return lastReadoutSnapshotRef.current
+  }, [blockSnapshots, candleSnapshots, hoveredEpoch, lastCandleEpoch, candleData])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return undefined
+
+    const handleCrosshair = (param) => {
+      if (!param?.time) {
+        setHoveredEpoch(null)
+        return
+      }
+      const epoch = typeof param.time === 'number' ? param.time : param.time.timestamp?.()
+      if (!Number.isFinite(epoch)) {
+        setHoveredEpoch(null)
+        return
+      }
+      setHoveredEpoch(Math.floor(epoch))
+    }
+
+    chart.subscribeCrosshairMove(handleCrosshair)
+    return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshair)
+    }
+  }, [chartRef])
 
   useBotLensChartCore({
     chartId,
@@ -268,7 +318,7 @@ export function BotLensChart({
       Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
     const longJump = next.length > previous.length + 1
     const requiresReset = !previous.length || !next.length || historyRewound || longJump
-    const shouldAnimate = isSameCandle && activeTradeAtLastCandle && !instantPlayback
+    const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -325,7 +375,7 @@ export function BotLensChart({
         logicalRange,
       })
     }
-  }, [activeTradeAtLastCandle, cancelAnimator, candleData, debugRanges, instantPlayback, logger, playbackSpeed, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -392,6 +442,7 @@ export function BotLensChart({
 
   return (
     <div ref={containerRef} className={containerClasses}>
+      {showRegimeReadout ? <RegimeReadoutBar snapshot={readoutSnapshot} /> : null}
       <MarkerTooltip markerTooltip={markerTooltip} />
     </div>
   )

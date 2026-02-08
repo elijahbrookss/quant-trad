@@ -267,6 +267,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     () => [
       { type: 'trade_markers', label: 'Trade Markers', group: 'trade', ui: { default_visible: true } },
       { type: 'trade_rays', label: 'Stop / Target Rays', group: 'trade', ui: { default_visible: true } },
+      { type: 'regime_readout', label: 'Regime Readout', group: 'regime', ui: { default_visible: true } },
     ],
     [],
   )

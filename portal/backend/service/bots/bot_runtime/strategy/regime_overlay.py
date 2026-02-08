@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
+from portal.backend.service.market.regime_blocks import RegimeBlockConfig, build_regime_blocks
+from portal.backend.service.market.regime_config import default_regime_runtime_config
 logger = logging.getLogger(__name__)
 
 STATE_COLORS = {
@@ -43,6 +45,8 @@ def _palette_for_lens(lens: str) -> Mapping[str, str]:
 def state_color(state: Optional[str], *, lens: str = "structure") -> str:
     palette = _palette_for_lens(lens)
     key = (state or "").strip().lower()
+    if not key or key in {"unknown", "none"}:
+        return "#94a3b8"
     if key in palette:
         return palette[key]
     # stable deterministic fallback per lens to keep UX predictable when new states appear
@@ -56,7 +60,7 @@ def state_color(state: Optional[str], *, lens: str = "structure") -> str:
     return base_palette[hash(key + lens) % len(base_palette)]
 
 
-def confidence_to_opacity(confidence: Optional[float], *, min_alpha: float = 0.03, max_alpha: float = 0.14) -> float:
+def confidence_to_opacity(confidence: Optional[float], *, min_alpha: float = 0.06, max_alpha: float = 0.22) -> float:
     if confidence is None:
         return min_alpha
     try:
@@ -89,11 +93,43 @@ def _to_rgba(color: str, alpha: float) -> str:
     return f"rgba({rgb[0]},{rgb[1]},{rgb[2]},{a:.3f})"
 
 
+def _lens_band_bounds(lens: str, *, min_low: float, max_high: float) -> Tuple[float, float]:
+    span = max(max_high - min_low, 1e-6)
+    band_height = span * 0.055
+    lens_key = (lens or "").strip().lower()
+    band_positions = {
+        "volatility": ("top", 0),
+        "liquidity": ("top", 1),
+        "expansion": ("top", 2),
+    }
+    side, offset = band_positions.get(lens_key, ("bottom", 0))
+    if side == "top":
+        y2 = max_high - (offset * band_height)
+        y1 = y2 - band_height
+        return y1, y2
+    y1 = min_low + (offset * band_height)
+    y2 = y1 + band_height
+    return y1, y2
+
+
+def _format_regime_label(block: Mapping[str, Any]) -> str:
+    structure = (block.get("structure_state") or "unknown").title()
+    volatility = (block.get("volatility_state") or "unknown").title()
+    liquidity = (block.get("liquidity_state") or "unknown").title()
+    expansion = (block.get("expansion_state") or "unknown").title()
+    confidence = block.get("avg_confidence")
+    confidence_label = ""
+    if isinstance(confidence, (int, float)):
+        confidence_label = f" (conf {float(confidence):.2f})"
+    return f"{structure} • {volatility} Vol • {liquidity} • {expansion}{confidence_label}"
+
+
 def detect_regime_changes(points: Sequence[Mapping[str, Any]]) -> List[int]:
     changes: List[int] = []
     last_state: Optional[str] = None
     for entry in points:
-        state = (entry.get("structure_state") or entry.get("state") or "").strip().lower()
+        state = (entry.get("regime_block_id") or entry.get("structure_state") or entry.get("state") or "")
+        state = str(state).strip().lower()
         epoch = entry.get("time")
         if not isinstance(epoch, (int, float)):
             continue
@@ -140,15 +176,24 @@ def _build_regime_points(
         if epoch is None:
             continue
         structure = last_regime.get("structure") if isinstance(last_regime, Mapping) else {}
+        volatility = last_regime.get("volatility") if isinstance(last_regime, Mapping) else {}
+        liquidity = last_regime.get("liquidity") if isinstance(last_regime, Mapping) else {}
+        expansion = last_regime.get("expansion") if isinstance(last_regime, Mapping) else {}
         points.append(
             {
                 "time": int(epoch),
+                "candle_time": candle_time,
                 "structure": structure,
                 "structure_state": (structure or {}).get("state"),
-                "expansion": last_regime.get("expansion") if isinstance(last_regime, Mapping) else {},
-                "liquidity": last_regime.get("liquidity") if isinstance(last_regime, Mapping) else {},
-                "volatility": last_regime.get("volatility") if isinstance(last_regime, Mapping) else {},
+                "expansion": expansion,
+                "expansion_state": (expansion or {}).get("state"),
+                "liquidity": liquidity,
+                "liquidity_state": (liquidity or {}).get("state"),
+                "volatility": volatility,
+                "volatility_state": (volatility or {}).get("state"),
                 "confidence": last_regime.get("confidence") if isinstance(last_regime, Mapping) else None,
+                "regime_block_id": last_regime.get("regime_block_id") if isinstance(last_regime, Mapping) else None,
+                "regime_key": last_regime.get("regime_key") if isinstance(last_regime, Mapping) else None,
             }
         )
 
@@ -167,22 +212,55 @@ def build_regime_markers(
     markers: List[Dict[str, Any]] = []
     last_state: Optional[str] = None
 
+    block_points = [
+        {
+            "time": entry.get("candle_time"),
+            "structure_state": entry.get("structure_state"),
+            "volatility_state": entry.get("volatility_state"),
+            "liquidity_state": entry.get("liquidity_state"),
+            "expansion_state": entry.get("expansion_state"),
+            "confidence": entry.get("confidence"),
+        }
+        for entry in points
+        if isinstance(entry.get("candle_time"), datetime)
+    ]
+    transition_epochs = []
+    if block_points:
+        blocks, _ = build_regime_blocks(
+            block_points,
+            timeframe_seconds=1,
+            config=RegimeBlockConfig(),
+        )
+        for block in blocks:
+            if (block.get("structure_state") or "").strip().lower() != "transition":
+                continue
+            epoch = _to_epoch(block.get("start_ts"))
+            if epoch is None:
+                continue
+            transition_epochs.append(
+                {
+                    "epoch": int(epoch),
+                    "confidence": block.get("avg_confidence"),
+                }
+            )
+
     for entry in points:
-        state = (entry.get("structure_state") or entry.get("state") or "").strip().lower()
         epoch = entry.get("time")
         if not isinstance(epoch, int):
-            continue
-        if not state:
-            continue
-        if last_state is None:
-            last_state = state
-            continue
-        if state == last_state:
             continue
         price = price_by_time.get(epoch)
         if price is None:
             continue
         confidence = entry.get("confidence")
+        state = (entry.get("structure_state") or entry.get("state") or "").strip().lower()
+        block_id = entry.get("regime_block_id")
+        if not state:
+            continue
+        if last_state is None:
+            last_state = block_id or state
+            continue
+        if (block_id or state) == last_state:
+            continue
         confidence_label = ""
         if isinstance(confidence, (int, float)):
             confidence_label = f" ({round(float(confidence) * 100)}%)"
@@ -198,7 +276,29 @@ def build_regime_markers(
                 "subtype": "regime_research",
             }
         )
-        last_state = state
+        last_state = block_id or state
+
+    for transition in transition_epochs:
+        epoch = transition["epoch"]
+        price = price_by_time.get(epoch)
+        if price is None:
+            continue
+        confidence = transition.get("confidence")
+        confidence_label = ""
+        if isinstance(confidence, (int, float)):
+            confidence_label = f" ({round(float(confidence) * 100)}%)"
+        markers.append(
+            {
+                "time": epoch,
+                "price": price,
+                "color": "#f59e0b",
+                "shape": "circle",
+                "size": 5,
+                "text": f"Transition{confidence_label} — Structure invalidated; acceptance pending",
+                "position": "aboveBar",
+                "subtype": "regime_transition",
+            }
+        )
     logger.debug(
         "regime_markers_built | points=%s | markers=%s",
         len(points),
@@ -230,55 +330,80 @@ def _build_regime_payload(
     include_regime_points: bool,
 ) -> Dict[str, Any]:
     boxes: List[Dict[str, Any]] = []
-    current_state = None
-    current_start = None
-    confidence_sum = 0.0
-    confidence_count = 0
+    regime_config = default_regime_runtime_config()
+    block_points = [
+        {
+            "time": entry.get("candle_time"),
+            "structure_state": entry.get("structure_state"),
+            "volatility_state": entry.get("volatility_state"),
+            "liquidity_state": entry.get("liquidity_state"),
+            "expansion_state": entry.get("expansion_state"),
+            "confidence": entry.get("confidence"),
+        }
+        for entry in points
+        if isinstance(entry.get("candle_time"), datetime)
+    ]
+    blocks, _ = build_regime_blocks(
+        block_points,
+        timeframe_seconds=timeframe_seconds,
+        config=regime_config.blocks,
+    )
 
-    def flush_box(end_epoch: int) -> None:
-        nonlocal current_state, current_start, confidence_sum, confidence_count
-        if current_state is None or current_start is None:
-            return
-        avg_conf = confidence_sum / confidence_count if confidence_count else None
-        base_color = state_color(current_state)
-        opacity = confidence_to_opacity(avg_conf)
+    regime_blocks: List[Dict[str, Any]] = []
+    transition_segments: List[Dict[str, Any]] = []
+    for block in blocks:
+        start_epoch = _to_epoch(block.get("start_ts"))
+        end_epoch = _to_epoch(block.get("end_ts"))
+        known_at_epoch = _to_epoch(block.get("known_at"))
+        if start_epoch is None or end_epoch is None:
+            continue
+        regime_blocks.append(
+            {
+                "x1": int(start_epoch),
+                "x2": int(end_epoch) + timeframe_seconds,
+                "known_at": int(known_at_epoch) if known_at_epoch is not None else int(start_epoch),
+                "structure": {"state": block.get("structure_state")},
+                "volatility": {"state": block.get("volatility_state")},
+                "liquidity": {"state": block.get("liquidity_state")},
+                "expansion": {"state": block.get("expansion_state")},
+                "confidence": block.get("avg_confidence"),
+                "entry_confidence": block.get("entry_confidence"),
+                "bars": block.get("bars"),
+                "regime_key": block.get("regime_key"),
+                "block_id": block.get("block_id"),
+            }
+        )
+        if (block.get("structure_state") or "").strip().lower() == "transition":
+            transition_segments.append(
+                {
+                    "x1": int(start_epoch),
+                    "x2": int(start_epoch),
+                    "y1": min_low,
+                    "y2": max_high,
+                    "color": "rgba(245,158,11,0.45)",
+                    "lineWidth": 1,
+                    "lineStyle": 0,
+                }
+            )
+            continue
+        base_color = state_color(block.get("structure_state"))
+        opacity = confidence_to_opacity(block.get("avg_confidence"))
         boxes.append(
             {
-                "x1": current_start,
-                "x2": end_epoch + timeframe_seconds,
+                "x1": int(start_epoch),
+                "x2": int(end_epoch) + timeframe_seconds,
                 "y1": min_low,
                 "y2": max_high,
                 "color": _to_rgba(base_color, opacity),
                 "border": {"color": _to_rgba(base_color, min(opacity + 0.12, 0.4)), "width": 1},
                 "precision": 4,
-                "known_at": current_start,
-                "state": current_state,
-                "confidence": avg_conf,
+                "known_at": int(known_at_epoch) if known_at_epoch is not None else int(start_epoch),
+                "state": block.get("structure_state"),
+                "confidence": block.get("avg_confidence"),
+                "regime_key": block.get("regime_key"),
+                "block_id": block.get("block_id"),
             }
         )
-        current_state = None
-        current_start = None
-        confidence_sum = 0.0
-        confidence_count = 0
-
-    for idx, entry in enumerate(points):
-        state = (entry.get("structure_state") or "").strip().lower()
-        epoch = entry.get("time")
-        if not isinstance(epoch, int):
-            continue
-        confidence = entry.get("confidence")
-        if current_state is None:
-            current_state = state or None
-            current_start = epoch
-        if state and state != current_state:
-            flush_box(epoch)
-            current_state = state
-            current_start = epoch
-        if isinstance(confidence, (int, float)):
-            confidence_sum += float(confidence)
-            confidence_count += 1
-        if idx == len(points) - 1:
-            flush_box(epoch)
 
     segments: List[Dict[str, Any]] = []
     if include_change_markers:
@@ -294,14 +419,22 @@ def _build_regime_payload(
                     "lineStyle": 2,
                 }
             )
+    segments.extend(transition_segments)
 
+    current_block = blocks[-1] if blocks else None
+    regime_label = None
+    if current_block:
+        regime_label = _format_regime_label(current_block)
     payload: Dict[str, Any] = {
         "boxes": boxes,
         "segments": segments,
+        "regime_blocks": regime_blocks,
         "summary": {
             "regime_version": regime_version,
             "points": len(points),
             "changes": len(segments),
+            "blocks": len(boxes),
+            "current_regime_label": regime_label,
         },
     }
     if include_regime_points:
@@ -318,59 +451,56 @@ def _build_lens_boxes(
     timeframe_seconds: int,
 ) -> List[Dict[str, Any]]:
     boxes: List[Dict[str, Any]] = []
-    current_state: Optional[str] = None
-    current_start: Optional[int] = None
-    confidence_sum = 0.0
-    confidence_count = 0
+    regime_config = default_regime_runtime_config()
+    state_key = f"{lens}_state"
+    block_points = []
+    for entry in points:
+        lens_state = (entry.get(lens) or {}).get("state") if isinstance(entry.get(lens), Mapping) else None
+        state = (entry.get(state_key) or lens_state or "").strip().lower()
+        candle_time = entry.get("candle_time")
+        if not isinstance(candle_time, datetime):
+            continue
+        block_points.append(
+            {
+                "time": candle_time,
+                "structure_state": state,
+                "confidence": entry.get("confidence"),
+            }
+        )
 
-    def flush(end_epoch: int) -> None:
-        nonlocal current_state, current_start, confidence_sum, confidence_count
-        if current_state is None or current_start is None:
-            return
-        avg_conf = confidence_sum / confidence_count if confidence_count else None
-        base_color = state_color(current_state, lens=lens)
-        opacity = confidence_to_opacity(avg_conf)
+    if not block_points:
+        return boxes
+
+    blocks, _ = build_regime_blocks(
+        block_points,
+        timeframe_seconds=timeframe_seconds,
+        config=regime_config.blocks,
+    )
+    y1, y2 = _lens_band_bounds(lens, min_low=min_low, max_high=max_high)
+    for block in blocks:
+        start_epoch = _to_epoch(block.get("start_ts"))
+        end_epoch = _to_epoch(block.get("end_ts"))
+        known_at_epoch = _to_epoch(block.get("known_at"))
+        if start_epoch is None or end_epoch is None:
+            continue
+        state = block.get("structure_state")
+        base_color = state_color(state, lens=lens)
+        opacity = confidence_to_opacity(block.get("avg_confidence"))
         boxes.append(
             {
-                "x1": current_start,
-                "x2": end_epoch + timeframe_seconds,
-                "y1": min_low,
-                "y2": max_high,
+                "x1": int(start_epoch),
+                "x2": int(end_epoch) + timeframe_seconds,
+                "y1": y1,
+                "y2": y2,
                 "color": _to_rgba(base_color, opacity),
                 "border": {"color": _to_rgba(base_color, min(opacity + 0.1, 0.32)), "width": 1},
                 "precision": 4,
-                "known_at": current_start,
-                "state": current_state,
+                "known_at": int(known_at_epoch) if known_at_epoch is not None else int(start_epoch),
+                "state": state,
                 "lens": lens,
-                "confidence": avg_conf,
+                "confidence": block.get("avg_confidence"),
             }
         )
-        current_state = None
-        current_start = None
-        confidence_sum = 0.0
-        confidence_count = 0
-
-    state_key = f"{lens}_state"
-    for idx, entry in enumerate(points):
-        lens_state = (entry.get(lens) or {}).get("state") if isinstance(entry.get(lens), Mapping) else None
-        # allow either nested "{lens}" dict or precomputed "{lens}_state"
-        state = (entry.get(state_key) or lens_state or "").strip().lower()
-        epoch = entry.get("time")
-        if not isinstance(epoch, int):
-            continue
-        confidence = entry.get("confidence")
-        if current_state is None:
-            current_state = state or None
-            current_start = epoch
-        if state and state != current_state:
-            flush(epoch)
-            current_state = state
-            current_start = epoch
-        if isinstance(confidence, (int, float)):
-            confidence_sum += float(confidence)
-            confidence_count += 1
-        if idx == len(points) - 1:
-            flush(epoch)
 
     return boxes
 
@@ -430,7 +560,7 @@ def build_regime_overlays(
         timeframe_seconds=timeframe_seconds,
         regime_version=regime_version,
         include_change_markers=include_change_markers,
-        include_regime_points=False,
+        include_regime_points=True,
     )
     if include_change_markers:
         change_epochs = detect_regime_changes(points)
@@ -445,7 +575,6 @@ def build_regime_overlays(
     overlays = [build_overlay("regime_overlay", payload)]
 
     lenses = [
-        ("structure", True),
         ("expansion", True),
         ("liquidity", True),
         ("volatility", True),

@@ -46,6 +46,7 @@ class RegimeEngineV1:
             directional_efficiency,
             slope_stability,
             range_position,
+            overlap_pct,
         )
         expansion_state = _classify_expansion(atr_slope, range_contraction, overlap_pct)
         liquidity_state = _classify_liquidity(volume_z, volume_vs_median)
@@ -79,12 +80,14 @@ class RegimeEngineV1:
                 "atr_zscore": atr_z,
                 "tr_pct": tr_pct,
                 "atr_ratio": atr_ratio,
+                "confidence": volatility_conf,
             },
             structure={
                 "state": structure_state,
                 "directional_efficiency": directional_efficiency,
                 "slope_stability": slope_stability,
                 "range_position": range_position,
+                "confidence": structure_conf,
             },
             expansion={
                 "state": expansion_state,
@@ -92,20 +95,22 @@ class RegimeEngineV1:
                 "atr_short": atr_short,
                 "range_contraction": range_contraction,
                 "overlap_pct": overlap_pct,
+                "confidence": expansion_conf,
             },
             liquidity={
                 "state": liquidity_state,
                 "volume_zscore": volume_z,
                 "volume_vs_median": volume_vs_median,
+                "confidence": liquidity_conf,
             },
             confidence=confidence,
         )
 
 
 def _classify_volatility(atr_z: float, tr_pct: float, atr_ratio: float) -> str:
-    if atr_z <= -0.75 and atr_ratio <= 0.8 and tr_pct <= 0.008:
+    if atr_z <= -0.75 and atr_ratio <= 0.85 and tr_pct <= 0.008:
         return "low"
-    if atr_z >= 0.75 or atr_ratio >= 1.2 or tr_pct >= 0.02:
+    if atr_z >= 0.75 or atr_ratio >= 1.15 or tr_pct >= 0.02:
         return "high"
     return "normal"
 
@@ -114,10 +119,11 @@ def _classify_structure(
     directional_efficiency: float,
     slope_stability: float,
     range_position: float,
+    overlap_pct: float,
 ) -> str:
-    if directional_efficiency >= 0.6 and slope_stability <= 0.4:
+    if directional_efficiency >= 0.55 and slope_stability <= 0.7:
         return "trend"
-    if directional_efficiency <= 0.3 and 0.35 <= range_position <= 0.65:
+    if directional_efficiency <= 0.45:
         return "range"
     return "transition"
 
