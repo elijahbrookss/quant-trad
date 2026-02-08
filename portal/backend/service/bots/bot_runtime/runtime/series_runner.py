@@ -37,6 +37,7 @@ class SeriesRunnerContext:
     thread_name: Callable[[SeriesState, int], str]
     log_debug: Callable[[str, Optional[SeriesState], Optional[dict]], None]
     log_info: Callable[[str, Optional[SeriesState], Optional[dict]], None]
+    log_error: Callable[[str, Optional[SeriesState], Optional[dict]], None]
 
 
 class SeriesRunner(Protocol):
@@ -73,7 +74,16 @@ class InlineSeriesRunner:
                     continue
                 break
             for state in due_states:
-                self._ctx.step_series_state(state)
+                try:
+                    self._ctx.step_series_state(state)
+                except Exception as exc:
+                    self._ctx.log_error(
+                        "series_step_failed",
+                        state,
+                        {"error": str(exc), "exception": repr(exc)},
+                    )
+                    stop_event.set()
+                    break
 
     def stop(self) -> None:
         return
@@ -142,7 +152,16 @@ class ThreadedSeriesRunner:
                     {"bar_index": state.bar_index, "total_bars": state.total_bars},
                 )
                 break
-            self._ctx.step_series_state(state)
+            try:
+                self._ctx.step_series_state(state)
+            except Exception as exc:
+                self._ctx.log_error(
+                    "series_step_failed",
+                    state,
+                    {"error": str(exc), "exception": repr(exc)},
+                )
+                stop_event.set()
+                break
             self._log_step_heartbeat(state)
 
     def _log_wait_if_needed(self, state: SeriesState, delay: float, next_at: datetime) -> None:
@@ -198,8 +217,19 @@ class PoolSeriesRunner:
                         continue
                     break
                 futures = [executor.submit(self._ctx.step_series_state, state) for state in due_states]
-                for future in futures:
-                    future.result()
+                for future, state in zip(futures, due_states):
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        self._ctx.log_error(
+                            "series_step_failed",
+                            state,
+                            {"error": str(exc), "exception": repr(exc)},
+                        )
+                        stop_event.set()
+                        for pending in futures:
+                            pending.cancel()
+                        break
 
     def stop(self) -> None:
         return

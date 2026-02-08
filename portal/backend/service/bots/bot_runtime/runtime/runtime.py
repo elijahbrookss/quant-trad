@@ -251,6 +251,7 @@ class BotRuntime:
             thread_name=self._series_thread_name,
             log_debug=self._log_runner_debug,
             log_info=self._log_runner_info,
+            log_error=self._log_runner_error,
         )
         if self._series_runner_type == "threaded":
             return ThreadedSeriesRunner(ctx)
@@ -296,6 +297,31 @@ class BotRuntime:
         if extra:
             context = merge_log_context(context, extra)
         logger.info(with_log_context(message, context))
+
+    def _log_runner_error(
+        self,
+        message: str,
+        state: Optional[SeriesExecutionState],
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        context = self._runtime_log_context()
+        if state is not None:
+            context = merge_log_context(context, series_log_context(state.series))
+        if extra:
+            context = merge_log_context(context, extra)
+        logger.exception(with_log_context(message, context))
+        error_message = None
+        if isinstance(extra, Mapping):
+            error_message = extra.get("error")
+        if not error_message:
+            error_message = "Series execution failed"
+        series = state.series if state is not None else None
+        self._set_error_state(
+            error_message,
+            strategy_id=getattr(series, "strategy_id", None),
+            symbol=getattr(series, "symbol", None),
+            timeframe=getattr(series, "timeframe", None),
+        )
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         run_id = self._run_context.run_id if self._run_context else None
@@ -1956,6 +1982,8 @@ class BotRuntime:
         """Log a strategy-level decision event for the decision ledger."""
         if not reason_code:
             raise ValueError("reason_code is required for decision events")
+        if trade_id is not None and "trade_id" in metadata:
+            metadata = {k: v for k, v in metadata.items() if k != "trade_id"}
         parent_event_id = self._signal_event_ids.get(
             self._signal_key(series, signal_type, signal_direction, rule_id),
         )
