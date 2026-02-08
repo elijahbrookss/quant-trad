@@ -244,47 +244,6 @@ def build_regime_markers(
                 }
             )
 
-    def _format_metric(label: str, value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return f"{label}={float(value):.3f}"
-        return f"{label}={value}"
-
-    def _append_lens_marker(
-        *,
-        lens: str,
-        state: str,
-        epoch: int,
-        price: float,
-        confidence: Optional[float],
-        metrics: Sequence[Optional[str]],
-    ) -> None:
-        label = lens.title()
-        conf_label = f"{round(float(confidence) * 100)}%" if isinstance(confidence, (int, float)) else "n/a"
-        metric_text = ", ".join([m for m in metrics if m])
-        text = f"{label}: {state.title()} ({conf_label})"
-        if metric_text:
-            text = f"{text} — {metric_text}"
-        markers.append(
-            {
-                "time": epoch,
-                "price": price,
-                "color": state_color(state, lens=lens),
-                "shape": "circle",
-                "size": 4,
-                "text": text,
-                "position": "aboveBar",
-                "subtype": f"regime_{lens}",
-            }
-        )
-
-    last_lens_state: Dict[str, Optional[str]] = {
-        "volatility": None,
-        "liquidity": None,
-        "expansion": None,
-    }
-
     for entry in points:
         epoch = entry.get("time")
         if not isinstance(epoch, int):
@@ -293,52 +252,6 @@ def build_regime_markers(
         if price is None:
             continue
         confidence = entry.get("confidence")
-        volatility = entry.get("volatility") if isinstance(entry.get("volatility"), Mapping) else {}
-        liquidity = entry.get("liquidity") if isinstance(entry.get("liquidity"), Mapping) else {}
-        expansion = entry.get("expansion") if isinstance(entry.get("expansion"), Mapping) else {}
-
-        lens_payloads = {
-            "volatility": (
-                (volatility or {}).get("state"),
-                [
-                    _format_metric("atr_ratio", (volatility or {}).get("atr_ratio")),
-                    _format_metric("atr_zscore", (volatility or {}).get("atr_zscore")),
-                    _format_metric("tr_pct", (volatility or {}).get("tr_pct")),
-                ],
-            ),
-            "liquidity": (
-                (liquidity or {}).get("state"),
-                [
-                    _format_metric("volume_zscore", (liquidity or {}).get("volume_zscore")),
-                    _format_metric("volume_vs_median", (liquidity or {}).get("volume_vs_median")),
-                ],
-            ),
-            "expansion": (
-                (expansion or {}).get("state"),
-                [
-                    _format_metric("atr_slope", (expansion or {}).get("atr_slope")),
-                    _format_metric("overlap_pct", (expansion or {}).get("overlap_pct")),
-                    _format_metric("range_contraction", (expansion or {}).get("range_contraction")),
-                ],
-            ),
-        }
-
-        for lens, (lens_state, metrics) in lens_payloads.items():
-            state_key = (lens_state or "").strip().lower()
-            if not state_key:
-                continue
-            if last_lens_state.get(lens) == state_key:
-                continue
-            _append_lens_marker(
-                lens=lens,
-                state=state_key,
-                epoch=epoch,
-                price=price,
-                confidence=confidence,
-                metrics=metrics,
-            )
-            last_lens_state[lens] = state_key
-
         state = (entry.get("structure_state") or entry.get("state") or "").strip().lower()
         block_id = entry.get("regime_block_id")
         if not state:
