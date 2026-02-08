@@ -246,6 +246,18 @@ class CandleSnapshot:
     atr: Optional[float] = None
     lookback_15: Optional[Dict[str, Optional[float]]] = None
 
+    def is_complete(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.time,
+                self.open,
+                self.high,
+                self.low,
+                self.close,
+            )
+        )
+
 
 @dataclass
 class EntryFill:
@@ -1556,7 +1568,7 @@ class LadderRiskEngine:
         outcome_payload = {}
         if isinstance(fill.raw, dict):
             outcome_payload = dict(fill.raw.get("outcome") or {})
-        if fill.candle is None:
+        if fill.candle is None or not fill.candle.is_complete():
             return EntryFillResult(
                 status="rejected",
                 pending=None,
