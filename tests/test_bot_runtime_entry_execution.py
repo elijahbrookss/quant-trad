@@ -1,19 +1,25 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+from engines.bot_runtime.core import EntryFill, EntryFillResult, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
 from engines.bot_runtime.core.wallet import WalletLedger
 
 
-def _build_spot_engine(*, execution_mode: str = "market", limit_maker: Optional[dict] = None) -> LadderRiskEngine:
+def _build_spot_engine(
+    *,
+    execution_mode: str = "market",
+    limit_maker: Optional[dict] = None,
+    base_risk_per_trade: float = 100,
+) -> LadderRiskEngine:
     config = {
         "tick_size": 1.0,
         "contract_size": 1.0,
         "tick_value": 1.0,
         "initial_stop": {"atr_multiplier": 2.0},
-        "risk": {"base_risk_per_trade": 100},
+        "risk": {"base_risk_per_trade": base_risk_per_trade},
         "take_profit_orders": [{"id": "tp-1", "ticks": 10}],
         "execution_mode": execution_mode,
     }
@@ -78,6 +84,27 @@ def _build_candle(*, close: float, atr: float) -> Candle:
         low=close - 1,
         close=close,
         atr=atr,
+    )
+
+
+def _build_pending(request: EntryRequest, validity_remaining: int = 0) -> PendingEntry:
+    intent = request.intent
+    assert intent is not None
+    return PendingEntry(
+        request=request,
+        intent=intent,
+        direction=request.direction,
+        qty_raw=request.qty_raw,
+        requested_qty=request.requested_qty,
+        r_ticks=float(request.r_ticks),
+        r_value=request.r_value,
+        atr_at_entry=request.atr_at_entry,
+        r_multiple_at_entry=request.r_multiple_at_entry,
+        order_intent_id=str(request.order_intent_id),
+        trade_id=str(request.trade_id),
+        validity_remaining=validity_remaining,
+        fallback=request.limit_params.fallback if request.limit_params else "cancel",
+        remaining_qty=float(request.requested_qty),
     )
 
 
@@ -158,6 +185,72 @@ def test_submit_entry_margin_capped_uses_request_qty():
     assert position.entry_order["qty"] == request.requested_qty
 
 
+def test_apply_entry_fill_accumulates_partial_fills():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    candle = _build_candle(close=100.0, atr=2.0)
+    request = engine.build_entry_request(candle, "long")
+    pending = _build_pending(request)
+
+    fill_one = EntryFill(
+        order_intent_id=str(request.order_intent_id),
+        trade_id=str(request.trade_id),
+        filled_qty=1.0,
+        fill_price=100.0,
+        fee_paid=0.05,
+        liquidity_role="taker",
+        fill_time="t1",
+        raw={"candle": candle, "outcome": {}},
+    )
+    result_one = engine.apply_entry_fill(request=request, pending=pending, fill=fill_one)
+
+    assert result_one.status == "pending"
+    assert result_one.pending is not None
+    assert result_one.pending.filled_qty == 1.0
+    assert result_one.pending.filled_notional == 100.0
+
+    fill_two = EntryFill(
+        order_intent_id=str(request.order_intent_id),
+        trade_id=str(request.trade_id),
+        filled_qty=1.0,
+        fill_price=110.0,
+        fee_paid=0.05,
+        liquidity_role="taker",
+        fill_time="t2",
+        raw={"candle": candle, "outcome": {}},
+    )
+    result_two = engine.apply_entry_fill(request=request, pending=result_one.pending, fill=fill_two)
+
+    assert result_two.status == "opened"
+    assert result_two.position is not None
+    assert result_two.position.entry_price == 105.0
+    assert result_two.position.fees_paid == 0.1
+
+
+def test_apply_entry_fill_opens_position_with_expected_stop():
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    candle = _build_candle(close=100.0, atr=2.0)
+    request = engine.build_entry_request(candle, "long")
+    pending = _build_pending(request)
+    fill = EntryFill(
+        order_intent_id=str(request.order_intent_id),
+        trade_id=str(request.trade_id),
+        filled_qty=request.requested_qty,
+        fill_price=100.0,
+        fee_paid=0.2,
+        liquidity_role="taker",
+        fill_time="t1",
+        raw={"candle": candle, "outcome": {}},
+    )
+
+    result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+
+    assert result.status == "opened"
+    assert result.position is not None
+    assert result.position.entry_price == 100.0
+    assert result.position.fees_paid == 0.2
+    assert result.position.stop_price == engine._calculate_stop_price(100.0, "long", request.r_ticks)
+
+
 def test_submit_entry_uses_facade_only(monkeypatch):
     engine = _build_spot_engine()
     candle = _build_candle(close=100.0, atr=2.0)
@@ -204,26 +297,45 @@ def test_submit_entry_uses_facade_only(monkeypatch):
         def evaluate(self, _intent, *, candle_high, candle_low, candle_close, candle_open):
             outcome = ExecutionOutcome(
                 order_id=_intent.order_id,
-                status="rejected",
-                filled_qty=0.0,
-                avg_fill_price=None,
+                status="filled",
+                filled_qty=float(_intent.qty),
+                avg_fill_price=float(candle_close),
                 fee_paid=0.0,
-                fee_role="unknown",
+                fee_role="taker",
                 fee_rate=0.0,
                 fee_source="test",
                 fee_version="test",
                 created_at="now",
                 updated_at="now",
-                filled_at=None,
-                remaining_qty=float(_intent.qty),
+                filled_at="now",
+                remaining_qty=0.0,
                 fallback_applied=False,
                 fallback_reason=None,
                 limit_price=None,
                 validity_window=None,
                 metadata=dict(_intent.metadata),
             )
-            return outcome, FillRejection(reason="TEST_REJECT", metadata={})
+            return outcome, None
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("unexpected leg construction")
+
+    monkeypatch.setattr(engine, "_build_legs", _fail)
+
+    called = {"apply": False}
+
+    def _apply(*, request, pending, fill):
+        called["apply"] = True
+        return EntryFillResult(
+            status="opened",
+            pending=None,
+            position=None,
+            events=[],
+            settlement_payloads=[],
+        )
+
+    monkeypatch.setattr(engine, "apply_entry_fill", _apply)
 
     engine.attach_execution_model(DummyModel())
     engine.entry_execution.submit_entry(candle, "long")
-    assert engine.last_rejection_reason == "TEST_REJECT"
+    assert called["apply"] is True
