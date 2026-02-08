@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Protocol
+import concurrent.futures
 
 class SeriesState(Protocol):
     """Minimal series state surface needed by runners."""
@@ -79,7 +80,7 @@ class InlineSeriesRunner:
 
 
 class ThreadedSeriesRunner:
-    """One thread per series with independent pacing."""
+    """One thread per series with independent pacing. (Deprecated: prefer PoolSeriesRunner.)"""
 
     def __init__(self, ctx: SeriesRunnerContext) -> None:
         self._ctx = ctx
@@ -169,3 +170,36 @@ class ThreadedSeriesRunner:
             state,
             {"bar_index": state.bar_index, "total_bars": state.total_bars},
         )
+
+
+class PoolSeriesRunner:
+    """Runner that uses a fixed-size worker pool to step due series states."""
+
+    def __init__(self, ctx: SeriesRunnerContext, *, max_workers: int) -> None:
+        self._ctx = ctx
+        self._max_workers = max(max_workers, 1)
+
+    def run(self) -> None:
+        stop_event = self._ctx.stop_event
+        pause_event = self._ctx.pause_event
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            while not stop_event.is_set():
+                if not pause_event.wait(timeout=0.2):
+                    continue
+                now = datetime.now(timezone.utc)
+                due_states = self._ctx.due_series_states(now)
+                if not due_states:
+                    if self._ctx.live_mode and self._ctx.append_live_candles_if_needed():
+                        continue
+                    next_at = self._ctx.next_step_time()
+                    if next_at:
+                        interval = max((next_at - now).total_seconds(), 0)
+                        self._ctx.pace(interval, True)
+                        continue
+                    break
+                futures = [executor.submit(self._ctx.step_series_state, state) for state in due_states]
+                for future in futures:
+                    future.result()
+
+    def stop(self) -> None:
+        return

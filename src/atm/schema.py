@@ -7,6 +7,14 @@ from typing import Any, Dict
 DEFAULT_ATM_TEMPLATE: Dict[str, Any] = {
     "schema_version": 2,
     "name": "New ATM template",
+    "execution_mode": "market",
+    "limit_maker": {
+        "anchor_price": "signal_price",
+        "offset_type": "ticks",
+        "offset_value": 0.0,
+        "validity_window": 1,
+        "fallback": "cancel",
+    },
     "initial_stop": {
         "mode": "atr",
         "atr_period": 14,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import uuid
 import time
@@ -12,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from ....storage import storage
 from engines.bot_runtime.core.domain import (
     Candle,
     DecisionLedgerEvent,
@@ -44,7 +44,10 @@ from engines.bot_runtime.core.wallet import LockedWalletLedger, project_wallet
 from ....indicators.indicator_service.context import IndicatorServiceContext, _context as indicator_context
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
-from .series_runner import InlineSeriesRunner, SeriesRunnerContext, ThreadedSeriesRunner
+from .persistence_buffer import TradePersistenceBuffer
+from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext, ThreadedSeriesRunner
+from .settlement import SettlementApplier
+from .signal_consumption import SignalConsumption, consume_signals
 from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
 from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
 
@@ -53,6 +56,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SIM_LOOKBACK_DAYS = 7
 MAX_LOG_ENTRIES = 500
 MAX_WARNING_ENTRIES = 20
+MAX_SIGNAL_CONSUMPTIONS = 500
 INTRABAR_BASE_SECONDS = 0.4
 WALK_FORWARD_SAMPLE_INTERVAL = 50
 OVERLAY_SUMMARY_INTERVAL = 50
@@ -78,6 +82,9 @@ class SeriesExecutionState:
     intrabar_index: int = 0
     active_candle: Optional[Candle] = None
     done: bool = False
+    signal_consumptions: Deque["SignalConsumption"] = field(
+        default_factory=lambda: deque(maxlen=MAX_SIGNAL_CONSUMPTIONS)
+    )
 
     def intrabar_active(self) -> bool:
         return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)
@@ -172,6 +179,11 @@ class BotRuntime:
             indicator_ctx=self._indicator_ctx,
             warning_sink=self._record_runtime_warning,
         )
+        self._settlement_applier = SettlementApplier()
+        self._persistence_buffer = TradePersistenceBuffer.from_config(
+            self.config,
+            self._runtime_log_context,
+        )
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
             build_candles=SeriesBuilder._build_candles,
@@ -202,9 +214,9 @@ class BotRuntime:
         if value is None:
             return "threaded"
         normalized = str(value).strip().lower()
-        if normalized in {"inline", "threaded"}:
+        if normalized in {"inline", "threaded", "pool"}:
             return normalized
-        raise ValueError(f"Unknown series_runner '{value}'. Expected 'inline' or 'threaded'.")
+        raise ValueError(f"Unknown series_runner '{value}'. Expected 'inline', 'threaded', or 'pool'.")
 
     def _build_series_runner(self) -> object:
         ctx = SeriesRunnerContext(
@@ -225,7 +237,16 @@ class BotRuntime:
         )
         if self._series_runner_type == "threaded":
             return ThreadedSeriesRunner(ctx)
+        if self._series_runner_type == "pool":
+            return PoolSeriesRunner(ctx, max_workers=self._pool_worker_count())
         return InlineSeriesRunner(ctx)
+
+    def _pool_worker_count(self) -> int:
+        configured = self.config.get("series_runner_pool_workers")
+        if isinstance(configured, int) and configured > 0:
+            return configured
+        cpu_count = os.cpu_count() or 1
+        return min(8, cpu_count)
 
     def _series_thread_name(self, state: SeriesExecutionState, index: int) -> str:
         series = state.series
@@ -1151,6 +1172,7 @@ class BotRuntime:
             with self._lock:
                 self.state.update({"status": "error", "error": str(exc)})
             self._persist_runtime_state("error")
+            self._flush_persistence_buffer("runtime_loop_failed")
 
     def _execute_loop(self) -> None:
         self._ensure_prepared()
@@ -1200,6 +1222,7 @@ class BotRuntime:
         self._persist_runtime_state(status)
         if status in {"completed", "stopped"}:
             self._persist_run_artifact(status)
+        self._flush_persistence_buffer("runtime_loop_complete")
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
@@ -1233,7 +1256,8 @@ class BotRuntime:
             )
             logger.info(with_log_context("walk_forward_step", info_context))
 
-        direction = self._next_signal_for(series, epoch)
+        consumed_signals, direction = self._next_signal_for(series, epoch)
+        self._record_signal_consumption(state, epoch, consumed_signals, direction)
 
         # Debug: Log signal consumption result
         if direction is not None:
@@ -1402,6 +1426,8 @@ class BotRuntime:
             self._persist_trade_entry(series, new_trade)
             self._update_trade_overlay(series)
         trade_events = self._prime_intrabar_or_step_bar(state, candle)
+        exit_settlement = getattr(series.risk_engine, "exit_settlement", None) if series.risk_engine else None
+        self._settlement_applier.apply(trade_events, exit_settlement)
         for event in trade_events:
             trade_time = self._trade_entry_time(series, event.get("trade_id"))
             self._log_event(
@@ -1445,11 +1471,31 @@ class BotRuntime:
         if not state.intrabar_active():
             self._finalize_bar_step(state, candle)
 
-    def _next_signal_for(self, series: StrategySeries, epoch: int) -> Optional[str]:
-        direction: Optional[str] = None
-        while series.signals and series.signals[0].epoch <= epoch:
-            direction = series.signals.popleft().direction
-        return direction
+    def _next_signal_for(
+        self, series: StrategySeries, epoch: int
+    ) -> Tuple[List[Dict[str, object]], Optional[str]]:
+        consumed, chosen, updated_last = consume_signals(
+            series.signals,
+            epoch=epoch,
+            last_consumed_epoch=series.last_consumed_epoch,
+        )
+        series.last_consumed_epoch = updated_last
+        return consumed, chosen
+
+    def _record_signal_consumption(
+        self,
+        state: SeriesExecutionState,
+        epoch: int,
+        consumed_signals: List[Dict[str, object]],
+        chosen_direction: Optional[str],
+    ) -> None:
+        state.signal_consumptions.append(
+            SignalConsumption(
+                epoch=epoch,
+                consumed_signals=list(consumed_signals),
+                chosen_direction=chosen_direction,
+            )
+        )
 
     def _compute_playback_interval(self, base_seconds: float = 1.0) -> float:
         return 0.0
@@ -2049,7 +2095,7 @@ class BotRuntime:
         )
         metrics = dict(trade._metrics_snapshot())
         metrics.update(build_entry_metrics(entry_context))
-        storage.record_bot_trade(
+        self._persistence_buffer.record_trade_entry(
             {
                 "trade_id": trade.trade_id,
                 "run_id": run_id,
@@ -2091,9 +2137,10 @@ class BotRuntime:
             "quote_currency": event.get("currency"),
             "event_time": event.get("event_time") or event.get("time"),
         }
-        storage.record_bot_trade_event(payload)
-        if event.get("type") == "close":
-            storage.record_bot_trade(
+        event_type = event.get("type")
+        self._persistence_buffer.record_trade_event(payload, event_type=event_type)
+        if event_type == "close":
+            self._persistence_buffer.record_trade_entry(
                 {
                     "trade_id": trade_id,
                     "run_id": run_id,
@@ -2129,6 +2176,13 @@ class BotRuntime:
         except Exception as exc:  # pragma: no cover - defensive logging
             context = self._runtime_log_context(status=status, error=str(exc))
             logger.warning(with_log_context("bot_runtime_state_callback_failed", context))
+
+    def _flush_persistence_buffer(self, reason: str) -> None:
+        try:
+            self._persistence_buffer.flush(reason=reason)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            context = self._runtime_log_context(reason=reason, error=str(exc))
+            logger.warning(with_log_context("bot_runtime_persistence_flush_failed", context))
 
     def _update_state(self, candle: Candle, status: str = "running") -> None:
         stats = self._aggregate_stats()
