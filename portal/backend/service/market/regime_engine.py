@@ -123,7 +123,7 @@ def _classify_structure(
 ) -> str:
     if directional_efficiency >= 0.55 and slope_stability <= 0.7:
         return "trend"
-    if directional_efficiency <= 0.45 or overlap_pct >= 0.6:
+    if directional_efficiency <= 0.45:
         return "range"
     return "transition"
 
