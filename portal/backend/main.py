@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots.bot_watchdog import get_watchdog
+from .service.db.postgres_extensions import ensure_postgres_extensions
 from .service.market.stats_queue import start_pipeline, stop_pipeline
 
 # Auto-discover indicators and signal rules via package imports
@@ -87,6 +88,7 @@ app.include_router(reports.router, prefix="/api/reports")
 @app.on_event("startup")
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
+    ensure_postgres_extensions()
     watchdog = get_watchdog()
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
