@@ -9,8 +9,8 @@ RUN apt-get update \
 RUN mkdir -p /var/log/postgresql \
     && chown -R postgres:postgres /var/log/postgresql
 
-COPY entrypoint.sh /usr/local/bin/pg-entrypoint.sh
-COPY initdb.d/ /docker-entrypoint-initdb.d/
+COPY docker/postgres/entrypoint.sh /usr/local/bin/pg-entrypoint.sh
+COPY docker/postgres/initdb.d/ /docker-entrypoint-initdb.d/
 
 RUN chmod +x /usr/local/bin/pg-entrypoint.sh
 
