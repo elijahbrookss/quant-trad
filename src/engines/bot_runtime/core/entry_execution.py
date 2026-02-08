@@ -10,10 +10,8 @@ from utils.log_context import build_log_context, merge_log_context, with_log_con
 from .execution_intent import ExecutionIntent, ExecutionOutcome
 from .entry_settlement import EntrySettlementContext
 from .execution_intent import LimitParams
-from .domain import LadderPosition
-
 if TYPE_CHECKING:
-    from .domain import Candle, LadderRiskEngine
+    from .domain import Candle, LadderPosition, LadderRiskEngine
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +366,8 @@ class EntryExecutionCoordinator:
             engine.template.get("trailing_stop") if isinstance(engine.template.get("trailing_stop"), dict) else {}
         )
         engine._last_tp_allocation = None
+
+        from .domain import LadderPosition
 
         position = LadderPosition(
             entry_time=candle.time,
