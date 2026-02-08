@@ -328,7 +328,7 @@ export function BotLensChart({
       Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
     const longJump = next.length > previous.length + 1
     const requiresReset = !previous.length || !next.length || historyRewound || longJump
-    const shouldAnimate = isSameCandle && activeTradeAtLastCandle && !instantPlayback
+    const shouldAnimate = isSameCandle && !instantPlayback && !activeTradeAtLastCandle
 
     const sample = frameSampleRef.current
     const start = performance.now()
