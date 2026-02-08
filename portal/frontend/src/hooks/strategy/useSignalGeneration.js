@@ -119,7 +119,8 @@ const useSignalGeneration = ({
             id: `strategy-${selectedStrategy.id}-signals`,
             source: 'strategy',
             strategyId: selectedStrategy.id,
-            type: 'strategy',
+            type: 'strategy_signal',
+            pane_views: ['marker'],
             payload: { markers: combinedMarkers },
           })
         }

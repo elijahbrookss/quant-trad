@@ -268,6 +268,18 @@ async def get_bot_performance(bot_id: str) -> Dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.get("/{bot_id}/regime_overlays")
+async def get_bot_regime_overlays(bot_id: str) -> Dict[str, Any]:
+    """Return raw and visible regime overlays for debugging (pre-trim + post-trim)."""
+
+    try:
+        return bot_service.regime_overlays(bot_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/{bot_id}/stream")
 async def stream_bot(bot_id: str) -> StreamingResponse:
     """Stream incremental bot updates via server-sent events."""

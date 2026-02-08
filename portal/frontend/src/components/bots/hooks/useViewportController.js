@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { toSec } from '../chartDataUtils.js'
+import { BOTLENS_DEBUG, toSec } from '../chartDataUtils.js'
 import { createLogger } from '../../../utils/logger.js'
 
 export const CameraIntents = {
@@ -88,6 +88,7 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   }, [chartRef])
 
   const logIntent = useCallback((payload) => {
+    if (!BOTLENS_DEBUG) return
     console.debug('[BotLensChart] camera intent applied', {
       ...payload,
       locked: lockedRef.current,

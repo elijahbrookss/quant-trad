@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { adaptPayload, getPaneViewsFor } from '../../../chart/indicators/registry.js';
+import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/registry.js';
 
 /**
  * useOverlaySync - Manages chart overlay synchronization
@@ -149,7 +149,7 @@ export function useOverlaySync({
         polylines: Array.isArray(payload.polylines) ? payload.polylines.length : 0,
       });
 
-      const paneViews = getPaneViewsFor(type);
+      const paneViews = getPaneViewsForOverlay(ov);
       const norm = adaptPayload(type, payload, color);
       overlayLogger.debug('overlay_adapted', {
         priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,

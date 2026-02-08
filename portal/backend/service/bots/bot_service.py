@@ -662,6 +662,16 @@ def performance(bot_id: str) -> Dict[str, object]:
     return payload
 
 
+def regime_overlays(bot_id: str) -> Dict[str, Any]:
+    """Return raw vs visible regime overlays for debugging."""
+
+    bot = get_bot(bot_id)
+    runtime = _RUNTIME.get(bot_id) or _runtime_for(bot_id, bot)
+    runtime.apply_config(bot)
+    runtime.warm_up()
+    return runtime.regime_overlay_dump()
+
+
 __all__ = [
     "create_bot",
     "delete_bot_record",

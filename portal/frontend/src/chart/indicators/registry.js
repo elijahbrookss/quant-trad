@@ -1,16 +1,28 @@
 import { PaneViewType } from '../paneViews/factory';
 
-const INDICATOR_PANEVIEWS = {
-  default: [PaneViewType.TOUCH],
-  pivot_level: [PaneViewType.SIGNAL_BUBBLE, PaneViewType.TOUCH],
-  market_profile: [PaneViewType.VA_BOX, PaneViewType.TOUCH],
-  trendline: [PaneViewType.SEGMENT, PaneViewType.TOUCH],
-  vwap: [PaneViewType.POLYLINE, PaneViewType.TOUCH],
-  bot_trade_rays: [PaneViewType.SEGMENT],
+const toPaneView = (value) => {
+  if (!value) return null;
+  const normalized = String(value).toLowerCase();
+  const candidates = Object.values(PaneViewType);
+  return candidates.includes(normalized) ? normalized : null;
 };
 
-export function getPaneViewsFor(type) {
-  return INDICATOR_PANEVIEWS[type] || INDICATOR_PANEVIEWS.default;
+export function getPaneViewsForOverlay(overlay) {
+  if (!overlay || !Array.isArray(overlay.pane_views) || !overlay.pane_views.length) {
+    console.error('[OverlayRegistry] Missing pane_views for overlay', {
+      type: overlay?.type,
+      overlay,
+    });
+    return [];
+  }
+  const mapped = overlay.pane_views.map(toPaneView).filter(Boolean);
+  if (!mapped.length) {
+    console.error('[OverlayRegistry] Invalid pane_views for overlay', {
+      type: overlay?.type,
+      pane_views: overlay?.pane_views,
+    });
+  }
+  return mapped;
 }
 
 const toSec = (value) => {
@@ -117,6 +129,9 @@ export function adaptPayload(type, payload, colorHex) {
   const normBoxes = boxesRaw
     .map((box) => {
       const baseColor = colorHex || box.color;
+      const isRegime = typeof type === "string" && type.includes("regime_overlay");
+      const fillAlpha = isRegime ? 0.05 : 0.08;
+      const borderAlpha = isRegime ? 0.16 : 0.25;
       return {
         ...box,
         x1: toSec(box.x1 ?? box.start ?? box.start_date ?? box.startDate),
@@ -124,9 +139,9 @@ export function adaptPayload(type, payload, colorHex) {
         y1: toFiniteNumber(box.y1 ?? box.val ?? box.VAL),
         y2: toFiniteNumber(box.y2 ?? box.vah ?? box.VAH),
         // Apply subtle opacity to make boxes see-through
-        color: toRgba(baseColor, 0.08) || box.color,
+        color: toRgba(baseColor, fillAlpha) || box.color,
         border: box.border || {
-          color: toRgba(baseColor, 0.25) || baseColor,
+          color: toRgba(baseColor, borderAlpha) || baseColor,
           width: 1,
         },
       };

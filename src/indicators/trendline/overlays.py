@@ -9,6 +9,7 @@ import pandas as pd
 from .indicator import TL, TrendlineIndicator
 from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
+from signals.overlays.registry import overlay_type
 from signals.overlays.schema import build_overlay, PolylinePayload
 
 
@@ -40,6 +41,15 @@ def _line_segment(line: TL, index: pd.DatetimeIndex) -> PolylinePayload:
     }
 
 
+@overlay_type(
+    TrendlineIndicator.NAME,
+    label="Trendline",
+    pane_views=("polyline", "touch"),
+    description="Trendline segments and touch markers.",
+    renderers={"lightweight": "polyline", "mpl": "line"},
+    payload_keys=("polylines", "markers"),
+    ui_color="#a855f7",
+)
 @overlay_adapter(TrendlineIndicator)
 def trendline_overlay_adapter(
     signals: Sequence[BaseSignal],

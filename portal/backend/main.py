@@ -20,6 +20,7 @@ import indicators  # noqa: F401
 # Signals: auto-discovers all @signal_rule decorated functions
 # This triggers decorator execution and registration in _REGISTRY
 import signals  # noqa: F401
+from signals.overlays.builtins import ensure_builtin_overlays_registered
 
 
 def _allowed_origins() -> List[str]:
@@ -85,6 +86,7 @@ app.include_router(reports.router, prefix="/api/reports")
 
 @app.on_event("startup")
 def _startup_watchdog() -> None:
+    ensure_builtin_overlays_registered()
     watchdog = get_watchdog()
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
