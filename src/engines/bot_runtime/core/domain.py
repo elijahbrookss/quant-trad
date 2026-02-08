@@ -240,11 +240,18 @@ class EntryFill:
 
     order_intent_id: str
     trade_id: str
+    candle_time: Optional[datetime]
+    candle_open: Optional[float]
+    candle_high: Optional[float]
+    candle_low: Optional[float]
+    candle_close: Optional[float]
+    candle_atr: Optional[float]
     filled_qty: float
     fill_price: float
     fee_paid: float
     liquidity_role: Optional[str]
     fill_time: Optional[str]
+    candle_lookback_15: Optional[Dict[str, Optional[float]]] = None
     raw: Optional[Dict[str, Any]] = None
 
 
@@ -1468,12 +1475,19 @@ class LadderRiskEngine:
         return EntryFill(
             order_intent_id=str(pending.order_intent_id),
             trade_id=str(pending.trade_id),
+            candle_time=candle.time,
+            candle_open=candle.open,
+            candle_high=candle.high,
+            candle_low=candle.low,
+            candle_close=candle.close,
+            candle_atr=candle.atr,
+            candle_lookback_15=candle.lookback_15,
             filled_qty=float(outcome.filled_qty or 0.0),
             fill_price=fill_price,
             fee_paid=float(outcome.fee_paid or 0.0),
             liquidity_role=str(outcome.fee_role or "unknown"),
             fill_time=outcome.filled_at or outcome.updated_at,
-            raw={"outcome": asdict(outcome), "candle": candle},
+            raw={"outcome": asdict(outcome)},
         )
 
     def apply_entry_fill(
@@ -1530,11 +1544,34 @@ class LadderRiskEngine:
         remaining_qty = max(float(request.requested_qty) - filled_qty_total, 0.0)
         avg_fill_price = filled_notional_total / filled_qty_total if filled_qty_total else 0.0
 
-        candle = None
         outcome_payload = {}
         if isinstance(fill.raw, dict):
-            candle = fill.raw.get("candle")
             outcome_payload = dict(fill.raw.get("outcome") or {})
+        if (
+            fill.candle_time is None
+            or fill.candle_open is None
+            or fill.candle_high is None
+            or fill.candle_low is None
+            or fill.candle_close is None
+        ):
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_CANDLE_MISSING",
+                rejection_detail={"order_intent_id": pending.order_intent_id},
+            )
+        candle = Candle(
+            time=fill.candle_time,
+            open=float(fill.candle_open),
+            high=float(fill.candle_high),
+            low=float(fill.candle_low),
+            close=float(fill.candle_close),
+            atr=fill.candle_atr,
+            lookback_15=fill.candle_lookback_15,
+        )
 
         pending.filled_qty = filled_qty_total
         pending.filled_notional = filled_notional_total
@@ -1598,16 +1635,6 @@ class LadderRiskEngine:
                 )
 
         stop_price = self._calculate_stop_price(avg_fill_price, pending.direction, pending.r_ticks)
-        if candle is None:
-            return EntryFillResult(
-                status="rejected",
-                pending=None,
-                position=None,
-                events=events,
-                settlement_payloads=settlement_payloads,
-                rejection_reason="ENTRY_CANDLE_MISSING",
-                rejection_detail={"order_intent_id": pending.order_intent_id},
-            )
         legs = self._build_legs(
             candle,
             pending.direction,

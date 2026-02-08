@@ -194,12 +194,19 @@ def test_apply_entry_fill_accumulates_partial_fills():
     fill_one = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
+        candle_time=candle.time,
+        candle_open=candle.open,
+        candle_high=candle.high,
+        candle_low=candle.low,
+        candle_close=candle.close,
+        candle_atr=candle.atr,
+        candle_lookback_15=candle.lookback_15,
         filled_qty=1.0,
         fill_price=100.0,
         fee_paid=0.05,
         liquidity_role="taker",
         fill_time="t1",
-        raw={"candle": candle, "outcome": {}},
+        raw={"outcome": {}},
     )
     result_one = engine.apply_entry_fill(request=request, pending=pending, fill=fill_one)
 
@@ -211,12 +218,19 @@ def test_apply_entry_fill_accumulates_partial_fills():
     fill_two = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
+        candle_time=candle.time,
+        candle_open=candle.open,
+        candle_high=candle.high,
+        candle_low=candle.low,
+        candle_close=candle.close,
+        candle_atr=candle.atr,
+        candle_lookback_15=candle.lookback_15,
         filled_qty=1.0,
         fill_price=110.0,
         fee_paid=0.05,
         liquidity_role="taker",
         fill_time="t2",
-        raw={"candle": candle, "outcome": {}},
+        raw={"outcome": {}},
     )
     result_two = engine.apply_entry_fill(request=request, pending=result_one.pending, fill=fill_two)
 
@@ -234,12 +248,19 @@ def test_apply_entry_fill_opens_position_with_expected_stop():
     fill = EntryFill(
         order_intent_id=str(request.order_intent_id),
         trade_id=str(request.trade_id),
+        candle_time=candle.time,
+        candle_open=candle.open,
+        candle_high=candle.high,
+        candle_low=candle.low,
+        candle_close=candle.close,
+        candle_atr=candle.atr,
+        candle_lookback_15=candle.lookback_15,
         filled_qty=request.requested_qty,
         fill_price=100.0,
         fee_paid=0.2,
         liquidity_role="taker",
         fill_time="t1",
-        raw={"candle": candle, "outcome": {}},
+        raw={"outcome": {}},
     )
 
     result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
