@@ -15,6 +15,7 @@ from .log_context import build_log_context, merge_log_context, with_log_context
 DEFAULT_OBS_ENABLED = True
 DEFAULT_OBS_STEP_SAMPLE_RATE = 0.01
 DEFAULT_OBS_SLOW_MS = 250.0
+DEFAULT_OBS_LOG_THROTTLE_S = 30.0
 
 
 def _coerce_bool(value: Optional[object], default: bool) -> bool:
@@ -77,6 +78,14 @@ def get_obs_slow_ms(config: Optional[Mapping[str, Any]] = None) -> float:
         value = os.getenv("OBS_SLOW_MS")
     slow_ms = _coerce_float(value, DEFAULT_OBS_SLOW_MS)
     return slow_ms if slow_ms > 0 else DEFAULT_OBS_SLOW_MS
+
+
+def get_obs_log_throttle_seconds(config: Optional[Mapping[str, Any]] = None) -> float:
+    value = _config_value(config, "OBS_LOG_THROTTLE_SECONDS")
+    if value is None:
+        value = os.getenv("OBS_LOG_THROTTLE_SECONDS")
+    interval_s = _coerce_float(value, DEFAULT_OBS_LOG_THROTTLE_S)
+    return interval_s if interval_s >= 0 else DEFAULT_OBS_LOG_THROTTLE_S
 
 
 def should_sample(rate: float, *, random_fn: Optional[Any] = None) -> bool:
@@ -192,9 +201,11 @@ __all__ = [
     "DEFAULT_OBS_ENABLED",
     "DEFAULT_OBS_STEP_SAMPLE_RATE",
     "DEFAULT_OBS_SLOW_MS",
+    "DEFAULT_OBS_LOG_THROTTLE_S",
     "get_obs_enabled",
     "get_obs_step_sample_rate",
     "get_obs_slow_ms",
+    "get_obs_log_throttle_seconds",
     "should_sample",
     "LogThrottle",
     "perf_log",
