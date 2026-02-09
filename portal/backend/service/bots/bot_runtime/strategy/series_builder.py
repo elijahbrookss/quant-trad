@@ -1370,7 +1370,7 @@ class SeriesBuilder:
                 continue
             if candle_time:
                 regime_rows[candle_time] = regime
-        logger.info(
+        logger.debug(
             with_log_context(
                 "bot_regime_rows_collected",
                 self._runtime_log_context(
