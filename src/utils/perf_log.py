@@ -149,6 +149,24 @@ class PerfLog(AbstractContextManager["PerfLog"]):
         self._fields.update(build_log_context(**fields))
 
 
+class LogThrottle:
+    """Simple per-key throttle for repeated log messages."""
+
+    def __init__(self, interval_s: float = 30.0) -> None:
+        self._interval_s = max(interval_s, 0.0)
+        self._last: Dict[str, float] = {}
+
+    def should_log(self, key: str) -> bool:
+        if self._interval_s <= 0:
+            return True
+        now = time.time()
+        last = self._last.get(key, 0.0)
+        if now - last < self._interval_s:
+            return False
+        self._last[key] = now
+        return True
+
+
 def perf_log(
     event: str,
     *,
@@ -178,6 +196,7 @@ __all__ = [
     "get_obs_step_sample_rate",
     "get_obs_slow_ms",
     "should_sample",
+    "LogThrottle",
     "perf_log",
     "PerfLog",
 ]

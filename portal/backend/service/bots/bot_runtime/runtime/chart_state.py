@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import logging
-import time
 from signals.overlays.transformers import apply_overlay_transform
+from utils.perf_log import LogThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class ChartStateBuilder:
         self._normalise_epoch = normalise_epoch_fn
         self._log_sequence = log_sequence_fn
         self._strategy_key = strategy_key_fn
-        self._regime_log_last: Dict[str, float] = {}
+        self._regime_log_throttle = LogThrottle(interval_s=30.0)
 
     def visible_candles(
         self,
@@ -403,9 +403,6 @@ class ChartStateBuilder:
     def _log_regime_debug(self, key: str, message: str, *args: Any) -> None:
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        now = time.time()
-        last = self._regime_log_last.get(key, 0.0)
-        if now - last < 30.0:
+        if not self._regime_log_throttle.should_log(key):
             return
-        self._regime_log_last[key] = now
         logger.debug(message, *args)
