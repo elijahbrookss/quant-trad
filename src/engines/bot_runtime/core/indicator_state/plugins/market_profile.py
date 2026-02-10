@@ -17,8 +17,29 @@ def market_profile_overlay_entries(projection_input: OverlayProjectionInput) -> 
     for idx, profile in enumerate(profiles):
         if not isinstance(profile, Mapping):
             continue
-        key = f"market_profile:{profile.get('session')}:{profile.get('VAH')}:{profile.get('VAL')}:{idx}"
-        entries[key] = {"type": "market_profile", "payload": dict(profile)}
+        session = str(profile.get("session") or "").strip()
+        vah = profile.get("VAH")
+        val = profile.get("VAL")
+        if not session or vah is None or val is None:
+            continue
+        try:
+            vah_f = float(vah)
+            val_f = float(val)
+            day_start = f"{session}T00:00:00+00:00"
+            day_end = f"{session}T23:59:59+00:00"
+        except (TypeError, ValueError):
+            continue
+        key = f"market_profile:{session}:{vah_f}:{val_f}:{idx}"
+        entries[key] = {
+            "type": "market_profile",
+            "payload": {
+                "boxes": [{"x1": day_start, "x2": day_end, "y1": val_f, "y2": vah_f}],
+                "markers": [],
+                "bubbles": [],
+                "price_lines": [],
+                "polylines": [],
+            },
+        }
     return entries
 
 

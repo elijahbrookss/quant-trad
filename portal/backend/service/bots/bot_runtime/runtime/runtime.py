@@ -26,7 +26,7 @@ from engines.bot_runtime.core.domain import (
 )
 from signals.overlays.registry import register_overlay_type
 from signals.overlays.builtins import ensure_builtin_overlays_registered
-from signals.overlays.schema import build_overlay
+from signals.overlays.schema import build_overlay, normalize_overlays
 from ..reporting.reporting import (
     TRADE_OVERLAY_SOURCE,
     TRADE_STOP_COLOR,
@@ -2227,10 +2227,24 @@ class BotRuntime:
             if not projection_delta.ops:
                 overlay_projection_skipped_count += 1
                 continue
-            entries = projector(OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state))
+            raw_entries = projector(OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state))
+            if not isinstance(raw_entries, Mapping):
+                raise RuntimeError(
+                    f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
+                )
+            normalized_entries: Dict[str, Dict[str, Any]] = {}
+            for entry_key, entry_value in raw_entries.items():
+                if not isinstance(entry_value, Mapping):
+                    continue
+                normalized = normalize_overlays(indicator_type, [dict(entry_value)])
+                if not normalized:
+                    raise RuntimeError(
+                        f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} indicator_id={indicator_id} entry_key={entry_key}"
+                    )
+                normalized_entries[str(entry_key)] = dict(normalized[0])
             projection_state["seq"] = projection_delta.seq
             projection_state["revision"] = snapshot.revision
-            projection_state["entries"] = dict(entries)
+            projection_state["entries"] = normalized_entries
 
         overlays: List[Dict[str, Any]] = []
         for projection_state in state.indicator_projection_runtime.values():
