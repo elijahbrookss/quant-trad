@@ -62,6 +62,16 @@ class MarketProfileIndicator(ComputeIndicator):
         "extend_value_area_to_chart_end": True,
         "days_back": DEFAULT_DAYS_BACK,
     }
+    RUNTIME_INPUT_SPECS = [
+        {
+            "source_timeframe": "30m",
+            "lookback_days_param": "days_back",
+            "session_scope": "global",
+            "alignment": "closed_bar_only",
+            "normalization": "project_to_strategy_timeframe",
+            "incremental_eval": True,
+        }
+    ]
 
     def __init__(
         self,

@@ -13,7 +13,7 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, Hashable, Optional, Tuple
+from typing import Any, Dict, Hashable, Optional, Set, Tuple
 
 from utils.perf_log import get_obs_enabled
 
@@ -60,6 +60,8 @@ class IncrementalCache:
         # Key can be anything: date string, timestamp, session ID, etc.
         # NOTE: In-memory LRU cache; per-process only, no locks for concurrent writers.
         self._cache: "OrderedDict[Tuple[str, str, Hashable], Any]" = OrderedDict()
+        # Scope index to avoid full-cache scans for per-indicator fingerprint lookups.
+        self._scope_index: Dict[Tuple[str, str], Set[Tuple[str, str, Hashable]]] = {}
 
     def _build_key(
         self, inst_id: str, symbol: str, key: Hashable
@@ -100,6 +102,7 @@ class IncrementalCache:
         cache_key = self._build_key(inst_id, symbol, key)
         self._cache[cache_key] = deepcopy(value)
         self._cache.move_to_end(cache_key)
+        self._scope_add(cache_key)
         self._enforce_limit()
 
     def get_range(
@@ -149,6 +152,7 @@ class IncrementalCache:
         stale_keys = [key for key in self._cache.keys() if key[0] == inst_id]
         for cache_key in stale_keys:
             self._cache.pop(cache_key, None)
+            self._scope_discard(cache_key)
 
     def purge_symbol(self, inst_id: str, symbol: str) -> None:
         """Remove all cached items for a given indicator+symbol combination."""
@@ -159,10 +163,12 @@ class IncrementalCache:
         ]
         for cache_key in stale_keys:
             self._cache.pop(cache_key, None)
+            self._scope_discard(cache_key)
 
     def clear(self) -> None:
         """Clear all cached items."""
         self._cache.clear()
+        self._scope_index.clear()
 
     def get_stats(self) -> Dict[str, int]:
         """Get cache statistics."""
@@ -173,12 +179,44 @@ class IncrementalCache:
             "symbols": len({(key[0], key[1]) for key in self._cache.keys()}),
         }
 
+    def fingerprint_for(self, inst_id: str, symbol: str) -> Tuple[int, Optional[str]]:
+        """Return a lightweight fingerprint for cached artifacts of one indicator+symbol.
+
+        The fingerprint is stable when no cache entries were added/removed for this pair.
+        """
+        if not inst_id or not symbol:
+            return (0, None)
+        scoped = self._scope_index.get((inst_id, symbol))
+        if not scoped:
+            return (0, None)
+        try:
+            ordered = sorted(scoped, key=lambda item: repr(item[2]))
+        except Exception:
+            ordered = list(scoped)
+        last = ordered[-1]
+        return (len(ordered), repr(last[2]))
+
+    def _scope_add(self, cache_key: Tuple[str, str, Hashable]) -> None:
+        scope = (cache_key[0], cache_key[1])
+        entries = self._scope_index.setdefault(scope, set())
+        entries.add(cache_key)
+
+    def _scope_discard(self, cache_key: Tuple[str, str, Hashable]) -> None:
+        scope = (cache_key[0], cache_key[1])
+        entries = self._scope_index.get(scope)
+        if not entries:
+            return
+        entries.discard(cache_key)
+        if not entries:
+            self._scope_index.pop(scope, None)
+
     def _enforce_limit(self) -> None:
         """Remove oldest entries when cache exceeds max size."""
         should_log = get_obs_enabled()
         while len(self._cache) > self.max_entries:
             evict_start = time.perf_counter() if should_log else 0.0
             cache_key, _ = self._cache.popitem(last=False)
+            self._scope_discard(cache_key)
             if should_log:
                 evict_ms = (time.perf_counter() - evict_start) * 1000.0
                 cache_key_summary = f"{cache_key[0]}:{cache_key[1]}:{cache_key[2]}"

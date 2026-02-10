@@ -113,6 +113,13 @@ class TrendlineIndicator(ComputeIndicator):
     """
 
     NAME = "trendline"
+    RUNTIME_INPUT_SPECS = [
+        {
+            "session_scope": "global",
+            "alignment": "closed_bar_only",
+            "normalization": "none",
+        }
+    ]
 
     def __init__(
         self,

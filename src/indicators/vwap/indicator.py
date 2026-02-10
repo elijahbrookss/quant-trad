@@ -22,6 +22,13 @@ class VWAPIndicator(ComputeIndicator):
     Computes anchored VWAP and its rolling standard-deviation bands (VWAP ± nσ).
     """
     NAME = "vwap_bands"
+    RUNTIME_INPUT_SPECS = [
+        {
+            "session_scope": "global",
+            "alignment": "closed_bar_only",
+            "normalization": "none",
+        }
+    ]
 
     def __init__(
         self,

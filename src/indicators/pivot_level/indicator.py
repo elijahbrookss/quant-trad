@@ -58,6 +58,15 @@ class PivotLevelIndicator(ComputeIndicator):
     and provides mplfinance overlays with optional touch markers.
     """
     NAME = 'pivot_level'
+    RUNTIME_INPUT_SPECS = [
+        {
+            "source_timeframe_param": "timeframe",
+            "lookback_days_param": "days_back",
+            "session_scope": "global",
+            "alignment": "closed_bar_only",
+            "normalization": "project_to_strategy_timeframe",
+        }
+    ]
 
     @staticmethod
     def _normalise_confirmation_bars(value: Any) -> int:
