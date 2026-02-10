@@ -109,10 +109,61 @@ class Database:
                 )
 
         require_table("portal_bot_runs")
+        require_table("portal_bot_run_steps")
         require_table("portal_bot_trades")
         require_table("portal_bots")
+        assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_bot_started_at "
+                    "ON portal_bot_run_steps (bot_id, started_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_step_started_at "
+                    "ON portal_bot_run_steps (run_id, step_name, started_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_started_at "
+                    "ON portal_bot_run_steps (run_id, started_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_started_at "
+                    "ON portal_bot_runs (bot_id, started_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_ended_at "
+                    "ON portal_bot_runs (bot_id, ended_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_run_entry_time "
+                    "ON portal_bot_trades (run_id, entry_time)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_bot_exit_time "
+                    "ON portal_bot_trades (bot_id, exit_time)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trade_events_trade_event_time "
+                    "ON portal_bot_trade_events (trade_id, event_time)"
+                )
+            )
 
     @property
     def available(self) -> bool:

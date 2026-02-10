@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 
 
@@ -578,4 +579,43 @@ class BotRunRecord(Base):
             "decision_ledger": list(self.decision_ledger or []),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRunStepRecord(Base):
+    """Timed runtime step trace entry for bot-run profiling."""
+
+    __tablename__ = "portal_bot_run_steps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False)
+    bot_id = Column(String(64), nullable=True)
+    step_name = Column(String(64), nullable=False)
+    started_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime, nullable=False)
+    duration_ms = Column(Float, nullable=False)
+    ok = Column(Boolean, nullable=False, default=True)
+    strategy_id = Column(String(64), nullable=True)
+    symbol = Column(String(64), nullable=True)
+    timeframe = Column(String(32), nullable=True)
+    error = Column(String(1024), nullable=True)
+    context = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "step_name": self.step_name,
+            "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
+            "ended_at": (self.ended_at.isoformat() + "Z") if self.ended_at else None,
+            "duration_ms": self.duration_ms,
+            "ok": bool(self.ok),
+            "strategy_id": self.strategy_id,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "error": self.error,
+            "context": dict(self.context or {}),
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }

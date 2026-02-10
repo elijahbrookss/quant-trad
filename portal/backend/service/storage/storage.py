@@ -14,6 +14,7 @@ from ...db import (
     ATMTemplateRecord,
     BotRecord,
     BotRunRecord,
+    BotRunStepRecord,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,
@@ -1384,3 +1385,40 @@ def record_bot_trade_event(event: Dict[str, Any]) -> None:
             session.add(record)
     except SQLAlchemyError as exc:
         logger.warning("bot_trade_event_persist_failed | trade=%s | error=%s", trade_id, exc)
+
+
+def record_bot_run_step(payload: Dict[str, Any]) -> None:
+    """Persist a timed bot runtime step for profiler dashboards."""
+
+    if not db.available:
+        return
+    run_id = str(payload.get("run_id") or "").strip()
+    step_name = str(payload.get("step_name") or "").strip()
+    if not run_id or not step_name:
+        return
+    started_at = _parse_optional_timestamp(payload.get("started_at"))
+    ended_at = _parse_optional_timestamp(payload.get("ended_at"))
+    duration_ms = _coerce_float(payload.get("duration_ms"))
+    if started_at is None or ended_at is None or duration_ms is None:
+        return
+    try:
+        with db.session() as session:
+            now = _utcnow()
+            record = BotRunStepRecord(
+                run_id=run_id,
+                bot_id=str(payload.get("bot_id") or "") or None,
+                step_name=step_name,
+                started_at=started_at,
+                ended_at=ended_at,
+                duration_ms=float(duration_ms),
+                ok=bool(payload.get("ok", True)),
+                strategy_id=str(payload.get("strategy_id") or "") or None,
+                symbol=str(payload.get("symbol") or "") or None,
+                timeframe=str(payload.get("timeframe") or "") or None,
+                error=(str(payload.get("error"))[:1024] if payload.get("error") else None),
+                context=dict(payload.get("context") or {}),
+                created_at=now,
+            )
+            session.add(record)
+    except SQLAlchemyError as exc:
+        logger.warning("bot_run_step_persist_failed | run_id=%s | step=%s | error=%s", run_id, step_name, exc)
