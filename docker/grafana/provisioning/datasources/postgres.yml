@@ -1,0 +1,18 @@
+apiVersion: 1
+
+datasources:
+  - name: QuantTrad Postgres
+    uid: quanttrad-postgres
+    type: postgres
+    access: proxy
+    orgId: 1
+    url: tsdb.quanttrad:5432
+    user: quanttrad
+    secureJsonData:
+      password: quanttrad
+    jsonData:
+      database: quanttrad
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: true
+    editable: true
