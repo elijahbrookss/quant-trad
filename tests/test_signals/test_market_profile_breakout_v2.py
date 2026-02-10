@@ -49,6 +49,16 @@ def test_breakout_v2_type1_inside_to_outside_above():
     assert sig["lockout_bars"] == 3
 
 
+def test_breakout_v2_ignores_non_mapping_payload():
+    closes = [95, 96, 97, 101, 102, 103]
+    df = _df_from_closes(closes)
+    ctx = {"df": df}
+
+    signals = detect_breakouts_v2(ctx, "invalid-payload", confirm_bars=3)
+
+    assert signals == []
+
+
 def test_breakout_v2_type2_outside_above_to_inside():
     closes = [102, 101, 101.5, 98, 99, 100]  # last 3 inside, prior above
     df = _df_from_closes(closes)

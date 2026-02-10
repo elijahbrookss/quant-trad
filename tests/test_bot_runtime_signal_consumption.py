@@ -31,3 +31,19 @@ def test_signal_consumption_log_bounded():
             )
         )
     assert len(signal_log) == 500
+
+
+def test_signal_consumption_skips_already_consumed_epochs():
+    signals = deque(
+        [
+            StrategySignal(epoch=95, direction="long"),
+            StrategySignal(epoch=100, direction="short"),
+            StrategySignal(epoch=105, direction="long"),
+        ]
+    )
+
+    consumed, chosen, last_consumed = consume_signals(signals, epoch=110, last_consumed_epoch=100)
+
+    assert consumed == [{"epoch": 105, "direction": "long"}]
+    assert chosen == "long"
+    assert last_consumed == 105
