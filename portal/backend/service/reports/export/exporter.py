@@ -500,7 +500,7 @@ def _build_readme(
         "- Large drawdowns, tail risk, and outcome volatility matter more than raw return.",
         "",
         "Platform constraints:",
-        "- Strategies run on exactly one timeframe per run; do not assume multi-timeframe inputs.",
+        "- Strategy execution time advances on one primary timeframe per run; indicators may consume additional source timeframes via runtime input specs.",
         "- A strategy uses one datasource/provider/venue per run; do not mix providers, venues, or symbol feeds inside a run.",
         "- Derived artifacts must respect known-at timing; nothing should appear before it could exist live.",
         "",

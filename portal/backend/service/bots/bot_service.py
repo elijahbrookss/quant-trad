@@ -14,7 +14,14 @@ from ..risk.atm import merge_templates, template_metrics
 from .bot_runtime import BotRuntime
 from .bot_watchdog import get_watchdog
 from .bot_stream import BotStreamManager
-from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
+from ..storage.storage import (
+    delete_bot,
+    get_bot_run,
+    load_bots,
+    load_strategies,
+    upsert_bot,
+    upsert_bot_run,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +69,53 @@ def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
     if runtime:
         snapshot["runtime"] = runtime.snapshot()
     _broadcast_bot_stream("bot_status", {"bot": snapshot})
+
+    if isinstance(runtime_payload, Mapping):
+        _upsert_run_row_from_runtime(record, runtime_payload)
+
+
+def _upsert_run_row_from_runtime(bot: Mapping[str, Any], runtime_payload: Mapping[str, Any]) -> None:
+    """Ensure portal_bot_runs has a row for this runtime run_id.
+
+    We persist at least once when run starts, and update again for terminal states.
+    """
+
+    run_id = str(runtime_payload.get("run_id") or "").strip()
+    if not run_id:
+        return
+    runtime_status = str(runtime_payload.get("status") or bot.get("status") or "").lower()
+    if not runtime_status:
+        return
+    terminal_states = {"completed", "stopped", "error", "crashed"}
+
+    existing = get_bot_run(run_id)
+    should_upsert = existing is None or runtime_status in terminal_states
+    if not should_upsert:
+        return
+
+    payload: Dict[str, Any] = {
+        "run_id": run_id,
+        "bot_id": bot.get("id"),
+        "bot_name": bot.get("name"),
+        "strategy_id": bot.get("strategy_id"),
+        "run_type": bot.get("run_type") or "backtest",
+        "status": runtime_status,
+        "backtest_start": bot.get("backtest_start"),
+        "backtest_end": bot.get("backtest_end"),
+        "started_at": runtime_payload.get("started_at") or bot.get("last_run_at"),
+        "ended_at": runtime_payload.get("ended_at") if runtime_status in terminal_states else None,
+        "summary": dict(runtime_payload.get("stats") or {}),
+    }
+    try:
+        upsert_bot_run(payload)
+    except Exception as exc:  # noqa: BLE001 - persistence boundary
+        logger.warning(
+            "bot_run_upsert_from_runtime_failed | bot_id=%s | run_id=%s | status=%s | error=%s",
+            bot.get("id"),
+            run_id,
+            runtime_status,
+            exc,
+        )
 
 
 def _now_iso() -> str:
@@ -411,6 +465,8 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     bot["status"] = "running"
     bot["last_run_at"] = _now_iso()
     bot["runtime"] = runtime.snapshot()
+    if isinstance(bot.get("runtime"), Mapping):
+        _upsert_run_row_from_runtime(bot, bot.get("runtime"))
     upsert_bot(bot)
     logger.info("[BotService] bot started", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": bot})
