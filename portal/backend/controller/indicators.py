@@ -51,6 +51,7 @@ class OverlayRequest(BaseModel):
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     instrument_id: Optional[str] = None
+    visibility_epoch: Optional[Any] = None
 
 class SignalRequest(BaseModel):
     start: str
@@ -206,6 +207,9 @@ def overlays(inst_id: str, req: OverlayRequest):
             datasource=req.datasource,
             exchange=req.exchange,
             instrument_id=req.instrument_id,
+            overlay_options={"visibility_epoch": req.visibility_epoch}
+            if req.visibility_epoch is not None
+            else None,
         )
         return payload
     except KeyError:
