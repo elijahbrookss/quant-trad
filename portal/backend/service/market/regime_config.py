@@ -40,6 +40,9 @@ class RegimeStabilizerConfig:
     hard_volatility_high_atr_zscore: float = 1.6
     hard_volatility_low_atr_ratio: float = 0.6
     hard_volatility_low_atr_zscore: float = -1.6
+    # Diagnostic logging switches. Keep blocked-per-bar logs off by default to avoid console flooding.
+    log_axis_switch_blocked: bool = False
+    log_axis_switch_confirmed: bool = True
 
 
 @dataclass(frozen=True)
