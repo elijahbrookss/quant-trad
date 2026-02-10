@@ -102,7 +102,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     streamStatus,
   } = useBotPerformance({ bot, open, onRefresh })
 
-  const logs = payload?.logs || []
   const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
   const warnings = useMemo(() => {
     const fromPayload = Array.isArray(payload?.warnings) ? payload.warnings : []
