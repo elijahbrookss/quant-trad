@@ -65,6 +65,27 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     [runtimeStatus],
   )
 
+  const extractRuntimeError = useCallback((incoming) => {
+    if (!incoming || typeof incoming !== 'object') return null
+    const runtimeError = incoming?.runtime?.error
+    if (runtimeError && typeof runtimeError === 'object') {
+      const msg = runtimeError.message || runtimeError.detail
+      if (msg) return String(msg)
+    }
+    if (incoming?.error && typeof incoming.error === 'object') {
+      const msg = incoming.error.message || incoming.error.detail
+      if (msg) return String(msg)
+    }
+    if (typeof incoming?.error === 'string' && incoming.error.trim()) {
+      return incoming.error.trim()
+    }
+    const status = String(incoming?.runtime?.status || '').toLowerCase()
+    if (status === 'error' || status === 'crashed') {
+      return 'Bot runtime failed. Check runtime logs for details.'
+    }
+    return null
+  }, [])
+
   useEffect(
     () => () => {
       if (focusDebounceRef.current) {
@@ -76,13 +97,165 @@ export function useBotPerformance({ bot, open, onRefresh }) {
 
   const payloadRef = useRef(null)
 
+  const buildOverlayState = useCallback((overlays) => {
+    const entries = {}
+    const order = []
+    const list = Array.isArray(overlays) ? overlays : []
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const overlay = list[idx]
+      if (!overlay || typeof overlay !== 'object') continue
+      const explicit = overlay.id
+      const key = explicit
+        ? String(explicit)
+        : [
+            String(overlay.type || 'overlay'),
+            String(overlay.strategy_id || ''),
+            String(overlay.symbol || ''),
+            String(overlay.timeframe || ''),
+            String(overlay.instrument_id || ''),
+            String(overlay.source || ''),
+            String(idx),
+          ].join('|')
+      entries[key] = overlay
+      order.push(key)
+    }
+    return { entries, order }
+  }, [])
+
+  const applyOverlayDelta = useCallback((existing, delta) => {
+    if (!delta || typeof delta !== 'object') return existing
+    const nextSeq = Number(delta.seq)
+    const baseSeq = Number(delta.base_seq)
+    const currentSeq = Number(existing?._overlay_seq || 0)
+    const currentState =
+      existing?._overlay_state && typeof existing._overlay_state === 'object'
+        ? existing._overlay_state
+        : buildOverlayState(existing?.overlays)
+
+    let effectiveSeq = currentSeq
+    if (Number.isFinite(baseSeq) && baseSeq !== currentSeq) {
+      const canBootstrapRebase =
+        currentSeq === 0
+        && baseSeq > 0
+        && (
+          (Array.isArray(currentState.order) && currentState.order.length > 0)
+          || (Array.isArray(existing?.overlays) && existing.overlays.length > 0)
+        )
+      if (canBootstrapRebase) {
+        effectiveSeq = baseSeq
+      } else {
+        console.warn('[BotPerformanceModal] overlay delta base_seq mismatch', {
+          expected: currentSeq,
+          received: baseSeq,
+        })
+        return existing
+      }
+    }
+    const entries = { ...(currentState.entries || {}) }
+    let order = Array.isArray(currentState.order) ? [...currentState.order] : []
+    const ops = Array.isArray(delta.ops) ? delta.ops : []
+    for (const op of ops) {
+      if (!op || typeof op !== 'object') continue
+      const opType = String(op.op || '').toLowerCase()
+      const key = String(op.key || '')
+      if (!key) continue
+      if (opType === 'remove') {
+        delete entries[key]
+        order = order.filter((candidate) => candidate !== key)
+        continue
+      }
+      if (opType === 'upsert' && op.overlay && typeof op.overlay === 'object') {
+        entries[key] = op.overlay
+        if (!order.includes(key)) order.push(key)
+      }
+    }
+    const overlays = order.map((key) => entries[key]).filter(Boolean)
+    return {
+      ...existing,
+      overlays,
+      _overlay_state: { entries, order },
+      _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : effectiveSeq,
+    }
+  }, [buildOverlayState])
+
   const applyPayload = useCallback((incoming) => {
     if (!incoming) return
-    // Avoid re-render loops when the stream replays the same snapshot
     if (payloadRef.current === incoming) return
     payloadRef.current = incoming
-    setPayload(incoming)
-  }, [])
+    setPayload((prev) => {
+      const kind = String(incoming?.type || '').toLowerCase()
+      if (kind !== 'delta') {
+        return incoming
+      }
+      const base = prev && typeof prev === 'object' ? { ...prev } : {}
+      if (incoming.runtime) base.runtime = incoming.runtime
+      if (incoming.logs) base.logs = incoming.logs
+      if (incoming.decisions) base.decisions = incoming.decisions
+      if (incoming.stats) base.stats = incoming.stats
+
+      const seriesDeltas = Array.isArray(incoming.series) ? incoming.series : []
+      const currentSeries = Array.isArray(base.series) ? [...base.series] : []
+      for (const delta of seriesDeltas) {
+        const strategyId = delta?.strategy_id
+        const symbol = delta?.symbol
+        const timeframe = delta?.timeframe
+        const idx = currentSeries.findIndex(
+          (item) => item?.strategy_id === strategyId && item?.symbol === symbol && item?.timeframe === timeframe,
+        )
+        const existing = idx >= 0 && currentSeries[idx] ? { ...currentSeries[idx] } : {
+          strategy_id: strategyId,
+          symbol,
+          timeframe,
+          candles: [],
+        }
+        const candles = Array.isArray(existing.candles) ? [...existing.candles] : []
+        if (delta?.candle) {
+          if (delta?.replace_last && candles.length) {
+            candles[candles.length - 1] = delta.candle
+          } else {
+            const nextTs = toSec(delta.candle?.time)
+            const lastTs = candles.length ? toSec(candles[candles.length - 1]?.time) : null
+            if (Number.isFinite(nextTs) && Number.isFinite(lastTs) && nextTs <= lastTs) {
+              candles[candles.length - 1] = delta.candle
+            } else {
+              candles.push(delta.candle)
+            }
+          }
+        }
+        existing.candles = candles
+        if (Array.isArray(delta?.overlays)) {
+          existing.overlays = delta.overlays
+          existing._overlay_state = buildOverlayState(delta.overlays)
+          existing._overlay_seq = 0
+        }
+        if (delta?.overlay_delta) {
+          const applied = applyOverlayDelta(existing, delta.overlay_delta)
+          existing.overlays = applied.overlays
+          existing._overlay_state = applied._overlay_state
+          existing._overlay_seq = applied._overlay_seq
+        }
+        if (Array.isArray(delta?.trades)) existing.trades = delta.trades
+        if (delta?.stats && typeof delta.stats === 'object') existing.stats = delta.stats
+        if (typeof delta?.bar_index === 'number') existing.bar_index = delta.bar_index
+        if (idx >= 0) currentSeries[idx] = existing
+        else currentSeries.push(existing)
+      }
+      base.series = currentSeries
+
+      // Keep backward-compatible top-level chart keys synced to the primary series.
+      const primary = currentSeries[0]
+      if (primary) {
+        base.candles = Array.isArray(primary.candles) ? primary.candles : []
+        base.trades = Array.isArray(primary.trades) ? primary.trades : []
+        base.overlays = Array.isArray(primary.overlays) ? primary.overlays : []
+      }
+      return base
+    })
+    const runtimeErr = extractRuntimeError(incoming)
+    if (runtimeErr) {
+      setError(runtimeErr)
+    }
+  }, [extractRuntimeError])
 
   const loadPerformance = useCallback(
     async (withLoader = true) => {
@@ -119,7 +292,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     if (!source) return undefined
     streamRef.current = source
     setStreamStatus('connecting')
-    const events = ['snapshot', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar']
+    const events = ['snapshot', 'delta', 'bar', 'status', 'live_refresh', 'pause', 'resume', 'start', 'stop', 'intrabar', 'error']
 
     const handler = (event) => {
       try {
@@ -129,6 +302,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
         setStreamStatus('open')
       } catch (err) {
         console.error('bot stream parse failed', err)
+        setError('Bot stream payload parse failed')
       }
     }
     source.onmessage = handler
@@ -137,6 +311,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     }
     source.onerror = () => {
       setStreamStatus('error')
+      setError((prev) => prev || 'Bot stream connection error')
     }
     source.onopen = () => setStreamStatus('open')
     return () => {

@@ -57,33 +57,96 @@ const saveChartPreferences = (prefs) => {
   }
 };
 
+const parseTimeframeToSeconds = (rawTimeframe) => {
+  const text = (rawTimeframe || '').toString().trim().toLowerCase();
+  if (!text) return null;
+  const match = text.match(/^(\d+)\s*([a-z]+)$/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2];
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  if (unit === 's' || unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') {
+    return amount;
+  }
+  if (unit === 'm' || unit === 'min' || unit === 'mins' || unit === 'minute' || unit === 'minutes') {
+    return amount * 60;
+  }
+  if (unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours') {
+    return amount * 3600;
+  }
+  if (unit === 'd' || unit === 'day' || unit === 'days') {
+    return amount * 86400;
+  }
+  if (unit === 'w' || unit === 'wk' || unit === 'wks' || unit === 'week' || unit === 'weeks') {
+    return amount * 7 * 86400;
+  }
+  if (unit === 'mo' || unit === 'mon' || unit === 'month' || unit === 'months') {
+    return amount * 30 * 86400;
+  }
+  if (unit === 'y' || unit === 'yr' || unit === 'yrs' || unit === 'year' || unit === 'years') {
+    return amount * 365 * 86400;
+  }
+  return null;
+};
+
+const buildTickMarkFormatter = (timeframeSeconds) => {
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const minuteGranularity = Number.isFinite(timeframeSeconds) && timeframeSeconds < 3600;
+  const intradayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const dayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const dateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: 'short',
+    day: '2-digit',
+  });
+
+  return (timeValue) => {
+    const epoch = typeof timeValue === 'number'
+      ? timeValue
+      : typeof timeValue?.timestamp === 'function'
+        ? Number(timeValue.timestamp())
+        : Number.isFinite(timeValue?.timestamp)
+          ? Number(timeValue.timestamp)
+          : null;
+    if (!Number.isFinite(epoch)) return '';
+    const date = new Date(epoch * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+
+    if (!intraday) {
+      return dateFormatter.format(date);
+    }
+    if (minuteGranularity) {
+      return intradayFormatter.format(date);
+    }
+
+    const hour = date.getUTCHours();
+    const minute = date.getUTCMinutes();
+    if (hour === 0 && minute === 0) {
+      return dayFormatter.format(date);
+    }
+    return intradayFormatter.format(date);
+  };
+};
+
 const deriveTimeScaleOptions = (rawInterval) => {
-  const interval = (rawInterval || '').toString().toLowerCase();
-  const base = { timeVisible: true, secondsVisible: false };
-
-  if (!interval) return base;
-
-  if (interval.endsWith('s')) {
-    return { ...base, secondsVisible: true };
-  }
-
-  if (interval.endsWith('m')) {
-    return base;
-  }
-
-  if (interval.endsWith('h')) {
-    return base;
-  }
-
-  if (interval.endsWith('d')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  if (interval.endsWith('w') || interval.endsWith('mo') || interval.endsWith('y')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  return base;
+  const timeframeSeconds = parseTimeframeToSeconds(rawInterval);
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const showSeconds = Number.isFinite(timeframeSeconds) && timeframeSeconds < 60;
+  return {
+    timeVisible: intraday || !Number.isFinite(timeframeSeconds),
+    secondsVisible: showSeconds,
+    tickMarkFormatter: buildTickMarkFormatter(timeframeSeconds),
+  };
 };
 
 const normalizeExchangeId = (value) => (value ?? '').toString().trim().toLowerCase();
