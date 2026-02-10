@@ -34,7 +34,7 @@ class ChartStateBuilder:
             return candles
         normalized = (status or "").lower()
         total = len(primary.candles)
-        if normalized in {"idle", "initialising", "completed", "stopped"}:
+        if normalized in {"completed", "stopped"}:
             visible = total
         else:
             visible = min(max(bar_index, 0), total)

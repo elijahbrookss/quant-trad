@@ -17,7 +17,7 @@ class RuntimeModePolicy:
     @staticmethod
     def for_run_type(run_type: str) -> "RuntimeModePolicy":
         normalized = (run_type or "").lower()
-        allow_live_refresh = normalized == "sim_trade"
+        allow_live_refresh = normalized in {"sim_trade", "paper", "live"}
         use_intrabar = True
         enforce_wallet = True
         return RuntimeModePolicy(

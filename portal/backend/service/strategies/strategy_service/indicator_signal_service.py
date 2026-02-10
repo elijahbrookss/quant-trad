@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 from ...indicators.indicator_service import generate_signals_for_instance
+from ...indicators.indicator_service import runtime_input_plan_for_instance
 from strategies import evaluator
 
 
@@ -97,6 +98,12 @@ def generate_indicator_payloads(
     for inst_id in indicator_ids:
         try:
             per_config = dict(base_config)
+            runtime_overrides = base_config.get("runtime_input_plan_overrides")
+            per_override = None
+            if isinstance(runtime_overrides, Mapping):
+                candidate = runtime_overrides.get(inst_id)
+                if isinstance(candidate, Mapping):
+                    per_override = dict(candidate)
             rule_filters = indicator_rule_map.get(inst_id)
             if rule_filters:
                 merged_rules = _merge_enabled_rules(per_config.get("enabled_rules"), rule_filters)
@@ -119,16 +126,48 @@ def generate_indicator_payloads(
                 per_config.get("enabled_rules"),
                 _config_diff(base_config, per_config),
             )
-            payload = generate_signals_for_instance(
+            runtime_input_plan = runtime_input_plan_for_instance(
                 inst_id,
+                strategy_interval=interval,
                 start=start,
                 end=end,
-                interval=interval,
+            )
+            if per_override:
+                if per_override.get("start"):
+                    runtime_input_plan["start"] = str(per_override.get("start"))
+                if per_override.get("end"):
+                    runtime_input_plan["end"] = str(per_override.get("end"))
+                if per_override.get("source_timeframe"):
+                    runtime_input_plan["source_timeframe"] = str(per_override.get("source_timeframe"))
+            plan_start = str(runtime_input_plan.get("start") or start)
+            plan_end = str(runtime_input_plan.get("end") or end)
+            plan_interval = str(runtime_input_plan.get("source_timeframe") or interval)
+            per_config["runtime_input_plan"] = dict(runtime_input_plan)
+            logger.info(
+                "strategy_signal_preview_runtime_input_plan | run_id=%s strategy=%s instrument_id=%s indicator=%s strategy_interval=%s source_timeframe=%s start=%s end=%s session_scope=%s alignment=%s normalization=%s",
+                run_id,
+                strategy_id,
+                instrument_id,
+                inst_id,
+                interval,
+                plan_interval,
+                plan_start,
+                plan_end,
+                runtime_input_plan.get("session_scope"),
+                runtime_input_plan.get("alignment"),
+                runtime_input_plan.get("normalization"),
+            )
+            payload = generate_signals_for_instance(
+                inst_id,
+                start=plan_start,
+                end=plan_end,
+                interval=plan_interval,
                 symbol=symbol,
                 datasource=datasource,
                 exchange=exchange,
                 config=per_config,
             )
+            payload["runtime_input_plan"] = dict(runtime_input_plan)
             indicator_payloads[inst_id] = payload
             signals_obj = payload.get("signals") if isinstance(payload, Mapping) else None
             signal_count = len(signals_obj) if isinstance(signals_obj, list) else 0
