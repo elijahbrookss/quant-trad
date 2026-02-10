@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
@@ -14,14 +14,42 @@ from .contracts import IndicatorStateDelta, IndicatorStateEngine, IndicatorState
 
 @dataclass(frozen=True)
 class MarketProfileEngineConfig:
-    source_timeframe: str = "30m"
-    bin_size: float = 0.25
-    price_precision: int = 4
+    params: Dict[str, Any] = field(default_factory=dict)
+    overlay_color: Optional[str] = None
 
 
 class MarketProfileStateEngine(IndicatorStateEngine):
     def __init__(self, config: Optional[MarketProfileEngineConfig] = None) -> None:
         self._config = config or MarketProfileEngineConfig()
+
+    def _param(self, key: str, default: Any = None) -> Any:
+        params = self._config.params if isinstance(self._config.params, Mapping) else {}
+        value = params.get(key)
+        return default if value is None else value
+
+    def _param_float(self, key: str, default: float) -> float:
+        try:
+            return float(self._param(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _param_int(self, key: str, default: int) -> int:
+        try:
+            return int(self._param(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _param_bool(self, key: str, default: bool) -> bool:
+        value = self._param(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+        return bool(value)
 
     def initialize(self, window_context: Mapping[str, Any]) -> MutableMapping[str, Any]:
         symbol = str(window_context.get("symbol") or "")
@@ -83,12 +111,15 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             "symbol": state.get("symbol"),
             "active_session": state.get("active_session"),
             "profiles": profiles,
+            # Pass through DB params so runtime and QuantLab share exact indicator config.
+            "profile_params": dict(self._config.params or {}),
+            "overlay_color": self._config.overlay_color,
         }
         return IndicatorStateSnapshot(
             revision=int(state.get("revision") or 0),
             known_at=known_at,
             formed_at=formed_at,
-            source_timeframe=self._config.source_timeframe,
+            source_timeframe=str(self._param("source_timeframe", "30m")),
             payload=payload,
         )
 
@@ -101,14 +132,16 @@ class MarketProfileStateEngine(IndicatorStateEngine):
     ) -> Dict[str, Any]:
         tpo_histogram = _build_tpo_histogram(
             rows=rows,
-            bin_size=self._config.bin_size,
-            price_precision=self._config.price_precision,
+            bin_size=self._param_float("bin_size", 0.25),
+            price_precision=self._param_int("price_precision", 4),
         )
-        value_area = _extract_value_area(tpo_histogram, self._config.price_precision)
+        value_area = _extract_value_area(tpo_histogram, self._param_int("price_precision", 4))
         if value_area is None:
             raise RuntimeError("indicator_state_finalize_failed: market_profile value area empty")
         return {
             "session": session,
+            "start": datetime.fromisoformat(f"{session}T00:00:00+00:00"),
+            "end": formed_at,
             "VAH": value_area["VAH"],
             "VAL": value_area["VAL"],
             "POC": value_area["POC"],
@@ -128,6 +161,7 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         formed_at = datetime.fromisoformat(f"{session}T23:59:59+00:00")
         profile = self._build_session_profile(session=session, rows=rows, formed_at=formed_at)
         profile["status"] = "completed"
+        profile["end"] = formed_at
 
         completed = state.setdefault("completed_profiles", [])
         completed.append(profile)

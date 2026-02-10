@@ -615,6 +615,14 @@ def market_profile_overlay_transformer(
         return overlay
     profiles = payload.get("profiles")
     if not isinstance(profiles, list):
+        # Runtime overlay projection can emit prebuilt boxes directly (without
+        # profile collections). In that case, preserve payload as-is.
+        has_prebuilt_payload = any(
+            isinstance(payload.get(key), list) and len(payload.get(key) or []) > 0
+            for key in ("boxes", "markers", "bubbles", "segments", "polylines", "touch_points")
+        )
+        if has_prebuilt_payload:
+            return overlay
         if "market_profile_profiles_missing" not in _WARNED_TRANSFORMERS:
             log.error("market_profile_profiles_missing_for_walk_forward")
             _WARNED_TRANSFORMERS.add("market_profile_profiles_missing")

@@ -32,18 +32,35 @@ def test_market_profile_state_engine_rolls_session_and_updates_revision() -> Non
     assert profiles[0]["status"] == "completed"
     assert profiles[1]["session"] == "2024-01-02"
     assert profiles[1]["status"] == "active"
+    assert profiles[0]["start"].isoformat().startswith("2024-01-01T00:00:00")
+    assert profiles[0]["end"].isoformat().startswith("2024-01-01T23:59:59")
     assert snapshot.revision == 2
 
 
-def test_market_profile_overlay_projection_emits_overlay_payload_boxes() -> None:
+def test_market_profile_overlay_projection_emits_profiles_and_params() -> None:
     snapshot = IndicatorStateSnapshot(
         revision=2,
         known_at=datetime(2024, 1, 3, tzinfo=timezone.utc),
         formed_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
         source_timeframe="30m",
         payload={
+            "profile_params": {
+                "use_merged_value_areas": True,
+                "merge_threshold": 0.6,
+                "min_merge_sessions": 5,
+                "extend_value_area_to_chart_end": True,
+            },
+            "overlay_color": "#22d3ee",
             "profiles": [
-                {"session": "2024-01-02", "VAH": 105.0, "VAL": 95.0, "POC": 100.0}
+                {
+                    "session": "2024-01-02",
+                    "start": "2024-01-02T00:00:00+00:00",
+                    "end": "2024-01-02T23:59:59+00:00",
+                    "known_at": "2024-01-02T23:59:59+00:00",
+                    "VAH": 105.0,
+                    "VAL": 95.0,
+                    "POC": 100.0,
+                }
             ]
         },
     )
@@ -53,8 +70,9 @@ def test_market_profile_overlay_projection_emits_overlay_payload_boxes() -> None
     assert len(entries) == 1
     entry = next(iter(entries.values()))
     assert entry["type"] == "market_profile"
+    assert entry["color"] == "#22d3ee"
     payload = entry["payload"]
-    assert payload["boxes"][0]["y1"] == 95.0
-    assert payload["boxes"][0]["y2"] == 105.0
-    assert payload["boxes"][0]["x1"].startswith("2024-01-02T00:00:00")
-    assert payload["boxes"][0]["x2"]
+    assert payload["profiles"][0]["VAL"] == 95.0
+    assert payload["profiles"][0]["VAH"] == 105.0
+    assert payload["profile_params"]["use_merged_value_areas"] is True
+    assert payload["profile_params"]["merge_threshold"] == 0.6

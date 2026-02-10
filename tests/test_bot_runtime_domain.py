@@ -5,12 +5,19 @@ from engines.bot_runtime.core.domain import (
     Candle,
     LadderPosition,
     Leg,
+    normalize_epoch,
     timeframe_to_seconds,
 )
 
 
 def test_timeframe_to_seconds_parses_minutes():
     assert timeframe_to_seconds("15m") == 900
+
+
+def test_normalize_epoch_converts_millisecond_values_to_seconds():
+    assert normalize_epoch(1755777600000) == 1755777600
+    assert normalize_epoch("1755777600000") == 1755777600
+    assert normalize_epoch("1755777600000.0") == 1755777600
 
 
 def test_ladder_position_targets_and_stops():

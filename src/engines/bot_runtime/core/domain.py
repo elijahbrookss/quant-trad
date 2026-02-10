@@ -131,14 +131,28 @@ def normalize_epoch(value: Any) -> Optional[int]:
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
-        return int(value)
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        # Treat 13-digit unix values as milliseconds.
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     text = str(value).strip()
     if not text:
         return None
     if text.isdigit():
-        return int(text)
+        numeric = float(text)
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     try:
-        return int(float(text))
+        numeric = float(text)
+        if not math.isfinite(numeric):
+            return None
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     except (TypeError, ValueError):
         pass
     try:

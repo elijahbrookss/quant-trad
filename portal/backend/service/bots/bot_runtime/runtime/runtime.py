@@ -439,7 +439,23 @@ class BotRuntime:
         self._series = streams
         # Calculate total bars as max across all series (for multi-instrument support)
         self._total_bars = max(len(series.candles) for series in self._series) if self._series else 0
-        self._build_series_states()
+        try:
+            self._build_series_states()
+            self._set_phase("prepare_indicators", "bot_runtime_indicator_bootstrap_start")
+            with self._series_update_lock:
+                for state in self._series_states:
+                    self._bootstrap_indicator_overlays_for_state(state)
+                self._validate_bootstrap_readiness()
+            self._set_phase("prepare_indicators_done", "bot_runtime_indicator_bootstrap_done")
+            self._aggregate_overlays_to_cache()
+        except Exception as exc:
+            details = self._prepare_error or {"message": str(exc)}
+            self._prepare_error = details
+            self._set_error_state(
+                details.get("message", str(exc)),
+                **{k: details.get(k) for k in ("strategy_id", "symbol", "timeframe")},
+            )
+            raise
         self._prepared = True
         with self._lock:
             self.state.update({"status": "idle", "progress": 0.0, "paused": False})
@@ -546,8 +562,6 @@ class BotRuntime:
         indicator_ids = strategy_meta.get("indicator_ids")
         if not indicator_links and isinstance(indicator_ids, list):
             indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
-        if not indicator_links:
-            return
 
         from ....indicators import indicator_service
 
@@ -570,7 +584,9 @@ class BotRuntime:
                 "indicator_id": indicator_id,
             })
             state.indicator_state_runtime[indicator_id] = {
+                "indicator_id": indicator_id,
                 "indicator_type": indicator_type,
+                "indicator_meta": dict(meta),
                 "plugin": plugin,
                 "engine": engine,
                 "engine_state": engine_state,
@@ -581,6 +597,79 @@ class BotRuntime:
                 "revision": -1,
                 "entries": {},
             }
+
+        # Prime indicator engines with warmup candles before replay start so
+        # overlays/signals at bar 0 reflect known history.
+        warmup_count = max(int(state.bar_index or 0), 0)
+        if warmup_count <= 0:
+            return
+        warmup_candles = list(series.candles[:warmup_count])
+        for runtime in state.indicator_state_runtime.values():
+            engine = runtime.get("engine")
+            engine_state = runtime.get("engine_state")
+            if engine is None or not isinstance(engine_state, MutableMapping):
+                continue
+            for warmup_candle in warmup_candles:
+                engine.apply_bar(engine_state, warmup_candle)
+            snapshot = engine.snapshot(engine_state)
+            runtime["last_revision"] = snapshot.revision
+            indicator_type = str(runtime.get("indicator_type") or "")
+            projector = getattr(runtime.get("plugin"), "overlay_projector", None)
+            if projector is None:
+                continue
+            raw_entries = projector(
+                OverlayProjectionInput(
+                    snapshot=snapshot,
+                    previous_projection_state={"seq": 0, "revision": -1, "entries": {}},
+                )
+            )
+            if not isinstance(raw_entries, Mapping):
+                continue
+            normalized_entries: Dict[str, Dict[str, Any]] = {}
+            indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
+            overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
+            for entry_key, entry_value in raw_entries.items():
+                if not isinstance(entry_value, Mapping):
+                    continue
+                normalized = normalize_overlays(indicator_type, [dict(entry_value)])
+                if not normalized:
+                    continue
+                overlay_entry = dict(normalized[0])
+                overlay_entry.update(
+                    {
+                        "ind_id": indicator_id,
+                        "source": "indicator_state",
+                        "bot_id": self.bot_id,
+                        "strategy_id": series.strategy_id,
+                        "symbol": series.symbol,
+                        "timeframe": series.timeframe,
+                    }
+                )
+                if isinstance(overlay_color, str) and overlay_color.strip():
+                    overlay_entry["color"] = overlay_color
+                normalized_entries[str(entry_key)] = overlay_entry
+            indicator_id = str(runtime.get("indicator_id") or "").strip()
+            if not indicator_id:
+                continue
+            projection_state = state.indicator_projection_runtime.setdefault(
+                indicator_id,
+                {"seq": 0, "revision": -1, "entries": {}},
+            )
+            projection_state["revision"] = snapshot.revision
+            projection_state["entries"] = normalized_entries
+
+        series.overlays = self._series_overlay_entries(state)
+        logger.info(
+            with_log_context(
+                "indicator_state_warmup_seeded",
+                self._series_log_context(
+                    series,
+                    warmup_candles=warmup_count,
+                    indicators=len(state.indicator_state_runtime),
+                    overlays=len(series.overlays or []),
+                ),
+            )
+        )
 
     def _series_state_for(self, series: Optional[StrategySeries]) -> Optional[SeriesExecutionState]:
         if series is None:
@@ -675,6 +764,158 @@ class BotRuntime:
             symbol,
             datasource,
             exchange,
+        )
+
+    def _series_overlay_entries(self, state: SeriesExecutionState) -> List[Dict[str, Any]]:
+        overlays: List[Dict[str, Any]] = []
+        for projection_state in state.indicator_projection_runtime.values():
+            entries = projection_state.get("entries")
+            if not isinstance(entries, Mapping):
+                continue
+            overlays.extend(dict(value) for value in entries.values() if isinstance(value, Mapping))
+        visible_count = min(max(int(state.bar_index) + 1, 1), len(state.series.candles))
+        visible_candles = state.series.candles[:visible_count]
+        overlays.extend(self._build_runtime_regime_overlays(series=state.series, candles=visible_candles))
+        return overlays
+
+    def _bootstrap_indicator_overlays_for_state(self, state: SeriesExecutionState) -> None:
+        series = state.series
+        strategy_meta = series.meta or {}
+        indicator_links = list(strategy_meta.get("indicator_links") or [])
+        replay_idx = max(int(state.bar_index or 0), 0)
+        if replay_idx >= len(series.candles):
+            replay_idx = max(len(series.candles) - 1, 0)
+        if not series.candles:
+            return
+        end_iso = _isoformat(series.candles[replay_idx].time) or _isoformat(series.candles[-1].time)
+        start_iso = str(series.window_start or end_iso)
+        fetched: List[Dict[str, Any]] = []
+        if indicator_links:
+            fetched = self._indicator_overlay_entries(
+                strategy_meta,
+                start_iso,
+                str(end_iso),
+                series.timeframe,
+                series.symbol,
+                series.datasource,
+                series.exchange,
+            )
+        grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        counters: Dict[str, int] = {}
+        for overlay in fetched:
+            if not isinstance(overlay, Mapping):
+                continue
+            indicator_id = str(overlay.get("ind_id") or "").strip()
+            if not indicator_id:
+                continue
+            bucket = grouped.setdefault(indicator_id, {})
+            idx = counters.get(indicator_id, 0)
+            key = f"bootstrap:{idx}"
+            counters[indicator_id] = idx + 1
+            bucket[key] = dict(overlay)
+        for indicator_id, entries in grouped.items():
+            projection_state = state.indicator_projection_runtime.setdefault(
+                indicator_id,
+                {"seq": 0, "revision": -1, "entries": {}},
+            )
+            projection_state["entries"] = entries
+        series.overlays = self._series_overlay_entries(state)
+        series.bootstrap_completed = True
+        series.bootstrap_indicator_overlays = int(sum(len(entries or {}) for entries in grouped.values()))
+        series.bootstrap_total_overlays = len(series.overlays or [])
+        logger.info(
+            with_log_context(
+                "indicator_overlay_bootstrap_completed",
+                self._series_log_context(
+                    series,
+                    start=start_iso,
+                    end=end_iso,
+                    overlays=len(series.overlays or []),
+                    indicators=len(grouped),
+                    indicator_overlays=series.bootstrap_indicator_overlays,
+                ),
+            )
+        )
+
+    def _validate_bootstrap_readiness(self) -> None:
+        min_total = max(int(self.config.get("bootstrap_min_total_overlays_per_series") or 0), 0)
+        min_indicator = max(int(self.config.get("bootstrap_min_indicator_overlays_per_series") or 1), 0)
+        require_indicator = bool(self.config.get("bootstrap_require_indicator_overlays", True))
+        require_indicator = require_indicator and bool(self.config.get("include_indicator_overlays", True))
+
+        failures: List[Dict[str, Any]] = []
+        for state in self._series_states:
+            series = state.series
+            if not bool(series.bootstrap_completed):
+                failures.append(
+                    self._series_log_context(
+                        series,
+                        reason="bootstrap_incomplete",
+                        bootstrap_completed=False,
+                    )
+                )
+                continue
+
+            total_overlays = int(series.bootstrap_total_overlays or 0)
+            indicator_overlays = int(series.bootstrap_indicator_overlays or 0)
+            indicator_links = list((series.meta or {}).get("indicator_links") or [])
+            expected_indicators = len(indicator_links)
+
+            if min_total > 0 and total_overlays < min_total:
+                failures.append(
+                    self._series_log_context(
+                        series,
+                        reason="bootstrap_total_overlays_below_min",
+                        total_overlays=total_overlays,
+                        min_total_overlays=min_total,
+                    )
+                )
+                continue
+
+            if require_indicator and expected_indicators > 0 and indicator_overlays < min_indicator:
+                failures.append(
+                    self._series_log_context(
+                        series,
+                        reason="bootstrap_indicator_overlays_below_min",
+                        indicator_overlays=indicator_overlays,
+                        min_indicator_overlays=min_indicator,
+                        expected_indicators=expected_indicators,
+                    )
+                )
+
+        if failures:
+            self._prepare_error = {
+                "message": "Indicator bootstrap validation failed.",
+                "failures": failures,
+            }
+            context = self._runtime_log_context(
+                failures=failures,
+                min_total_overlays=min_total,
+                min_indicator_overlays=min_indicator,
+                require_indicator_overlays=require_indicator,
+            )
+            logger.error(with_log_context("bot_runtime_bootstrap_validation_failed", context))
+            raise RuntimeError(
+                "Indicator bootstrap validation failed. "
+                "Check bot_runtime_bootstrap_validation_failed log for per-series details."
+            )
+
+    def _build_runtime_regime_overlays(
+        self,
+        *,
+        series: StrategySeries,
+        candles: Sequence[Candle],
+    ) -> List[Dict[str, Any]]:
+        instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
+        instrument_id = str(instrument.get("id") or "").strip()
+        if not instrument_id:
+            return []
+        return self._series_builder._build_regime_overlays(
+            instrument_id=instrument_id,
+            candles=list(candles),
+            timeframe=series.timeframe,
+            strategy_id=series.strategy_id,
+            symbol=series.symbol,
         )
 
     @staticmethod
@@ -1255,6 +1496,7 @@ class BotRuntime:
         }
         profile_counts: Dict[str, int] = {}
         profile_params_present: Dict[str, int] = {}
+        profile_params_samples: Dict[str, Dict[str, Any]] = {}
         type_payload_counts: Dict[str, Dict[str, int]] = {}
         transform_counts: Dict[str, Dict[str, int]] = {
             "known_profiles": {},
@@ -1276,6 +1518,10 @@ class BotRuntime:
                 profile_counts[overlay_type] = profile_counts.get(overlay_type, 0) + len(profiles)
             if "profile_params" in payload:
                 profile_params_present[overlay_type] = profile_params_present.get(overlay_type, 0) + 1
+                if overlay_type not in profile_params_samples:
+                    profile_params = payload.get("profile_params")
+                    if isinstance(profile_params, Mapping):
+                        profile_params_samples[overlay_type] = dict(profile_params)
             transform_summary = payload.get("transform_summary")
             if isinstance(transform_summary, Mapping):
                 for key in ("known_profiles", "merged_profiles"):
@@ -1298,6 +1544,7 @@ class BotRuntime:
             "payload_counts": payload_counts,
             "profile_counts": profile_counts,
             "profile_params_present": profile_params_present,
+            "profile_params_samples": profile_params_samples,
             "type_payload_counts": type_payload_counts,
             "transform_counts": transform_counts,
         }
@@ -2233,6 +2480,8 @@ class BotRuntime:
                     f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
                 )
             normalized_entries: Dict[str, Dict[str, Any]] = {}
+            indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
+            overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
             for entry_key, entry_value in raw_entries.items():
                 if not isinstance(entry_value, Mapping):
                     continue
@@ -2241,19 +2490,26 @@ class BotRuntime:
                     raise RuntimeError(
                         f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} indicator_id={indicator_id} entry_key={entry_key}"
                     )
-                normalized_entries[str(entry_key)] = dict(normalized[0])
+                overlay_entry = dict(normalized[0])
+                overlay_entry.update(
+                    {
+                        "ind_id": indicator_id,
+                        "source": "indicator_state",
+                        "bot_id": self.bot_id,
+                        "strategy_id": series.strategy_id,
+                        "symbol": series.symbol,
+                        "timeframe": series.timeframe,
+                    }
+                )
+                if isinstance(overlay_color, str) and overlay_color.strip():
+                    overlay_entry["color"] = overlay_color
+                normalized_entries[str(entry_key)] = overlay_entry
             projection_state["seq"] = projection_delta.seq
             projection_state["revision"] = snapshot.revision
             projection_state["entries"] = normalized_entries
 
-        overlays: List[Dict[str, Any]] = []
-        for projection_state in state.indicator_projection_runtime.values():
-            entries = projection_state.get("entries")
-            if not isinstance(entries, Mapping):
-                continue
-            overlays.extend(dict(value) for value in entries.values() if isinstance(value, Mapping))
-
         overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
+        overlays = self._series_overlay_entries(state)
         overlays_changed_count, overlay_points_changed = self._overlay_change_metrics(series.overlays or [], overlays)
         series.overlays = overlays
 
@@ -3131,7 +3387,37 @@ class BotRuntime:
         if "started_at" not in payload and self._run_started_at is not None:
             payload["started_at"] = _isoformat(self._run_started_at)
         payload.setdefault("warnings", self.warnings())
+        payload["bootstrap"] = self._bootstrap_status_payload()
         return payload
+
+    def _bootstrap_status_payload(self) -> Dict[str, Any]:
+        with self._series_update_lock:
+            per_series: List[Dict[str, Any]] = []
+            for state in self._series_states:
+                series = state.series
+                indicator_links = list((series.meta or {}).get("indicator_links") or [])
+                per_series.append(
+                    {
+                        "strategy_id": series.strategy_id,
+                        "symbol": series.symbol,
+                        "timeframe": series.timeframe,
+                        "replay_start_index": int(getattr(series, "replay_start_index", 0) or 0),
+                        "bootstrap_completed": bool(getattr(series, "bootstrap_completed", False)),
+                        "bootstrap_total_overlays": int(getattr(series, "bootstrap_total_overlays", 0) or 0),
+                        "bootstrap_indicator_overlays": int(getattr(series, "bootstrap_indicator_overlays", 0) or 0),
+                        "expected_indicators": len(indicator_links),
+                    }
+                )
+        failed = [entry for entry in per_series if not entry.get("bootstrap_completed")]
+        status = "failed" if failed else ("ready" if per_series else "idle")
+        details = self._prepare_error if isinstance(self._prepare_error, Mapping) else {}
+        failure_details = details.get("failures") if isinstance(details, Mapping) else None
+        return {
+            "status": status,
+            "series": per_series,
+            "failed_count": len(failed),
+            "failure_details": failure_details if isinstance(failure_details, list) else [],
+        }
 
     def snapshot(self) -> Dict[str, object]:
         """Return a thread-safe snapshot of runtime state."""
@@ -3149,6 +3435,35 @@ class BotRuntime:
         payload["bot_id"] = self.bot_id
         payload["run_id"] = self._run_context.run_id if self._run_context is not None else None
         payload["runtime"] = self.snapshot()
+        overlays = payload.get("overlays")
+        overlay_summary = self._overlay_summary(overlays if isinstance(overlays, list) else [])
+        series_entries = payload.get("series")
+        series_overlay_counts: List[Dict[str, Any]] = []
+        if isinstance(series_entries, list):
+            for entry in series_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                series_overlays = entry.get("overlays")
+                series_overlay_counts.append(
+                    {
+                        "strategy_id": entry.get("strategy_id"),
+                        "symbol": entry.get("symbol"),
+                        "timeframe": entry.get("timeframe"),
+                        "overlays": len(series_overlays) if isinstance(series_overlays, list) else 0,
+                    }
+                )
+        logger.info(
+            with_log_context(
+                "bot_overlay_snapshot_sent",
+                self._runtime_log_context(
+                    overlays=overlay_summary.get("total_overlays"),
+                    overlay_types=overlay_summary.get("type_counts"),
+                    overlay_payloads=overlay_summary.get("payload_counts"),
+                    overlay_profile_params=overlay_summary.get("profile_params_samples"),
+                    series_overlay_counts=series_overlay_counts,
+                ),
+            )
+        )
         return payload
 
     def regime_overlay_dump(self) -> Dict[str, Any]:
@@ -3382,6 +3697,19 @@ class BotRuntime:
             "base_seq": previous_seq,
             "ops": ops,
         }
+
+    @staticmethod
+    def _overlay_delta_op_counts(delta: Mapping[str, Any]) -> Dict[str, int]:
+        ops = delta.get("ops")
+        if not isinstance(ops, list):
+            return {}
+        counts: Dict[str, int] = {}
+        for op in ops:
+            if not isinstance(op, Mapping):
+                continue
+            key = str(op.get("op") or "unknown").lower()
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     @classmethod
     def _count_overlay_points(cls, overlays: Sequence[Mapping[str, Any]]) -> int:
@@ -3731,9 +4059,43 @@ class BotRuntime:
                         cache["overlay_revision"] = overlay_revision
                     visible_overlays = cache.get("visible_overlays")
                     if isinstance(visible_overlays, list):
+                        overlay_summary = self._overlay_summary(visible_overlays)
                         overlay_delta = self._build_overlay_delta(cache, visible_overlays)
+                        logger.info(
+                            with_log_context(
+                                "bot_overlay_emit_attempt",
+                                self._series_log_context(
+                                    series,
+                                    bar_index=bar_index,
+                                    status=status,
+                                    event=event,
+                                    overlays=overlay_summary.get("total_overlays"),
+                                    overlay_types=overlay_summary.get("type_counts"),
+                                    overlay_payloads=overlay_summary.get("payload_counts"),
+                                    overlay_profile_params=overlay_summary.get("profile_params_samples"),
+                                    emitted_delta=isinstance(overlay_delta, Mapping),
+                                ),
+                            )
+                        )
                         if isinstance(overlay_delta, Mapping):
                             series_delta["overlay_delta"] = dict(overlay_delta)
+                            logger.info(
+                                with_log_context(
+                                    "bot_overlay_delta_sent",
+                                    self._series_log_context(
+                                        series,
+                                        bar_index=bar_index,
+                                        seq=overlay_delta.get("seq"),
+                                        base_seq=overlay_delta.get("base_seq"),
+                                        overlay_ops=len(overlay_delta.get("ops") or []),
+                                        overlay_op_counts=self._overlay_delta_op_counts(overlay_delta),
+                                        overlays=overlay_summary.get("total_overlays"),
+                                        overlay_types=overlay_summary.get("type_counts"),
+                                        overlay_payloads=overlay_summary.get("payload_counts"),
+                                        overlay_profile_params=overlay_summary.get("profile_params_samples"),
+                                    ),
+                                )
+                            )
                 trades_revision = self._trade_revision(series)
                 if cache.get("trades_revision") != trades_revision:
                     trades = series.risk_engine.serialise_trades()

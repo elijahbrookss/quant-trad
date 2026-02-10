@@ -7,44 +7,53 @@ from typing import Any, Dict, List, Mapping
 from engines.bot_runtime.core.domain import Candle
 
 from ..contracts import OverlayProjectionInput
-from ..market_profile_engine import MarketProfileStateEngine
+from ..market_profile_engine import MarketProfileEngineConfig, MarketProfileStateEngine
 from .registry import indicator_plugin_manifest
 
 
 def market_profile_overlay_entries(projection_input: OverlayProjectionInput) -> Mapping[str, Mapping[str, Any]]:
     profiles = list((projection_input.snapshot.payload or {}).get("profiles") or [])
-    entries: Dict[str, Mapping[str, Any]] = {}
-    for idx, profile in enumerate(profiles):
+    profile_params = dict((projection_input.snapshot.payload or {}).get("profile_params") or {})
+    overlay_color = (projection_input.snapshot.payload or {}).get("overlay_color")
+    normalized_profiles: List[Dict[str, Any]] = []
+    for profile in profiles:
         if not isinstance(profile, Mapping):
             continue
-        session = str(profile.get("session") or "").strip()
-        vah = profile.get("VAH")
-        val = profile.get("VAL")
-        if not session or vah is None or val is None:
-            continue
-        try:
-            vah_f = float(vah)
-            val_f = float(val)
-            day_start = f"{session}T00:00:00+00:00"
-        except (TypeError, ValueError):
-            continue
-        known_at = profile.get("known_at")
-        status = str(profile.get("status") or "completed").strip().lower()
-        if hasattr(known_at, "isoformat"):
-            known_at = known_at.isoformat()
-        day_end = str(known_at or f"{session}T23:59:59+00:00") if status == "active" else f"{session}T23:59:59+00:00"
-        key = f"market_profile:{session}:{status}:{idx}"
-        entries[key] = {
-            "type": "market_profile",
-            "payload": {
-                "boxes": [{"x1": day_start, "x2": day_end, "y1": val_f, "y2": vah_f}],
-                "markers": [],
-                "bubbles": [],
-                "price_lines": [],
-                "polylines": [],
-            },
-        }
-    return entries
+        copied = dict(profile)
+        for key in ("start", "end", "formed_at", "known_at"):
+            value = copied.get(key)
+            if hasattr(value, "isoformat"):
+                copied[key] = value.isoformat()
+        normalized_profiles.append(copied)
+    if not normalized_profiles:
+        return {}
+
+    entry: Dict[str, Any] = {
+        "type": "market_profile",
+        "payload": {
+            "profiles": normalized_profiles,
+            "profile_params": profile_params,
+            "boxes": [],
+            "markers": [],
+            "bubbles": [],
+            "price_lines": [],
+            "polylines": [],
+            "touch_points": [],
+        },
+    }
+    if isinstance(overlay_color, str) and overlay_color.strip():
+        entry["color"] = overlay_color
+
+    return {"market_profile:overlay": entry}
+
+
+def _market_profile_engine_factory(meta: Mapping[str, Any]) -> MarketProfileStateEngine:
+    params = dict(meta.get("params") or {}) if isinstance(meta, Mapping) else {}
+    config = MarketProfileEngineConfig(
+        params=params,
+        overlay_color=str(meta.get("color") or "").strip() or None,
+    )
+    return MarketProfileStateEngine(config)
 
 
 def market_profile_rule_payload(
@@ -83,7 +92,7 @@ def market_profile_rule_payload(
 
 @indicator_plugin_manifest(
     indicator_type="market_profile",
-    engine_factory=lambda _meta: MarketProfileStateEngine(),
+    engine_factory=_market_profile_engine_factory,
     evaluation_mode="session",
     signal_emitter=lambda payload, candle, previous: market_profile_rule_payload(
         snapshot_payload=payload,

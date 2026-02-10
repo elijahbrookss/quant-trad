@@ -63,6 +63,9 @@ class StrategySeries:
     atm_template: Dict[str, Any] = field(default_factory=dict)
     trade_overlay: Optional[Dict[str, Any]] = None
     replay_start_index: int = 0
+    bootstrap_completed: bool = False
+    bootstrap_indicator_overlays: int = 0
+    bootstrap_total_overlays: int = 0
 
 
 class SeriesBuilder:
@@ -889,6 +892,7 @@ class SeriesBuilder:
                 raise RuntimeError("Backtest runtime requires both backtest_start and backtest_end")
             start_iso = str(configured_start)
             end_iso = str(configured_end)
+            warmup_bars = self._resolve_backtest_warmup_bars(strategy, timeframe)
             candles, replay_start_index, window_start_iso = self._build_backtest_candles_with_warmup(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -897,6 +901,7 @@ class SeriesBuilder:
                 strategy_id=strategy.id,
                 backtest_start_iso=start_iso,
                 backtest_end_iso=end_iso,
+                warmup_bars=warmup_bars,
             )
         else:
             start_iso, end_iso = self._resolve_live_window()
@@ -985,6 +990,7 @@ class SeriesBuilder:
         strategy_id: str,
         backtest_start_iso: str,
         backtest_end_iso: str,
+        warmup_bars: int = 100,
     ) -> Tuple[List[Candle], int, str]:
         start_ts = pd.to_datetime(backtest_start_iso, utc=True)
         end_ts = pd.to_datetime(backtest_end_iso, utc=True)
@@ -993,11 +999,12 @@ class SeriesBuilder:
         if start_ts >= end_ts:
             raise RuntimeError("backtest_start must be before backtest_end")
 
-        # Bounded seed window: last 100 candles before/at start_time.
+        # Bounded seed window before replay start for indicator-state priming.
         tf_delta = timeframe_duration(timeframe)
         if tf_delta is None or tf_delta.total_seconds() <= 0:
             raise RuntimeError(f"Unsupported timeframe '{timeframe}' for warmup fetch")
-        warmup_start_ts = start_ts - (tf_delta * 100)
+        safe_warmup_bars = max(int(warmup_bars or 100), 1)
+        warmup_start_ts = start_ts - (tf_delta * safe_warmup_bars)
 
         warmup_candles: List[Candle] = []
         try:
@@ -1017,8 +1024,8 @@ class SeriesBuilder:
         except RuntimeError:
             # Warmup is bounded and best-effort; replay candles remain mandatory.
             warmup_candles = []
-        if len(warmup_candles) > 100:
-            warmup_candles = warmup_candles[-100:]
+        if len(warmup_candles) > safe_warmup_bars:
+            warmup_candles = warmup_candles[-safe_warmup_bars:]
 
         replay_df = self._fetch_ohlcv_data(
             symbol=symbol,
@@ -1047,6 +1054,20 @@ class SeriesBuilder:
                 replay_start_index = idx
                 break
         return ordered, replay_start_index, isoformat(warmup_start_ts.to_pydatetime())
+
+    def _resolve_backtest_warmup_bars(self, strategy: Strategy, timeframe: str) -> int:
+        # Strategy/runtime warmup is intentionally separate from indicator-
+        # specific fetch windows (e.g. indicator days_back settings).
+        default_bars = 100
+        configured = self.config.get("backtest_warmup_bars")
+        if configured is not None:
+            try:
+                parsed = int(configured)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+        return default_bars
 
     def evaluate_incremental_for_bar(
         self,
