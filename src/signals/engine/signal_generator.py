@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+
+from engines.bot_runtime.core.indicator_state.contracts import IndicatorStateSnapshot
+from engines.bot_runtime.core.indicator_state.plugins import (
+    IndicatorPluginManifest,
+    ensure_builtin_indicator_plugins_registered,
+    plugin_registry,
+)
 
 from signals.base import BaseSignal
 from signals.overlays.registry import get_overlay_spec
@@ -42,28 +48,70 @@ class RulePhase(Enum):
     AGGREGATION = "aggregation"
 
 
-@dataclass
 class _DecoratedRegistration:
     """Mutable container for decorator-driven registrations."""
 
-    indicator_type: str
-    rules: List[RuleCallable]
-    overlay_adapter: Optional[OverlayAdapter] = None
-    registered: bool = False
+    def __init__(self, indicator_type: str, rules: Optional[List[RuleCallable]] = None, overlay_adapter: Optional[OverlayAdapter] = None, registered: bool = False) -> None:
+        self.indicator_type = indicator_type
+        self.rules = list(rules or [])
+        self.overlay_adapter = overlay_adapter
+        self.registered = registered
 
 
-@dataclass(frozen=True)
-class IndicatorRegistration:
-    """Container describing how to process rules for an indicator."""
-
-    rules: Sequence[RuleCallable]
-    overlay_adapter: Optional[OverlayAdapter] = None
-
-
-_REGISTRY: MutableMapping[str, IndicatorRegistration] = {}
 _DECORATED: MutableMapping[str, _DecoratedRegistration] = {}
 _RESERVED_CONFIG_KEYS = {"rule_payloads", "enabled_rules"}
 _TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
+
+
+def _registration_from_plugin(indicator_type: str) -> Optional[Tuple[Sequence[RuleCallable], Optional[OverlayAdapter]]]:
+    key = str(indicator_type or "").strip().lower()
+    ensure_builtin_indicator_plugins_registered()
+    try:
+        manifest = plugin_registry().resolve(key)
+    except RuntimeError:
+        return None
+    rules = tuple(manifest.signal_rules or ())
+    if not rules:
+        return None
+    return rules, manifest.signal_overlay_adapter
+
+
+
+class _SignalOnlyStateEngine:
+    """Signal-only manifest engine for non-runtime signal generation paths."""
+
+    def initialize(self, window_context: Mapping[str, Any]) -> Dict[str, Any]:
+        return {"revision": 0, "payload": {}}
+
+    def apply_bar(self, state: Mapping[str, Any], bar: Any) -> tuple[Mapping[str, Any], int]:
+        return {"changed": False}, int(state.get("revision", 0))
+
+    def snapshot(self, state: Mapping[str, Any]) -> IndicatorStateSnapshot:
+        return IndicatorStateSnapshot(
+            revision=int(state.get("revision", 0)),
+            known_at=0,
+            formed_at=0,
+            source_timeframe="signal-only",
+            payload=dict(state.get("payload") or {}),
+        )
+
+
+def _ensure_signal_manifest(indicator_type: str) -> None:
+    key = str(indicator_type or "").strip().lower()
+    try:
+        plugin_registry().resolve(key)
+        return
+    except RuntimeError:
+        pass
+    plugin_registry().register(
+        IndicatorPluginManifest(
+            indicator_type=key,
+            engine_factory=lambda _meta: _SignalOnlyStateEngine(),
+            evaluation_mode="rolling",
+        )
+    )
+    logger.warning("signal_manifest_auto_registered | indicator_type=%s", key)
+
 
 def _df_summary(df: "DataFrame") -> Mapping[str, Any]:
     try:
@@ -93,35 +141,11 @@ def register_indicator_rules(
     rules: Sequence[RuleCallable],
     overlay_adapter: Optional[OverlayAdapter] = None,
 ) -> None:
-    """Register ordered rule callables for an indicator type."""
+    """Register ordered rule callables for an indicator type via core plugin registry."""
 
-    if not indicator_type:
+    key = str(indicator_type or "").strip().lower()
+    if not key:
         raise ValueError("indicator_type must be provided for registration")
-
-    existing = _REGISTRY.get(indicator_type)
-    if existing is not None:
-        # Allow updating with a superset of rules (for decorator accumulation)
-        existing_rules_set = set(existing.rules)
-        new_rules_set = set(rules)
-
-        # If new rules is a superset or equal, allow the update
-        if not existing_rules_set.issubset(new_rules_set):
-            # New rules is missing some existing rules - this is an error
-            raise ValueError(f"Rules for indicator '{indicator_type}' are already registered with different rules")
-
-        # Update if we have new rules or a new overlay adapter
-        if existing_rules_set != new_rules_set or (existing.overlay_adapter is None and overlay_adapter is not None):
-            _REGISTRY[indicator_type] = IndicatorRegistration(
-                rules=tuple(rules),
-                overlay_adapter=overlay_adapter or existing.overlay_adapter,
-            )
-            logger.info(
-                "✓ Registered rules for '%s' | rules=%s | registry_keys=%s",
-                indicator_type,
-                [getattr(r, "__name__", repr(r))[:50] for r in rules],
-                sorted(_REGISTRY.keys())
-            )
-        return
 
     normalized_rules = tuple(rules or ())
     if not normalized_rules:
@@ -129,26 +153,37 @@ def register_indicator_rules(
 
     for idx, rule in enumerate(normalized_rules):
         if not callable(rule):
-            raise TypeError(f"Rule at position {idx} for '{indicator_type}' is not callable")
+            raise TypeError(f"Rule at position {idx} for '{key}' is not callable")
 
-    _REGISTRY[indicator_type] = IndicatorRegistration(
-        rules=normalized_rules,
-        overlay_adapter=overlay_adapter,
+    _ensure_signal_manifest(key)
+    existing = _registration_from_plugin(key)
+    if existing is not None:
+        existing_rules, existing_overlay = existing
+        existing_rules_set = set(existing_rules)
+        new_rules_set = set(normalized_rules)
+        if not existing_rules_set.issubset(new_rules_set):
+            raise ValueError(f"Rules for indicator '{key}' are already registered with different rules")
+        if existing_rules_set == new_rules_set and (existing_overlay is not None or overlay_adapter is None):
+            return
+
+    plugin_registry().register_signal_components(
+        indicator_type=key,
+        signal_rules=normalized_rules,
+        signal_overlay_adapter=overlay_adapter,
     )
     logger.info(
-        "✓ Registered rules for '%s' | rules=%s | registry_keys=%s",
-        indicator_type,
+        "indicator_signal_components_registered | indicator_type=%s | rules=%s",
+        key,
         [getattr(r, "__name__", repr(r))[:50] for r in normalized_rules],
-        sorted(_REGISTRY.keys())
     )
 
 
 def _normalise_indicator_type(indicator: Union[str, Any]) -> str:
     if isinstance(indicator, str):
-        return indicator
+        return str(indicator).strip().lower()
     if isinstance(indicator, type):
-        return getattr(indicator, "NAME", indicator.__name__)
-    return getattr(indicator, "NAME", indicator.__class__.__name__)
+        return str(getattr(indicator, "NAME", indicator.__name__)).strip().lower()
+    return str(getattr(indicator, "NAME", indicator.__class__.__name__)).strip().lower()
 
 
 def _get_decorated_registration(indicator: Union[str, Any]) -> _DecoratedRegistration:
@@ -164,25 +199,12 @@ def _attempt_autoregistration(registration: _DecoratedRegistration) -> None:
     if registration.registered or not registration.rules:
         return
 
-    try:
-        register_indicator_rules(
-            registration.indicator_type,
-            tuple(registration.rules),
-            overlay_adapter=registration.overlay_adapter,
-        )
-        registration.registered = True
-    except ValueError:
-        existing = _REGISTRY.get(registration.indicator_type)
-        if existing is None:
-            raise
-        if tuple(existing.rules) != tuple(registration.rules):
-            raise
-        if existing.overlay_adapter is None and registration.overlay_adapter is not None:
-            _REGISTRY[registration.indicator_type] = IndicatorRegistration(
-                rules=existing.rules,
-                overlay_adapter=registration.overlay_adapter,
-            )
-        registration.registered = True
+    register_indicator_rules(
+        registration.indicator_type,
+        tuple(registration.rules),
+        overlay_adapter=registration.overlay_adapter,
+    )
+    registration.registered = True
 
 
 def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
@@ -270,18 +292,55 @@ def overlay_adapter(indicator: Union[str, Any]) -> Callable[[OverlayAdapter], Ov
         registration = _get_decorated_registration(indicator)
         registration.overlay_adapter = func
 
-        existing = _REGISTRY.get(registration.indicator_type)
-        if existing is not None and existing.overlay_adapter is None:
-            _REGISTRY[registration.indicator_type] = IndicatorRegistration(
-                rules=existing.rules,
+        key = registration.indicator_type
+        if registration.rules:
+            register_indicator_rules(
+                key,
+                tuple(registration.rules),
                 overlay_adapter=func,
             )
-
+            registration.registered = True
+        else:
+            _ensure_signal_manifest(key)
+            plugin_registry().register_signal_components(
+                indicator_type=key,
+                signal_overlay_adapter=func,
+            )
+        
         _attempt_autoregistration(registration)
         return func
 
     return decorator
 
+
+
+def indicator_plugin(
+    *,
+    rules: Optional[Sequence[RuleCallable]] = None,
+    overlay: Optional[OverlayAdapter] = None,
+) -> Callable[[Any], Any]:
+    """Single decorator for indicator signal/overlay registration.
+
+    This is the canonical plugin entrypoint for new indicators: pass rule callables
+    and optional overlay adapter once, instead of stacking multiple decorators.
+    """
+
+    def decorator(indicator_obj: Any) -> Any:
+        registration = _get_decorated_registration(indicator_obj)
+        if rules:
+            for rule in rules:
+                if not callable(rule):
+                    raise TypeError("indicator_plugin rules must be callables")
+                registration.rules.append(rule)
+        if overlay is not None:
+            if not callable(overlay):
+                raise TypeError("indicator_plugin overlay must be callable")
+            registration.overlay_adapter = overlay
+        registration.registered = False
+        _attempt_autoregistration(registration)
+        return indicator_obj
+
+    return decorator
 
 def _resolve_dependencies(
     all_rules: Sequence[RuleCallable],
@@ -398,11 +457,8 @@ def _build_context(
         context[key] = value
     if "symbol" not in context and hasattr(indicator, "symbol"):
         context["symbol"] = getattr(indicator, "symbol")
-    if indicator_type == "market_profile" and "market_profile" not in context:
-        from indicators.market_profile import MarketProfileIndicator
-
-        if isinstance(indicator, MarketProfileIndicator):
-            context["market_profile"] = indicator
+    if indicator_type not in context and not isinstance(indicator, str):
+        context[indicator_type] = indicator
     return context
 
 
@@ -496,25 +552,14 @@ def run_indicator_rules(
     **config: Any,
 ) -> List[BaseSignal]:
     indicator_type = _normalise_indicator_type(indicator)
-    registration = _REGISTRY.get(indicator_type)
+    registration = _registration_from_plugin(indicator_type)
     if registration is None:
-        # Extra hint when the name doesn't match
-        logger.warning(
-            "No rules found for indicator '%s'. Registered types: %s",
-            indicator_type, list(_REGISTRY.keys())
-        )
+        logger.warning("signal_rules_missing | indicator_type=%s", indicator_type)
         raise ValueError(f"No rules registered for indicator '{indicator_type}'")
+    active_rules_for_indicator, _ = registration
 
     context = _build_context(indicator, indicator_type, market_df, config)
     payloads = _resolve_payloads(config)
-
-    if indicator_type == "market_profile":
-        from signals.rules.market_profile._bootstrap import ensure_breakouts_ready
-
-        try:
-            ensure_breakouts_ready(context, payloads)
-        except Exception:
-            logger.exception("Failed to initialise market profile breakouts")
 
     logger.info(
         "Signal run triggered | indicator=%s | payloads=%d",
@@ -536,7 +581,7 @@ def run_indicator_rules(
         logger.debug("Context preview=\n%s", pformat(ctx_preview))
 
     enabled_rules = config.get("enabled_rules")
-    active_rules, explicitly_requested = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
+    active_rules, explicitly_requested = _filter_enabled_rules(active_rules_for_indicator, enabled_rules, indicator_type)
 
     # Group rules by execution phase
     bootstrap_rules = [r for r in active_rules if getattr(r, "_rule_phase", RulePhase.PER_PAYLOAD) == RulePhase.BOOTSTRAP]
@@ -624,14 +669,13 @@ def run_indicator_rules(
                 rule_name, signals_added, int((time.perf_counter() - t_start) * 1000)
             )
 
-    if indicator_type == "market_profile":
-        type_counts = Counter(sig.type for sig in signals if getattr(sig, "type", None))
-        logger.info(
-            "Market profile signal summary | total=%d | breakouts=%d | retests=%d",
-            len(signals),
-            type_counts.get("breakout", 0),
-            type_counts.get("retest", 0),
-        )
+    type_counts = Counter(sig.type for sig in signals if getattr(sig, "type", None))
+    logger.info(
+        "Signal type summary | indicator=%s | total=%d | counts=%s",
+        indicator_type,
+        len(signals),
+        dict(type_counts),
+    )
 
     logger.info(
         "Signal run complete | indicator=%s | total_signals=%d",
@@ -652,15 +696,12 @@ def build_signal_overlays(
         raise ValueError(
             f"overlay spec missing for type '{indicator_type}'. Register with overlay_type/register_overlay_type."
         )
-    registration = _REGISTRY.get(indicator_type)
+    registration = _registration_from_plugin(indicator_type)
     if registration is None:
-        logger.warning(
-            "No rules registered for indicator '%s' (overlay build requested). Registered: %s",
-            indicator_type, list(_REGISTRY.keys())
-        )
+        logger.warning("signal_plugin_missing_for_overlay | indicator_type=%s", indicator_type)
         raise ValueError(f"No rules registered for indicator '{indicator_type}'")
 
-    adapter = registration.overlay_adapter
+    _, adapter = registration
     if adapter is None:
         logger.debug(
             "No overlay adapter registered for '%s' -> returning fallback bubbles", indicator_type
@@ -760,12 +801,13 @@ def _accent_for_direction(direction: Optional[str]) -> str:
 def describe_indicator_rules(indicator_type: str) -> List[Mapping[str, Any]]:
     """Return friendly metadata about registered rules for an indicator."""
 
-    registration = _REGISTRY.get(indicator_type)
+    registration = _registration_from_plugin(indicator_type)
     if registration is None:
         return []
 
+    rules, _ = registration
     descriptions: List[Mapping[str, Any]] = []
-    for rule in registration.rules:
+    for rule in rules:
         identifiers = _rule_identifiers(rule)
         rule_id = identifiers[0]
         label = getattr(rule, "signal_label", None) or rule_id.replace("_", " ").title()
@@ -784,6 +826,7 @@ __all__ = [
     "indicator",
     "signal_rule",
     "overlay_adapter",
+    "indicator_plugin",
     "register_indicator_rules",
     "run_indicator_rules",
     "build_signal_overlays",

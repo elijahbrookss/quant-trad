@@ -6,6 +6,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
+from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
 from portal.backend.main import app
 from signals.engine import signal_generator as engine
 from signals.rules.pivot import PivotLevelIndicator
@@ -13,16 +14,25 @@ from signals.rules.pivot import PivotLevelIndicator
 
 def test_indicator_service_registers_pivot_rules():
     module = importlib.import_module("portal.backend.service.indicators.indicator_service")
-    original_registry = dict(engine._REGISTRY)
+    registry = plugin_registry()
+    original_plugins = dict(registry._plugins)
+    original_pending_rules = dict(registry._pending_signal_rules)
+    original_pending_overlays = dict(registry._pending_signal_overlay_adapters)
 
     try:
-        engine._REGISTRY.clear()
+        registry._plugins.clear()
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_overlay_adapters.clear()
         importlib.reload(module)
 
-        assert PivotLevelIndicator.NAME in engine._REGISTRY
+        assert tuple(registry.get_signal_rules(PivotLevelIndicator.NAME))
     finally:
-        engine._REGISTRY.clear()
-        engine._REGISTRY.update(original_registry)
+        registry._plugins.clear()
+        registry._plugins.update(original_plugins)
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_rules.update(original_pending_rules)
+        registry._pending_signal_overlay_adapters.clear()
+        registry._pending_signal_overlay_adapters.update(original_pending_overlays)
 
 
 class _DummyFrame:
@@ -102,8 +112,6 @@ def signal_test_env(monkeypatch):
         monkeypatch.setattr(svc, "_load_indicator_record", lambda req_id: record if req_id == inst_id else (_raise_missing()))
         monkeypatch.setattr(svc, "AlpacaProvider", lambda: DummyProvider(df))
 
-        engine_registry = dict(engine._REGISTRY)
-
         def dummy_rule(context, payload):
             return [
                 {
@@ -124,7 +132,6 @@ def signal_test_env(monkeypatch):
                 }
             ]
 
-        monkeypatch.setattr(engine, "_REGISTRY", engine_registry)
         engine.register_indicator_rules(_DummyIndicator.NAME, [dummy_rule], overlay_adapter=dummy_overlay)
 
         client = TestClient(app)

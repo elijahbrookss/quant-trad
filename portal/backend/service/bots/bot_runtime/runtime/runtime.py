@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Full, Queue
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from engines.bot_runtime.core.domain import (
     Candle,
@@ -43,6 +43,14 @@ from .runtime_policy import RuntimeModePolicy
 from ..strategy.series_builder import SeriesBuilder, StrategySeries
 from .run_context import RunContext
 from engines.bot_runtime.core.wallet import LockedWalletLedger, project_wallet
+from engines.bot_runtime.core.indicator_state import (
+    OverlayProjectionInput,
+    SignalEvaluationInput,
+    ensure_builtin_indicator_plugins_registered,
+    evaluate_rules_from_state_snapshots,
+    plugin_registry,
+    project_overlay_delta,
+)
 from ....indicators.indicator_service.context import IndicatorServiceContext, _context as indicator_context
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
@@ -97,6 +105,8 @@ class SeriesExecutionState:
     signal_consumptions: Deque["SignalConsumption"] = field(
         default_factory=lambda: deque(maxlen=MAX_SIGNAL_CONSUMPTIONS)
     )
+    indicator_state_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    indicator_projection_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def intrabar_active(self) -> bool:
         return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)
@@ -195,6 +205,8 @@ class BotRuntime:
             indicator_ctx=self._indicator_ctx,
             warning_sink=self._record_runtime_warning,
         )
+        ensure_builtin_indicator_plugins_registered()
+        self._indicator_plugin_registry = plugin_registry()
         self._settlement_applier = SettlementApplier(
             obs_enabled=self._obs_enabled,
             obs_slow_ms=self._obs_slow_ms,
@@ -523,8 +535,52 @@ class BotRuntime:
             key = self._strategy_key(series)
             self._series_states.append(state)
             self._series_state_map[key] = state
+            self._initialize_indicator_runtime_state(state)
             if self._primary_series_key is None:
                 self._primary_series_key = key
+
+    def _initialize_indicator_runtime_state(self, state: SeriesExecutionState) -> None:
+        series = state.series
+        strategy_meta = series.meta or {}
+        indicator_links = list(strategy_meta.get("indicator_links") or [])
+        indicator_ids = strategy_meta.get("indicator_ids")
+        if not indicator_links and isinstance(indicator_ids, list):
+            indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
+        if not indicator_links:
+            return
+
+        from ....indicators import indicator_service
+
+        for link in indicator_links:
+            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
+            if not indicator_id:
+                continue
+            meta = indicator_service.get_instance_meta(indicator_id, ctx=self._indicator_ctx)
+            indicator_type = str(meta.get("type") or "").strip().lower()
+            if not indicator_type:
+                raise RuntimeError(f"indicator_state_setup_failed: missing indicator type | indicator_id={indicator_id}")
+            plugin = self._indicator_plugin_registry.resolve(indicator_type)
+            engine = plugin.engine_factory(meta)
+            if engine is None:
+                raise RuntimeError(f"indicator_plugin_engine_missing: indicator_type={indicator_type} indicator_id={indicator_id}")
+            engine_state = engine.initialize({
+                "symbol": series.symbol,
+                "timeframe": series.timeframe,
+                "strategy_id": series.strategy_id,
+                "indicator_id": indicator_id,
+            })
+            state.indicator_state_runtime[indicator_id] = {
+                "indicator_type": indicator_type,
+                "plugin": plugin,
+                "engine": engine,
+                "engine_state": engine_state,
+                "last_revision": -1,
+            }
+            state.indicator_projection_runtime[indicator_id] = {
+                "seq": 0,
+                "revision": -1,
+                "entries": {},
+            }
 
     def _series_state_for(self, series: Optional[StrategySeries]) -> Optional[SeriesExecutionState]:
         if series is None:
@@ -1598,6 +1654,11 @@ class BotRuntime:
                             "strategy_eval_ms": signal_eval_metrics.get("strategy_eval_ms"),
                             "indicator_eval_ms": signal_eval_metrics.get("indicator_eval_ms"),
                             "rule_eval_ms": signal_eval_metrics.get("rule_eval_ms"),
+                            "indicator_state_update_ms": signal_eval_metrics.get("indicator_state_update_ms"),
+                            "signal_eval_ms": signal_eval_metrics.get("signal_eval_ms"),
+                            "overlay_projection_ms": signal_eval_metrics.get("overlay_projection_ms"),
+                            "overlay_projection_skipped_count": signal_eval_metrics.get("overlay_projection_skipped_count"),
+                            "state_revisions_changed_count": signal_eval_metrics.get("state_revisions_changed_count"),
                             "signals_emitted_count": signal_eval_metrics.get("signals_emitted_count"),
                             "overlays_update_ms": signal_eval_metrics.get("overlays_update_ms"),
                             "pending_signals_ops_ms": signal_eval_metrics.get("pending_signals_ops_ms"),
@@ -1624,6 +1685,11 @@ class BotRuntime:
                             "indicator_eval_ms": None,
                             "rule_eval_ms": None,
                             "signals_emitted_count": None,
+                            "indicator_state_update_ms": None,
+                            "signal_eval_ms": None,
+                            "overlay_projection_ms": None,
+                            "overlay_projection_skipped_count": None,
+                            "state_revisions_changed_count": None,
                             "overlays_update_ms": None,
                             "pending_signals_ops_ms": None,
                             "indicators_count": None,
@@ -2079,6 +2145,11 @@ class BotRuntime:
                     "pending_signals_ops_ms": pending_consume_ms,
                     "signals_emitted_count": 0.0,
                     "overlays_update_ms": 0.0,
+                    "indicator_state_update_ms": 0.0,
+                    "signal_eval_ms": 0.0,
+                    "overlay_projection_ms": 0.0,
+                    "overlay_projection_skipped_count": 0.0,
+                    "state_revisions_changed_count": 0.0,
                     "indicators_count": 0.0,
                     "overlays_changed_count": 0.0,
                     "overlay_points_changed": 0.0,
@@ -2086,26 +2157,97 @@ class BotRuntime:
                 state.last_evaluated_epoch,
                 updated_last,
             )
+
+        indicator_started = time.perf_counter()
+        snapshots: Dict[str, Any] = {}
+        state_revisions_changed_count = 0
+        previous_candle: Optional[Candle] = None
+        if state.bar_index > 0 and state.bar_index - 1 < len(series.candles):
+            previous_candle = series.candles[state.bar_index - 1]
+
+        for indicator_id, runtime in state.indicator_state_runtime.items():
+            indicator_type = str(runtime.get("indicator_type") or "")
+            engine = runtime.get("engine")
+            engine_state = runtime.get("engine_state")
+            if engine is None or not isinstance(engine_state, MutableMapping):
+                raise RuntimeError(f"indicator_state_runtime_invalid: indicator_id={indicator_id}")
+            delta = engine.apply_bar(engine_state, candle)
+            snapshot = engine.snapshot(engine_state)
+
+            payload = dict(snapshot.payload)
+            plugin = runtime.get("plugin")
+            if plugin is None:
+                raise RuntimeError(f"indicator_plugin_runtime_missing: indicator_id={indicator_id}")
+            if getattr(plugin, "signal_emitter", None) is not None:
+                rule_payload = plugin.signal_emitter(payload, candle, previous_candle)
+            else:
+                rule_payload = {"signals": []}
+            enriched_payload = dict(payload)
+            enriched_payload.update(dict(rule_payload or {}))
+            snapshots[indicator_id] = type(snapshot)(
+                revision=snapshot.revision,
+                known_at=snapshot.known_at,
+                formed_at=snapshot.formed_at,
+                source_timeframe=snapshot.source_timeframe,
+                payload=enriched_payload,
+            )
+            if bool(delta.changed):
+                state_revisions_changed_count += 1
+
+        indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
+
+        signal_started = time.perf_counter()
+        rules = (series.meta or {}).get("rules") or {}
+        evaluated = evaluate_rules_from_state_snapshots(
+            signal_input=SignalEvaluationInput(snapshots=snapshots),
+            rules=rules,
+            current_epoch=epoch,
+            rule_evaluator=self._series_builder._evaluate_rule_payload,
+        )
+        signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
+
         previous_overlay_count = float(len(series.overlays or []))
         previous_overlay_points = float(self._count_overlay_points(series.overlays or []))
-        # Keep per-bar evaluation bounded to the configured incremental window.
-        # Using full history here grows both compute and overlay payload size over time.
-        lookback_bars = max(int(getattr(self._series_builder, "_incremental_signal_lookback_bars", 200) or 200), 1)
-        visible_end = max(state.bar_index + 1, 0)
-        visible_start = max(visible_end - lookback_bars, 0)
-        visible_candles = series.candles[visible_start:visible_end]
-        signals, overlays, eval_metrics = self._series_builder.evaluate_incremental_for_bar(
-            series=series,
-            candle=candle,
-            visible_candles=visible_candles,
-            last_evaluated_epoch=state.last_evaluated_epoch,
-        )
+
+        projection_started = time.perf_counter()
+        overlay_projection_skipped_count = 0
+        for indicator_id, snapshot in snapshots.items():
+            runtime = state.indicator_state_runtime.get(indicator_id) or {}
+            indicator_type = str(runtime.get("indicator_type") or "")
+            plugin = runtime.get("plugin")
+            projector = getattr(plugin, "overlay_projector", None) if plugin is not None else None
+            if projector is None:
+                overlay_projection_skipped_count += 1
+                continue
+            projection_state = state.indicator_projection_runtime.setdefault(indicator_id, {"seq": 0, "revision": -1, "entries": {}})
+            projection_delta = project_overlay_delta(
+                projection_input=OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state),
+                entry_projector=projector,
+            )
+            if not projection_delta.ops:
+                overlay_projection_skipped_count += 1
+                continue
+            entries = projector(OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state))
+            projection_state["seq"] = projection_delta.seq
+            projection_state["revision"] = snapshot.revision
+            projection_state["entries"] = dict(entries)
+
+        overlays: List[Dict[str, Any]] = []
+        for projection_state in state.indicator_projection_runtime.values():
+            entries = projection_state.get("entries")
+            if not isinstance(entries, Mapping):
+                continue
+            overlays.extend(dict(value) for value in entries.values() if isinstance(value, Mapping))
+
+        overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
         overlays_changed_count, overlay_points_changed = self._overlay_change_metrics(series.overlays or [], overlays)
         series.overlays = overlays
+
         append_started = time.perf_counter()
-        for signal in signals:
+        for signal in evaluated:
             state.pending_signals.append(signal)
         pending_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
+
         consume_started = time.perf_counter()
         consumed, chosen, updated_last = consume_signals(
             state.pending_signals,
@@ -2114,23 +2256,31 @@ class BotRuntime:
         )
         pending_consume_ms = max((time.perf_counter() - consume_started) * 1000.0, 0.0)
         pending_ops_ms = pending_append_ms + pending_consume_ms
-        eval_metrics = dict(eval_metrics or {})
-        eval_metrics.update(
-            {
-                "pending_signals_append_ms": pending_append_ms,
-                "pending_signals_consume_ms": pending_consume_ms,
-                "pending_signals_ops_ms": pending_ops_ms,
-                "overlays_changed_count": overlays_changed_count,
-                "overlay_points_changed": overlay_points_changed,
-                "overlay_count_before": previous_overlay_count,
-                "overlay_count_after": float(len(overlays)),
-                "overlay_points_before": previous_overlay_points,
-                "overlay_points_after": float(self._count_overlay_points(overlays)),
-            }
-        )
+
+        eval_metrics = {
+            "epochs_evaluated_this_tick": 1.0,
+            "pending_signals_append_ms": pending_append_ms,
+            "pending_signals_consume_ms": pending_consume_ms,
+            "pending_signals_ops_ms": pending_ops_ms,
+            "signals_emitted_count": float(len(evaluated)),
+            "overlays_update_ms": overlay_projection_ms,
+            "indicator_state_update_ms": indicator_state_update_ms,
+            "signal_eval_ms": signal_eval_ms,
+            "overlay_projection_ms": overlay_projection_ms,
+            "overlay_projection_skipped_count": float(overlay_projection_skipped_count),
+            "state_revisions_changed_count": float(state_revisions_changed_count),
+            "indicators_count": float(len(state.indicator_state_runtime)),
+            "overlays_changed_count": overlays_changed_count,
+            "overlay_points_changed": overlay_points_changed,
+            "overlay_count_before": previous_overlay_count,
+            "overlay_count_after": float(len(overlays)),
+            "overlay_points_before": previous_overlay_points,
+            "overlay_points_after": float(self._count_overlay_points(overlays)),
+        }
+
         next_last_evaluated = epoch
         return consumed, chosen, len(state.pending_signals), eval_metrics, next_last_evaluated, updated_last
-    
+
     def _record_signal_consumption(
         self,
         state: SeriesExecutionState,

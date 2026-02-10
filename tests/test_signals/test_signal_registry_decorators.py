@@ -2,22 +2,33 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+
 from signals.engine import signal_generator
 
 
 @pytest.fixture(autouse=True)
 def restore_registry():
-    original_registry = dict(signal_generator._REGISTRY)
     original_decorated = dict(signal_generator._DECORATED)
+    registry = plugin_registry()
+    original_plugins = dict(registry._plugins)
+    original_pending_rules = dict(registry._pending_signal_rules)
+    original_pending_overlays = dict(registry._pending_signal_overlay_adapters)
     try:
-        signal_generator._REGISTRY.clear()
         signal_generator._DECORATED.clear()
+        registry._plugins.clear()
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_overlay_adapters.clear()
         yield
     finally:
-        signal_generator._REGISTRY.clear()
-        signal_generator._REGISTRY.update(original_registry)
         signal_generator._DECORATED.clear()
         signal_generator._DECORATED.update(original_decorated)
+        registry._plugins.clear()
+        registry._plugins.update(original_plugins)
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_rules.update(original_pending_rules)
+        registry._pending_signal_overlay_adapters.clear()
+        registry._pending_signal_overlay_adapters.update(original_pending_overlays)
 
 
 def test_decorated_rule_and_overlay_registration():
@@ -51,10 +62,9 @@ def test_decorated_rule_and_overlay_registration():
             }
         ]
 
-    registration = signal_generator._REGISTRY.get("ExampleIndicator")
-    assert registration is not None
-    assert tuple(registration.rules) == (example_rule,)
-    assert registration.overlay_adapter is example_overlay
+    registry = plugin_registry()
+    assert tuple(registry.get_signal_rules("exampleindicator")) == (example_rule,)
+    assert registry.get_signal_overlay_adapter("exampleindicator") is example_overlay
 
     descriptions = signal_generator.describe_indicator_rules("ExampleIndicator")
     assert descriptions == [
@@ -76,6 +86,5 @@ def test_overlay_adapter_updates_existing_registration():
     def legacy_overlay(signals, df, **kwargs):
         return []
 
-    registration = signal_generator._REGISTRY.get("Legacy")
-    assert registration is not None
-    assert registration.overlay_adapter is legacy_overlay
+    registry = plugin_registry()
+    assert registry.get_signal_overlay_adapter("legacy") is legacy_overlay

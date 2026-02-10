@@ -132,31 +132,59 @@ export function useBotPerformance({ bot, open, onRefresh }) {
         ? existing._overlay_state
         : buildOverlayState(existing?.overlays)
 
-    let effectiveSeq = currentSeq
+    const ops = Array.isArray(delta.ops) ? delta.ops : []
+    const resetOp = ops.find((op) => op && String(op.op || '').toLowerCase() === 'reset')
+    const hasAuthoritativeReset = Boolean(delta.authoritative_snapshot) || Boolean(resetOp)
+
     if (Number.isFinite(baseSeq) && baseSeq !== currentSeq) {
-      const canBootstrapRebase =
-        currentSeq === 0
-        && baseSeq > 0
-        && (
-          (Array.isArray(currentState.order) && currentState.order.length > 0)
-          || (Array.isArray(existing?.overlays) && existing.overlays.length > 0)
-        )
-      if (canBootstrapRebase) {
-        effectiveSeq = baseSeq
-      } else {
-        console.warn('[BotPerformanceModal] overlay delta base_seq mismatch', {
+      if (!hasAuthoritativeReset) {
+        console.warn('[BotPerformanceModal] overlay delta base_seq mismatch -> hard reset', {
           expected: currentSeq,
           received: baseSeq,
         })
-        return existing
+        return {
+          ...existing,
+          overlays: [],
+          _overlay_state: { entries: {}, order: [] },
+          _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : 0,
+        }
       }
     }
-    const entries = { ...(currentState.entries || {}) }
+
+    let entries = { ...(currentState.entries || {}) }
     let order = Array.isArray(currentState.order) ? [...currentState.order] : []
-    const ops = Array.isArray(delta.ops) ? delta.ops : []
+
     for (const op of ops) {
       if (!op || typeof op !== 'object') continue
       const opType = String(op.op || '').toLowerCase()
+
+      if (opType === 'reset') {
+        const resetEntries = {}
+        const resetOrder = []
+        const resetList = Array.isArray(op.entries) ? op.entries : []
+        for (let idx = 0; idx < resetList.length; idx += 1) {
+          const overlay = resetList[idx]
+          if (!overlay || typeof overlay !== 'object') continue
+          const explicit = overlay.id
+          const key = explicit
+            ? String(explicit)
+            : [
+                String(overlay.type || 'overlay'),
+                String(overlay.strategy_id || ''),
+                String(overlay.symbol || ''),
+                String(overlay.timeframe || ''),
+                String(overlay.instrument_id || ''),
+                String(overlay.source || ''),
+                String(idx),
+              ].join('|')
+          resetEntries[key] = overlay
+          resetOrder.push(key)
+        }
+        entries = resetEntries
+        order = resetOrder
+        continue
+      }
+
       const key = String(op.key || '')
       if (!key) continue
       if (opType === 'remove') {
@@ -174,7 +202,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
       ...existing,
       overlays,
       _overlay_state: { entries, order },
-      _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : effectiveSeq,
+      _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : currentSeq,
     }
   }, [buildOverlayState])
 
