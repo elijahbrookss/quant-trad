@@ -18,18 +18,21 @@ def test_market_profile_state_engine_rolls_session_and_updates_revision() -> Non
     state = engine.initialize({"symbol": "BTC/USD"})
 
     first = engine.apply_bar(state, _candle("2024-01-01T00:00:00Z", 100.0))
-    assert first.changed is False
-    assert first.revision == 0
+    assert first.changed is True
+    assert first.revision == 1
 
     second = engine.apply_bar(state, _candle("2024-01-02T00:00:00Z", 101.0))
     assert second.changed is True
-    assert second.revision == 1
+    assert second.revision == 2
 
     snapshot = engine.snapshot(state)
     profiles = snapshot.payload["profiles"]
-    assert len(profiles) == 1
+    assert len(profiles) == 2
     assert profiles[0]["session"] == "2024-01-01"
-    assert snapshot.revision == 1
+    assert profiles[0]["status"] == "completed"
+    assert profiles[1]["session"] == "2024-01-02"
+    assert profiles[1]["status"] == "active"
+    assert snapshot.revision == 2
 
 
 def test_market_profile_overlay_projection_emits_overlay_payload_boxes() -> None:
@@ -54,3 +57,4 @@ def test_market_profile_overlay_projection_emits_overlay_payload_boxes() -> None
     assert payload["boxes"][0]["y1"] == 95.0
     assert payload["boxes"][0]["y2"] == 105.0
     assert payload["boxes"][0]["x1"].startswith("2024-01-02T00:00:00")
+    assert payload["boxes"][0]["x2"]

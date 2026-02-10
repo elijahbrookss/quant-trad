@@ -26,10 +26,14 @@ def market_profile_overlay_entries(projection_input: OverlayProjectionInput) -> 
             vah_f = float(vah)
             val_f = float(val)
             day_start = f"{session}T00:00:00+00:00"
-            day_end = f"{session}T23:59:59+00:00"
         except (TypeError, ValueError):
             continue
-        key = f"market_profile:{session}:{vah_f}:{val_f}:{idx}"
+        known_at = profile.get("known_at")
+        status = str(profile.get("status") or "completed").strip().lower()
+        if hasattr(known_at, "isoformat"):
+            known_at = known_at.isoformat()
+        day_end = str(known_at or f"{session}T23:59:59+00:00") if status == "active" else f"{session}T23:59:59+00:00"
+        key = f"market_profile:{session}:{status}:{idx}"
         entries[key] = {
             "type": "market_profile",
             "payload": {

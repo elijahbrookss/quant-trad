@@ -32,6 +32,7 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             "symbol": symbol,
             "active_session": None,
             "active_rows": [],
+            "active_profile": None,
             "completed_profiles": [],
             "known_at": None,
             "formed_at": None,
@@ -44,25 +45,25 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         bar_time = bar.time.astimezone(timezone.utc) if bar.time.tzinfo else bar.time.replace(tzinfo=timezone.utc)
         session = bar_time.date().isoformat()
 
-        rolled_session = False
         active_session = state.get("active_session")
         if active_session is None:
             state["active_session"] = session
         elif active_session != session:
             self._finalize_session(state)
             state["active_rows"] = []
+            state["active_profile"] = None
             state["active_session"] = session
-            rolled_session = True
 
         state.setdefault("active_rows", []).append({"low": float(bar.low), "high": float(bar.high)})
-        if not rolled_session:
-            return IndicatorStateDelta(changed=False, revision=int(state.get("revision") or 0), known_at=bar_time)
+        state["active_profile"] = self._build_session_profile(
+            session=str(state.get("active_session") or session),
+            rows=list(state.get("active_rows") or []),
+            formed_at=bar_time,
+        )
 
         state["revision"] = int(state.get("revision") or 0) + 1
         state["known_at"] = bar_time
-        completed_profiles = list(state.get("completed_profiles") or [])
-        if completed_profiles:
-            state["formed_at"] = completed_profiles[-1]["formed_at"]
+        state["formed_at"] = bar_time
         return IndicatorStateDelta(changed=True, revision=int(state["revision"]), known_at=bar_time)
 
     def snapshot(self, state: Mapping[str, Any]) -> IndicatorStateSnapshot:
@@ -73,10 +74,15 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         if not isinstance(formed_at, datetime):
             formed_at = known_at
 
+        profiles = list(state.get("completed_profiles") or [])
+        active_profile = state.get("active_profile")
+        if isinstance(active_profile, Mapping):
+            profiles.append(dict(active_profile))
+
         payload = {
             "symbol": state.get("symbol"),
             "active_session": state.get("active_session"),
-            "profiles": list(state.get("completed_profiles") or []),
+            "profiles": profiles,
         }
         return IndicatorStateSnapshot(
             revision=int(state.get("revision") or 0),
@@ -86,11 +92,13 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             payload=payload,
         )
 
-    def _finalize_session(self, state: MutableMapping[str, Any]) -> None:
-        rows = list(state.get("active_rows") or [])
-        if not rows:
-            return
-
+    def _build_session_profile(
+        self,
+        *,
+        session: str,
+        rows: List[Mapping[str, float]],
+        formed_at: datetime,
+    ) -> Dict[str, Any]:
         tpo_histogram = _build_tpo_histogram(
             rows=rows,
             bin_size=self._config.bin_size,
@@ -99,23 +107,30 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         value_area = _extract_value_area(tpo_histogram, self._config.price_precision)
         if value_area is None:
             raise RuntimeError("indicator_state_finalize_failed: market_profile value area empty")
+        return {
+            "session": session,
+            "VAH": value_area["VAH"],
+            "VAL": value_area["VAL"],
+            "POC": value_area["POC"],
+            "formed_at": formed_at,
+            "known_at": formed_at,
+            "status": "active",
+        }
+
+    def _finalize_session(self, state: MutableMapping[str, Any]) -> None:
+        rows = list(state.get("active_rows") or [])
+        if not rows:
+            return
 
         session = str(state.get("active_session") or "")
         if not session:
             raise RuntimeError("indicator_state_finalize_failed: market_profile active_session missing")
         formed_at = datetime.fromisoformat(f"{session}T23:59:59+00:00")
+        profile = self._build_session_profile(session=session, rows=rows, formed_at=formed_at)
+        profile["status"] = "completed"
 
         completed = state.setdefault("completed_profiles", [])
-        completed.append(
-            {
-                "session": session,
-                "VAH": value_area["VAH"],
-                "VAL": value_area["VAL"],
-                "POC": value_area["POC"],
-                "formed_at": formed_at,
-                "known_at": formed_at,
-            }
-        )
+        completed.append(profile)
 
 
 def _build_tpo_histogram(*, rows: List[Mapping[str, float]], bin_size: float, price_precision: int) -> Dict[float, int]:
