@@ -206,6 +206,13 @@ def detect_breakouts_v2(
     df: Optional[pd.DataFrame] = context.get("df")  # type: ignore[assignment]
     if df is None or df.empty or "close" not in df.columns:
         return []
+    if not isinstance(value_area, Mapping):
+        log.warning(
+            "breakout_v2_invalid_value_area_payload | payload_type=%s | payload=%r",
+            type(value_area).__name__,
+            value_area,
+        )
+        return []
 
     vah = value_area.get("VAH")
     val = value_area.get("VAL")

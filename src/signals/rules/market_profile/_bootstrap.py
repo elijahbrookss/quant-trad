@@ -20,8 +20,8 @@ def ensure_breakouts_ready(context: MutableMapping[str, Any], payloads: Sequence
         mark_ready(context, _BREAKOUT_READY_FLAG, ready=True)
 
     if not context.get(_BREAKOUT_V2_READY_FLAG):
-        payload = payloads[0] if payloads else {}
-        market_profile_breakout_v2_rule(context, payload)
+        # v2 bootstrap expects the full payload sequence (value areas), not a single payload.
+        market_profile_breakout_v2_rule(context, payloads or [])
         mark_ready(context, _BREAKOUT_V2_READY_FLAG, ready=True)
 
 
