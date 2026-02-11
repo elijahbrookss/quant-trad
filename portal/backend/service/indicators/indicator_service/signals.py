@@ -4,9 +4,12 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.domain import timeframe_to_seconds
 from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
 from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
 from indicators.config import DataContext
@@ -23,6 +26,7 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+_SIGNAL_EXEC_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
 
 @dataclass
@@ -60,14 +64,19 @@ class IndicatorSignalExecutor:
         exchange: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        t0 = perf_counter()
+        t_prepare_start = perf_counter()
         entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
+        t_prepare_ms = (perf_counter() - t_prepare_start) * 1000.0
         sym = self._resolve_symbol(entry, symbol)
+        t_plan_start = perf_counter()
         runtime_plan = self._ctx.factory.build_runtime_input_plan(
             entry.meta,
             strategy_interval=interval,
             start=start,
             end=end,
         )
+        t_plan_ms = (perf_counter() - t_plan_start) * 1000.0
         plan_start = str(runtime_plan.get("start") or start)
         plan_end = str(runtime_plan.get("end") or end)
         plan_interval = str(runtime_plan.get("source_timeframe") or interval)
@@ -80,7 +89,33 @@ class IndicatorSignalExecutor:
         provider, data_ctx = self._prepare_provider(
             entry.meta, sym, plan_start, plan_end, plan_interval, datasource, exchange
         )
+        include_overlays = bool((config or {}).get("include_overlays", False))
+        cache_key = self._build_cache_key(
+            inst_id=inst_id,
+            meta=entry.meta,
+            symbol=sym,
+            datasource=datasource,
+            exchange=exchange,
+            plan_start=plan_start,
+            plan_end=plan_end,
+            plan_interval=plan_interval,
+            config=config or {},
+            include_overlays=include_overlays,
+        )
+        cached_payload = _SIGNAL_EXEC_CACHE.get(cache_key)
+        if cached_payload is not None:
+            logger.info(
+                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s",
+                inst_id,
+                entry.meta.get("type"),
+                sym,
+                plan_interval,
+                include_overlays,
+            )
+            return deepcopy(cached_payload)
+        t_fetch_start = perf_counter()
         df = self._load_candles(provider, data_ctx, inst_id, sym, plan_interval)
+        t_fetch_ms = (perf_counter() - t_fetch_start) * 1000.0
         logger.info(
             "event=indicator_signal_mode indicator_id=%s indicator_type=%s mode=runtime_state source_timeframe=%s requested_rules=%s",
             inst_id,
@@ -88,28 +123,124 @@ class IndicatorSignalExecutor:
             plan_interval,
             sorted(requested_rule_ids) if requested_rule_ids else None,
         )
+        logger.info(
+            "event=indicator_runtime_artifacts_prepare_start indicator_id=%s indicator_type=%s symbol=%s",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+        )
+        t_artifacts_start = perf_counter()
+        precomputed_runtime_payload = self._build_precomputed_runtime_payload(
+            inst_id=inst_id,
+            meta=entry.meta,
+            instance=entry.instance,
+            symbol=sym,
+            runtime_scope=f"{plan_start}|{plan_end}|{plan_interval}",
+            source_timeframe=plan_interval,
+            chart_timeframe=interval,
+        )
+        t_artifacts_ms = (perf_counter() - t_artifacts_start) * 1000.0
+        logger.info(
+            "event=indicator_runtime_artifacts_prepare_complete indicator_id=%s indicator_type=%s symbol=%s ready=%s duration_ms=%.3f",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+            bool(precomputed_runtime_payload),
+            t_artifacts_ms,
+        )
+        t_runtime_start = perf_counter()
         signals_all = self._run_runtime_state_signals(
             inst_id=inst_id,
             meta=entry.meta,
             df=df,
             symbol=sym,
             timeframe=plan_interval,
+            prepared_snapshot_payload=precomputed_runtime_payload,
         )
+        t_runtime_ms = (perf_counter() - t_runtime_start) * 1000.0
         cache_ctx = BreakoutCacheContext(
             cache_spec=None,
             cache_key=None,
             requested_rule_ids=requested_rule_ids,
             requested_rule_identities=requested_rule_identities,
         )
+        t_filter_start = perf_counter()
         filtered = self._filter_signals(signals_all, cache_ctx)
-        overlays = self._ctx.signal_runner.build_overlays(
-            entry.instance, filtered, df, **(config or {})
-        )
+        t_filter_ms = (perf_counter() - t_filter_start) * 1000.0
+        t_overlay_start = perf_counter()
+        overlays: List[Any] = []
+        if include_overlays:
+            overlays = self._ctx.signal_runner.build_overlays(
+                entry.instance, filtered, df, **(config or {})
+            )
+        t_overlay_ms = (perf_counter() - t_overlay_start) * 1000.0
         payload = ensure_color(dict(entry.meta), ctx=self._ctx)
         # Convert BaseSignal objects to dicts for JSON serialization and strategy evaluation
         payload["signals"] = [sig.to_dict() if hasattr(sig, "to_dict") else sig for sig in filtered]
         payload["overlays"] = overlays
+        _SIGNAL_EXEC_CACHE[cache_key] = deepcopy(payload)
+        t_total_ms = (perf_counter() - t0) * 1000.0
+        logger.info(
+            "event=indicator_signal_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s bars=%s raw_signals=%s filtered_signals=%s overlays=%s include_overlays=%s duration_total_ms=%.3f duration_prepare_ms=%.3f duration_plan_ms=%.3f duration_fetch_ms=%.3f duration_artifacts_ms=%.3f duration_runtime_ms=%.3f duration_filter_ms=%.3f duration_overlay_ms=%.3f",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+            plan_interval,
+            len(df) if df is not None else 0,
+            len(signals_all),
+            len(filtered),
+            len(overlays) if isinstance(overlays, list) else 0,
+            include_overlays,
+            t_total_ms,
+            t_prepare_ms,
+            t_plan_ms,
+            t_fetch_ms,
+            t_artifacts_ms,
+            t_runtime_ms,
+            t_filter_ms,
+            t_overlay_ms,
+        )
         return payload
+
+    def _build_cache_key(
+        self,
+        *,
+        inst_id: str,
+        meta: Mapping[str, Any],
+        symbol: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        plan_start: str,
+        plan_end: str,
+        plan_interval: str,
+        config: Mapping[str, Any],
+        include_overlays: bool,
+    ) -> Tuple[Any, ...]:
+        params = meta.get("params") if isinstance(meta, Mapping) else {}
+        params_items: Tuple[Tuple[str, str], ...]
+        if isinstance(params, Mapping):
+            params_items = tuple(sorted((str(k), repr(v)) for k, v in params.items()))
+        else:
+            params_items = tuple()
+        enabled_rules = config.get("enabled_rules") if isinstance(config, Mapping) else None
+        enabled_rules_key = (
+            tuple(sorted(str(r).strip().lower() for r in enabled_rules if r is not None))
+            if isinstance(enabled_rules, Sequence) and not isinstance(enabled_rules, (str, bytes))
+            else tuple()
+        )
+        return (
+            str(inst_id),
+            str(meta.get("type") if isinstance(meta, Mapping) else ""),
+            str(symbol),
+            str(datasource or ""),
+            str(exchange or ""),
+            str(plan_start),
+            str(plan_end),
+            str(plan_interval),
+            params_items,
+            enabled_rules_key,
+            bool(include_overlays),
+        )
 
     def _load_entry(
         self,
@@ -221,6 +352,7 @@ class IndicatorSignalExecutor:
         df: Any,
         symbol: str,
         timeframe: str,
+        prepared_snapshot_payload: Mapping[str, Any],
     ) -> List[BaseSignal]:
         indicator_type = str(meta.get("type") or "").strip().lower()
         if not indicator_type:
@@ -237,17 +369,24 @@ class IndicatorSignalExecutor:
                 f"indicator_signal_runtime_emitter_missing: indicator_id={inst_id} indicator_type={indicator_type}"
             )
 
-        engine = plugin.engine_factory(meta)
-        engine_state = engine.initialize(
-            {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "indicator_id": inst_id,
-            }
+        logger.info(
+            "event=indicator_signal_runtime_input_source indicator_id=%s indicator_type=%s source=prepared_runtime_artifacts",
+            inst_id,
+            indicator_type,
         )
         emitted: List[BaseSignal] = []
         previous_candle: Optional[Candle] = None
+        t_loop_start = perf_counter()
+        apply_ms = 0.0
+        snapshot_ms = 0.0
+        emitter_ms = 0.0
+        convert_ms = 0.0
+        emitted_raw = 0
+        bar_count = 0
+        diagnostics_sum: Dict[str, float] = {}
+        diagnostics_max: Dict[str, float] = {}
         for timestamp, row in df.iterrows():
+            bar_count += 1
             candle_time = timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp
             if getattr(candle_time, "tzinfo", None) is None:
                 candle_time = candle_time.replace(tzinfo=timezone.utc)
@@ -261,30 +400,136 @@ class IndicatorSignalExecutor:
                 close=float(row.get("close")),
                 volume=float(row.get("volume")) if row.get("volume") is not None else None,
             )
-            engine.apply_bar(engine_state, candle)
-            snapshot = engine.snapshot(engine_state)
-            payload = dict(snapshot.payload)
+            payload = dict(prepared_snapshot_payload)
+            t_emit = perf_counter()
             result = plugin.signal_emitter(payload, candle, previous_candle)
+            emitter_ms += (perf_counter() - t_emit) * 1000.0
+            if isinstance(result, Mapping):
+                raw_diagnostics = result.get("diagnostics")
+                if isinstance(raw_diagnostics, Mapping):
+                    for key, value in raw_diagnostics.items():
+                        metric_name = str(key).strip()
+                        if not metric_name:
+                            continue
+                        numeric: Optional[float] = None
+                        if isinstance(value, bool):
+                            numeric = 1.0 if value else 0.0
+                        elif isinstance(value, (int, float)):
+                            numeric = float(value)
+                        if numeric is None:
+                            continue
+                        diagnostics_sum[metric_name] = diagnostics_sum.get(metric_name, 0.0) + numeric
+                        current_max = diagnostics_max.get(metric_name)
+                        if current_max is None or numeric > current_max:
+                            diagnostics_max[metric_name] = numeric
             signals = result.get("signals") if isinstance(result, Mapping) else []
             if isinstance(signals, Sequence):
+                emitted_raw += len(signals)
                 for signal in signals:
                     if not isinstance(signal, Mapping):
                         continue
+                    t_convert = perf_counter()
                     converted = self._signal_from_runtime_payload(
                         signal,
                         default_symbol=symbol,
                     )
+                    convert_ms += (perf_counter() - t_convert) * 1000.0
                     if converted is not None:
                         emitted.append(converted)
             previous_candle = candle
+            if bar_count % 1000 == 0:
+                logger.debug(
+                    "event=indicator_signal_runtime_progress indicator_id=%s indicator_type=%s bars_processed=%s emitted_raw=%s emitted_converted=%s apply_ms=%.3f snapshot_ms=%.3f emitter_ms=%.3f convert_ms=%.3f diagnostics_sum=%s diagnostics_max=%s",
+                    inst_id,
+                    indicator_type,
+                    bar_count,
+                    emitted_raw,
+                    len(emitted),
+                    apply_ms,
+                    snapshot_ms,
+                    emitter_ms,
+                    convert_ms,
+                    diagnostics_sum,
+                    diagnostics_max,
+                )
+        loop_ms = (perf_counter() - t_loop_start) * 1000.0
         logger.info(
-            "event=indicator_signal_runtime_complete indicator_id=%s indicator_type=%s signals=%s bars=%s",
+            "event=indicator_signal_runtime_complete indicator_id=%s indicator_type=%s signals=%s bars=%s emitted_raw=%s duration_loop_ms=%.3f duration_apply_ms=%.3f duration_snapshot_ms=%.3f duration_emitter_ms=%.3f duration_convert_ms=%.3f",
             inst_id,
             indicator_type,
             len(emitted),
             len(df),
+            emitted_raw,
+            loop_ms,
+            apply_ms,
+            snapshot_ms,
+            emitter_ms,
+            convert_ms,
+        )
+        logger.info(
+            "event=indicator_signal_runtime_diagnostics indicator_id=%s indicator_type=%s diagnostics_sum=%s diagnostics_max=%s",
+            inst_id,
+            indicator_type,
+            diagnostics_sum,
+            diagnostics_max,
         )
         return emitted
+
+    def _build_precomputed_runtime_payload(
+        self,
+        *,
+        inst_id: str,
+        meta: Mapping[str, Any],
+        instance: Any,
+        symbol: str,
+        runtime_scope: str,
+        source_timeframe: str,
+        chart_timeframe: str,
+    ) -> Dict[str, Any]:
+        builder = getattr(instance, "build_runtime_signal_payload", None)
+        if not callable(builder):
+            raise RuntimeError(
+                "indicator_signal_runtime_payload_builder_missing: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')}"
+            )
+        try:
+            payload = builder(
+                indicator_id=inst_id,
+                params=dict(meta.get("params") or {}),
+                symbol=symbol,
+                color=meta.get("color"),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"indicator_signal_precomputed_payload_failed: indicator_id={inst_id} indicator_type={meta.get('type')}"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(
+                "indicator_signal_precomputed_payload_invalid: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=non_mapping"
+            )
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, Sequence):
+            raise RuntimeError(
+                "indicator_signal_precomputed_payload_invalid: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profiles"
+            )
+        normalized = dict(payload)
+        normalized["_indicator_id"] = inst_id
+        normalized["symbol"] = symbol
+        normalized["_runtime_scope"] = runtime_scope
+        normalized["source_timeframe"] = str(source_timeframe or "")
+        normalized["chart_timeframe"] = str(chart_timeframe or "")
+        normalized["source_timeframe_seconds"] = timeframe_to_seconds(source_timeframe) or 0
+        if "profile_params" not in normalized:
+            normalized["profile_params"] = dict(meta.get("params") or {})
+        logger.info(
+            "event=indicator_signal_precomputed_payload_ready indicator_id=%s indicator_type=%s profiles=%s",
+            inst_id,
+            meta.get("type"),
+            len(profiles),
+        )
+        return normalized
 
     def _signal_from_runtime_payload(
         self,
