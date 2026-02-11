@@ -939,6 +939,7 @@ export const ChartComponent = ({ chartId }) => {
         provider_id: providerRef.current,
         venue_id: venueRef.current,
         exchange: exchangeRef.current || null,
+        overlayLoading: true, // hold loader until IndicatorTab finishes overlay refresh
       });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;

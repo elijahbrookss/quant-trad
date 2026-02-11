@@ -12,9 +12,11 @@ export const useMarkerTooltip = ({ chartRef, markerDetailsRef }) => {
         setMarkerTooltip(null)
         return
       }
-      const detail = (markerDetailsRef.current || []).find((entry) => entry.time === epoch)
-      if (detail) {
-        setMarkerTooltip({ x: param.point.x, y: param.point.y, entries: detail.entries })
+      const details = (markerDetailsRef.current || []).filter((entry) => entry.time === epoch)
+      if (details.length) {
+        const entries = details.flatMap((detail) => (Array.isArray(detail?.entries) ? detail.entries : []))
+        const kinds = [...new Set(details.map((detail) => detail?.kind).filter(Boolean))]
+        setMarkerTooltip({ x: param.point.x, y: param.point.y, entries, kinds })
       } else {
         setMarkerTooltip(null)
       }
@@ -25,4 +27,3 @@ export const useMarkerTooltip = ({ chartRef, markerDetailsRef }) => {
 
   return markerTooltip
 }
-

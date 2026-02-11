@@ -126,6 +126,8 @@ export async function runSignalGeneration({
     if (Array.isArray(enabledRules) && enabledRules.length) {
       config.enabled_rules = enabledRules;
     }
+    // Signals tab expects overlay artifacts for visual inspection.
+    config.include_overlays = true;
 
     scopedLogger.debug('signal_generation_request', { config });
 

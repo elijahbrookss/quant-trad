@@ -29,7 +29,7 @@ export const useOverlaySync = ({
 
   const computeArtifacts = useCallback(
     ({ overlayPayloads = [], tradeMarkers = [], tradeTooltips = [], tradeRegions = [], tradePriceLines = [], candleData = [] }) => {
-      const markerDetails = Array.isArray(tradeTooltips) ? tradeTooltips : []
+      const markerDetails = Array.isArray(tradeTooltips) ? [...tradeTooltips] : []
       const baseMarkers = [...tradeMarkers]
       const overlayMarkers = []
       const touchPoints = []
@@ -189,6 +189,23 @@ export const useOverlaySync = ({
               }))
             : norm.bubbles
           bubbles.push(...tinted)
+          for (const bubble of tinted) {
+            const epoch = toSec(bubble?.time)
+            if (!Number.isFinite(epoch)) continue
+            const lines = []
+            const label = typeof bubble?.label === 'string' ? bubble.label.trim() : ''
+            const detail = typeof bubble?.detail === 'string' ? bubble.detail.trim() : ''
+            const meta = typeof bubble?.meta === 'string' ? bubble.meta.trim() : ''
+            if (label) lines.push(label)
+            if (detail) lines.push(detail)
+            if (meta) lines.push(meta)
+            const diagnostics = Array.isArray(bubble?.diagnostics) ? bubble.diagnostics : []
+            diagnostics.forEach((entry) => {
+              if (typeof entry === 'string' && entry.trim()) lines.push(entry.trim())
+            })
+            if (!lines.length) continue
+            markerDetails.push({ time: epoch, entries: lines, kind: 'signal' })
+          }
         }
       }
 

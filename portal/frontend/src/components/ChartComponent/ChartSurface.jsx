@@ -70,26 +70,36 @@ export function ChartSurface({
       </button>
       <div ref={containerRef} className="h-full w-full" />
       {chartStateNotice?.message && chartStateNotice.state !== 'ready' ? (
-        <div className="pointer-events-none absolute inset-0 z-[5] grid place-items-center px-6">
-          <div className="relative max-w-xl rounded-2xl border border-white/8 bg-black/70 px-6 py-5 text-center text-sm text-slate-200 shadow-[0_26px_90px_rgba(0,0,0,0.7)] backdrop-blur">
-            <div className="pointer-events-none absolute inset-2 rounded-2xl bg-[radial-gradient(circle_at_center,_rgba(255,255,255,0.06),_transparent_55%)]" />
-            <p className="relative text-[11px] uppercase tracking-[0.32em] text-[color:var(--accent-text-soft)]">
-              {chartStateNotice.state === 'loading'
-                ? 'Loading'
-                : chartStateNotice.state === 'empty'
+        chartStateNotice.state === 'loading' ? (
+          <div className="pointer-events-none absolute right-6 top-[52px] z-[5]">
+            <div className="flex items-center gap-2.5 rounded-full border border-white/15 bg-black/70 px-4 py-2 text-xs font-medium text-slate-200 shadow-lg shadow-black/40 backdrop-blur-sm">
+              <svg className="h-3.5 w-3.5 animate-spin text-[color:var(--accent-text-bright,#a5b4fc)]" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" opacity="0.3" />
+                <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth="3" fill="none" />
+              </svg>
+              <span>{chartStateNotice.message}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="pointer-events-none absolute inset-0 z-[5] grid place-items-center px-6">
+            <div className="relative max-w-xl rounded-2xl border border-white/8 bg-black/70 px-6 py-5 text-center text-sm text-slate-200 shadow-[0_26px_90px_rgba(0,0,0,0.7)] backdrop-blur">
+              <div className="pointer-events-none absolute inset-2 rounded-2xl bg-[radial-gradient(circle_at_center,_rgba(255,255,255,0.06),_transparent_55%)]" />
+              <p className="relative text-[11px] uppercase tracking-[0.32em] text-[color:var(--accent-text-soft)]">
+                {chartStateNotice.state === 'empty'
                   ? 'No Data'
                   : chartStateNotice.state === 'error'
                     ? 'Issue'
                     : 'Status'}
-            </p>
-            <p className="relative mt-2 text-base font-semibold tracking-tight text-slate-50">
-              {chartStateNotice.message}
-            </p>
-            {windowSummary ? (
-              <p className="relative mt-2 text-xs text-slate-400">{windowSummary}</p>
-            ) : null}
+              </p>
+              <p className="relative mt-2 text-base font-semibold tracking-tight text-slate-50">
+                {chartStateNotice.message}
+              </p>
+              {windowSummary ? (
+                <p className="relative mt-2 text-xs text-slate-400">{windowSummary}</p>
+              ) : null}
+            </div>
           </div>
-        </div>
+        )
       ) : null}
 
       <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
