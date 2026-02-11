@@ -125,6 +125,47 @@ def _va_span_meta(metadata: Mapping[str, Any]) -> Optional[str]:
     return f"VAH {vah:.2f} / VAL {val:.2f}"
 
 
+def _signal_diagnostics(metadata: Mapping[str, Any], *, signal_time: Any) -> List[str]:
+    lines: List[str] = []
+    rule_id = metadata.get("rule_id")
+    level_type = metadata.get("level_type")
+    level_price = finite_float(metadata.get("level_price"))
+    trigger_close = finite_float(metadata.get("trigger_close"))
+    direction = metadata.get("breakout_direction") or metadata.get("direction")
+    value_area_id = metadata.get("value_area_id")
+    known_at = metadata.get("known_at")
+    formed_at = metadata.get("formed_at")
+    bar_index = metadata.get("bar_index")
+    streak_count = metadata.get("streak_count")
+    run_length = metadata.get("run_length")
+    confirm_bars = metadata.get("confirm_bars")
+    if rule_id:
+        lines.append(f"rule={rule_id}")
+    if level_type or level_price is not None:
+        lines.append(f"level={level_type or 'NA'}@{level_price:.2f}" if level_price is not None else f"level={level_type}")
+    if trigger_close is not None:
+        lines.append(f"trigger_close={trigger_close:.2f}")
+    if direction:
+        lines.append(f"direction={direction}")
+    if bar_index is not None:
+        lines.append(f"bar_index={bar_index}")
+    if streak_count is not None:
+        lines.append(f"streak={streak_count}")
+    if run_length is not None:
+        lines.append(f"run_len={run_length}")
+    if confirm_bars is not None:
+        lines.append(f"confirm_bars={confirm_bars}")
+    if value_area_id:
+        lines.append(f"profile={value_area_id}")
+    if known_at is not None:
+        lines.append(f"known_at={known_at}")
+    if formed_at is not None:
+        lines.append(f"formed_at={formed_at}")
+    if signal_time is not None:
+        lines.append(f"signal_time={signal_time}")
+    return lines
+
+
 def _apply_collision_avoidance(
     bubbles: List[Dict[str, Any]],
     time_threshold_seconds: int = 3600,  # 1 hour
@@ -253,9 +294,11 @@ def market_profile_overlay_adapter(
 
         breakout_index = metadata.get("bar_index") or metadata.get("trigger_index")
 
-        # Use the signal time directly instead of the origin time
+        # Use explicit signal/trigger timestamp. Do not map by runtime bar_index because
+        # signal source timeframe (e.g. 30m) can differ from chart timeframe (e.g. 1h),
+        # which would place bubbles on wrong candles.
         signal_time = metadata.get("time") or metadata.get("trigger_time") or sig.time
-        marker_time = _normalize_marker_time(signal_time, plot_df, breakout_index, "bubble")
+        marker_time = _normalize_marker_time(signal_time, plot_df, None, "bubble")
         log.debug(
             "Normalized bubble time | signal_time=%s | epoch=%s | idx=%s",
             signal_time,
@@ -323,6 +366,7 @@ def market_profile_overlay_adapter(
                     or metadata.get("direction")
                     or bubble_direction,
                     "bias": bias_label,
+                    "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
                     "subtype": "bubble",
                 }
             )
@@ -332,23 +376,9 @@ def market_profile_overlay_adapter(
         breakout_direction = str(metadata.get("breakout_direction", "")).lower()
         color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")
 
-        # Get trigger candle OHLC from plot_df using breakout_index
-        trigger_close = None
-        if breakout_index is not None and plot_df is not None:
-            try:
-                if isinstance(breakout_index, int) and 0 <= breakout_index < len(plot_df):
-                    row = plot_df.iloc[breakout_index]
-                    trigger_close = finite_float(row.get("close"))
-            except Exception as exc:
-                log.warning(
-                    "Failed to read trigger close from plot_df | idx=%s | error=%s",
-                    breakout_index,
-                    exc,
-                )
-
-        # Fallback to metadata or level price
-        if trigger_close is None:
-            trigger_close = finite_float(metadata.get("trigger_close"))
+        # Trust emitter-provided trigger close. Index remapping can be wrong when
+        # chart timeframe != signal source timeframe.
+        trigger_close = finite_float(metadata.get("trigger_close"))
         anchor_price = trigger_close or level_price
 
         # Position bubble at the close of the signal candle instead of level price
@@ -518,6 +548,7 @@ def market_profile_overlay_adapter(
             "textColor": "#ffffff",
             "direction": pointer_hint,
             "bias": bias_label,
+            "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
             "subtype": "bubble",
         }
         if marker_points:

@@ -5,6 +5,7 @@ Combines consecutive profiles with overlapping value areas.
 """
 
 import logging
+from time import perf_counter
 from typing import List
 
 from ..domain import Profile, ValueArea
@@ -77,8 +78,11 @@ def merge_profiles(
     label_str = " ".join(log_labels) + " " if log_labels else ""
 
     log_key = (bot_id, strategy_id, symbol)
-    log_signature = (threshold, min_sessions, len(profiles), profiles[-1].end)
+    # Do not include rolling profile end timestamps in the signature; that causes
+    # high-frequency INFO spam during per-bar signal evaluation.
+    log_signature = (threshold, min_sessions, len(profiles))
     should_log = _LAST_MERGE_SIGNATURE.get(log_key) != log_signature
+    merge_started_at = perf_counter()
     if should_log:
         _LAST_MERGE_SIGNATURE[log_key] = log_signature
         logger.info(
@@ -129,27 +133,13 @@ def merge_profiles(
             )
             merged.append(merged_profile)
 
-            if should_log:
-                logger.info(
-                    "event=market_profile_merge_group_complete %ssessions=%d start=%s end=%s val=%.{prec}f vah=%.{prec}f poc=%.{prec}f".replace(
-                        "{prec}",
-                        str(base.precision),
-                    ),
-                    label_str,
-                    count,
-                    start_ts,
-                    end_ts,
-                    merged_val,
-                    merged_vah,
-                    avg_poc,
-                )
-
         i = j
 
     if should_log:
         logger.info(
-            "event=market_profile_merge_complete %smerged_profiles=%d",
+            "event=market_profile_merge_complete %smerged_profiles=%d duration_ms=%.3f",
             label_str,
             len(merged),
+            (perf_counter() - merge_started_at) * 1000.0,
         )
     return merged

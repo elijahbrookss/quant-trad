@@ -9,7 +9,7 @@ import logging
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -634,6 +634,53 @@ class MarketProfileIndicator(ComputeIndicator):
             "bot_id": self.bot_id,
             "symbol": self.symbol,
             "strategy_id": self.strategy_id,
+        }
+
+    def build_runtime_signal_payload(
+        self,
+        *,
+        indicator_id: Optional[str] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        symbol: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return canonical runtime signal payload from already-computed profiles.
+
+        This allows signal execution to reuse the indicator instance/cache state
+        without replaying indicator computation per bar.
+        """
+        profile_params = dict(params or {})
+        if not profile_params:
+            profile_params = {
+                "use_merged_value_areas": bool(self.use_merged_value_areas),
+                "merge_threshold": float(self.merge_threshold),
+                "min_merge_sessions": int(self.min_merge_sessions),
+                "extend_value_area_to_chart_end": bool(self.extend_value_area_to_chart_end),
+                "days_back": int(self.days_back),
+            }
+        payload_profiles: List[Dict[str, Any]] = []
+        for profile in self.get_profiles():
+            start_ts = pd.Timestamp(profile.start)
+            end_ts = pd.Timestamp(profile.end)
+            payload_profiles.append(
+                {
+                    "start": int(start_ts.timestamp()),
+                    "end": int(end_ts.timestamp()),
+                    "VAH": float(profile.vah),
+                    "VAL": float(profile.val),
+                    "POC": float(profile.poc),
+                    "session_count": int(getattr(profile, "session_count", 1) or 1),
+                    "precision": int(getattr(profile, "precision", self.price_precision) or self.price_precision),
+                    "formed_at": int(end_ts.timestamp()),
+                    "known_at": int(end_ts.timestamp()),
+                }
+            )
+        return {
+            "_indicator_id": str(indicator_id or ""),
+            "symbol": str(symbol or self.symbol or ""),
+            "profiles": payload_profiles,
+            "profile_params": profile_params,
+            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
         }
 
     def _compute_daily_profiles(self) -> List[Profile]:

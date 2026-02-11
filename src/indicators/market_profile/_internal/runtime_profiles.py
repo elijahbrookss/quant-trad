@@ -2,12 +2,40 @@
 
 from __future__ import annotations
 
+import logging
+from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from indicators.market_profile.domain import Profile, ValueArea
 from indicators.market_profile._internal.merging import merge_profiles
+
+logger = logging.getLogger(__name__)
+_LAST_RESOLUTION_LOG_SIGNATURE: Dict[Tuple[str, str, str, str], Tuple[int, int]] = {}
+
+
+def _should_log_resolution(
+    *,
+    mode: str,
+    symbol: Optional[str],
+    merge_threshold: Any,
+    min_merge_sessions: Any,
+    known_profiles: int,
+    merged_profiles: int,
+) -> bool:
+    key = (
+        mode,
+        str(symbol or ""),
+        str(merge_threshold) if merge_threshold is not None else "",
+        str(min_merge_sessions) if min_merge_sessions is not None else "",
+    )
+    signature = (int(known_profiles), int(merged_profiles))
+    previous = _LAST_RESOLUTION_LOG_SIGNATURE.get(key)
+    if previous == signature:
+        return False
+    _LAST_RESOLUTION_LOG_SIGNATURE[key] = signature
+    return True
 
 
 def resolve_effective_profiles(
@@ -20,6 +48,7 @@ def resolve_effective_profiles(
     strategy_id: Optional[str] = None,
 ) -> Tuple[List[Profile], Dict[str, int]]:
     """Resolve known-at profiles and apply merge policy from profile params."""
+    started = perf_counter()
 
     known_profiles: List[Profile] = []
     for entry in profiles_payload:
@@ -28,7 +57,12 @@ def resolve_effective_profiles(
         profile = _profile_from_payload(entry)
         if profile is None:
             continue
-        if int(profile.end.timestamp()) > int(current_epoch):
+        known_epoch = _to_epoch_seconds(entry.get("known_at"))
+        if known_epoch is None:
+            raise RuntimeError(
+                "market_profile_profile_missing_known_at: every profile must include known_at for known-at gating"
+            )
+        if int(known_epoch) > int(current_epoch):
             continue
         known_profiles.append(profile)
 
@@ -37,10 +71,25 @@ def resolve_effective_profiles(
 
     use_merged = bool(profile_params.get("use_merged_value_areas"))
     if not use_merged:
-        return known_profiles, {
+        summary = {
             "known_profiles": len(known_profiles),
             "merged_profiles": len(known_profiles),
         }
+        if len(known_profiles) > 0 and _should_log_resolution(
+            mode="known_only",
+            symbol=symbol,
+            merge_threshold=None,
+            min_merge_sessions=None,
+            known_profiles=summary["known_profiles"],
+            merged_profiles=summary["merged_profiles"],
+        ):
+            logger.debug(
+                "event=runtime_profile_resolution mode=known_only known_profiles=%s merged_profiles=%s duration_ms=%.3f",
+                summary["known_profiles"],
+                summary["merged_profiles"],
+                (perf_counter() - started) * 1000.0,
+            )
+        return known_profiles, summary
 
     merge_threshold = profile_params.get("merge_threshold")
     min_merge_sessions = profile_params.get("min_merge_sessions")
@@ -56,10 +105,27 @@ def resolve_effective_profiles(
         symbol=symbol,
         strategy_id=strategy_id,
     )
-    return merged_profiles, {
+    summary = {
         "known_profiles": len(known_profiles),
         "merged_profiles": len(merged_profiles),
     }
+    if _should_log_resolution(
+        mode="merged",
+        symbol=symbol,
+        merge_threshold=merge_threshold,
+        min_merge_sessions=min_merge_sessions,
+        known_profiles=summary["known_profiles"],
+        merged_profiles=summary["merged_profiles"],
+    ):
+        logger.debug(
+            "event=runtime_profile_resolution mode=merged known_profiles=%s merged_profiles=%s merge_threshold=%s min_merge_sessions=%s duration_ms=%.3f",
+            summary["known_profiles"],
+            summary["merged_profiles"],
+            merge_threshold,
+            min_merge_sessions,
+            (perf_counter() - started) * 1000.0,
+        )
+    return merged_profiles, summary
 
 
 def _profile_from_payload(entry: Mapping[str, Any]) -> Optional[Profile]:

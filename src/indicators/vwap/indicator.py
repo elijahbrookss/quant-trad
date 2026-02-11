@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import pandas as pd
 from matplotlib import patches
@@ -220,3 +220,27 @@ class VWAPIndicator(ComputeIndicator):
         Convert legend_entries (label, color) tuples into matplotlib Patch handles.
         """
         return [patches.Patch(color=color, label=label) for label, color in sorted(legend_entries)]
+
+    def build_runtime_signal_payload(
+        self,
+        *,
+        indicator_id: Optional[str] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        symbol: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Provide canonical runtime payload for strict signal execution path."""
+        payload_params = dict(params or {})
+        if not payload_params:
+            payload_params = {
+                "stddev_window": int(self.stddev_window),
+                "stddev_multipliers": list(self.stddev_multipliers),
+                "reset_by": str(self.reset_by),
+            }
+        return {
+            "_indicator_id": str(indicator_id or ""),
+            "symbol": str(symbol or ""),
+            "signals": [],
+            "profile_params": payload_params,
+            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
+        }

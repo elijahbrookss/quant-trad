@@ -397,3 +397,29 @@ class PivotLevelIndicator(ComputeIndicator):
             "price_lines": price_lines,
             "markers": markers
         }
+
+    def build_runtime_signal_payload(
+        self,
+        *,
+        indicator_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Provide canonical runtime payload for strict signal execution path."""
+        payload_params = dict(params or {})
+        if not payload_params:
+            payload_params = {
+                "timeframe": str(self.timeframe),
+                "lookbacks": list(self.lookbacks),
+                "threshold": float(self.threshold),
+                "days_back": int(self.days_back),
+                "pivot_breakout_confirmation_bars": int(self.pivot_breakout_confirmation_bars),
+            }
+        return {
+            "_indicator_id": str(indicator_id or ""),
+            "symbol": str(symbol or ""),
+            "signals": [],
+            "profile_params": payload_params,
+            "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
+        }
