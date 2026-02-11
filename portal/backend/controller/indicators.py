@@ -5,25 +5,43 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from portal.backend.service.indicators.async_dispatch import (
+    AsyncJobFailedError,
+    AsyncJobNotFoundError,
+    AsyncJobTimeoutError,
+    enqueue_overlay_job,
+    enqueue_signal_job,
+    wait_for_job,
+)
 from portal.backend.service.indicators.indicator_service import (
     bulk_delete_instances,
     bulk_set_enabled,
     create_instance,
     delete_instance,
     duplicate_instance,
-    generate_signals_for_instance,
     get_instance_meta,
     get_type_details,
     list_indicator_strategies,
     list_instances_meta,
     list_types,
-    overlays_for_instance,
     set_instance_enabled,
     update_instance,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _raise_failed_job(error: str) -> None:
+    message = str(error or "async job failed")
+    lower = message.lower()
+    if "keyerror" in lower or "not found" in lower:
+        raise HTTPException(404, message)
+    if "lookuperror" in lower or "no overlays computed" in lower or "no candles" in lower:
+        raise HTTPException(404, message)
+    if "valueerror" in lower or "invalid" in lower:
+        raise HTTPException(400, message)
+    raise HTTPException(500, message)
 
 # ===== Schemas =====
 class IndicatorInstanceIn(BaseModel):
@@ -181,7 +199,7 @@ async def get_indicator_type(type_id: str):
 
 # ===== Overlays by UUID =====
 @router.post("/{inst_id}/overlays")
-def overlays(inst_id: str, req: OverlayRequest):
+async def overlays(inst_id: str, req: OverlayRequest):
     """
     Returns TradingView Lightweight-Charts overlays for a stored indicator UUID
     over the requested chart window. Does not accept indicator params.
@@ -198,7 +216,7 @@ def overlays(inst_id: str, req: OverlayRequest):
             req.start,
             req.end,
         )
-        payload = overlays_for_instance(
+        job_id = enqueue_overlay_job(
             inst_id=inst_id,
             start=req.start,
             end=req.end,
@@ -211,7 +229,14 @@ def overlays(inst_id: str, req: OverlayRequest):
             if req.visibility_epoch is not None
             else None,
         )
+        payload = await wait_for_job(job_id)
         return payload
+    except AsyncJobNotFoundError:
+        raise HTTPException(500, "Overlay job disappeared before completion")
+    except AsyncJobTimeoutError as e:
+        raise HTTPException(504, str(e))
+    except AsyncJobFailedError as e:
+        _raise_failed_job(str(e))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except LookupError as e:
@@ -237,7 +262,7 @@ async def signals(inst_id: str, req: SignalRequest):
         req.interval,
     )
     try:
-        return generate_signals_for_instance(
+        job_id = enqueue_signal_job(
             inst_id=inst_id,
             start=req.start,
             end=req.end,
@@ -247,6 +272,13 @@ async def signals(inst_id: str, req: SignalRequest):
             exchange=req.exchange,
             config=req.config,
         )
+        return await wait_for_job(job_id)
+    except AsyncJobNotFoundError:
+        raise HTTPException(500, "Signal job disappeared before completion")
+    except AsyncJobTimeoutError as e:
+        raise HTTPException(504, str(e))
+    except AsyncJobFailedError as e:
+        _raise_failed_job(str(e))
     except KeyError:
         raise HTTPException(404, "Indicator not found")
     except LookupError as e:

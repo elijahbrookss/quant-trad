@@ -619,3 +619,48 @@ class BotRunStepRecord(Base):
             "context": dict(self.context or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+class AsyncJobRecord(Base):
+    """Database-backed async job used by API and worker processes."""
+
+    __tablename__ = "portal_async_jobs"
+
+    id = Column(String(64), primary_key=True)
+    job_type = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="queued")
+    payload = Column(JSONB, nullable=False, default=dict)
+    result = Column(JSONB, nullable=True)
+    error = Column(String(2048), nullable=True)
+    partition_key = Column(String(255), nullable=True)
+    partition_hash = Column(Integer, nullable=False, default=0)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    lock_owner = Column(String(128), nullable=True)
+    locked_at = Column(DateTime, nullable=True)
+    available_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "job_type": self.job_type,
+            "status": self.status,
+            "payload": dict(self.payload or {}),
+            "result": dict(self.result or {}) if isinstance(self.result, dict) else self.result,
+            "error": self.error,
+            "partition_key": self.partition_key,
+            "partition_hash": int(self.partition_hash or 0),
+            "attempts": int(self.attempts or 0),
+            "max_attempts": int(self.max_attempts or 0),
+            "lock_owner": self.lock_owner,
+            "locked_at": (self.locked_at.isoformat() + "Z") if self.locked_at else None,
+            "available_at": (self.available_at.isoformat() + "Z") if self.available_at else None,
+            "started_at": (self.started_at.isoformat() + "Z") if self.started_at else None,
+            "finished_at": (self.finished_at.isoformat() + "Z") if self.finished_at else None,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
