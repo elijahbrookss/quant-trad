@@ -99,7 +99,18 @@ export async function runSignalGeneration({
     exchange: chartState.exchange,
   });
 
-  updateChart(chartId, { signalsLoading: true, signalsLoadingFor: indicator.id });
+  const loadingState = getChart(chartId) || {};
+  const prevLoadingMap = loadingState?.signalsLoadingByIndicator && typeof loadingState.signalsLoadingByIndicator === 'object'
+    ? loadingState.signalsLoadingByIndicator
+    : {};
+  const nextLoadingMap = { ...prevLoadingMap, [indicator.id]: true };
+  const nextActiveIds = Object.keys(nextLoadingMap);
+  updateChart(chartId, {
+    signalsLoading: nextActiveIds.length > 0,
+    signalsLoadingFor: nextActiveIds[0] || indicator.id,
+    signalsLoadingByIndicator: nextLoadingMap,
+    signalsLoadingCount: nextActiveIds.length,
+  });
 
   try {
     const confirmationBars = chartState?.signalsConfig?.pivotBreakoutConfirmationBars
@@ -169,6 +180,18 @@ export async function runSignalGeneration({
     setError?.(msg);
     return false;
   } finally {
-    updateChart(chartId, { signalsLoading: false, signalsLoadingFor: null });
+    const latest = getChart(chartId) || {};
+    const currentLoadingMap = latest?.signalsLoadingByIndicator && typeof latest.signalsLoadingByIndicator === 'object'
+      ? latest.signalsLoadingByIndicator
+      : {};
+    const reducedLoadingMap = { ...currentLoadingMap };
+    delete reducedLoadingMap[indicator.id];
+    const activeIds = Object.keys(reducedLoadingMap);
+    updateChart(chartId, {
+      signalsLoading: activeIds.length > 0,
+      signalsLoadingFor: activeIds[0] || null,
+      signalsLoadingByIndicator: activeIds.length ? reducedLoadingMap : null,
+      signalsLoadingCount: activeIds.length,
+    });
   }
 }
