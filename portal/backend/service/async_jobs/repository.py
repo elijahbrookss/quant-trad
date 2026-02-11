@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from sqlalchemy import select
@@ -46,6 +46,33 @@ def _partition_hash(partition_key: Optional[str]) -> int:
         return 0
     digest = hashlib.md5(partition_key.encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert nested payload values into JSON-serialisable structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if hasattr(value, "item"):
+        try:
+            # numpy/pandas scalars often unwrap to datetime/date objects;
+            # recurse so nested values are normalised too.
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
 
 
@@ -159,7 +186,7 @@ def complete_job(job_id: str, result: Mapping[str, Any]) -> None:
         if record is None:
             raise KeyError(f"async_job_not_found: {job_id}")
         record.status = STATUS_SUCCEEDED
-        record.result = dict(result or {})
+        record.result = _json_safe(dict(result or {}))
         record.error = None
         record.finished_at = now
         record.updated_at = now
