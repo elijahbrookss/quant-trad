@@ -11,7 +11,7 @@ from signals.base import BaseSignal
 from signals.engine.signal_generator import overlay_adapter
 from signals.overlays.schema import build_overlay
 from signals.overlays.registry import overlay_type
-from signals.overlays.transformers import overlay_transformer, normalize_overlay_epoch
+from signals.overlays.transformers import overlay_transformer
 from signals.rules.common.utils import (
     bias_label_from_direction,
     finite_float,
@@ -219,7 +219,7 @@ def market_profile_overlay_adapter(
     plot_df: pd.DataFrame,
     **_: Any,
 ) -> List[Dict[str, Any]]:
-    log.info(
+    log.debug(
         "🚀 OVERLAY ADAPTER CALLED | signals=%d | has_plot_df=%s | plot_df_len=%s",
         len(signals),
         plot_df is not None,
@@ -238,7 +238,7 @@ def market_profile_overlay_adapter(
 
     for sig in signals:
         metadata = sig.metadata or {}
-        log.info(
+        log.debug(
             "Processing signal | type=%s | source=%s | sig.time=%s | has_confirm_indices=%s | confirm_indices=%s | confirm_times=%s",
             sig.type,
             metadata.get("source"),
@@ -524,7 +524,7 @@ def market_profile_overlay_adapter(
             bubble["_markers"] = marker_points
 
         # Debug logging for bubble placement
-        log.info(
+        log.debug(
             "Created bubble | signal_time=%s (epoch=%s) | idx=%s | price=%.2f (close=%.2f, level=%.2f) | label=%s | markers=%d",
             signal_time,
             marker_time,
@@ -632,9 +632,6 @@ def market_profile_overlay_transformer(
         return trimmed
 
     params = payload.get("profile_params") or {}
-    use_merged = bool(params.get("use_merged_value_areas"))
-    merge_threshold = params.get("merge_threshold")
-    min_merge_sessions = params.get("min_merge_sessions")
     extend_to_end = bool(params.get("extend_value_area_to_chart_end"))
 
     # Extract metadata for logging context
@@ -642,18 +639,12 @@ def market_profile_overlay_transformer(
     symbol = overlay.get("symbol") or payload.get("symbol")
     strategy_id = overlay.get("strategy_id") or payload.get("strategy_id")
 
-    known_profiles = []
-    for entry in profiles:
-        if not isinstance(entry, Mapping):
-            continue
-        end_epoch = normalize_overlay_epoch(entry.get("end"))
-        if end_epoch is None or end_epoch > current_epoch:
-            continue
-        profile = _profile_from_payload(entry)
-        if profile is not None:
-            known_profiles.append(profile)
-
-    if not known_profiles:
+    try:
+        from indicators.market_profile._internal.runtime_profiles import resolve_effective_profiles
+    except Exception:
+        if "market_profile_runtime_profiles_import_failed" not in _WARNED_TRANSFORMERS:
+            log.error("market_profile_runtime_profiles_import_failed")
+            _WARNED_TRANSFORMERS.add("market_profile_runtime_profiles_import_failed")
         trimmed = dict(overlay)
         payload_copy = dict(payload)
         payload_copy["boxes"] = []
@@ -664,47 +655,20 @@ def market_profile_overlay_transformer(
         trimmed["payload"] = payload_copy
         return trimmed
 
-    if use_merged:
-        try:
-            from indicators.market_profile._internal.merging import merge_profiles
-        except Exception:
-            merge_profiles = None
-        if merge_profiles is None:
-            if "market_profile_merge_import_failed" not in _WARNED_TRANSFORMERS:
-                log.error("market_profile_merge_import_failed")
-                _WARNED_TRANSFORMERS.add("market_profile_merge_import_failed")
-            trimmed = dict(overlay)
-            payload_copy = dict(payload)
-            payload_copy["boxes"] = []
-            payload_copy["transform_summary"] = {
-                "known_profiles": len(known_profiles),
-                "merged_profiles": 0,
-            }
-            trimmed["payload"] = payload_copy
-            return trimmed
-        if merge_threshold is None or min_merge_sessions is None:
-            if "market_profile_merge_params_missing" not in _WARNED_TRANSFORMERS:
-                log.error("market_profile_merge_params_missing")
-                _WARNED_TRANSFORMERS.add("market_profile_merge_params_missing")
-            trimmed = dict(overlay)
-            payload_copy = dict(payload)
-            payload_copy["boxes"] = []
-            payload_copy["transform_summary"] = {
-                "known_profiles": len(known_profiles),
-                "merged_profiles": 0,
-            }
-            trimmed["payload"] = payload_copy
-            return trimmed
-        merged_profiles = merge_profiles(
-            known_profiles,
-            float(merge_threshold),
-            int(min_merge_sessions),
-            bot_id=bot_id,
-            symbol=symbol,
-            strategy_id=strategy_id,
-        )
-    else:
-        merged_profiles = known_profiles
+    merged_profiles, transform_summary = resolve_effective_profiles(
+        profiles_payload=profiles,
+        profile_params=params if isinstance(params, Mapping) else {},
+        current_epoch=int(current_epoch),
+        bot_id=str(bot_id) if bot_id is not None else None,
+        symbol=str(symbol) if symbol is not None else None,
+        strategy_id=str(strategy_id) if strategy_id is not None else None,
+    )
+
+    if not merged_profiles and bool((params or {}).get("use_merged_value_areas")):
+        if ("market_profile_merge_params_missing" not in _WARNED_TRANSFORMERS
+                and transform_summary.get("known_profiles", 0) > 0):
+            log.error("market_profile_merge_params_missing")
+            _WARNED_TRANSFORMERS.add("market_profile_merge_params_missing")
 
     boxes: List[Dict[str, Any]] = []
     for profile in merged_profiles:
@@ -729,36 +693,6 @@ def market_profile_overlay_transformer(
     trimmed = dict(overlay)
     payload_copy = dict(payload)
     payload_copy["boxes"] = boxes
-    payload_copy["transform_summary"] = {
-        "known_profiles": len(known_profiles),
-        "merged_profiles": len(merged_profiles),
-    }
+    payload_copy["transform_summary"] = transform_summary
     trimmed["payload"] = payload_copy
     return trimmed
-
-
-def _profile_from_payload(entry: Mapping[str, Any]) -> Optional["Profile"]:
-    try:
-        from indicators.market_profile.domain import Profile, ValueArea
-    except Exception:
-        return None
-    start_epoch = normalize_overlay_epoch(entry.get("start"))
-    end_epoch = normalize_overlay_epoch(entry.get("end"))
-    if start_epoch is None or end_epoch is None:
-        return None
-    try:
-        vah = float(entry.get("VAH"))
-        val = float(entry.get("VAL"))
-        poc = float(entry.get("POC"))
-    except (TypeError, ValueError):
-        return None
-    session_count = int(entry.get("session_count") or 1)
-    precision = int(entry.get("precision") or 4)
-    value_area = ValueArea(vah=vah, val=val, poc=poc)
-    return Profile(
-        start=pd.Timestamp(start_epoch, unit="s"),
-        end=pd.Timestamp(end_epoch, unit="s"),
-        value_area=value_area,
-        session_count=session_count,
-        precision=precision,
-    )

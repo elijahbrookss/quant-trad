@@ -91,7 +91,23 @@ class IndicatorOverlayBuilder:
         if cached_payload is not None:
             logger.info("event=overlay_cache_hit indicator_id=%s", inst_id)
             if isinstance(cached_payload, dict) and "type" in cached_payload and "payload" in cached_payload:
-                return cached_payload
+                try:
+                    cached_overlay = self._apply_walk_forward_visibility(
+                        cached_payload,
+                        end=end,
+                        overlay_options=effective_overlay_options,
+                        indicator_id=inst_id,
+                    )
+                    payload = cached_overlay.get("payload") if isinstance(cached_overlay, Mapping) else None
+                    if not isinstance(payload, Mapping):
+                        raise LookupError("No overlays computed for given window")
+                    self._validate_payload(dict(payload))
+                    return dict(cached_overlay)
+                except LookupError:
+                    logger.warning(
+                        "event=overlay_cache_stale indicator_id=%s message='cached overlay had no visible artifacts; recomputing'",
+                        inst_id,
+                    )
             logger.warning(
                 "event=overlay_cache_payload_invalid indicator_id=%s cache_key=%s message='cached payload missing type/payload'",
                 inst_id,
@@ -216,17 +232,47 @@ class IndicatorOverlayBuilder:
         visible_overlay = visible[0]
         payload = visible_overlay.get("payload") if isinstance(visible_overlay, Mapping) else None
         if isinstance(payload, Mapping):
+            visual_count = self._payload_visual_count(payload)
             logger.info(
-                "event=overlay_visibility_applied indicator_id=%s visibility_epoch=%s boxes=%s markers=%s price_lines=%s segments=%s polylines=%s",
+                "event=overlay_visibility_applied indicator_id=%s visibility_epoch=%s visuals=%s boxes=%s markers=%s price_lines=%s segments=%s polylines=%s",
                 indicator_id,
                 current_epoch,
+                visual_count,
                 len(payload.get("boxes", []) if isinstance(payload.get("boxes"), list) else []),
                 len(payload.get("markers", []) if isinstance(payload.get("markers"), list) else []),
                 len(payload.get("price_lines", []) if isinstance(payload.get("price_lines"), list) else []),
                 len(payload.get("segments", []) if isinstance(payload.get("segments"), list) else []),
                 len(payload.get("polylines", []) if isinstance(payload.get("polylines"), list) else []),
             )
+            if visual_count <= 0:
+                logger.warning(
+                    "event=overlay_visibility_empty indicator_id=%s visibility_epoch=%s payload_keys=%s",
+                    indicator_id,
+                    current_epoch,
+                    list(payload.keys()),
+                )
+                raise LookupError("No overlays computed for given window")
         return dict(visible_overlay)
+
+    @staticmethod
+    def _payload_visual_count(payload: Mapping[str, Any]) -> int:
+        count = 0
+        for key in (
+            "price_lines",
+            "markers",
+            "touchPoints",
+            "touch_points",
+            "boxes",
+            "segments",
+            "polylines",
+            "bubbles",
+            "regime_blocks",
+            "regime_points",
+        ):
+            values = payload.get(key)
+            if isinstance(values, list):
+                count += len(values)
+        return count
 
     def _load_entry(
         self,

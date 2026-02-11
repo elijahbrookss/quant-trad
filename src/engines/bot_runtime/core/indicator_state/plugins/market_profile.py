@@ -69,25 +69,94 @@ def market_profile_rule_payload(
 
     prior_close = float(previous_candle.close) if isinstance(previous_candle, Candle) else float(candle.open)
     now_close = float(candle.close)
+    profile_params = snapshot_payload.get("profile_params")
+    try:
+        from indicators.market_profile._internal.runtime_profiles import resolve_effective_profiles
+    except Exception:
+        return {"signals": emitted}
+    effective_profiles, _summary = resolve_effective_profiles(
+        profiles_payload=profiles,
+        profile_params=profile_params if isinstance(profile_params, Mapping) else {},
+        current_epoch=int(candle.time.timestamp()),
+    )
+    if not effective_profiles:
+        return {"signals": emitted}
 
-    for profile in profiles:
-        if not isinstance(profile, Mapping):
-            continue
-        vah = profile.get("VAH")
-        val = profile.get("VAL")
-        if vah is None or val is None:
-            continue
-        try:
-            vah_f = float(vah)
-            val_f = float(val)
-        except (TypeError, ValueError):
-            continue
+    emitted_signatures: set[tuple[Any, ...]] = set()
+    bar_epoch = int(candle.time.timestamp())
+    for profile in effective_profiles:
+        vah_f = float(profile.vah)
+        val_f = float(profile.val)
+        profile_key = _profile_identity(profile)
+
         if prior_close <= vah_f < now_close:
-            emitted.append({"time": candle.time, "type": "breakout", "direction": "long", "rule_id": "market_profile_breakout", "pattern_id": "market_profile_breakout", "level_type": "VAH", "level_price": vah_f, "value_area_id": profile.get("session")})
+            signature = (bar_epoch, profile_key, "VAH", "above", "market_profile_breakout")
+            if signature not in emitted_signatures:
+                emitted_signatures.add(signature)
+                emitted.append(
+                    _build_breakout_signal(
+                        candle=candle,
+                        profile=profile,
+                        level_type="VAH",
+                        level_price=vah_f,
+                        breakout_direction="above",
+                    )
+                )
         if prior_close >= val_f > now_close:
-            emitted.append({"time": candle.time, "type": "breakout", "direction": "short", "rule_id": "market_profile_breakout", "pattern_id": "market_profile_breakout", "level_type": "VAL", "level_price": val_f, "value_area_id": profile.get("session")})
+            signature = (bar_epoch, profile_key, "VAL", "below", "market_profile_breakout")
+            if signature not in emitted_signatures:
+                emitted_signatures.add(signature)
+                emitted.append(
+                    _build_breakout_signal(
+                        candle=candle,
+                        profile=profile,
+                        level_type="VAL",
+                        level_price=val_f,
+                        breakout_direction="below",
+                    )
+                )
 
     return {"signals": emitted}
+
+def _profile_identity(profile: Any) -> str:
+    start = profile.start.isoformat() if hasattr(profile.start, "isoformat") else str(profile.start)
+    end = profile.end.isoformat() if hasattr(profile.end, "isoformat") else str(profile.end)
+    return f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
+
+
+def _build_breakout_signal(
+    *,
+    candle: Candle,
+    profile: Any,
+    level_type: str,
+    level_price: float,
+    breakout_direction: str,
+) -> Dict[str, Any]:
+    direction = "long" if breakout_direction == "above" else "short"
+    pointer_direction = "up" if breakout_direction == "above" else "down"
+    return {
+        "time": candle.time,
+        "type": "breakout",
+        "source": "MarketProfile",
+        "rule_id": "market_profile_breakout",
+        "pattern_id": "market_profile_breakout",
+        "level_type": level_type,
+        "level_price": level_price,
+        "value_area_id": _profile_identity(profile),
+        "breakout_direction": breakout_direction,
+        "pointer_direction": pointer_direction,
+        "direction": direction,
+        "trigger_time": candle.time,
+        "trigger_close": float(candle.close),
+        "VAH": float(profile.vah),
+        "VAL": float(profile.val),
+        "POC": float(profile.poc),
+        "value_area_start": profile.start,
+        "value_area_end": profile.end,
+        "session_count": int(getattr(profile, "session_count", 1) or 1),
+        "known_at": profile.end,
+        "formed_at": profile.end,
+    }
 
 
 @indicator_plugin_manifest(

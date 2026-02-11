@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timezone
 from typing import Any, Dict, Mapping, Optional
 
@@ -38,6 +39,15 @@ def build_runtime_state_overlay(
     if plugin.overlay_projector is None:
         return None
 
+    started = time.perf_counter()
+    logger.info(
+        "event=overlay_runtime_state_projection_start indicator_id=%s indicator_type=%s symbol=%s timeframe=%s",
+        indicator_id,
+        indicator_type,
+        symbol,
+        timeframe,
+    )
+
     candles = _candles_from_frame(df)
     if not candles:
         raise LookupError("No overlays computed for given window")
@@ -59,6 +69,14 @@ def build_runtime_state_overlay(
             previous_projection_state={"seq": 0, "revision": -1, "entries": {}},
         )
     )
+    projection_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+    logger.info(
+        "event=overlay_runtime_state_projection_done indicator_id=%s indicator_type=%s candles=%s duration_ms=%.3f",
+        indicator_id,
+        indicator_type,
+        len(candles),
+        projection_ms,
+    )
     if not isinstance(entries, Mapping) or not entries:
         raise LookupError("No overlays computed for given window")
 
@@ -72,10 +90,15 @@ def build_runtime_state_overlay(
         normalized_count += 1
         payload = normalized[0].get("payload") if isinstance(normalized[0], Mapping) else None
         logger.info(
-            "event=overlay_runtime_state_projected indicator_id=%s indicator_type=%s entries=%s payload_keys=%s",
+            "event=overlay_runtime_state_projected indicator_id=%s indicator_type=%s entries=%s profiles=%s boxes=%s markers=%s segments=%s polylines=%s payload_keys=%s",
             indicator_id,
             indicator_type,
             len(entries),
+            len(payload.get("profiles", []) if isinstance(payload, Mapping) and isinstance(payload.get("profiles"), list) else []),
+            len(payload.get("boxes", []) if isinstance(payload, Mapping) and isinstance(payload.get("boxes"), list) else []),
+            len(payload.get("markers", []) if isinstance(payload, Mapping) and isinstance(payload.get("markers"), list) else []),
+            len(payload.get("segments", []) if isinstance(payload, Mapping) and isinstance(payload.get("segments"), list) else []),
+            len(payload.get("polylines", []) if isinstance(payload, Mapping) and isinstance(payload.get("polylines"), list) else []),
             list((payload or {}).keys()) if isinstance(payload, Mapping) else [],
         )
         return dict(normalized[0])
@@ -118,4 +141,3 @@ def _candles_from_frame(df: Any) -> list[Candle]:
             )
         )
     return candles
-

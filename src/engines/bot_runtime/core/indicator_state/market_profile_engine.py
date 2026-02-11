@@ -59,7 +59,7 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             "revision": 0,
             "symbol": symbol,
             "active_session": None,
-            "active_rows": [],
+            "active_histogram": {},
             "active_profile": None,
             "completed_profiles": [],
             "known_at": None,
@@ -78,14 +78,24 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             state["active_session"] = session
         elif active_session != session:
             self._finalize_session(state)
-            state["active_rows"] = []
+            state["active_histogram"] = {}
             state["active_profile"] = None
             state["active_session"] = session
 
-        state.setdefault("active_rows", []).append({"low": float(bar.low), "high": float(bar.high)})
+        histogram = state.setdefault("active_histogram", {})
+        if not isinstance(histogram, MutableMapping):
+            histogram = {}
+            state["active_histogram"] = histogram
+        _apply_row_to_tpo_histogram(
+            histogram=histogram,
+            low=float(bar.low),
+            high=float(bar.high),
+            bin_size=self._param_float("bin_size", 0.25),
+            price_precision=self._param_int("price_precision", 4),
+        )
         state["active_profile"] = self._build_session_profile(
             session=str(state.get("active_session") or session),
-            rows=list(state.get("active_rows") or []),
+            histogram=histogram,
             formed_at=bar_time,
         )
 
@@ -127,15 +137,10 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         self,
         *,
         session: str,
-        rows: List[Mapping[str, float]],
+        histogram: Mapping[float, int],
         formed_at: datetime,
     ) -> Dict[str, Any]:
-        tpo_histogram = _build_tpo_histogram(
-            rows=rows,
-            bin_size=self._param_float("bin_size", 0.25),
-            price_precision=self._param_int("price_precision", 4),
-        )
-        value_area = _extract_value_area(tpo_histogram, self._param_int("price_precision", 4))
+        value_area = _extract_value_area(histogram, self._param_int("price_precision", 4))
         if value_area is None:
             raise RuntimeError("indicator_state_finalize_failed: market_profile value area empty")
         return {
@@ -151,15 +156,15 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         }
 
     def _finalize_session(self, state: MutableMapping[str, Any]) -> None:
-        rows = list(state.get("active_rows") or [])
-        if not rows:
+        histogram = state.get("active_histogram")
+        if not isinstance(histogram, Mapping) or not histogram:
             return
 
         session = str(state.get("active_session") or "")
         if not session:
             raise RuntimeError("indicator_state_finalize_failed: market_profile active_session missing")
         formed_at = datetime.fromisoformat(f"{session}T23:59:59+00:00")
-        profile = self._build_session_profile(session=session, rows=rows, formed_at=formed_at)
+        profile = self._build_session_profile(session=session, histogram=histogram, formed_at=formed_at)
         profile["status"] = "completed"
         profile["end"] = formed_at
 
@@ -167,22 +172,24 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         completed.append(profile)
 
 
-def _build_tpo_histogram(*, rows: List[Mapping[str, float]], bin_size: float, price_precision: int) -> Dict[float, int]:
-    histogram: Dict[float, int] = {}
-    for row in rows:
-        low = float(row["low"])
-        high = float(row["high"])
-        if not math.isfinite(low) or not math.isfinite(high):
-            continue
-        if high < low:
-            low, high = high, low
-        span = max(high - low, 0.0)
-        steps = int(math.floor(span / bin_size + 1e-9))
-        for idx in range(steps + 1):
-            price = low + idx * bin_size
-            bucket = round(round(price / bin_size) * bin_size, price_precision)
-            histogram[bucket] = histogram.get(bucket, 0) + 1
-    return histogram
+def _apply_row_to_tpo_histogram(
+    *,
+    histogram: MutableMapping[float, int],
+    low: float,
+    high: float,
+    bin_size: float,
+    price_precision: int,
+) -> None:
+    if not math.isfinite(low) or not math.isfinite(high):
+        return
+    if high < low:
+        low, high = high, low
+    span = max(high - low, 0.0)
+    steps = int(math.floor(span / bin_size + 1e-9))
+    for idx in range(steps + 1):
+        price = low + idx * bin_size
+        bucket = round(round(price / bin_size) * bin_size, price_precision)
+        histogram[bucket] = int(histogram.get(bucket, 0)) + 1
 
 
 def _extract_value_area(histogram: Mapping[float, int], price_precision: int) -> Optional[Dict[str, float]]:
