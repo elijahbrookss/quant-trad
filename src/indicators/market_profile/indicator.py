@@ -122,6 +122,8 @@ class MarketProfileIndicator(ComputeIndicator):
 
         # Compute profiles on initialization
         self._profiles = self._compute_daily_profiles()
+        # Cache normalized profile timelines keyed by chart timeframe + merge policy.
+        self._normalized_runtime_profiles_cache: Dict[tuple[str, bool, float, int], List[Profile]] = {}
 
     @classmethod
     def from_context(
@@ -349,6 +351,7 @@ class MarketProfileIndicator(ComputeIndicator):
             instance.strategy_id = kwargs.get("strategy_id")
             instance.df = empty_df
             instance._profiles = sorted(cached_profiles_dict.values(), key=lambda p: p.start)
+            instance._normalized_runtime_profiles_cache = {}
 
             return instance
 
@@ -643,6 +646,7 @@ class MarketProfileIndicator(ComputeIndicator):
         params: Optional[Mapping[str, Any]] = None,
         symbol: Optional[str] = None,
         color: Optional[str] = None,
+        chart_timeframe: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return canonical runtime signal payload from already-computed profiles.
 
@@ -650,16 +654,26 @@ class MarketProfileIndicator(ComputeIndicator):
         without replaying indicator computation per bar.
         """
         profile_params = dict(params or {})
-        if not profile_params:
-            profile_params = {
-                "use_merged_value_areas": bool(self.use_merged_value_areas),
-                "merge_threshold": float(self.merge_threshold),
-                "min_merge_sessions": int(self.min_merge_sessions),
-                "extend_value_area_to_chart_end": bool(self.extend_value_area_to_chart_end),
-                "days_back": int(self.days_back),
-            }
+        profile_params.setdefault("use_merged_value_areas", bool(self.use_merged_value_areas))
+        profile_params.setdefault("merge_threshold", float(self.merge_threshold))
+        profile_params.setdefault("min_merge_sessions", int(self.min_merge_sessions))
+        profile_params.setdefault(
+            "extend_value_area_to_chart_end", bool(self.extend_value_area_to_chart_end)
+        )
+        profile_params.setdefault("days_back", int(self.days_back))
+        use_merged = bool(profile_params.get("use_merged_value_areas", self.use_merged_value_areas))
+        merge_threshold = float(profile_params.get("merge_threshold", self.merge_threshold))
+        min_merge_sessions = int(profile_params.get("min_merge_sessions", self.min_merge_sessions))
+        resolved_chart_timeframe = str(chart_timeframe or "").strip().lower() or "30m"
+        runtime_profiles = self._runtime_profiles_for_chart_timeframe(
+            chart_timeframe=resolved_chart_timeframe,
+            use_merged=use_merged,
+            merge_threshold=merge_threshold,
+            min_merge_sessions=min_merge_sessions,
+        )
+        profile_params["profiles_premerged"] = bool(use_merged)
         payload_profiles: List[Dict[str, Any]] = []
-        for profile in self.get_profiles():
+        for profile in runtime_profiles:
             start_ts = pd.Timestamp(profile.start)
             end_ts = pd.Timestamp(profile.end)
             payload_profiles.append(
@@ -680,8 +694,99 @@ class MarketProfileIndicator(ComputeIndicator):
             "symbol": str(symbol or self.symbol or ""),
             "profiles": payload_profiles,
             "profile_params": profile_params,
+            "profile_chart_timeframe": resolved_chart_timeframe,
+            "profile_source_timeframe": "30m",
+            "profile_normalization": "snap_to_chart_timeframe",
             "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
         }
+
+    def _runtime_profiles_for_chart_timeframe(
+        self,
+        *,
+        chart_timeframe: str,
+        use_merged: bool,
+        merge_threshold: float,
+        min_merge_sessions: int,
+    ) -> List[Profile]:
+        key = (
+            str(chart_timeframe or "").strip().lower() or "30m",
+            bool(use_merged),
+            float(merge_threshold),
+            int(min_merge_sessions),
+        )
+        cached = self._normalized_runtime_profiles_cache.get(key)
+        if cached is not None:
+            logger.debug(
+                "Market Profile runtime profile cache hit | symbol=%s chart_timeframe=%s use_merged=%s profiles=%d",
+                self.symbol,
+                key[0],
+                key[1],
+                len(cached),
+            )
+            return cached
+
+        base_profiles = (
+            self.get_merged_profiles(merge_threshold, min_merge_sessions)
+            if use_merged
+            else self.get_profiles()
+        )
+        normalized = self._normalize_profiles_to_chart_timeframe(base_profiles, key[0])
+        self._normalized_runtime_profiles_cache[key] = normalized
+        logger.info(
+            "Market Profile runtime profile cache miss | symbol=%s chart_timeframe=%s use_merged=%s source_profiles=%d normalized_profiles=%d",
+            self.symbol,
+            key[0],
+            key[1],
+            len(base_profiles),
+            len(normalized),
+        )
+        return normalized
+
+    def _normalize_profiles_to_chart_timeframe(
+        self,
+        profiles: List[Profile],
+        chart_timeframe: str,
+    ) -> List[Profile]:
+        tf = str(chart_timeframe or "").strip().lower() or "30m"
+        if tf in {"30m", "30min"}:
+            return list(profiles)
+        normalized: List[Profile] = []
+        for profile in profiles:
+            start = pd.Timestamp(profile.start)
+            end = pd.Timestamp(profile.end)
+            if start.tzinfo is None:
+                start = start.tz_localize("UTC")
+            else:
+                start = start.tz_convert("UTC")
+            if end.tzinfo is None:
+                end = end.tz_localize("UTC")
+            else:
+                end = end.tz_convert("UTC")
+            try:
+                norm_start = start.floor(tf)
+            except Exception:
+                norm_start = start
+            try:
+                norm_end = end.ceil(tf)
+            except Exception:
+                norm_end = end
+            if norm_end < norm_start:
+                norm_end = norm_start
+            normalized.append(
+                Profile(
+                    start=norm_start,
+                    end=norm_end,
+                    value_area=ValueArea(
+                        vah=float(profile.vah),
+                        val=float(profile.val),
+                        poc=float(profile.poc),
+                    ),
+                    session_count=int(getattr(profile, "session_count", 1) or 1),
+                    tpo_histogram=getattr(profile, "tpo_histogram", None),
+                    precision=int(getattr(profile, "precision", self.price_precision) or self.price_precision),
+                )
+            )
+        return normalized
 
     def _compute_daily_profiles(self) -> List[Profile]:
         """

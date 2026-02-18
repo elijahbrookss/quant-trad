@@ -69,6 +69,27 @@ def resolve_effective_profiles(
     if not known_profiles:
         return [], {"known_profiles": 0, "merged_profiles": 0}
 
+    if bool(profile_params.get("profiles_premerged")):
+        summary = {
+            "known_profiles": len(known_profiles),
+            "merged_profiles": len(known_profiles),
+        }
+        if len(known_profiles) > 0 and _should_log_resolution(
+            mode="premerged",
+            symbol=symbol,
+            merge_threshold=profile_params.get("merge_threshold"),
+            min_merge_sessions=profile_params.get("min_merge_sessions"),
+            known_profiles=summary["known_profiles"],
+            merged_profiles=summary["merged_profiles"],
+        ):
+            logger.debug(
+                "event=runtime_profile_resolution mode=premerged known_profiles=%s merged_profiles=%s duration_ms=%.3f",
+                summary["known_profiles"],
+                summary["merged_profiles"],
+                (perf_counter() - started) * 1000.0,
+            )
+        return known_profiles, summary
+
     use_merged = bool(profile_params.get("use_merged_value_areas"))
     if not use_merged:
         summary = {
@@ -126,6 +147,12 @@ def resolve_effective_profiles(
             (perf_counter() - started) * 1000.0,
         )
     return merged_profiles, summary
+
+
+def profile_identity(profile: Profile) -> str:
+    start = profile.start.isoformat() if hasattr(profile.start, "isoformat") else str(profile.start)
+    end = profile.end.isoformat() if hasattr(profile.end, "isoformat") else str(profile.end)
+    return f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
 
 
 def _profile_from_payload(entry: Mapping[str, Any]) -> Optional[Profile]:

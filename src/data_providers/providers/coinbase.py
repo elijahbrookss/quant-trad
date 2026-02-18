@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -145,74 +144,34 @@ class CoinbaseProvider(BaseDataProvider):
             timeout=timeout,
         )
 
-        if not self._api_key or not self._api_secret:
-            logger.warning(
-                "coinbase_credentials_missing | Coinbase API credentials not fully configured. "
-                "Set COINBASE_API_KEY and COINBASE_API_SECRET (or COINBASE_API_SECRET_FILE)."
-            )
-
         self._last_product_payload: Dict[str, Any] = {}
 
     # Credentials / helpers -------------------------------------------------
-    def _resolve_credentials(self) -> Tuple[Optional[str], Optional[str]]:
-        # First, attempt to pull credentials from the managed store.
+    def _resolve_credentials(self) -> Tuple[str, str]:
+        # DB-backed provider credentials are the only supported path.
         try:
             stored = load_credentials("COINBASE", "COINBASE_DIRECT")
         except Exception as exc:
-            logger.warning("coinbase_credentials_store_error | error=%s", exc)
-            stored = None
+            logger.error("coinbase_credentials_store_error | error=%s", exc)
+            raise RuntimeError(
+                "Coinbase credentials unavailable from provider credential store. "
+                "Fix PROVIDER_CREDENTIAL_KEY and re-save COINBASE credentials."
+            ) from exc
 
-        if stored:
-            api_key = stored.get("COINBASE_API_KEY")
-            api_secret = stored.get("COINBASE_API_SECRET")
-            if api_key and api_secret:
-                return api_key, api_secret
+        if not stored:
+            raise RuntimeError(
+                "Coinbase credentials missing from provider credential store for COINBASE/COINBASE_DIRECT. "
+                "Save credentials via provider settings before starting Coinbase data operations."
+            )
 
-        # Fallback to legacy environment variables or secret file if present.
-        api_key = os.getenv("COINBASE_API_KEY")
-        api_secret = None
-        secret_source = None
-
-        secret_file = os.getenv("COINBASE_API_SECRET_FILE")
-        if secret_file:
-            secret_source = "file"
-            api_secret = self._load_secret_from_file(secret_file)
-            if api_secret is None:
-                logger.warning(
-                    "coinbase_secret_file_missing | path=%s",
-                    os.path.abspath(os.path.expanduser(secret_file)),
-                )
-                logger.debug(
-                    "coinbase_credentials_resolve | api_key_present=%s | api_secret_present=%s | secret_source=%s",
-                    bool(api_key),
-                    False,
-                    secret_source,
-                )
-                return api_key, None
-        else:
-            secret_source = "env_var"
-            api_secret = os.getenv("COINBASE_API_SECRET")
-
-        if api_secret and "\\n" in api_secret:
-            api_secret = api_secret.replace("\\n", "\n")
-
-        logger.debug(
-            "coinbase_credentials_resolve | api_key_present=%s | api_secret_present=%s | secret_source=%s",
-            bool(api_key),
-            bool(api_secret),
-            secret_source,
-        )
-
+        api_key = str(stored.get("COINBASE_API_KEY") or "").strip()
+        api_secret = str(stored.get("COINBASE_API_SECRET") or "").strip()
+        if not api_key or not api_secret:
+            raise RuntimeError(
+                "Coinbase credentials incomplete in provider credential store; "
+                "both COINBASE_API_KEY and COINBASE_API_SECRET are required."
+            )
         return api_key, api_secret
-
-    @staticmethod
-    def _load_secret_from_file(file_path: str) -> Optional[str]:
-        try:
-            with open(file_path, "r", encoding="utf-8") as handle:
-                return handle.read().strip()
-        except OSError as exc:
-            logger.error("coinbase_secret_file_read_failed | path=%s | error=%s", file_path, exc)
-            return None
 
     @staticmethod
     def _response_to_dict(response: Any) -> Dict[str, Any]:

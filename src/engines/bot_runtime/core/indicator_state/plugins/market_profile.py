@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import logging
 import threading
+import hashlib
 from bisect import bisect_right
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, MutableMapping
 
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.domain import timeframe_to_seconds
+from signals.contract import (
+    assert_no_execution_fields,
+    assert_signal_contract,
+    assert_signal_time_is_closed_bar,
+)
 
 from ..contracts import OverlayProjectionInput
 from ..market_profile_engine import MarketProfileEngineConfig, MarketProfileStateEngine
@@ -21,6 +27,15 @@ _PROFILE_CACHE_LOCK = threading.Lock()
 _PROFILE_KNOWN_EPOCHS_CACHE: Dict[tuple[Any, ...], List[int]] = {}
 _PROFILE_RUNTIME_VIEW_CACHE: Dict[tuple[Any, ...], List[Dict[str, Any]]] = {}
 _MP_RUNTIME_STATE: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+
+
+def _bias_from_direction(direction: str) -> str:
+    normalized = str(direction or "").strip().lower()
+    if normalized in {"long", "up", "above", "bull", "bullish", "buy"}:
+        return "bullish"
+    if normalized in {"short", "down", "below", "bear", "bearish", "sell"}:
+        return "bearish"
+    return "neutral"
 
 
 def market_profile_overlay_entries(projection_input: OverlayProjectionInput) -> Mapping[str, Mapping[str, Any]]:
@@ -79,8 +94,10 @@ def market_profile_rule_payload(
     if not profiles:
         return {"signals": emitted}
 
+    prior_open = float(previous_candle.open) if isinstance(previous_candle, Candle) else float(candle.open)
     prior_close = float(previous_candle.close) if isinstance(previous_candle, Candle) else float(candle.open)
     now_close = float(candle.close)
+    now_open = float(candle.open)
     profile_params = snapshot_payload.get("profile_params")
     try:
         from indicators.market_profile._internal.runtime_profiles import resolve_effective_profiles
@@ -92,14 +109,13 @@ def market_profile_rule_payload(
     indicator_id = str(snapshot_payload.get("_indicator_id") or "")
     symbol = str(snapshot_payload.get("symbol") or "")
     runtime_scope = str(snapshot_payload.get("_runtime_scope") or "")
-    source_timeframe = str(snapshot_payload.get("source_timeframe") or "").strip().lower()
     chart_timeframe = str(snapshot_payload.get("chart_timeframe") or "").strip().lower()
-    source_timeframe_seconds = _safe_int(snapshot_payload.get("source_timeframe_seconds"))
-    if source_timeframe_seconds is None and source_timeframe:
-        source_timeframe_seconds = timeframe_to_seconds(source_timeframe)
-    if source_timeframe_seconds is None or source_timeframe_seconds <= 0:
+    chart_timeframe_seconds = _safe_int(snapshot_payload.get("chart_timeframe_seconds"))
+    if chart_timeframe_seconds is None and chart_timeframe:
+        chart_timeframe_seconds = timeframe_to_seconds(chart_timeframe)
+    if chart_timeframe_seconds is None or chart_timeframe_seconds <= 0:
         raise RuntimeError(
-            "market_profile_runtime_invalid_source_timeframe_seconds: source timeframe seconds required for lockout semantics"
+            "market_profile_runtime_invalid_chart_timeframe_seconds: chart timeframe seconds required for lockout semantics"
         )
     merge_threshold = _safe_float(params_map.get("merge_threshold"))
     min_merge_sessions = _safe_int(params_map.get("min_merge_sessions"))
@@ -162,7 +178,36 @@ def market_profile_rule_payload(
             with _PROFILE_CACHE_LOCK:
                 _PROFILE_RUNTIME_VIEW_CACHE[cache_key] = runtime_views
         cache_hit = True
+    runtime_key = (indicator_id, symbol, runtime_scope)
+    runtime_state = _get_runtime_state(runtime_key=runtime_key, current_epoch=current_epoch)
+    bar_epoch = int(candle.time.timestamp())
+    v3_outcome = _market_profile_breakout_v3_payload(
+        snapshot_payload=snapshot_payload,
+        candle=candle,
+        previous_candle=previous_candle,
+        runtime_state=runtime_state,
+        runtime_views=runtime_views,
+        cache_hit=cache_hit,
+        known_count=known_count,
+        indicator_id=indicator_id,
+        symbol=symbol,
+        runtime_scope=runtime_scope,
+        bar_epoch=bar_epoch,
+        params_map=params_map,
+        chart_timeframe=chart_timeframe,
+        chart_timeframe_seconds=chart_timeframe_seconds,
+        bar_index=int(runtime_state.get("bar_index") or 0),
+    )
+    emitted.extend(list(v3_outcome.get("signals") or []))
+    runtime_state["bar_index"] = int(runtime_state.get("bar_index") or 0) + 1
+    runtime_state["last_epoch"] = current_epoch
+    return {
+        "signals": emitted,
+        "diagnostics": dict(v3_outcome.get("diagnostics") or {}),
+    }
+
     if not effective_profiles:
+        v3_diag = dict(v3_outcome.get("diagnostics") or {})
         return {
             "signals": emitted,
             "diagnostics": {
@@ -176,24 +221,13 @@ def market_profile_rule_payload(
                 "profiles_considered": 0,
                 "candidate_count": 0,
                 "candidate_chosen": 0,
-                "source_timeframe_seconds": int(source_timeframe_seconds),
+                "source_timeframe_seconds": int(chart_timeframe_seconds),
                 "timeframe_mismatch_warning": 0,
+                "v3_candidate_count": int(v3_diag.get("candidate_count") or 0),
+                "v3_pending_count": int(v3_diag.get("pending_count") or 0),
+                "v3_emitted": int(len(v3_outcome.get("signals") or [])),
             },
         }
-
-    runtime_key = (indicator_id, symbol, runtime_scope)
-    runtime_state = _get_runtime_state(runtime_key=runtime_key, current_epoch=current_epoch)
-    mismatch_timeframes = bool(source_timeframe and chart_timeframe and source_timeframe != chart_timeframe)
-    if mismatch_timeframes and not bool(runtime_state.get("chart_timeframe_mismatch_warned")):
-        runtime_state["chart_timeframe_mismatch_warned"] = True
-        log.warning(
-            "event=market_profile_signal_timeframe_mismatch indicator_id=%s symbol=%s chart_timeframe=%s source_timeframe=%s source_timeframe_seconds=%s",
-            indicator_id,
-            symbol,
-            chart_timeframe,
-            source_timeframe,
-            source_timeframe_seconds,
-        )
 
     bar_index = int(runtime_state.get("bar_index") or 0)
     emitted_signatures: set[tuple[Any, ...]] = set()
@@ -215,7 +249,7 @@ def market_profile_rule_payload(
             "market_profile_breakout_lockout_bars",
             "lockout_bars",
         ),
-        default=3,
+        default=1,
         min_value=0,
     )
     retest_min_bars = _resolve_int(
@@ -243,11 +277,10 @@ def market_profile_rule_payload(
         default=0.35,
         min_value=0.0,
     )
-    lockout_seconds = int(lockout_bars) * int(source_timeframe_seconds)
+    lockout_seconds = int(lockout_bars) * int(chart_timeframe_seconds)
 
     active_breakouts: List[Dict[str, Any]] = runtime_state.setdefault("active_breakouts", [])
     profile_states: MutableMapping[str, Dict[str, Any]] = runtime_state.setdefault("profile_states", {})
-    bar_epoch = int(candle.time.timestamp())
     breakout_emitted = 0
     retest_emitted = 0
 
@@ -283,13 +316,24 @@ def market_profile_rule_payload(
         vah_f = float(runtime_view["vah"])
         val_f = float(runtime_view["val"])
         profile_key = str(runtime_view["profile_key"])
+        prior_body_low = min(prior_open, prior_close)
+        prior_body_high = max(prior_open, prior_close)
+        now_body_low = min(now_open, now_close)
+        now_body_high = max(now_open, now_close)
+        now_fully_above_vah = _body_fully_above(now_body_low=now_body_low, level=vah_f)
+        now_fully_below_val = _body_fully_below(now_body_high=now_body_high, level=val_f)
+        now_fully_inside_va = _body_fully_inside(
+            now_body_low=now_body_low,
+            now_body_high=now_body_high,
+            val=val_f,
+            vah=vah_f,
+        )
         profile_state = profile_states.setdefault(
             profile_key,
             {
                 "streak_above_vah": 0,
                 "streak_below_val": 0,
-                "crossed_up_active": False,
-                "crossed_down_active": False,
+                "streak_inside_va": 0,
                 "last_breakout_above_idx": -10_000_000,
                 "last_breakout_below_idx": -10_000_000,
                 "last_breakout_above_time": None,
@@ -299,29 +343,21 @@ def market_profile_rule_payload(
 
         prev_streak_above = int(profile_state.get("streak_above_vah") or 0)
         prev_streak_below = int(profile_state.get("streak_below_val") or 0)
-        if now_close > vah_f:
-            if prev_streak_above == 0:
-                profile_state["crossed_up_active"] = _crossed_up(
-                    prior_close=prior_close,
-                    current_close=now_close,
-                    level=vah_f,
-                )
+        if now_fully_above_vah:
             profile_state["streak_above_vah"] = prev_streak_above + 1
         else:
             profile_state["streak_above_vah"] = 0
-            profile_state["crossed_up_active"] = False
 
-        if now_close < val_f:
-            if prev_streak_below == 0:
-                profile_state["crossed_down_active"] = _crossed_dn(
-                    prior_close=prior_close,
-                    current_close=now_close,
-                    level=val_f,
-                )
+        if now_fully_below_val:
             profile_state["streak_below_val"] = prev_streak_below + 1
         else:
             profile_state["streak_below_val"] = 0
-            profile_state["crossed_down_active"] = False
+
+        prev_inside_streak = int(profile_state.get("streak_inside_va") or 0)
+        if now_fully_inside_va:
+            profile_state["streak_inside_va"] = prev_inside_streak + 1
+        else:
+            profile_state["streak_inside_va"] = 0
 
         if profile_key != chosen_profile_key:
             continue
@@ -331,18 +367,18 @@ def market_profile_rule_payload(
         above_run_len = above_streak
         below_run_len = below_streak
 
+        above_crossed_vah_ready = above_streak == confirm_bars
         breakout_above_ready = (
-            bool(profile_state.get("crossed_up_active"))
-            and above_streak == confirm_bars
+            above_crossed_vah_ready
             and _lockout_elapsed(
                 last_time_epoch=_safe_int(profile_state.get("last_breakout_above_time")),
                 current_epoch=bar_epoch,
                 lockout_seconds=lockout_seconds,
             )
         )
+        below_crossed_val_ready = below_streak == confirm_bars
         breakout_below_ready = (
-            bool(profile_state.get("crossed_down_active"))
-            and below_streak == confirm_bars
+            below_crossed_val_ready
             and _lockout_elapsed(
                 last_time_epoch=_safe_int(profile_state.get("last_breakout_below_time")),
                 current_epoch=bar_epoch,
@@ -356,16 +392,20 @@ def market_profile_rule_payload(
                 emitted_signatures.add(signature)
                 profile_state["last_breakout_above_idx"] = bar_index
                 profile_state["last_breakout_above_time"] = bar_epoch
+                above_level_type = "VAH"
+                above_level_price = vah_f
+                above_variant = "crossed_vah_to_outside"
                 breakout_signal = _build_breakout_signal(
                     candle=candle,
                     bar_index=bar_index,
                     profile=profile,
-                    level_type="VAH",
-                    level_price=vah_f,
+                    level_type=above_level_type,
+                    level_price=above_level_price,
                     breakout_direction="above",
+                    breakout_variant=above_variant,
                     confirm_bars=confirm_bars,
                     lockout_bars=lockout_bars,
-                    source_timeframe_seconds=int(source_timeframe_seconds),
+                    source_timeframe_seconds=int(chart_timeframe_seconds),
                     streak_count=above_streak,
                     run_length=above_run_len,
                     chosen_profile_key=chosen_profile_key,
@@ -376,13 +416,19 @@ def market_profile_rule_payload(
                 emitted.append(breakout_signal)
                 breakout_emitted += 1
                 log.debug(
-                    "event=mp_breakout_emitted indicator_id=%s symbol=%s profile_key=%s side=above level_type=VAH level_price=%.6f prior_close=%.6f close=%.6f streak=%s run_len=%s confirm_bars=%s lockout_bars=%s bar_time=%s",
+                    "event=mp_breakout_emitted indicator_id=%s symbol=%s profile_key=%s side=above breakout_variant=%s level_type=%s level_price=%.6f prior_close=%.6f close=%.6f prior_body_low=%.6f prior_body_high=%.6f body_low=%.6f body_high=%.6f streak=%s run_len=%s confirm_bars=%s lockout_bars=%s bar_time=%s",
                     indicator_id,
                     symbol,
                     profile_key,
-                    vah_f,
+                    above_variant,
+                    above_level_type,
+                    above_level_price,
                     prior_close,
                     now_close,
+                    prior_body_low,
+                    prior_body_high,
+                    now_body_low,
+                    now_body_high,
                     above_streak,
                     above_run_len,
                     confirm_bars,
@@ -394,14 +440,14 @@ def market_profile_rule_payload(
                         "breakout_id": str(breakout_signal.get("breakout_id") or ""),
                         "value_area_id": str(breakout_signal.get("value_area_id") or ""),
                         "breakout_direction": "above",
-                        "level_type": "VAH",
-                        "level_price": vah_f,
+                        "level_type": above_level_type,
+                        "level_price": above_level_price,
                         "breakout_bar_index": bar_index,
                         "breakout_time_epoch": bar_epoch,
                         "breakout_time": candle.time,
                         "VAH": vah_f,
                         "VAL": val_f,
-                        "source_timeframe_seconds": int(source_timeframe_seconds),
+                        "source_timeframe_seconds": int(chart_timeframe_seconds),
                         "profile_key": profile_key,
                         "formed_at": profile.end,
                     }
@@ -412,16 +458,20 @@ def market_profile_rule_payload(
                 emitted_signatures.add(signature)
                 profile_state["last_breakout_below_idx"] = bar_index
                 profile_state["last_breakout_below_time"] = bar_epoch
+                below_level_type = "VAL"
+                below_level_price = val_f
+                below_variant = "crossed_val_to_outside"
                 breakout_signal = _build_breakout_signal(
                     candle=candle,
                     bar_index=bar_index,
                     profile=profile,
-                    level_type="VAL",
-                    level_price=val_f,
+                    level_type=below_level_type,
+                    level_price=below_level_price,
                     breakout_direction="below",
+                    breakout_variant=below_variant,
                     confirm_bars=confirm_bars,
                     lockout_bars=lockout_bars,
-                    source_timeframe_seconds=int(source_timeframe_seconds),
+                    source_timeframe_seconds=int(chart_timeframe_seconds),
                     streak_count=below_streak,
                     run_length=below_run_len,
                     chosen_profile_key=chosen_profile_key,
@@ -432,13 +482,19 @@ def market_profile_rule_payload(
                 emitted.append(breakout_signal)
                 breakout_emitted += 1
                 log.debug(
-                    "event=mp_breakout_emitted indicator_id=%s symbol=%s profile_key=%s side=below level_type=VAL level_price=%.6f prior_close=%.6f close=%.6f streak=%s run_len=%s confirm_bars=%s lockout_bars=%s bar_time=%s",
+                    "event=mp_breakout_emitted indicator_id=%s symbol=%s profile_key=%s side=below breakout_variant=%s level_type=%s level_price=%.6f prior_close=%.6f close=%.6f prior_body_low=%.6f prior_body_high=%.6f body_low=%.6f body_high=%.6f streak=%s run_len=%s confirm_bars=%s lockout_bars=%s bar_time=%s",
                     indicator_id,
                     symbol,
                     profile_key,
-                    val_f,
+                    below_variant,
+                    below_level_type,
+                    below_level_price,
                     prior_close,
                     now_close,
+                    prior_body_low,
+                    prior_body_high,
+                    now_body_low,
+                    now_body_high,
                     below_streak,
                     below_run_len,
                     confirm_bars,
@@ -450,14 +506,14 @@ def market_profile_rule_payload(
                         "breakout_id": str(breakout_signal.get("breakout_id") or ""),
                         "value_area_id": str(breakout_signal.get("value_area_id") or ""),
                         "breakout_direction": "below",
-                        "level_type": "VAL",
-                        "level_price": val_f,
+                        "level_type": below_level_type,
+                        "level_price": below_level_price,
                         "breakout_bar_index": bar_index,
                         "breakout_time_epoch": bar_epoch,
                         "breakout_time": candle.time,
                         "VAH": vah_f,
                         "VAL": val_f,
-                        "source_timeframe_seconds": int(source_timeframe_seconds),
+                        "source_timeframe_seconds": int(chart_timeframe_seconds),
                         "profile_key": profile_key,
                         "formed_at": profile.end,
                     }
@@ -485,13 +541,13 @@ def market_profile_rule_payload(
 
         if direction == "above":
             body_touches = candle_body_low <= (level_price + tolerance)
-            close_not_far = now_close >= (level_price - tolerance)
-            valid_retest = body_touches and close_not_far
+            close_on_side = now_close >= level_price
+            valid_retest = body_touches and close_on_side
             retest_role = "resistance"
         elif direction == "below":
             body_touches = candle_body_high >= (level_price - tolerance)
-            close_not_far = now_close <= (level_price + tolerance)
-            valid_retest = body_touches and close_not_far
+            close_on_side = now_close <= level_price
+            valid_retest = body_touches and close_on_side
             retest_role = "support"
         else:
             valid_retest = False
@@ -529,28 +585,39 @@ def market_profile_rule_payload(
     runtime_state["bar_index"] = bar_index + 1
     runtime_state["last_epoch"] = current_epoch
 
+    diagnostics = {
+        "profile_cache_hit": 1 if cache_hit else 0,
+        "profile_cache_miss": 0 if cache_hit else 1,
+        "known_profiles": int(known_count),
+        "merged_profiles": int(len(effective_profiles)),
+        "breakouts_emitted": int(breakout_emitted),
+        "retests_emitted": int(retest_emitted),
+        "active_breakouts": int(len(remaining_breakouts)),
+        "profiles_considered": int(len(candidate_profiles)),
+        "candidate_count": int(len(candidate_profiles)),
+        "candidate_chosen": 1 if chosen_profile_key else 0,
+        "source_timeframe_seconds": int(chart_timeframe_seconds),
+        "lockout_timeframe_seconds": int(chart_timeframe_seconds),
+        "timeframe_mismatch_warning": 0,
+    }
+    v3_diag = dict(v3_outcome.get("diagnostics") or {})
+    diagnostics["v3_candidate_count"] = int(v3_diag.get("candidate_count") or 0)
+    diagnostics["v3_pending_count"] = int(v3_diag.get("pending_count") or 0)
+    diagnostics["v3_emitted"] = int(len(v3_outcome.get("signals") or []))
     return {
         "signals": emitted,
-        "diagnostics": {
-            "profile_cache_hit": 1 if cache_hit else 0,
-            "profile_cache_miss": 0 if cache_hit else 1,
-            "known_profiles": int(known_count),
-            "merged_profiles": int(len(effective_profiles)),
-            "breakouts_emitted": int(breakout_emitted),
-            "retests_emitted": int(retest_emitted),
-            "active_breakouts": int(len(remaining_breakouts)),
-            "profiles_considered": int(len(candidate_profiles)),
-            "candidate_count": int(len(candidate_profiles)),
-            "candidate_chosen": 1 if chosen_profile_key else 0,
-            "source_timeframe_seconds": int(source_timeframe_seconds),
-            "timeframe_mismatch_warning": 1 if mismatch_timeframes else 0,
-        },
+        "diagnostics": diagnostics,
     }
 
 def _profile_identity(profile: Any) -> str:
-    start = profile.start.isoformat() if hasattr(profile.start, "isoformat") else str(profile.start)
-    end = profile.end.isoformat() if hasattr(profile.end, "isoformat") else str(profile.end)
-    return f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
+    try:
+        from indicators.market_profile._internal.runtime_profiles import profile_identity
+
+        return profile_identity(profile)
+    except Exception:
+        start = profile.start.isoformat() if hasattr(profile.start, "isoformat") else str(profile.start)
+        end = profile.end.isoformat() if hasattr(profile.end, "isoformat") else str(profile.end)
+        return f"{start}:{end}:{int(getattr(profile, 'session_count', 1) or 1)}"
 
 
 def _profile_known_marker(profile: Any) -> str:
@@ -711,11 +778,17 @@ def _select_nearby_profiles(
         )
         midpoint = (vah + val) / 2.0
         if in_or_cross:
+            boundary_distance = min(
+                abs(close_price - vah),
+                abs(close_price - val),
+                abs(previous_close - vah),
+                abs(previous_close - val),
+            )
             selected.append(
                 {
                     **runtime_view,
                     "selection_reason": "in_or_cross",
-                    "selection_score": abs(close_price - float(runtime_view["poc"])),
+                    "selection_score": boundary_distance,
                     "selection_tie_score": abs(close_price - midpoint),
                 }
             )
@@ -733,7 +806,7 @@ def _select_nearby_profiles(
                 {
                     **runtime_view,
                     "selection_reason": "nearby_threshold",
-                    "selection_score": abs(close_price - float(runtime_view["poc"])),
+                    "selection_score": distance,
                     "selection_tie_score": abs(close_price - midpoint),
                 }
             )
@@ -755,12 +828,16 @@ def _select_single_candidate_profile(candidates: List[Dict[str, Any]]) -> Dict[s
     return ordered[0]
 
 
-def _crossed_up(*, prior_close: float, current_close: float, level: float) -> bool:
-    return prior_close <= level and current_close > level
+def _body_fully_above(*, now_body_low: float, level: float) -> bool:
+    return now_body_low > level
 
 
-def _crossed_dn(*, prior_close: float, current_close: float, level: float) -> bool:
-    return prior_close >= level and current_close < level
+def _body_fully_below(*, now_body_high: float, level: float) -> bool:
+    return now_body_high < level
+
+
+def _body_fully_inside(*, now_body_low: float, now_body_high: float, val: float, vah: float) -> bool:
+    return now_body_low >= val and now_body_high <= vah
 
 
 def _lockout_elapsed(*, last_time_epoch: int | None, current_epoch: int, lockout_seconds: int) -> bool:
@@ -779,6 +856,7 @@ def _build_breakout_signal(
     level_type: str,
     level_price: float,
     breakout_direction: str,
+    breakout_variant: str,
     confirm_bars: int,
     lockout_bars: int,
     source_timeframe_seconds: int,
@@ -791,6 +869,7 @@ def _build_breakout_signal(
 ) -> Dict[str, Any]:
     direction = "long" if breakout_direction == "above" else "short"
     pointer_direction = "up" if breakout_direction == "above" else "down"
+    bias = _bias_from_direction(direction)
     profile_id = _profile_identity(profile)
     breakout_id = f"{profile_id}:{level_type}:{bar_index}"
     return {
@@ -809,8 +888,10 @@ def _build_breakout_signal(
         "level_price": level_price,
         "value_area_id": profile_id,
         "breakout_direction": breakout_direction,
+        "breakout_variant": str(breakout_variant or ""),
         "pointer_direction": pointer_direction,
         "direction": direction,
+        "bias": bias,
         "trigger_time": candle.time,
         "bar_index": bar_index,
         "trigger_index": bar_index,
@@ -852,6 +933,7 @@ def _build_retest_signal(
     breakout_direction = str(breakout.get("breakout_direction") or "").strip().lower()
     trade_direction = "long" if breakout_direction == "above" else "short"
     pointer_direction = "up" if breakout_direction == "above" else "down"
+    bias = _bias_from_direction(trade_direction)
     level_type = str(breakout.get("level_type") or "")
     level_price = float(breakout.get("level_price") or 0.0)
     return {
@@ -872,6 +954,7 @@ def _build_retest_signal(
         "breakout_id": str(breakout.get("breakout_id") or ""),
         "breakout_direction": breakout_direction,
         "direction": trade_direction,
+        "bias": bias,
         "pointer_direction": pointer_direction,
         "retest_role": retest_role,
         "trigger_time": candle.time,
@@ -890,6 +973,631 @@ def _build_retest_signal(
         "VAL": _safe_float(breakout.get("VAL")),
         "formed_at": breakout.get("formed_at"),
         "known_at": breakout.get("formed_at"),
+    }
+
+
+def _body_bounds(candle: Candle) -> tuple[float, float]:
+    open_f = float(candle.open)
+    close_f = float(candle.close)
+    return (min(open_f, close_f), max(open_f, close_f))
+
+
+def _is_merged_profile(profile: Any) -> bool:
+    if bool(getattr(profile, "is_merged", False)):
+        return True
+    session_count = _safe_int(getattr(profile, "session_count", None))
+    return bool(session_count is not None and session_count > 1)
+
+
+def _resolve_breakout_v3_candidate(
+    *,
+    runtime_views: List[Dict[str, Any]],
+    previous_candle: Candle | None,
+    candle: Candle,
+    epsilon: float = 1e-9,
+) -> tuple[Dict[str, Any] | None, int]:
+    if not runtime_views:
+        return None, 0
+    if not isinstance(previous_candle, Candle):
+        raise RuntimeError(
+            "market_profile_breakout_v3_missing_previous_bar: previous candle is required for candidate evaluation"
+        )
+
+    prev_body_low, prev_body_high = _body_bounds(previous_candle)
+    curr_body_low, curr_body_high = _body_bounds(candle)
+    curr_close = float(candle.close)
+    curr_open = float(candle.open)
+    prev_open = float(previous_candle.open)
+    prev_close = float(previous_candle.close)
+
+    candidates: List[Dict[str, Any]] = []
+    for runtime_view in runtime_views:
+        vah = float(runtime_view["vah"])
+        val = float(runtime_view["val"])
+        va_width = max(vah - val, float(epsilon))
+        profile_key = str(runtime_view["profile_key"])
+        profile = runtime_view["profile"]
+        variants: List[Dict[str, Any]] = []
+
+        if prev_body_high <= vah and curr_body_high > vah and curr_close > vah:
+            penetration = max(0.0, curr_body_high - vah)
+            variants.append(
+                {
+                    "variant": "breakout_up",
+                    "boundary_type": "VAH",
+                    "boundary_price": vah,
+                    "penetration": penetration,
+                    "direction": "long",
+                }
+            )
+        if prev_body_low >= val and curr_body_low < val and curr_close < val:
+            penetration = max(0.0, val - curr_body_low)
+            variants.append(
+                {
+                    "variant": "breakout_down",
+                    "boundary_type": "VAL",
+                    "boundary_price": val,
+                    "penetration": penetration,
+                    "direction": "short",
+                }
+            )
+        if prev_body_low > vah and curr_body_low <= vah and (val <= curr_close <= vah):
+            penetration = max(0.0, vah - curr_body_low)
+            variants.append(
+                {
+                    "variant": "breakin_from_above",
+                    "boundary_type": "VAH",
+                    "boundary_price": vah,
+                    "penetration": penetration,
+                    "direction": "long",
+                }
+            )
+        if prev_body_high < val and curr_body_high >= val and (val <= curr_close <= vah):
+            penetration = max(0.0, curr_body_high - val)
+            variants.append(
+                {
+                    "variant": "breakin_from_below",
+                    "boundary_type": "VAL",
+                    "boundary_price": val,
+                    "penetration": penetration,
+                    "direction": "short",
+                }
+            )
+
+        if not variants:
+            continue
+
+        # Deterministic variant priority for edge cases where a malformed profile could satisfy >1.
+        priority = ("breakout_up", "breakout_down", "breakin_from_above", "breakin_from_below")
+        variant = sorted(variants, key=lambda item: priority.index(str(item["variant"])))[0]
+        score = float(variant["penetration"]) / va_width
+        candidates.append(
+            {
+                "profile": profile,
+                "profile_key": profile_key,
+                "value_area_id": _profile_identity(profile),
+                "known_at": getattr(profile, "end", None),
+                "vah": vah,
+                "val": val,
+                "va_width": float(vah - val),
+                "is_merged": _is_merged_profile(profile),
+                "variant": str(variant["variant"]),
+                "boundary_type": str(variant["boundary_type"]),
+                "boundary_price": float(variant["boundary_price"]),
+                "penetration": float(variant["penetration"]),
+                "score": float(score),
+                "direction": str(variant["direction"]),
+                "candidate_diagnostics": {
+                    "prev_open": prev_open,
+                    "prev_close": prev_close,
+                    "prev_body_low": prev_body_low,
+                    "prev_body_high": prev_body_high,
+                    "candidate_open": curr_open,
+                    "candidate_close": curr_close,
+                    "candidate_body_low": curr_body_low,
+                    "candidate_body_high": curr_body_high,
+                    "penetration": float(variant["penetration"]),
+                },
+            }
+        )
+
+    if not candidates:
+        return None, 0
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            -float(item["score"]),
+            0 if bool(item["is_merged"]) else 1,
+            float(item["va_width"]),
+            str(item["profile_key"]),
+        ),
+    )
+    chosen = dict(ordered[0])
+    chosen["chosen_score"] = float(chosen["score"])
+    chosen["tie_break_notes"] = (
+        f"score_desc,merged_pref,width_asc,profile_key_asc;"
+        f"merged={1 if chosen['is_merged'] else 0};width={float(chosen['va_width']):.8f}"
+    )
+    return chosen, len(candidates)
+
+
+def _breakout_v3_confirm_valid(*, variant: str, body_low: float, body_high: float, val: float, vah: float) -> bool:
+    if variant == "breakout_up":
+        return body_low > vah
+    if variant == "breakout_down":
+        return body_high < val
+    if variant in {"breakin_from_above", "breakin_from_below"}:
+        return body_low >= val and body_high <= vah
+    return False
+
+
+def _lockout_elapsed_v3(*, last_time_epoch: int | None, current_epoch: int, lockout_seconds: int) -> bool:
+    if last_time_epoch is None or lockout_seconds <= 0:
+        return True
+    return (int(current_epoch) - int(last_time_epoch)) > int(lockout_seconds)
+
+
+def _short_trace_id(signature: str) -> str:
+    digest = hashlib.sha1(str(signature).encode("utf-8")).hexdigest()
+    return f"mpv3-{digest[:12]}"
+
+
+def _build_breakout_v3_confirmed_signal(
+    *,
+    candle: Candle,
+    bar_index: int,
+    timeframe_seconds: int,
+    indicator_id: str,
+    runtime_scope: str,
+    symbol: str,
+    confirm_bars: int,
+    lockout_seconds: int,
+    pending_entry: Mapping[str, Any],
+    confirm_streak: int,
+    signature: str,
+) -> Dict[str, Any]:
+    variant = str(pending_entry.get("variant") or "")
+    direction = "long" if variant in {"breakout_up", "breakin_from_above"} else "short"
+    pointer_direction = "up" if direction == "long" else "down"
+    bias = _bias_from_direction(direction)
+    profile_key = str(pending_entry.get("profile_key") or "")
+    started_bar_index = int(pending_entry.get("started_bar_index") or 0)
+    diagnostics = dict(pending_entry.get("candidate_diagnostics") or {})
+    diagnostics["chosen_score"] = _safe_float(pending_entry.get("chosen_score"))
+    diagnostics["tie_break_notes"] = str(pending_entry.get("tie_break_notes") or "")
+    diagnostics["event_signature"] = signature
+    trace_id = _short_trace_id(signature)
+    diagnostics["trace_id"] = trace_id
+    signal_epoch = int(candle.time.timestamp())
+    return {
+        "time": candle.time,
+        "signal_time": signal_epoch,
+        "signal_type": "breakout",
+        "type": "breakout",
+        "source": "MarketProfile",
+        "symbol": symbol,
+        "indicator_id": indicator_id,
+        "runtime_scope": runtime_scope,
+        "rule_id": "market_profile_breakout",
+        "pattern_id": "value_area_breakout",
+        "rule_aliases": [
+            "market_profile_breakout",
+            "market_profile_breakout_rule",
+            "market_profile_breakout_v3_confirmed",
+            "market_profile_breakout_v3_confirmed_rule",
+            "market_profile_breakout_v3",
+            "market_profile_breakout_v3_rule",
+        ],
+        "profile_key": profile_key,
+        "value_area_id": str(pending_entry.get("value_area_id") or profile_key),
+        "known_at": pending_entry.get("known_at"),
+        "variant": variant,
+        "boundary_type": str(pending_entry.get("boundary_type") or ""),
+        "boundary_price": float(pending_entry.get("boundary_price") or 0.0),
+        "VAH": _safe_float(pending_entry.get("VAH")),
+        "VAL": _safe_float(pending_entry.get("VAL")),
+        "bar_time": candle.time,
+        "bar_index": int(bar_index),
+        "timeframe_seconds": int(timeframe_seconds),
+        "confirm_bars": int(confirm_bars),
+        "lockout_seconds": int(lockout_seconds),
+        "started_bar_index": started_bar_index,
+        "confirm_streak_at_emit": int(confirm_streak),
+        "direction": direction,
+        "bias": bias,
+        "pointer_direction": pointer_direction,
+        "trace_id": trace_id,
+        "event_signature": signature,
+        "candidate_diagnostics": diagnostics,
+        "metadata": {
+            "signal_time": signal_epoch,
+            "rule_id": "market_profile_breakout",
+            "pattern_id": "value_area_breakout",
+            "indicator_id": indicator_id,
+            "runtime_scope": runtime_scope,
+            "timeframe_seconds": int(timeframe_seconds),
+            "symbol": symbol,
+            "known_at": pending_entry.get("known_at"),
+            "trace_id": trace_id,
+            "direction": direction,
+            "bias": bias,
+            "VAH": _safe_float(pending_entry.get("VAH")),
+            "VAL": _safe_float(pending_entry.get("VAL")),
+        },
+    }
+
+
+def _build_breakout_v3_retest_signal(
+    *,
+    candle: Candle,
+    bar_index: int,
+    timeframe_seconds: int,
+    indicator_id: str,
+    runtime_scope: str,
+    symbol: str,
+    breakout_entry: Mapping[str, Any],
+    bars_since_breakout: int,
+    retest_tolerance_pct: float,
+) -> Dict[str, Any]:
+    direction = str(breakout_entry.get("direction") or "long").strip().lower()
+    pointer_direction = "up" if direction == "long" else "down"
+    bias = _bias_from_direction(direction)
+    profile_key = str(breakout_entry.get("profile_key") or "")
+    boundary_type = str(breakout_entry.get("boundary_type") or "")
+    boundary_price = float(breakout_entry.get("boundary_price") or 0.0)
+    breakout_started_bar_index = int(breakout_entry.get("started_bar_index") or 0)
+    breakout_signature = str(breakout_entry.get("event_signature") or "")
+    signature = f"retest_v3|{profile_key}|{boundary_type}|{breakout_started_bar_index}|{bar_index}"
+    trace_id = _short_trace_id(signature)
+    signal_epoch = int(candle.time.timestamp())
+    return {
+        "time": candle.time,
+        "signal_time": signal_epoch,
+        "signal_type": "retest",
+        "type": "retest",
+        "source": "MarketProfile",
+        "symbol": symbol,
+        "indicator_id": indicator_id,
+        "runtime_scope": runtime_scope,
+        "rule_id": "market_profile_retest",
+        "pattern_id": "value_area_retest",
+        "rule_aliases": [
+            "market_profile_retest",
+            "market_profile_retest_rule",
+            "market_profile_retest_v3",
+            "market_profile_retest_v3_rule",
+        ],
+        "profile_key": profile_key,
+        "value_area_id": str(breakout_entry.get("value_area_id") or profile_key),
+        "known_at": breakout_entry.get("known_at"),
+        "variant": str(breakout_entry.get("variant") or ""),
+        "boundary_type": boundary_type,
+        "boundary_price": boundary_price,
+        "VAH": _safe_float(breakout_entry.get("VAH")),
+        "VAL": _safe_float(breakout_entry.get("VAL")),
+        "bar_time": candle.time,
+        "bar_index": int(bar_index),
+        "timeframe_seconds": int(timeframe_seconds),
+        "direction": direction,
+        "bias": bias,
+        "pointer_direction": pointer_direction,
+        "breakout_started_bar_index": breakout_started_bar_index,
+        "bars_since_breakout": int(bars_since_breakout),
+        "retest_tolerance_pct": float(retest_tolerance_pct),
+        "breakout_event_signature": breakout_signature,
+        "event_signature": signature,
+        "trace_id": trace_id,
+        "metadata": {
+            "signal_time": signal_epoch,
+            "rule_id": "market_profile_retest",
+            "pattern_id": "value_area_retest",
+            "indicator_id": indicator_id,
+            "runtime_scope": runtime_scope,
+            "timeframe_seconds": int(timeframe_seconds),
+            "symbol": symbol,
+            "known_at": breakout_entry.get("known_at"),
+            "trace_id": trace_id,
+            "direction": direction,
+            "bias": bias,
+            "VAH": _safe_float(breakout_entry.get("VAH")),
+            "VAL": _safe_float(breakout_entry.get("VAL")),
+        },
+    }
+
+
+def _market_profile_breakout_v3_payload(
+    *,
+    snapshot_payload: Mapping[str, Any],
+    candle: Candle,
+    previous_candle: Candle | None,
+    runtime_state: MutableMapping[str, Any],
+    runtime_views: List[Dict[str, Any]],
+    cache_hit: bool,
+    known_count: int,
+    indicator_id: str,
+    symbol: str,
+    runtime_scope: str,
+    bar_epoch: int,
+    params_map: Mapping[str, Any],
+    chart_timeframe: str,
+    chart_timeframe_seconds: int,
+    bar_index: int,
+) -> Dict[str, Any]:
+    timeframe_seconds = _safe_int(chart_timeframe_seconds)
+    if timeframe_seconds is None or timeframe_seconds <= 0:
+        raise RuntimeError(
+            "market_profile_breakout_v3_missing_timeframe_seconds: chart timeframe seconds required for lockout math"
+        )
+
+    confirm_bars = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_confirm_bars", "confirm_bars"),
+        default=3,
+        min_value=1,
+    )
+    lockout_bars = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_lockout_bars", "lockout_bars"),
+        default=confirm_bars,
+        min_value=0,
+    )
+    retest_min_bars = _resolve_int(
+        params_map,
+        keys=("market_profile_retest_min_bars", "market_profile_retest_v3_min_bars", "retest_min_bars"),
+        default=3,
+        min_value=0,
+    )
+    retest_max_lookback = _resolve_int(
+        params_map,
+        keys=("market_profile_retest_max_bars", "market_profile_retest_v3_max_lookback", "retest_max_lookback"),
+        default=50,
+        min_value=1,
+    )
+    retest_tolerance_pct = _resolve_float(
+        params_map,
+        keys=("market_profile_retest_tolerance_pct", "market_profile_retest_v3_tolerance_pct", "retest_tolerance_pct"),
+        default=0.5,
+        min_value=0.0,
+    )
+    lockout_seconds = int(lockout_bars) * int(timeframe_seconds)
+
+    emitted: List[Dict[str, Any]] = []
+    last_processed_bar_index = _safe_int(runtime_state.get("v3_last_processed_bar_index"))
+    pending: MutableMapping[str, Dict[str, Any]] = runtime_state.setdefault("v3_pending", {})
+    last_emit_epoch: MutableMapping[str, int] = runtime_state.setdefault("v3_last_emit_epoch", {})
+    emitted_signatures: MutableMapping[str, int] = runtime_state.setdefault("v3_emitted_signatures", {})
+    active_breakouts: List[Dict[str, Any]] = runtime_state.setdefault("v3_active_breakouts", [])
+    retest_signatures: MutableMapping[str, int] = runtime_state.setdefault("v3_retest_signatures", {})
+
+    if last_processed_bar_index is not None and bar_index <= last_processed_bar_index:
+        pending.clear()
+        last_emit_epoch.clear()
+        emitted_signatures.clear()
+        active_breakouts.clear()
+        retest_signatures.clear()
+
+    active_views: Dict[str, Dict[str, Any]] = {str(item["profile_key"]): item for item in runtime_views}
+
+    chosen_candidate: Dict[str, Any] | None = None
+    num_candidates = 0
+    if runtime_views:
+        chosen_candidate, num_candidates = _resolve_breakout_v3_candidate(
+            runtime_views=runtime_views,
+            previous_candle=previous_candle,
+            candle=candle,
+        )
+
+    if isinstance(chosen_candidate, Mapping):
+        profile_key = str(chosen_candidate.get("profile_key") or "")
+        variant = str(chosen_candidate.get("variant") or "")
+        pending_key = f"{profile_key}|{variant}"
+        previous_emit = _safe_int(last_emit_epoch.get(pending_key))
+        if _lockout_elapsed_v3(last_time_epoch=previous_emit, current_epoch=bar_epoch, lockout_seconds=lockout_seconds):
+            pending[pending_key] = {
+                "profile_key": profile_key,
+                "value_area_id": str(chosen_candidate.get("value_area_id") or profile_key),
+                "known_at": chosen_candidate.get("known_at"),
+                "variant": variant,
+                "boundary_type": str(chosen_candidate.get("boundary_type") or ""),
+                "boundary_price": float(chosen_candidate.get("boundary_price") or 0.0),
+                "started_bar_index": int(bar_index),
+                "started_epoch": int(bar_epoch),
+                "streak": 0,
+                "candidate_diagnostics": dict(chosen_candidate.get("candidate_diagnostics") or {}),
+                "penetration": float(chosen_candidate.get("penetration") or 0.0),
+                "chosen_score": float(chosen_candidate.get("chosen_score") or 0.0),
+                "tie_break_notes": str(chosen_candidate.get("tie_break_notes") or ""),
+            }
+
+    body_low, body_high = _body_bounds(candle)
+    for pending_key in list(pending.keys()):
+        entry = pending.get(pending_key)
+        if not isinstance(entry, Mapping):
+            pending.pop(pending_key, None)
+            continue
+        profile_key = str(entry.get("profile_key") or "")
+        runtime_view = active_views.get(profile_key)
+        if runtime_view is None:
+            pending.pop(pending_key, None)
+            continue
+        if int(entry.get("started_bar_index") or 0) >= bar_index:
+            continue
+
+        val = float(runtime_view["val"])
+        vah = float(runtime_view["vah"])
+        variant = str(entry.get("variant") or "")
+        boundary_type = str(entry.get("boundary_type") or "")
+        boundary_price = _safe_float(entry.get("boundary_price")) or 0.0
+        expected_boundary = vah if boundary_type == "VAH" else val if boundary_type == "VAL" else None
+        if expected_boundary is not None and abs(float(expected_boundary) - float(boundary_price)) > 1e-9:
+            log.warning(
+                "event=market_profile_breakout_v3_boundary_mismatch indicator_id=%s symbol=%s profile_key=%s boundary_type=%s boundary_price=%.8f expected=%.8f vah=%.8f val=%.8f bar_index=%s",
+                indicator_id,
+                symbol,
+                profile_key,
+                boundary_type,
+                float(boundary_price),
+                float(expected_boundary),
+                float(vah),
+                float(val),
+                bar_index,
+            )
+        confirm_valid = _breakout_v3_confirm_valid(
+            variant=variant,
+            body_low=body_low,
+            body_high=body_high,
+            val=val,
+            vah=vah,
+        )
+        if not confirm_valid:
+            pending.pop(pending_key, None)
+            continue
+
+        next_streak = int(entry.get("streak") or 0) + 1
+        entry = dict(entry)
+        entry["streak"] = next_streak
+        entry["VAH"] = float(vah)
+        entry["VAL"] = float(val)
+        pending[pending_key] = entry
+        if next_streak != confirm_bars:
+            continue
+
+        started_bar_index = int(entry.get("started_bar_index") or 0)
+        signature = f"breakout_v3|{profile_key}|{variant}|{started_bar_index}"
+        if signature in emitted_signatures:
+            pending.pop(pending_key, None)
+            continue
+
+        signal = _build_breakout_v3_confirmed_signal(
+            candle=candle,
+            bar_index=bar_index,
+            timeframe_seconds=timeframe_seconds,
+            indicator_id=indicator_id,
+            runtime_scope=runtime_scope,
+            symbol=symbol,
+            confirm_bars=confirm_bars,
+            lockout_seconds=lockout_seconds,
+            pending_entry=entry,
+            confirm_streak=next_streak,
+            signature=signature,
+        )
+        assert_signal_contract(signal)
+        assert_signal_time_is_closed_bar(signal, candle)
+        assert_no_execution_fields(signal)
+        emitted.append(signal)
+        emitted_signatures[signature] = int(bar_epoch)
+        last_emit_epoch[pending_key] = int(bar_epoch)
+        active_breakouts.append(
+            {
+                "event_signature": signature,
+                "profile_key": profile_key,
+                "value_area_id": str(entry.get("value_area_id") or profile_key),
+                "known_at": entry.get("known_at"),
+                "variant": variant,
+                "boundary_type": str(entry.get("boundary_type") or ""),
+                "boundary_price": float(entry.get("boundary_price") or 0.0),
+                "VAH": float(vah),
+                "VAL": float(val),
+                "direction": str(signal.get("direction") or ""),
+                "started_bar_index": int(entry.get("started_bar_index") or 0),
+                "breakout_bar_index": int(bar_index),
+                "breakout_epoch": int(bar_epoch),
+            }
+        )
+        pending.pop(pending_key, None)
+        log.debug(
+            "event=market_profile_breakout_v3_confirmed indicator_id=%s symbol=%s profile_key=%s variant=%s bar_index=%s payload=%s",
+            indicator_id,
+            symbol,
+            profile_key,
+            variant,
+            bar_index,
+            signal,
+        )
+
+    breakout_count = len(emitted)
+    remaining_breakouts: List[Dict[str, Any]] = []
+    for breakout in active_breakouts:
+        if not isinstance(breakout, Mapping):
+            continue
+        breakout_bar_index = int(breakout.get("breakout_bar_index") or -1)
+        if breakout_bar_index < 0:
+            continue
+        bars_since = int(bar_index - breakout_bar_index)
+        if bars_since < retest_min_bars:
+            remaining_breakouts.append(dict(breakout))
+            continue
+        if bars_since > retest_max_lookback:
+            continue
+
+        boundary_price = _safe_float(breakout.get("boundary_price"))
+        if boundary_price is None:
+            remaining_breakouts.append(dict(breakout))
+            continue
+        tolerance = abs(float(boundary_price)) * (float(retest_tolerance_pct) / 100.0)
+        body_touches = (body_low - tolerance) <= float(boundary_price) <= (body_high + tolerance)
+        direction = str(breakout.get("direction") or "").strip().lower()
+        close_price = float(candle.close)
+        if direction == "long":
+            close_on_side = close_price >= float(boundary_price)
+        elif direction == "short":
+            close_on_side = close_price <= float(boundary_price)
+        else:
+            close_on_side = False
+        if not (body_touches and close_on_side):
+            remaining_breakouts.append(dict(breakout))
+            continue
+
+        retest_signature = (
+            f"retest_v3|{str(breakout.get('event_signature') or '')}|{int(bar_index)}"
+        )
+        if retest_signature in retest_signatures:
+            continue
+        retest_signal = _build_breakout_v3_retest_signal(
+            candle=candle,
+            bar_index=bar_index,
+            timeframe_seconds=timeframe_seconds,
+            indicator_id=indicator_id,
+            runtime_scope=runtime_scope,
+            symbol=symbol,
+            breakout_entry=breakout,
+            bars_since_breakout=bars_since,
+            retest_tolerance_pct=float(retest_tolerance_pct),
+        )
+        assert_signal_contract(retest_signal)
+        assert_signal_time_is_closed_bar(retest_signal, candle)
+        assert_no_execution_fields(retest_signal)
+        emitted.append(retest_signal)
+        retest_signatures[retest_signature] = int(bar_epoch)
+
+    runtime_state["v3_last_processed_bar_index"] = int(bar_index)
+    runtime_state["v3_pending"] = pending
+    runtime_state["v3_last_emit_epoch"] = last_emit_epoch
+    runtime_state["v3_emitted_signatures"] = emitted_signatures
+    runtime_state["v3_active_breakouts"] = remaining_breakouts
+    runtime_state["v3_retest_signatures"] = retest_signatures
+    return {
+        "signals": emitted,
+        "diagnostics": {
+            "profile_cache_hit": 1 if cache_hit else 0,
+            "profile_cache_miss": 0 if cache_hit else 1,
+            "known_profiles": int(known_count),
+            "merged_profiles": int(len(runtime_views)),
+            "breakouts_emitted": int(breakout_count),
+            "retests_emitted": int(len(emitted) - breakout_count),
+            "active_breakouts": int(len(remaining_breakouts)),
+            "profiles_considered": int(len(runtime_views)),
+            "candidate_count": int(num_candidates),
+            "candidate_chosen": 1 if isinstance(chosen_candidate, Mapping) else 0,
+            "chosen_profile_key": str(chosen_candidate.get("profile_key") or "") if isinstance(chosen_candidate, Mapping) else "",
+            "pending_count": int(len(pending)),
+            "num_effective_profiles": int(len(runtime_views)),
+            "num_candidates": int(num_candidates),
+            "source_timeframe_seconds": int(timeframe_seconds),
+            "lockout_timeframe_seconds": int(timeframe_seconds),
+            "timeframe_mismatch_warning": 0,
+        },
     }
 
 

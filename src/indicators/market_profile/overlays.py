@@ -35,11 +35,53 @@ _RETEST_COLORS = {
 }
 
 
+def _variant_compact(variant: str) -> str:
+    normalized = str(variant or "").strip().lower()
+    mapping = {
+        "breakout_up": "BO-UP",
+        "breakout_down": "BO-DN",
+        "breakin_from_above": "BI-ABV",
+        "breakin_from_below": "BI-BLW",
+    }
+    return mapping.get(normalized, normalized.upper() if normalized else "")
+
+
+def _direction_compact(
+    *,
+    direction: Any = None,
+    breakout_direction: Any = None,
+    pointer_direction: Any = None,
+    bias: Any = None,
+) -> str:
+    direct = str(direction or "").strip().lower()
+    if direct in {"long", "buy", "bullish"}:
+        return "L"
+    if direct in {"short", "sell", "bearish"}:
+        return "S"
+    breakout = str(breakout_direction or "").strip().lower()
+    if breakout in {"above", "up", "bullish"}:
+        return "L"
+    if breakout in {"below", "down", "bearish"}:
+        return "S"
+    pointer = str(pointer_direction or "").strip().lower()
+    if pointer in {"up", "above"}:
+        return "L"
+    if pointer in {"down", "below"}:
+        return "S"
+    bias_text = str(bias or "").strip().lower()
+    if bias_text == "bullish":
+        return "L"
+    if bias_text == "bearish":
+        return "S"
+    return ""
+
+
 def _normalize_marker_time(
     ts: Any,
     plot_df: Optional[pd.DataFrame],
     idx: Optional[int],
     marker_kind: str,
+    require_exact_plot_match: bool = True,
 ) -> Optional[int]:
     """Normalize marker timestamps to epoch seconds, preferring plot_df index when available."""
 
@@ -70,6 +112,32 @@ def _normalize_marker_time(
         )
 
     normalized = epoch_from_index if epoch_from_index is not None else epoch_from_meta
+    if (
+        require_exact_plot_match
+        and normalized is not None
+        and plot_df is not None
+        and len(plot_df.index) > 0
+    ):
+        try:
+            index_epochs = {
+                value
+                for value in (to_epoch_seconds(item) for item in plot_df.index)
+                if value is not None
+            }
+        except Exception as exc:
+            log.warning(
+                "Failed to build index epoch set for exact match | kind=%s | error=%s",
+                marker_kind,
+                exc,
+            )
+            index_epochs = set()
+        if normalized not in index_epochs:
+            log.warning(
+                "Skipping %s marker due to missing exact close-time match | signal_epoch=%s",
+                marker_kind,
+                normalized,
+            )
+            return None
     if normalized is None:
         log.warning(
             "Skipping %s marker due to invalid timestamp | ts=%s | idx=%s",
@@ -84,8 +152,11 @@ def _resolve_level_price(metadata: Mapping[str, Any]) -> Optional[float]:
     price = finite_float(metadata.get("level_price"))
     if price is not None:
         return price
+    price = finite_float(metadata.get("boundary_price"))
+    if price is not None:
+        return price
 
-    level_type = str(metadata.get("level_type", "")).upper()
+    level_type = str(metadata.get("level_type") or metadata.get("boundary_type") or "").upper()
     if level_type == "VAH":
         return finite_float(metadata.get("VAH"))
     if level_type == "VAL":
@@ -100,12 +171,29 @@ def _resolve_level_price(metadata: Mapping[str, Any]) -> Optional[float]:
 
 
 def _level_label(metadata: Mapping[str, Any]) -> str:
-    level_type = str(metadata.get("level_type", "")).strip().upper()
+    level_type = str(metadata.get("level_type") or metadata.get("boundary_type") or "").strip().upper()
     if level_type in {"VAH", "VAL"}:
         return level_type
     if level_type:
         return level_type.title()
     return "Value Area"
+
+
+def _resolve_breakout_direction(metadata: Mapping[str, Any]) -> str:
+    direction = str(metadata.get("breakout_direction") or "").strip().lower()
+    if direction in {"above", "below"}:
+        return direction
+    variant = str(metadata.get("variant") or metadata.get("breakout_variant") or "").strip().lower()
+    if variant in {"breakout_up", "breakin_from_below"}:
+        return "above"
+    if variant in {"breakout_down", "breakin_from_above"}:
+        return "below"
+    fallback = str(metadata.get("direction") or "").strip().lower()
+    if fallback == "long":
+        return "above"
+    if fallback == "short":
+        return "below"
+    return ""
 
 
 def _confidence_meta(metadata: Mapping[str, Any]) -> Optional[str]:
@@ -128,8 +216,10 @@ def _va_span_meta(metadata: Mapping[str, Any]) -> Optional[str]:
 def _signal_diagnostics(metadata: Mapping[str, Any], *, signal_time: Any) -> List[str]:
     lines: List[str] = []
     rule_id = metadata.get("rule_id")
-    level_type = metadata.get("level_type")
+    level_type = metadata.get("level_type") or metadata.get("boundary_type")
     level_price = finite_float(metadata.get("level_price"))
+    if level_price is None:
+        level_price = finite_float(metadata.get("boundary_price"))
     trigger_close = finite_float(metadata.get("trigger_close"))
     direction = metadata.get("breakout_direction") or metadata.get("direction")
     value_area_id = metadata.get("value_area_id")
@@ -139,10 +229,21 @@ def _signal_diagnostics(metadata: Mapping[str, Any], *, signal_time: Any) -> Lis
     streak_count = metadata.get("streak_count")
     run_length = metadata.get("run_length")
     confirm_bars = metadata.get("confirm_bars")
+    variant = metadata.get("variant") or metadata.get("breakout_variant")
+    trace_id = metadata.get("trace_id")
+    event_signature = metadata.get("event_signature")
+    started_bar_index = metadata.get("started_bar_index")
+    confirm_streak = metadata.get("confirm_streak_at_emit")
     if rule_id:
         lines.append(f"rule={rule_id}")
+    if trace_id:
+        lines.append(f"trace_id={trace_id}")
+    elif event_signature:
+        lines.append(f"trace={event_signature}")
     if level_type or level_price is not None:
         lines.append(f"level={level_type or 'NA'}@{level_price:.2f}" if level_price is not None else f"level={level_type}")
+    if variant:
+        lines.append(f"variant={variant}")
     if trigger_close is not None:
         lines.append(f"trigger_close={trigger_close:.2f}")
     if direction:
@@ -155,6 +256,10 @@ def _signal_diagnostics(metadata: Mapping[str, Any], *, signal_time: Any) -> Lis
         lines.append(f"run_len={run_length}")
     if confirm_bars is not None:
         lines.append(f"confirm_bars={confirm_bars}")
+    if confirm_streak is not None:
+        lines.append(f"confirm_streak_at_emit={confirm_streak}")
+    if started_bar_index is not None:
+        lines.append(f"started_bar_index={started_bar_index}")
     if value_area_id:
         lines.append(f"profile={value_area_id}")
     if known_at is not None:
@@ -194,6 +299,7 @@ def _apply_collision_avoidance(
     for bubble in bubbles:
         bubble_time = bubble.get("time")
         bubble_price = bubble.get("price")
+        lock_price = bool(bubble.get("lock_price"))
 
         if bubble_time is None or bubble_price is None:
             continue
@@ -211,8 +317,10 @@ def _apply_collision_avoidance(
                 # Found overlap - need to offset this bubble
                 offset_level = max(offset_level, pos["offset_level"] + 1)
 
-        # Apply offset if needed (shift price by small percentage per level)
-        if offset_level > 0:
+        # Apply offset if needed (shift price by small percentage per level).
+        # Some bubbles intentionally represent exact levels (e.g. VAH/VAL labels);
+        # preserve their y-anchor and skip vertical collision shifting.
+        if offset_level > 0 and not lock_price:
             # Determine offset direction based on bubble direction or default to upward
             direction = bubble.get("direction", "above")
             if direction in ("below", "down"):
@@ -276,6 +384,13 @@ def market_profile_overlay_adapter(
         "skipped_price": 0,
         "skipped_time": 0,
     }
+    close_by_epoch: Dict[int, float] = {}
+    if plot_df is not None and not plot_df.empty and "close" in plot_df.columns:
+        for ts, close_value in zip(plot_df.index, plot_df["close"]):
+            epoch = to_epoch_seconds(ts)
+            close_f = finite_float(close_value)
+            if epoch is not None and close_f is not None:
+                close_by_epoch[int(epoch)] = float(close_f)
 
     for sig in signals:
         metadata = sig.metadata or {}
@@ -297,7 +412,7 @@ def market_profile_overlay_adapter(
         # Use explicit signal/trigger timestamp. Do not map by runtime bar_index because
         # signal source timeframe (e.g. 30m) can differ from chart timeframe (e.g. 1h),
         # which would place bubbles on wrong candles.
-        signal_time = metadata.get("time") or metadata.get("trigger_time") or sig.time
+        signal_time = metadata.get("signal_time") or metadata.get("time") or metadata.get("trigger_time") or sig.time
         marker_time = _normalize_marker_time(signal_time, plot_df, None, "bubble")
         log.debug(
             "Normalized bubble time | signal_time=%s | epoch=%s | idx=%s",
@@ -322,19 +437,23 @@ def market_profile_overlay_adapter(
             # Position at retest close instead of level price
             anchor_price = finite_float(metadata.get("retest_close")) or finite_float(metadata.get("trigger_close")) or level_price
             bars_since = metadata.get("bars_since_breakout")
-            if bars_since is not None:
-                detail = f"Retest after {int(bars_since)} bars near {level_label} {float(level_price):.2f}"
-            else:
-                detail = f"Retest near {level_label} {float(level_price):.2f}"
-
-            meta_bits = []
-            meta_label = _confidence_meta(metadata)
-            if meta_label:
-                meta_bits.append(meta_label)
-            va_span = _va_span_meta(metadata)
-            if va_span:
-                meta_bits.append(va_span)
-            meta_text = " · ".join(meta_bits) if meta_bits else None
+            direction_tag = _direction_compact(
+                direction=metadata.get("direction"),
+                breakout_direction=metadata.get("breakout_direction"),
+                pointer_direction=metadata.get("pointer_direction"),
+                bias=metadata.get("bias"),
+            )
+            detail = (
+                f"RT {level_label} {float(level_price):.2f}"
+                + (f" +{int(bars_since)}" if bars_since is not None else "")
+            )
+            short_label = (
+                f"{level_label} RT {float(level_price):.2f}"
+                + (f" +{int(bars_since)}" if bars_since is not None else "")
+                + (f" {direction_tag}" if direction_tag else "")
+            )
+            trace_id = str(metadata.get("trace_id") or "").strip()
+            meta_text = f"id={trace_id}" if trace_id else None
             pointer_hint = str(
                 metadata.get("pointer_direction")
                 or metadata.get("breakout_direction")
@@ -356,7 +475,7 @@ def market_profile_overlay_adapter(
                 {
                     "time": marker_time,
                     "price": float(anchor_price),
-                    "label": f"{level_label} retest",
+                    "label": short_label,
                     "detail": detail,
                     "meta": meta_text,
                     "accentColor": color,
@@ -373,38 +492,51 @@ def market_profile_overlay_adapter(
             summary["converted_retest"] += 1
             continue
 
-        breakout_direction = str(metadata.get("breakout_direction", "")).lower()
+        breakout_direction = _resolve_breakout_direction(metadata)
         color = _BREAKOUT_COLORS.get(breakout_direction, "#6b7280")
 
         # Trust emitter-provided trigger close. Index remapping can be wrong when
         # chart timeframe != signal source timeframe.
         trigger_close = finite_float(metadata.get("trigger_close"))
-        anchor_price = trigger_close or level_price
-
-        # Position bubble at the close of the signal candle instead of level price
-        bubble_price = float(anchor_price)
+        close_at_signal = close_by_epoch.get(int(marker_time))
+        bubble_price = float(trigger_close if trigger_close is not None else close_at_signal if close_at_signal is not None else level_price)
 
         if breakout_direction == "above":
             label = f"{level_label} breakout"
             detail_prefix = "Closed above"
+            short_side = "BO"
         elif breakout_direction == "below":
             label = f"{level_label} breakdown"
             detail_prefix = "Closed below"
+            short_side = "BD"
         else:
             label = f"{level_label} breakout"
             detail_prefix = "Closed near"
+            short_side = "BO"
 
         detail = f"{detail_prefix} {level_label} {float(level_price):.2f}"
-        meta_bits = []
-        meta_label = _confidence_meta(metadata)
-        if meta_label:
-            meta_bits.append(meta_label)
-        # Don't include value_area_id in meta text - it's an ISO timestamp that's confusing to users
-        # value_area_id is still in metadata for matching breakouts to retests
-        va_span = _va_span_meta(metadata)
-        if va_span:
-            meta_bits.append(va_span)
-        meta_text = " · ".join(meta_bits) if meta_bits else None
+        confirm_bars = metadata.get("confirm_bars")
+        trace_id = str(metadata.get("trace_id") or "").strip()
+        variant = str(metadata.get("variant") or metadata.get("breakout_variant") or "").strip()
+        variant_compact = _variant_compact(variant)
+        started_bar = metadata.get("started_bar_index")
+        streak_emit = metadata.get("confirm_streak_at_emit")
+        current_bar = metadata.get("bar_index")
+        profile_key = str(metadata.get("profile_key") or metadata.get("value_area_id") or "").strip()
+        profile_tag = profile_key[-12:] if profile_key else ""
+        if confirm_bars is not None:
+            short_label = f"{short_side} {level_label}@{float(level_price):.2f} c{int(confirm_bars)}"
+        else:
+            short_label = f"{short_side} {level_label}@{float(level_price):.2f}"
+        direction_tag = _direction_compact(
+            direction=metadata.get("direction"),
+            breakout_direction=metadata.get("breakout_direction"),
+            pointer_direction=metadata.get("pointer_direction"),
+            bias=metadata.get("bias"),
+        )
+        if direction_tag:
+            short_label = f"{short_label} {direction_tag}"
+        meta_text = f"id={trace_id}" if trace_id else None
 
         bias_label = bias_label_from_direction(
             breakout_direction or metadata.get("direction")
@@ -540,7 +672,8 @@ def market_profile_overlay_adapter(
         bubble = {
             "time": marker_time,
             "price": bubble_price,
-            "label": label,
+            "lock_price": True,
+            "label": short_label,
             "detail": detail,
             "meta": meta_text,
             "accentColor": color,
@@ -548,6 +681,9 @@ def market_profile_overlay_adapter(
             "textColor": "#ffffff",
             "direction": pointer_hint,
             "bias": bias_label,
+            "profile_key": str(metadata.get("profile_key") or metadata.get("value_area_id") or ""),
+            "boundary_type": str(metadata.get("boundary_type") or metadata.get("level_type") or ""),
+            "boundary_price": finite_float(metadata.get("boundary_price") or metadata.get("level_price")),
             "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
             "subtype": "bubble",
         }
@@ -662,7 +798,22 @@ def market_profile_overlay_transformer(
         trimmed["payload"]["boxes"] = []
         return trimmed
 
-    params = payload.get("profile_params") or {}
+    raw_params = payload.get("profile_params") or {}
+    params: Dict[str, Any] = (
+        dict(raw_params) if isinstance(raw_params, Mapping) else {}
+    )
+    if bool(params.get("use_merged_value_areas")):
+        if params.get("merge_threshold") is None:
+            params["merge_threshold"] = 0.6
+            log.warning(
+                "event=market_profile_merge_param_defaulted param=merge_threshold default=0.6"
+            )
+        if params.get("min_merge_sessions") is None:
+            params["min_merge_sessions"] = int(MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS)
+            log.warning(
+                "event=market_profile_merge_param_defaulted param=min_merge_sessions default=%s",
+                int(MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS),
+            )
     extend_to_end = bool(params.get("extend_value_area_to_chart_end"))
 
     # Extract metadata for logging context
@@ -671,7 +822,10 @@ def market_profile_overlay_transformer(
     strategy_id = overlay.get("strategy_id") or payload.get("strategy_id")
 
     try:
-        from indicators.market_profile._internal.runtime_profiles import resolve_effective_profiles
+        from indicators.market_profile._internal.runtime_profiles import (
+            profile_identity,
+            resolve_effective_profiles,
+        )
     except Exception:
         if "market_profile_runtime_profiles_import_failed" not in _WARNED_TRANSFORMERS:
             log.error("market_profile_runtime_profiles_import_failed")
@@ -695,35 +849,114 @@ def market_profile_overlay_transformer(
         strategy_id=str(strategy_id) if strategy_id is not None else None,
     )
 
-    if not merged_profiles and bool((params or {}).get("use_merged_value_areas")):
-        if ("market_profile_merge_params_missing" not in _WARNED_TRANSFORMERS
-                and transform_summary.get("known_profiles", 0) > 0):
-            log.error("market_profile_merge_params_missing")
-            _WARNED_TRANSFORMERS.add("market_profile_merge_params_missing")
+    if not merged_profiles and bool(params.get("use_merged_value_areas")):
+        known_profiles = int(transform_summary.get("known_profiles", 0) or 0)
+        if known_profiles > 0:
+            missing_merge_param = (
+                not isinstance(raw_params, Mapping)
+                or raw_params.get("merge_threshold") is None
+                or raw_params.get("min_merge_sessions") is None
+            )
+            if missing_merge_param and "market_profile_merge_params_missing" not in _WARNED_TRANSFORMERS:
+                log.error("market_profile_merge_params_missing")
+                _WARNED_TRANSFORMERS.add("market_profile_merge_params_missing")
+            elif "market_profile_merge_resolved_empty" not in _WARNED_TRANSFORMERS:
+                log.warning(
+                    "event=market_profile_merge_resolved_empty known_profiles=%s merge_threshold=%s min_merge_sessions=%s",
+                    known_profiles,
+                    params.get("merge_threshold"),
+                    params.get("min_merge_sessions"),
+                )
+                _WARNED_TRANSFORMERS.add("market_profile_merge_resolved_empty")
 
     boxes: List[Dict[str, Any]] = []
+    debug_profiles: List[Dict[str, Any]] = []
     for profile in merged_profiles:
         start_epoch = int(profile.start.timestamp())
         end_epoch = int(profile.end.timestamp())
         if end_epoch > current_epoch:
             continue
         box_end = current_epoch if extend_to_end else end_epoch
+        profile_key = profile_identity(profile)
         boxes.append(
             {
                 "x1": start_epoch,
                 "x2": box_end,
                 "y1": float(profile.val),
                 "y2": float(profile.vah),
+                "profile_key": profile_key,
                 "fillColor": "rgba(59, 130, 246, 0.1)",
                 "borderColor": "#3b82f6",
                 "borderWidth": 1,
                 "borderStyle": 2,
             }
         )
+        if len(debug_profiles) < 5:
+            debug_profiles.append(
+                {
+                    "profile_key": profile_key,
+                    "vah": float(profile.vah),
+                    "val": float(profile.val),
+                    "start": start_epoch,
+                    "end": end_epoch,
+                    "box_end": box_end,
+                }
+            )
 
     trimmed = dict(overlay)
     payload_copy = dict(payload)
     payload_copy["boxes"] = boxes
     payload_copy["transform_summary"] = transform_summary
+    bubbles = payload_copy.get("bubbles")
+    if isinstance(bubbles, list) and boxes:
+        box_by_profile: Dict[str, Dict[str, Any]] = {}
+        for box in boxes:
+            if not isinstance(box, Mapping):
+                continue
+            profile_key = str(box.get("profile_key") or "")
+            if profile_key:
+                box_by_profile[profile_key] = dict(box)
+        for bubble in bubbles:
+            if not isinstance(bubble, Mapping):
+                continue
+            profile_key = str(bubble.get("profile_key") or "")
+            if not profile_key:
+                continue
+            matched_box = box_by_profile.get(profile_key)
+            boundary_type = str(bubble.get("boundary_type") or "").upper()
+            boundary_price = finite_float(bubble.get("boundary_price"))
+            if matched_box is None:
+                log.warning(
+                    "event=market_profile_overlay_bubble_profile_unmatched symbol=%s profile_key=%s boundary_type=%s boundary_price=%s",
+                    symbol,
+                    profile_key,
+                    boundary_type,
+                    boundary_price,
+                )
+                continue
+            expected = None
+            if boundary_type == "VAH":
+                expected = finite_float(matched_box.get("y2"))
+            elif boundary_type == "VAL":
+                expected = finite_float(matched_box.get("y1"))
+            if expected is None or boundary_price is None:
+                continue
+            if abs(float(expected) - float(boundary_price)) > 1e-9:
+                log.warning(
+                    "event=market_profile_overlay_bubble_boundary_mismatch symbol=%s profile_key=%s boundary_type=%s boundary_price=%.8f box_expected=%.8f",
+                    symbol,
+                    profile_key,
+                    boundary_type,
+                    float(boundary_price),
+                    float(expected),
+                )
+    if debug_profiles:
+        log.debug(
+            "event=market_profile_overlay_boxes_resolved symbol=%s current_epoch=%s boxes=%s sample=%s",
+            symbol,
+            current_epoch,
+            len(boxes),
+            debug_profiles,
+        )
     trimmed["payload"] = payload_copy
     return trimmed

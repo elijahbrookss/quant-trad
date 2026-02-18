@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional
 
-from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.domain import Candle, timeframe_to_seconds
 
 from .contracts import IndicatorStateDelta, IndicatorStateEngine, IndicatorStateSnapshot
 
@@ -55,9 +55,26 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         symbol = str(window_context.get("symbol") or "")
         if not symbol:
             raise RuntimeError("indicator_state_init_failed: market_profile requires symbol")
+        chart_timeframe = str(window_context.get("timeframe") or "").strip()
+        indicator_id = str(window_context.get("indicator_id") or "").strip()
+        strategy_id = str(window_context.get("strategy_id") or "").strip()
+        if chart_timeframe:
+            chart_timeframe_seconds = int(timeframe_to_seconds(chart_timeframe) or 0)
+        else:
+            chart_timeframe_seconds = 0
+        runtime_scope = (
+            f"bot|{strategy_id}|{symbol}|{chart_timeframe}|{indicator_id}"
+            if (strategy_id and chart_timeframe and indicator_id)
+            else ""
+        )
         return {
             "revision": 0,
             "symbol": symbol,
+            "chart_timeframe": chart_timeframe,
+            "chart_timeframe_seconds": chart_timeframe_seconds,
+            "indicator_id": indicator_id,
+            "strategy_id": strategy_id,
+            "runtime_scope": runtime_scope,
             "active_session": None,
             "active_histogram": {},
             "active_profile": None,
@@ -116,9 +133,16 @@ class MarketProfileStateEngine(IndicatorStateEngine):
         active_profile = state.get("active_profile")
         if isinstance(active_profile, Mapping):
             profiles.append(dict(active_profile))
+        source_timeframe = str(self._param("source_timeframe", "30m"))
 
         payload = {
+            "_indicator_id": str(state.get("indicator_id") or ""),
+            "_runtime_scope": str(state.get("runtime_scope") or ""),
             "symbol": state.get("symbol"),
+            "chart_timeframe": str(state.get("chart_timeframe") or ""),
+            "chart_timeframe_seconds": int(state.get("chart_timeframe_seconds") or 0),
+            "source_timeframe": source_timeframe,
+            "source_timeframe_seconds": int(timeframe_to_seconds(source_timeframe) or 0),
             "active_session": state.get("active_session"),
             "profiles": profiles,
             # Pass through DB params so runtime and QuantLab share exact indicator config.
@@ -129,7 +153,7 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             revision=int(state.get("revision") or 0),
             known_at=known_at,
             formed_at=formed_at,
-            source_timeframe=str(self._param("source_timeframe", "30m")),
+            source_timeframe=source_timeframe,
             payload=payload,
         )
 
