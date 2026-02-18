@@ -132,11 +132,11 @@ export function BotCreateForm({
 
   // Auto-generate name based on selected strategy
   const selectedStrategy = useMemo(() => {
-    if (form.strategy_ids?.length === 1) {
-      return strategies.find(s => s.id === form.strategy_ids[0])
+    if (form.strategy_id) {
+      return strategies.find((s) => s.id === form.strategy_id)
     }
     return null
-  }, [form.strategy_ids, strategies])
+  }, [form.strategy_id, strategies])
 
   const suggestedName = useMemo(() => {
     if (selectedStrategy) {
@@ -161,7 +161,7 @@ export function BotCreateForm({
   }
 
   // Check if form has the minimum required fields
-  const hasStrategy = form.strategy_ids?.length > 0
+  const hasStrategy = Boolean(form.strategy_id)
   const hasDateRange = form.backtest_start && form.backtest_end
   const hasWallet = form.wallet_balances?.length > 0 && form.wallet_balances.some(w => w.currency && w.amount)
   const hasName = Boolean(form.name && form.name.trim())
@@ -186,7 +186,7 @@ export function BotCreateForm({
               <div className="text-xs font-medium text-slate-300">Strategy (choose one)</div>
               <StrategySelector
                 strategies={strategies}
-                selectedIds={form.strategy_ids}
+                selectedIds={form.strategy_id ? [form.strategy_id] : []}
                 onToggle={onStrategyToggle}
                 loading={strategiesLoading}
                 error={strategyError}
@@ -308,7 +308,7 @@ export function BotCreateForm({
     return baseSteps.filter((step) => step.enabled !== false)
   }, [
     form.run_type,
-    form.strategy_ids,
+    form.strategy_id,
     form.backtest_start,
     form.backtest_end,
     form.wallet_balances,

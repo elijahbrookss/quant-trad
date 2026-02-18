@@ -51,7 +51,7 @@ class BotBase(BaseModel):
     """Shared bot attributes."""
 
     name: str
-    strategy_ids: List[str] = Field(default_factory=list)
+    strategy_id: str
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
@@ -75,7 +75,7 @@ class BotUpdateRequest(BaseModel):
     """Patch payload for updating a bot."""
 
     name: Optional[str] = None
-    strategy_ids: Optional[List[str]] = None
+    strategy_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     # timeframe is intentionally managed by strategies; bots don't own it

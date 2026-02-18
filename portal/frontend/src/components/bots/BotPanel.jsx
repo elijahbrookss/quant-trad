@@ -244,7 +244,7 @@ export function BotPanel() {
     setError(null)
     setCreateError(null)
     if (!form.name) return
-    if (!form.strategy_ids.length) {
+    if (!form.strategy_id) {
       setCreateError('Select at least one strategy for this bot.')
       return
     }
@@ -262,8 +262,7 @@ export function BotPanel() {
     logger.info('bot_create_request', {
       run_type: form.run_type,
       mode: normalizedMode,
-      strategy_count: form.strategy_ids.length,
-      strategy_ids: form.strategy_ids,
+      strategy_id: form.strategy_id,
       backtest_start: startISO,
       backtest_end: endISO,
     })
@@ -281,7 +280,7 @@ export function BotPanel() {
       const payload = await createBot(payloadBody)
       logger.info('bot_create_success', { bot_id: payload?.id })
       upsertBot(payload)
-      resetForm({ strategy_ids: form.strategy_ids, run_type: form.run_type })
+      resetForm({ strategy_id: form.strategy_id, run_type: form.run_type })
       closeCreateModal()
     } catch (err) {
       logger.error('bot_create_failed', { message: err?.message }, err)
@@ -292,7 +291,7 @@ export function BotPanel() {
   const handleStart = async (botId) => {
     setError(null)
     const target = bots.find((bot) => bot.id === botId)
-    if (!target?.strategy_ids?.length) {
+    if (!target?.strategy_id) {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
@@ -431,9 +430,7 @@ export function BotPanel() {
     const query = search.trim().toLowerCase()
     if (!query) return sortedBots
     return sortedBots.filter((bot) => {
-      const assignedNames = (bot.strategy_ids || [])
-        .map((id) => strategyLookup.get(id)?.name || id)
-        .join(' ')
+      const assignedNames = bot.strategy_id ? (strategyLookup.get(bot.strategy_id)?.name || bot.strategy_id) : ''
       const haystack = [
         bot.name,
         computeStatus(bot),
@@ -454,8 +451,8 @@ export function BotPanel() {
     (botItem, field) => {
       if (!botItem) return ''
       const values = new Set()
-      for (const strategyId of botItem.strategy_ids || []) {
-        const strategy = strategyLookup.get(strategyId)
+      if (botItem.strategy_id) {
+        const strategy = strategyLookup.get(botItem.strategy_id)
         const value = strategy?.[field]
         if (value) values.add(value)
       }
@@ -488,7 +485,7 @@ export function BotPanel() {
               logger.info('bot_create_modal_open')
               setCreateError(null)
               resetForm({
-                strategy_ids: form.strategy_ids || [],
+                strategy_id: form.strategy_id || "",
                 run_type: form.run_type || 'backtest',
                 snapshot_interval_ms: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
                 bot_env: parseEnvText(settings?.botDefaults?.envText || ''),

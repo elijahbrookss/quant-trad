@@ -40,18 +40,16 @@ const formatDateShort = (dateStr) => {
 /**
  * Get base currency from instrument or symbol
  */
-const getBaseCurrency = (symbol, strategyLookup, strategyIds) => {
+const getBaseCurrency = (symbol, strategyLookup, strategyId) => {
   if (!symbol) return symbol
 
-  // Try to find instrument metadata from strategies
-  for (const strategyId of strategyIds || []) {
-    const strategy = strategyLookup?.get(strategyId)
-    const instruments = strategy?.instruments || []
-    for (const inst of instruments) {
-      if (inst?.symbol?.toUpperCase() === symbol.toUpperCase()) {
-        const baseCurrency = inst?.metadata?.instrument_fields?.base_currency || inst?.base_currency
-        if (baseCurrency) return baseCurrency
-      }
+  // Try to find instrument metadata from selected strategy
+  const strategy = strategyId ? strategyLookup?.get(strategyId) : null
+  const instruments = strategy?.instruments || []
+  for (const inst of instruments) {
+    if (inst?.symbol?.toUpperCase() === symbol.toUpperCase()) {
+      const baseCurrency = inst?.metadata?.instrument_fields?.base_currency || inst?.base_currency
+      if (baseCurrency) return baseCurrency
     }
   }
 
@@ -78,13 +76,10 @@ export const BotCard = memo(function BotCard({
   const navigate = useNavigate()
   const [errorOpen, setErrorOpen] = useState(false)
   const [warningsOpen, setWarningsOpen] = useState(false)
-  const assignedNames = useMemo(
-    () =>
-      (bot.strategy_ids || [])
-        .map((id) => strategyLookup.get(id)?.name || id)
-        .filter(Boolean),
-    [bot.strategy_ids, strategyLookup],
-  )
+  const assignedName = useMemo(() => {
+    if (!bot.strategy_id) return ''
+    return strategyLookup.get(bot.strategy_id)?.name || bot.strategy_id
+  }, [bot.strategy_id, strategyLookup])
   const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
   const warningCount = runtimeWarnings.length
   const warningMessages = runtimeWarnings
@@ -174,10 +169,10 @@ export const BotCard = memo(function BotCard({
   const symbolsDisplay = useMemo(() => {
     if (!rawSymbols) return '—'
     const symbolList = rawSymbols.split(', ').slice(0, 3)
-    const formatted = symbolList.map(s => getBaseCurrency(s, strategyLookup, bot.strategy_ids))
+    const formatted = symbolList.map(s => getBaseCurrency(s, strategyLookup, bot.strategy_id))
     const extra = rawSymbols.split(', ').length - 3
     return formatted.join(', ') + (extra > 0 ? ` +${extra}` : '')
-  }, [rawSymbols, strategyLookup, bot.strategy_ids])
+  }, [rawSymbols, strategyLookup, bot.strategy_id])
 
   // Compact date range
   const dateRangeShort = useMemo(() => {
@@ -226,7 +221,7 @@ export const BotCard = memo(function BotCard({
               )}
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
-              {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}
+              {assignedName || "—"}
             </p>
           </div>
 
@@ -496,19 +491,18 @@ function describeBotMeta(bot, strategyLookup, key) {
   if (!bot) return null
 
   const fromStrategies = new Set()
-  for (const strategyId of bot.strategy_ids || []) {
-    const strategy = strategyLookup.get(strategyId)
-    if (!strategy) continue
+  const strategy = bot.strategy_id ? strategyLookup.get(bot.strategy_id) : null
+  if (strategy) {
     if (key === 'symbol') {
       symbolsFromInstrumentSlots(strategy.instrument_slots).forEach((sym) => fromStrategies.add(sym))
-      continue
-    }
-    const value = strategy[key]
-    if (value) {
-      if (Array.isArray(value)) {
-        value.forEach((val) => fromStrategies.add(val))
-      } else {
-        fromStrategies.add(value)
+    } else {
+      const value = strategy[key]
+      if (value) {
+        if (Array.isArray(value)) {
+          value.forEach((val) => fromStrategies.add(val))
+        } else {
+          fromStrategies.add(value)
+        }
       }
     }
   }

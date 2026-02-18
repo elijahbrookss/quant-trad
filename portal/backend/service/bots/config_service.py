@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
 
@@ -29,15 +29,14 @@ class BotConfigService:
 
     def create_bot(self, name: str, **payload: object) -> Dict[str, object]:
         bot_id = payload.get("id") or str(uuid.uuid4())
-        strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"))
+        strategy_id = self.validate_strategy_id(payload.get("strategy_id"))
         run_type = str(payload.get("run_type") or "backtest").lower()
         wallet_config = self.validate_wallet_config(payload.get("wallet_config"))
 
         record: Dict[str, object] = {
             "id": bot_id,
             "name": name,
-            "strategy_id": strategy_ids[0],
-            "strategy_ids": strategy_ids,
+            "strategy_id": strategy_id,
             "timeframe": None,
             "mode": (payload.get("mode") or "instant").lower(),
             "run_type": run_type,
@@ -64,10 +63,8 @@ class BotConfigService:
             raise KeyError(f"Bot {bot_id} was not found")
         record = bots[bot_id]
 
-        if "strategy_ids" in payload:
-            strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"))
-            record["strategy_ids"] = strategy_ids
-            record["strategy_id"] = strategy_ids[0]
+        if "strategy_id" in payload and payload["strategy_id"] is not None:
+            record["strategy_id"] = self.validate_strategy_id(payload.get("strategy_id"))
         if "name" in payload and payload["name"] is not None:
             record["name"] = payload["name"]
         if "instrument_type" in payload:
@@ -249,36 +246,23 @@ class BotConfigService:
             "runtime_env": env_rows,
         }
 
-    def validate_strategy_ids(self, strategy_ids: Optional[Iterable[str]]) -> List[str]:
-        candidates: List[str] = []
-        if strategy_ids:
-            for strategy_id in strategy_ids:
-                if strategy_id:
-                    candidates.append(str(strategy_id))
-        deduped: List[str] = []
-        seen = set()
-        for strategy_id in candidates:
-            trimmed = strategy_id.strip()
-            if not trimmed or trimmed in seen:
-                continue
-            deduped.append(trimmed)
-            seen.add(trimmed)
-        if not deduped:
-            raise ValueError("Bots require at least one strategy.")
-
+    def validate_strategy_id(self, strategy_id: Optional[object]) -> str:
+        candidate = str(strategy_id or "").strip()
+        if not candidate:
+            raise ValueError("Bots require a strategy_id.")
         available = {strategy["id"] for strategy in load_strategies()}
-        missing = [strategy_id for strategy_id in deduped if strategy_id not in available]
-        if missing:
-            raise ValueError("The following strategies do not exist: " + ", ".join(sorted(missing)))
-        return deduped
+        if candidate not in available:
+            raise ValueError(f"Strategy does not exist: {candidate}")
+        return candidate
 
     def validate_strategy_existence(self, bot: Mapping[str, object]) -> None:
         from .bot_runtime.strategy import StrategyLoader
 
-        ids = bot.get("strategy_ids") or []
-        for strategy_id in ids:
-            if not StrategyLoader.strategy_exists(strategy_id):
-                raise ValueError(f"Strategy not found: {strategy_id}")
+        strategy_id = str(bot.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError("Bots require a strategy_id.")
+        if not StrategyLoader.strategy_exists(strategy_id):
+            raise ValueError(f"Strategy not found: {strategy_id}")
 
     def validate_instrument_policy(self, bot: Mapping[str, object]) -> None:
         policy = self.instrument_policy_from_bot(bot)
@@ -287,27 +271,28 @@ class BotConfigService:
 
         from .bot_runtime.strategy import StrategyLoader
 
-        strategy_ids = bot.get("strategy_ids") or []
-        for strategy_id in strategy_ids:
-            strategy = StrategyLoader.fetch_strategy(strategy_id)
-            for link in strategy.instrument_links:
-                snapshot = link.instrument_snapshot or {}
-                instrument_type = str(snapshot.get("instrument_type") or "").lower()
-                symbol = snapshot.get("symbol") or link.symbol
-                if not instrument_type:
-                    from ..market import instrument_service
-                    resolved = instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol or "")
-                    instrument_type = str((resolved or {}).get("instrument_type") or "").lower()
-                if not instrument_type:
-                    raise ValueError(
-                        f"Instrument type missing for {symbol or link.instrument_id}. Validate the instrument before running this bot."
-                    )
-                is_spot = instrument_type == "spot"
-                if policy == "derivatives" and is_spot:
-                    raise ValueError(
-                        f"Derivatives-only bot cannot run on spot instrument {symbol or link.instrument_id}."
-                    )
-                if policy == "spot" and not is_spot:
-                    raise ValueError(
-                        f"Spot-only bot cannot run on derivatives instrument {symbol or link.instrument_id}."
-                    )
+        strategy_id = str(bot.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError("Bots require a strategy_id.")
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        for link in strategy.instrument_links:
+            snapshot = link.instrument_snapshot or {}
+            instrument_type = str(snapshot.get("instrument_type") or "").lower()
+            symbol = snapshot.get("symbol") or link.symbol
+            if not instrument_type:
+                from ..market import instrument_service
+                resolved = instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol or "")
+                instrument_type = str((resolved or {}).get("instrument_type") or "").lower()
+            if not instrument_type:
+                raise ValueError(
+                    f"Instrument type missing for {symbol or link.instrument_id}. Validate the instrument before running this bot."
+                )
+            is_spot = instrument_type == "spot"
+            if policy == "derivatives" and is_spot:
+                raise ValueError(
+                    f"Derivatives-only bot cannot run on spot instrument {symbol or link.instrument_id}."
+                )
+            if policy == "spot" and not is_spot:
+                raise ValueError(
+                    f"Spot-only bot cannot run on derivatives instrument {symbol or link.instrument_id}."
+                )

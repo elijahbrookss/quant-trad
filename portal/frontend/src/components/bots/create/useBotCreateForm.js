@@ -79,12 +79,10 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
   }, [])
 
   const handleStrategyToggle = useCallback((strategyId) => {
-    setForm((prev) => {
-      const selected = prev.strategy_ids || []
-      const isActive = selected.includes(strategyId)
-      const next = isActive ? [] : [strategyId]
-      return { ...prev, strategy_ids: next }
-    })
+    setForm((prev) => ({
+      ...prev,
+      strategy_id: prev.strategy_id === strategyId ? '' : strategyId,
+    }))
   }, [])
 
   const handleWalletBalanceChange = useCallback((index, patch) => {

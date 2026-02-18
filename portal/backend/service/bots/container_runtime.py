@@ -109,7 +109,10 @@ def main() -> int:
 
     run_id = str(uuid.uuid4())
     update_bot_runtime_status(bot_id=bot_id, run_id=run_id, status="running")
-    series_keys: List[str] = [str(v) for v in (bot.get("strategy_ids") or [bot.get("strategy_id")]) if v]
+    strategy_id = str(bot.get("strategy_id") or "").strip()
+    if not strategy_id:
+        raise RuntimeError(f"Bot {bot_id} has no strategy_id configured")
+    series_keys: List[str] = [strategy_id]
     if not series_keys:
         raise RuntimeError("Bot has no series to execute")
 

@@ -34,9 +34,7 @@ class BotRuntimeControlService:
         bot = bots[bot_id]
 
         bot["wallet_config"] = self._config.validate_wallet_config(bot.get("wallet_config"))
-        strategy_ids = bot.get("strategy_ids") or ([bot.get("strategy_id")] if bot.get("strategy_id") else [])
-        bot["strategy_ids"] = self._config.validate_strategy_ids(strategy_ids)
-        bot["strategy_id"] = bot["strategy_ids"][0]
+        bot["strategy_id"] = self._config.validate_strategy_id(bot.get("strategy_id"))
         self._config.validate_backtest_window(bot)
         self._config.validate_strategy_existence(bot)
         self._config.validate_instrument_policy(bot)
