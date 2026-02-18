@@ -34,6 +34,22 @@ const drawRoundedRect = (ctx, x, y, width, height, radius, fill, stroke) => {
   ctx.stroke();
 };
 
+const abbreviateSignalLabel = (raw = '', max = 40) => {
+  const label = String(raw || '').trim();
+  if (!label) return 'SIG';
+  return label.length > max ? `${label.slice(0, max)}...` : label;
+};
+
+const normalizeBubbleLines = (bubble) => {
+  const lines = [];
+  const label = abbreviateSignalLabel(bubble?.label || 'Signal', 42);
+  if (label) lines.push(label);
+  const meta = abbreviateSignalLabel(bubble?.meta || '', 42);
+  if (meta) lines.push(meta);
+  if (!lines.length) lines.push('Signal');
+  return lines.slice(0, 2);
+};
+
 export function createSignalBubblePaneView(timeScaleApi) {
   let bubbles = [];
 
@@ -51,12 +67,13 @@ export function createSignalBubblePaneView(timeScaleApi) {
       const widthPx = bitmapSize?.width ?? ctx.canvas.width;
       const heightPx = bitmapSize?.height ?? ctx.canvas.height;
 
-      const padX = 8 * hpr;
-      const padY = 5 * vpr;
-      const radius = 8 * Math.min(hpr, vpr);
-      const markerRadius = 2.5 * Math.min(hpr, vpr);
-      const labelFontPx = 10 * vpr;
-      const gap = 10 * vpr;
+      const padX = 7 * hpr;
+      const padY = 4 * vpr;
+      const radius = 6 * Math.min(hpr, vpr);
+      const markerRadius = 2.4 * Math.min(hpr, vpr);
+      const labelFontPx = 11 * vpr;
+      const metaFontPx = 10 * vpr;
+      const gap = 8 * vpr;
 
       ctx.save();
       ctx.textBaseline = 'top';
@@ -73,14 +90,22 @@ export function createSignalBubblePaneView(timeScaleApi) {
         if (canvasX < -24 * hpr || canvasX > widthPx + 24 * hpr) continue;
 
         const accent = bubble?.accentColor ?? '#38bdf8';
-        const background = bubble?.backgroundColor ?? hexToRgba(accent, 0.16) ?? 'rgba(30,41,59,0.8)';
-        const textColor = bubble?.textColor ?? '#eef2ff';
+        const background = bubble?.backgroundColor ?? hexToRgba(accent, 0.14) ?? 'rgba(15,23,42,0.82)';
+        const textColor = bubble?.textColor ?? '#dbeafe';
 
-        const rawLabel = typeof bubble?.label === 'string' ? bubble.label.trim() : '';
-        const label = rawLabel || 'Signal';
-        const textWidth = ctx.measureText(label).width;
+        const lines = normalizeBubbleLines(bubble);
+        const widths = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          ctx.font = i === 0
+            ? `600 ${labelFontPx}px "Inter", "Segoe UI", sans-serif`
+            : `500 ${metaFontPx}px "Inter", "Segoe UI", sans-serif`;
+          widths.push(ctx.measureText(lines[i]).width);
+        }
+        const textWidth = widths.length ? Math.max(...widths) : 0;
+        const lineGap = 2 * vpr;
+        const textHeight = labelFontPx + (lines.length > 1 ? (lineGap + metaFontPx) : 0);
         const tagWidth = textWidth + padX * 2;
-        const tagHeight = labelFontPx + padY * 2;
+        const tagHeight = textHeight + padY * 2;
 
         const direction = bubble?.direction === 'below' ? 'below' : 'above';
         let x = canvasX - tagWidth / 2;
@@ -94,7 +119,14 @@ export function createSignalBubblePaneView(timeScaleApi) {
         drawRoundedRect(ctx, x, y, tagWidth, tagHeight, radius, background, accent);
 
         ctx.fillStyle = textColor;
-        ctx.fillText(label, x + padX, y + padY);
+        ctx.font = `600 ${labelFontPx}px "Inter", "Segoe UI", sans-serif`;
+        ctx.fillText(lines[0], x + padX, y + padY);
+        if (lines.length > 1) {
+          ctx.globalAlpha = 0.92;
+          ctx.font = `500 ${metaFontPx}px "Inter", "Segoe UI", sans-serif`;
+          ctx.fillText(lines[1], x + padX, y + padY + labelFontPx + lineGap);
+          ctx.globalAlpha = 1;
+        }
 
         ctx.beginPath();
         ctx.fillStyle = accent;

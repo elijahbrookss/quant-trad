@@ -287,23 +287,6 @@ export const IndicatorSection = ({ chartId }) => {
     setIsLoading(false);
   }, [bulkActionLoading, chartState?.overlayLoading, isLoading, jobState.busy, refreshingList]);
 
-  // Safety valve: clear overlayLoading if it lingers with no active jobs
-  useEffect(() => {
-    if (!chartState?.overlayLoading) return undefined;
-    const timer = setTimeout(() => {
-      const snapshot = getChart(chartId);
-      const active =
-        jobState.busy ||
-        refreshingList ||
-        bulkActionLoading ||
-        isLoading;
-      if (!active && snapshot?.overlayLoading) {
-        updateChart(chartId, { overlayLoading: false });
-      }
-    }, 1800);
-    return () => clearTimeout(timer);
-  }, [bulkActionLoading, chartId, chartState?.overlayLoading, getChart, isLoading, jobState.busy, refreshingList, updateChart]);
-
   // Derive ISO start/end from dateRange
   const [startISO, endISO] = useMemo(() => {
     const [s, e] = chartState?.dateRange || []

@@ -99,20 +99,36 @@ export function useOverlaySync({
   barSpacingRef,
   logger,
   setDataLoading,
+  signalDetailsRef,
 }) {
   // Overlay resource handles
   const overlayHandlesRef = useRef({ priceLines: [] });
 
   const syncOverlays = useCallback((overlays = []) => {
     setDataLoading(true);
+    if (signalDetailsRef) signalDetailsRef.current = [];
     // Guard on required refs
     if (!seriesRef.current || !chartRef.current) return;
 
     // Helper: normalize time to seconds
     const toSec = (t) => {
       if (t == null) return t;
-      if (typeof t !== 'number') return t;
-      return t > 2e10 ? Math.floor(t / 1000) : t;
+      if (typeof t === 'number') return t > 2e10 ? Math.floor(t / 1000) : t;
+      if (typeof t === 'string') {
+        const numeric = Number(t);
+        if (Number.isFinite(numeric)) return numeric > 2e10 ? Math.floor(numeric / 1000) : numeric;
+        const epochMs = Date.parse(t);
+        if (Number.isFinite(epochMs)) return Math.floor(epochMs / 1000);
+        return t;
+      }
+      if (typeof t === 'object') {
+        if (typeof t.timestamp === 'function') {
+          const ts = Number(t.timestamp());
+          return Number.isFinite(ts) ? ts : t;
+        }
+        if (Number.isFinite(t.timestamp)) return Number(t.timestamp);
+      }
+      return t;
     };
 
     // 1) Clear existing price lines
@@ -132,6 +148,7 @@ export function useOverlaySync({
     const touchPoints = [];
     const boxes = [];
     const signalBubbles = [];
+    const signalDetails = [];
     const allSegments = [];
     const allPolylines = [];
 
@@ -190,6 +207,18 @@ export function useOverlaySync({
       markers.push(...norm.markers);
 
       if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
+        for (const bubble of norm.bubbles) {
+          const bubbleTime = toSec(bubble?.time);
+          if (!Number.isFinite(bubbleTime)) continue;
+          const lines = [];
+          if (typeof bubble?.label === 'string' && bubble.label.trim()) lines.push(bubble.label.trim());
+          if (typeof bubble?.detail === 'string' && bubble.detail.trim()) lines.push(bubble.detail.trim());
+          if (typeof bubble?.meta === 'string' && bubble.meta.trim()) lines.push(bubble.meta.trim());
+          // Keep signal tooltip minimal and high-signal only.
+          if (lines.length) {
+            signalDetails.push({ time: bubbleTime, kind: 'signal', entries: lines });
+          }
+        }
         if (color) {
           signalBubbles.push(...norm.bubbles.map(b => {
             const accentColor = color;
@@ -371,6 +400,9 @@ export function useOverlaySync({
       pvMgrRef.current?.setSegments(allSegments);
       pvMgrRef.current?.setPolylines(allPolylines);
       pvMgrRef.current?.setSignalBubbles(signalBubbles);
+      if (signalDetailsRef) {
+        signalDetailsRef.current = signalDetails;
+      }
     } catch (e) {
       logger.error('overlays_apply_failed', e);
     }

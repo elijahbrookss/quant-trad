@@ -199,10 +199,7 @@ export const useOverlaySync = ({
             if (label) lines.push(label)
             if (detail) lines.push(detail)
             if (meta) lines.push(meta)
-            const diagnostics = Array.isArray(bubble?.diagnostics) ? bubble.diagnostics : []
-            diagnostics.forEach((entry) => {
-              if (typeof entry === 'string' && entry.trim()) lines.push(entry.trim())
-            })
+            // Keep signal tooltip minimal and high-signal only.
             if (!lines.length) continue
             markerDetails.push({ time: epoch, entries: lines, kind: 'signal' })
           }
