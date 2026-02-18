@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+pytest.importorskip("pandas")
+
 from engines.bot_runtime.core.domain import Candle, isoformat
 from portal.backend.service.bots.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 
@@ -111,3 +115,34 @@ def test_incremental_eval_uses_bounded_lookback_window():
     expected_start = now - timedelta(minutes=5)
     assert observed["start_iso"] == isoformat(expected_start)
     assert observed["end_iso"] == isoformat(now)
+
+
+def test_build_signals_from_markers_preserves_signal_time_without_shift() -> None:
+    ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    markers = {
+        "buy": [
+            {
+                "time": int(ts.timestamp()),
+                "known_at": int((ts - timedelta(minutes=1)).timestamp()),
+            }
+        ],
+        "sell": [],
+    }
+    out = SeriesBuilder._build_signals_from_markers(markers)
+    assert len(out) == 1
+    assert out[0].epoch == int(ts.timestamp())
+
+
+def test_build_signals_from_markers_raises_when_known_at_after_signal_time() -> None:
+    ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    markers = {
+        "buy": [
+            {
+                "time": int(ts.timestamp()),
+                "known_at": int((ts + timedelta(minutes=1)).timestamp()),
+            }
+        ],
+        "sell": [],
+    }
+    with pytest.raises(RuntimeError, match="known_at"):
+        SeriesBuilder._build_signals_from_markers(markers)

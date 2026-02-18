@@ -7,6 +7,19 @@ import {
   updateBot,
 } from '../../../adapters/bot.adapter.js'
 import { BOTLENS_DEBUG, toSec } from '../chartDataUtils.js'
+import { createLogger } from '../../../utils/logger.js'
+
+const log = createLogger('BotPerformance')
+
+const summarizeOverlays = (overlays) => {
+  const list = Array.isArray(overlays) ? overlays : []
+  const summary = {}
+  for (const overlay of list) {
+    const type = String(overlay?.type || 'unknown')
+    summary[type] = (summary[type] || 0) + 1
+  }
+  return { total: list.length, byType: summary }
+}
 
 const logCandleDiagnostics = (label, seriesList, botId) => {
   if (!Array.isArray(seriesList) || seriesList.length === 0) {
@@ -132,31 +145,59 @@ export function useBotPerformance({ bot, open, onRefresh }) {
         ? existing._overlay_state
         : buildOverlayState(existing?.overlays)
 
-    let effectiveSeq = currentSeq
+    const ops = Array.isArray(delta.ops) ? delta.ops : []
+    const resetOp = ops.find((op) => op && String(op.op || '').toLowerCase() === 'reset')
+    const hasAuthoritativeReset = Boolean(delta.authoritative_snapshot) || Boolean(resetOp)
+
     if (Number.isFinite(baseSeq) && baseSeq !== currentSeq) {
-      const canBootstrapRebase =
-        currentSeq === 0
-        && baseSeq > 0
-        && (
-          (Array.isArray(currentState.order) && currentState.order.length > 0)
-          || (Array.isArray(existing?.overlays) && existing.overlays.length > 0)
-        )
-      if (canBootstrapRebase) {
-        effectiveSeq = baseSeq
-      } else {
-        console.warn('[BotPerformanceModal] overlay delta base_seq mismatch', {
+      if (!hasAuthoritativeReset) {
+        console.warn('[BotPerformanceModal] overlay delta base_seq mismatch -> hard reset', {
           expected: currentSeq,
           received: baseSeq,
         })
-        return existing
+        return {
+          ...existing,
+          overlays: [],
+          _overlay_state: { entries: {}, order: [] },
+          _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : 0,
+        }
       }
     }
-    const entries = { ...(currentState.entries || {}) }
+
+    let entries = { ...(currentState.entries || {}) }
     let order = Array.isArray(currentState.order) ? [...currentState.order] : []
-    const ops = Array.isArray(delta.ops) ? delta.ops : []
+
     for (const op of ops) {
       if (!op || typeof op !== 'object') continue
       const opType = String(op.op || '').toLowerCase()
+
+      if (opType === 'reset') {
+        const resetEntries = {}
+        const resetOrder = []
+        const resetList = Array.isArray(op.entries) ? op.entries : []
+        for (let idx = 0; idx < resetList.length; idx += 1) {
+          const overlay = resetList[idx]
+          if (!overlay || typeof overlay !== 'object') continue
+          const explicit = overlay.id
+          const key = explicit
+            ? String(explicit)
+            : [
+                String(overlay.type || 'overlay'),
+                String(overlay.strategy_id || ''),
+                String(overlay.symbol || ''),
+                String(overlay.timeframe || ''),
+                String(overlay.instrument_id || ''),
+                String(overlay.source || ''),
+                String(idx),
+              ].join('|')
+          resetEntries[key] = overlay
+          resetOrder.push(key)
+        }
+        entries = resetEntries
+        order = resetOrder
+        continue
+      }
+
       const key = String(op.key || '')
       if (!key) continue
       if (opType === 'remove') {
@@ -174,7 +215,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
       ...existing,
       overlays,
       _overlay_state: { entries, order },
-      _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : effectiveSeq,
+      _overlay_seq: Number.isFinite(nextSeq) ? nextSeq : currentSeq,
     }
   }, [buildOverlayState])
 
@@ -182,6 +223,20 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     if (!incoming) return
     if (payloadRef.current === incoming) return
     payloadRef.current = incoming
+    const incomingSeries = Array.isArray(incoming?.series) ? incoming.series : []
+    const primarySeries = incomingSeries[0]
+    const primaryOverlaySummary = summarizeOverlays(primarySeries?.overlays)
+    log.info('overlay_payload_received', {
+      bot_id: bot?.id || null,
+      event_type: String(incoming?.type || 'snapshot'),
+      series_count: incomingSeries.length,
+      primary_symbol: primarySeries?.symbol || null,
+      primary_timeframe: primarySeries?.timeframe || null,
+      overlays_total: primaryOverlaySummary.total,
+      overlays_by_type: primaryOverlaySummary.byType,
+      has_overlay_delta: Boolean(primarySeries?.overlay_delta),
+      logs_count: Array.isArray(incoming?.logs) ? incoming.logs.length : null,
+    })
     setPayload((prev) => {
       const kind = String(incoming?.type || '').toLowerCase()
       if (kind !== 'delta') {
@@ -227,12 +282,40 @@ export function useBotPerformance({ bot, open, onRefresh }) {
           existing.overlays = delta.overlays
           existing._overlay_state = buildOverlayState(delta.overlays)
           existing._overlay_seq = 0
+          const fullOverlaySummary = summarizeOverlays(delta.overlays)
+          log.info('overlay_full_snapshot_received', {
+            bot_id: bot?.id || null,
+            strategy_id: strategyId || null,
+            symbol: symbol || null,
+            timeframe: timeframe || null,
+            overlays_total: fullOverlaySummary.total,
+            overlays_by_type: fullOverlaySummary.byType,
+          })
         }
         if (delta?.overlay_delta) {
+          const ops = Array.isArray(delta.overlay_delta?.ops) ? delta.overlay_delta.ops : []
+          const opCounts = ops.reduce((acc, op) => {
+            const name = String(op?.op || 'unknown').toLowerCase()
+            acc[name] = (acc[name] || 0) + 1
+            return acc
+          }, {})
           const applied = applyOverlayDelta(existing, delta.overlay_delta)
           existing.overlays = applied.overlays
           existing._overlay_state = applied._overlay_state
           existing._overlay_seq = applied._overlay_seq
+          const postDeltaSummary = summarizeOverlays(applied.overlays)
+          log.info('overlay_delta_received', {
+            bot_id: bot?.id || null,
+            strategy_id: strategyId || null,
+            symbol: symbol || null,
+            timeframe: timeframe || null,
+            seq: Number(delta.overlay_delta?.seq),
+            base_seq: Number(delta.overlay_delta?.base_seq),
+            ops_total: ops.length,
+            ops_by_type: opCounts,
+            overlays_total_after: postDeltaSummary.total,
+            overlays_by_type_after: postDeltaSummary.byType,
+          })
         }
         if (Array.isArray(delta?.trades)) existing.trades = delta.trades
         if (delta?.stats && typeof delta.stats === 'object') existing.stats = delta.stats
@@ -255,7 +338,7 @@ export function useBotPerformance({ bot, open, onRefresh }) {
     if (runtimeErr) {
       setError(runtimeErr)
     }
-  }, [extractRuntimeError])
+  }, [bot?.id, extractRuntimeError, applyOverlayDelta, buildOverlayState])
 
   const loadPerformance = useCallback(
     async (withLoader = true) => {

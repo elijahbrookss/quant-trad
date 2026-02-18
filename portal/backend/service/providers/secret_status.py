@@ -31,7 +31,17 @@ def resolve_status(provider_id: Optional[str], venue_id: Optional[str]) -> Dict[
         if has_credentials(provider_id, venue_id, keys):
             return {"state": "available", "missing": [], "required": keys}
     except Exception as exc:  # pragma: no cover - configuration issues
-        return {"state": "error", "missing": keys, "required": keys, "message": str(exc)}
+        message = str(exc)
+        state = "error"
+        if "Failed to decrypt provider credentials" in message or "InvalidToken" in message:
+            state = "invalid_credentials"
+        return {
+            "state": state,
+            "missing": keys,
+            "required": keys,
+            "message": message,
+            "action": "resave_credentials" if state == "invalid_credentials" else None,
+        }
 
     return {"state": "missing_secrets", "missing": keys, "required": keys}
 

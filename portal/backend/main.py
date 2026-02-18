@@ -12,7 +12,6 @@ from starlette.requests import Request
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots.bot_watchdog import get_watchdog
 from .service.db.postgres_extensions import ensure_postgres_extensions
-from .service.market.stats_queue import start_pipeline, stop_pipeline
 
 # Auto-discover indicators and signal rules via package imports
 # Indicators: pure computation, returns domain objects
@@ -22,6 +21,7 @@ import indicators  # noqa: F401
 # This triggers decorator execution and registration in _REGISTRY
 import signals  # noqa: F401
 from signals.overlays.builtins import ensure_builtin_overlays_registered
+from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
 
 
 def _allowed_origins() -> List[str]:
@@ -88,11 +88,11 @@ app.include_router(reports.router, prefix="/api/reports")
 @app.on_event("startup")
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
+    ensure_builtin_indicator_plugins_registered()
     ensure_postgres_extensions()
     watchdog = get_watchdog()
     watchdog.recover_local_orphans()
     watchdog.start_background_monitor()
-    start_pipeline()
     logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
 
 
@@ -100,7 +100,6 @@ def _startup_watchdog() -> None:
 def _shutdown_watchdog() -> None:
     watchdog = get_watchdog()
     watchdog.stop_background_monitor()
-    stop_pipeline()
     logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
 
 

@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from time import perf_counter
+from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.domain import timeframe_to_seconds
+from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
+from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
 from indicators.config import DataContext
-from indicators.market_profile import MarketProfileIndicator
 from signals.base import BaseSignal
-from signals.engine.market_profile import resolve_market_profile_params
-from signals.engine.market_profile_generator import build_value_area_payloads
-from signals.rules.market_profile import MarketProfileBreakoutConfig
-from signals.rules.pivot import PivotBreakoutConfig
+from signals.contract import assert_no_execution_fields, assert_signal_contract
 
 from .context import IndicatorServiceContext, _context
 from ...market import instrument_service
 from .utils import (
-    coerce_int,
     ensure_color,
     get_indicator_entry,
     normalize_datasource,
@@ -24,9 +27,99 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+_SIGNAL_EXEC_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
 
-_DEFAULT_PIVOT_BREAKOUT_CONFIG = PivotBreakoutConfig()
-_DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG = MarketProfileBreakoutConfig()
+
+def _to_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    if hasattr(value, "timestamp"):
+        try:
+            return int(value.timestamp())
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _profile_cache_signature(instance: Any) -> Tuple[Any, ...]:
+    """Return a stable signature of profile state to prevent stale signal cache hits."""
+
+    getter = getattr(instance, "get_profiles", None)
+    if not callable(getter):
+        return ("no_profiles_getter",)
+    try:
+        profiles = list(getter() or [])
+    except Exception:
+        return ("profiles_getter_failed",)
+    if not profiles:
+        return ("profiles_empty", 0)
+
+    first = profiles[0]
+    last = profiles[-1]
+    return (
+        "profiles_v1",
+        len(profiles),
+        _to_epoch_seconds(getattr(first, "start", None)),
+        _to_epoch_seconds(getattr(first, "end", None)),
+        float(getattr(first, "vah", 0.0) or 0.0),
+        float(getattr(first, "val", 0.0) or 0.0),
+        int(getattr(first, "session_count", 1) or 1),
+        _to_epoch_seconds(getattr(last, "start", None)),
+        _to_epoch_seconds(getattr(last, "end", None)),
+        float(getattr(last, "vah", 0.0) or 0.0),
+        float(getattr(last, "val", 0.0) or 0.0),
+        int(getattr(last, "session_count", 1) or 1),
+    )
+
+
+def _derive_bias_from_metadata(metadata: Mapping[str, Any]) -> Optional[str]:
+    direction = str(metadata.get("direction") or "").strip().lower()
+    breakout_direction = str(metadata.get("breakout_direction") or "").strip().lower()
+    pointer_direction = str(metadata.get("pointer_direction") or "").strip().lower()
+    variant = str(metadata.get("variant") or "").strip().lower()
+    candidate = direction or breakout_direction or pointer_direction
+    if not candidate:
+        if "up" in variant or "above" in variant:
+            candidate = "up"
+        elif "down" in variant or "below" in variant:
+            candidate = "down"
+    if candidate in {"long", "up", "above", "bull", "bullish", "buy"}:
+        return "bullish"
+    if candidate in {"short", "down", "below", "bear", "bearish", "sell"}:
+        return "bearish"
+    return None
+
+
+def _derive_direction_from_metadata(metadata: Mapping[str, Any]) -> Optional[str]:
+    direction = str(metadata.get("direction") or "").strip().lower()
+    if direction in {"long", "short"}:
+        return direction
+    breakout_direction = str(metadata.get("breakout_direction") or "").strip().lower()
+    pointer_direction = str(metadata.get("pointer_direction") or "").strip().lower()
+    bias = str(metadata.get("bias") or "").strip().lower()
+    if breakout_direction in {"above", "up"} or pointer_direction == "up" or bias == "bullish":
+        return "long"
+    if breakout_direction in {"below", "down"} or pointer_direction == "down" or bias == "bearish":
+        return "short"
+    return None
 
 
 @dataclass
@@ -34,12 +127,20 @@ class BreakoutCacheContext:
     cache_spec: Optional[Any]
     cache_key: Optional[Tuple[Any, ...]]
     requested_rule_ids: Optional[Set[str]]
+    requested_rule_identities: Optional[List["RuleIdentity"]] = None
     using_cached_breakouts: bool = False
     drop_breakout_from_response: bool = False
 
 
+@dataclass(frozen=True)
+class RuleIdentity:
+    raw_id: str
+    family: str
+    version: Optional[int]
+
+
 class IndicatorSignalExecutor:
-    """Execute indicator signal rules with breakout cache support."""
+    """Execute indicator signals via runtime state-engine semantics."""
 
     def __init__(self, ctx: IndicatorServiceContext = _context) -> None:
         self._ctx = ctx
@@ -56,28 +157,193 @@ class IndicatorSignalExecutor:
         exchange: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        t0 = perf_counter()
+        t_prepare_start = perf_counter()
         entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
+        t_prepare_ms = (perf_counter() - t_prepare_start) * 1000.0
         sym = self._resolve_symbol(entry, symbol)
+        t_plan_start = perf_counter()
+        runtime_plan = self._ctx.factory.build_runtime_input_plan(
+            entry.meta,
+            strategy_interval=interval,
+            start=start,
+            end=end,
+        )
+        t_plan_ms = (perf_counter() - t_plan_start) * 1000.0
+        plan_start = str(runtime_plan.get("start") or start)
+        plan_end = str(runtime_plan.get("end") or end)
+        plan_interval = str(runtime_plan.get("source_timeframe") or interval)
+        signal_start = str(start)
+        signal_end = str(end)
+        signal_interval = str(interval)
+        requested_rule_ids = self._normalise_enabled_rules(dict(config or {}))
+        requested_rule_identities = (
+            [self._rule_identity_from_id(rule_id) for rule_id in sorted(requested_rule_ids)]
+            if requested_rule_ids
+            else None
+        )
         provider, data_ctx = self._prepare_provider(
-            entry.meta, sym, start, end, interval, datasource, exchange
+            entry.meta, sym, signal_start, signal_end, signal_interval, datasource, exchange
         )
-        df = self._load_candles(provider, data_ctx, inst_id, sym, interval)
-        rule_config, cache_ctx = self._prepare_rule_config(
-            entry.instance, entry.meta, df, sym, interval, start, end, config
+        include_overlays = bool((config or {}).get("include_overlays", False))
+        profile_signature = _profile_cache_signature(entry.instance)
+        cache_key = self._build_cache_key(
+            inst_id=inst_id,
+            meta=entry.meta,
+            profile_signature=profile_signature,
+            symbol=sym,
+            datasource=datasource,
+            exchange=exchange,
+            plan_start=signal_start,
+            plan_end=signal_end,
+            plan_interval=signal_interval,
+            config=config or {},
+            include_overlays=include_overlays,
         )
-        signals_all = self._run_rules(
-            entry.instance, df, rule_config, inst_id, sym, interval, start, end
+        cached_payload = _SIGNAL_EXEC_CACHE.get(cache_key)
+        if cached_payload is not None:
+            logger.info(
+                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s profile_signature=%s",
+                inst_id,
+                entry.meta.get("type"),
+                sym,
+                signal_interval,
+                include_overlays,
+                profile_signature,
+            )
+            return deepcopy(cached_payload)
+        t_fetch_start = perf_counter()
+        df = self._load_candles(provider, data_ctx, inst_id, sym, signal_interval)
+        t_fetch_ms = (perf_counter() - t_fetch_start) * 1000.0
+        logger.info(
+            "event=indicator_signal_mode indicator_id=%s indicator_type=%s mode=runtime_state signal_timeframe=%s profile_source_timeframe=%s requested_rules=%s",
+            inst_id,
+            entry.meta.get("type"),
+            signal_interval,
+            plan_interval,
+            sorted(requested_rule_ids) if requested_rule_ids else None,
         )
+        logger.info(
+            "event=indicator_runtime_artifacts_prepare_start indicator_id=%s indicator_type=%s symbol=%s",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+        )
+        t_artifacts_start = perf_counter()
+        precomputed_runtime_payload = self._build_precomputed_runtime_payload(
+            inst_id=inst_id,
+            meta=entry.meta,
+            instance=entry.instance,
+            symbol=sym,
+            runtime_scope=f"{signal_start}|{signal_end}|{signal_interval}",
+            source_timeframe=signal_interval,
+            chart_timeframe=interval,
+            profile_source_timeframe=plan_interval,
+        )
+        t_artifacts_ms = (perf_counter() - t_artifacts_start) * 1000.0
+        logger.info(
+            "event=indicator_runtime_artifacts_prepare_complete indicator_id=%s indicator_type=%s symbol=%s ready=%s duration_ms=%.3f",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+            bool(precomputed_runtime_payload),
+            t_artifacts_ms,
+        )
+        t_runtime_start = perf_counter()
+        signals_all = self._run_runtime_state_signals(
+            inst_id=inst_id,
+            meta=entry.meta,
+            df=df,
+            symbol=sym,
+            timeframe=signal_interval,
+            prepared_snapshot_payload=precomputed_runtime_payload,
+        )
+        t_runtime_ms = (perf_counter() - t_runtime_start) * 1000.0
+        cache_ctx = BreakoutCacheContext(
+            cache_spec=None,
+            cache_key=None,
+            requested_rule_ids=requested_rule_ids,
+            requested_rule_identities=requested_rule_identities,
+        )
+        t_filter_start = perf_counter()
         filtered = self._filter_signals(signals_all, cache_ctx)
-        self._persist_breakout_cache(signals_all, cache_ctx, inst_id)
-        overlays = self._ctx.signal_runner.build_overlays(
-            entry.instance, filtered, df, **rule_config
-        )
+        t_filter_ms = (perf_counter() - t_filter_start) * 1000.0
+        t_overlay_start = perf_counter()
+        overlays: List[Any] = []
+        if include_overlays:
+            overlays = self._ctx.signal_runner.build_overlays(
+                entry.instance, filtered, df, **(config or {})
+            )
+        t_overlay_ms = (perf_counter() - t_overlay_start) * 1000.0
         payload = ensure_color(dict(entry.meta), ctx=self._ctx)
         # Convert BaseSignal objects to dicts for JSON serialization and strategy evaluation
         payload["signals"] = [sig.to_dict() if hasattr(sig, "to_dict") else sig for sig in filtered]
         payload["overlays"] = overlays
+        _SIGNAL_EXEC_CACHE[cache_key] = deepcopy(payload)
+        t_total_ms = (perf_counter() - t0) * 1000.0
+        logger.info(
+            "event=indicator_signal_execute_complete indicator_id=%s indicator_type=%s symbol=%s timeframe=%s bars=%s raw_signals=%s filtered_signals=%s overlays=%s include_overlays=%s duration_total_ms=%.3f duration_prepare_ms=%.3f duration_plan_ms=%.3f duration_fetch_ms=%.3f duration_artifacts_ms=%.3f duration_runtime_ms=%.3f duration_filter_ms=%.3f duration_overlay_ms=%.3f",
+            inst_id,
+            entry.meta.get("type"),
+            sym,
+            signal_interval,
+            len(df) if df is not None else 0,
+            len(signals_all),
+            len(filtered),
+            len(overlays) if isinstance(overlays, list) else 0,
+            include_overlays,
+            t_total_ms,
+            t_prepare_ms,
+            t_plan_ms,
+            t_fetch_ms,
+            t_artifacts_ms,
+            t_runtime_ms,
+            t_filter_ms,
+            t_overlay_ms,
+        )
         return payload
+
+    def _build_cache_key(
+        self,
+        *,
+        inst_id: str,
+        meta: Mapping[str, Any],
+        profile_signature: Tuple[Any, ...],
+        symbol: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        plan_start: str,
+        plan_end: str,
+        plan_interval: str,
+        config: Mapping[str, Any],
+        include_overlays: bool,
+    ) -> Tuple[Any, ...]:
+        params = meta.get("params") if isinstance(meta, Mapping) else {}
+        params_items: Tuple[Tuple[str, str], ...]
+        if isinstance(params, Mapping):
+            params_items = tuple(sorted((str(k), repr(v)) for k, v in params.items()))
+        else:
+            params_items = tuple()
+        enabled_rules = config.get("enabled_rules") if isinstance(config, Mapping) else None
+        enabled_rules_key = (
+            tuple(sorted(str(r).strip().lower() for r in enabled_rules if r is not None))
+            if isinstance(enabled_rules, Sequence) and not isinstance(enabled_rules, (str, bytes))
+            else tuple()
+        )
+        return (
+            str(inst_id),
+            str(meta.get("type") if isinstance(meta, Mapping) else ""),
+            str(symbol),
+            str(datasource or ""),
+            str(exchange or ""),
+            str(plan_start),
+            str(plan_end),
+            str(plan_interval),
+            params_items,
+            profile_signature,
+            enabled_rules_key,
+            bool(include_overlays),
+        )
 
     def _load_entry(
         self,
@@ -181,107 +447,295 @@ class IndicatorSignalExecutor:
             raise LookupError("No candles available for given window")
         return df
 
-    def _prepare_rule_config(
+    def _run_runtime_state_signals(
         self,
-        instance,
+        *,
+        inst_id: str,
         meta: Mapping[str, Any],
-        df,
+        df: Any,
         symbol: str,
-        interval: str,
-        start: str,
-        end: str,
-        config: Optional[Dict[str, Any]],
-    ) -> Tuple[Dict[str, Any], BreakoutCacheContext]:
-        rule_config: Dict[str, Any] = dict(config or {})
-        stored_params = meta.get("params", {}) if isinstance(meta, Mapping) else {}
-        self._apply_breakout_defaults(instance, stored_params, rule_config)
-        self._maybe_add_market_profile_payloads(instance, df, rule_config, interval, symbol)
-        rule_config.setdefault("symbol", symbol)
+        timeframe: str,
+        prepared_snapshot_payload: Mapping[str, Any],
+    ) -> List[BaseSignal]:
+        indicator_type = str(meta.get("type") or "").strip().lower()
+        if not indicator_type:
+            raise RuntimeError(f"indicator_signal_runtime_invalid: indicator_id={inst_id} missing type")
+        ensure_builtin_indicator_plugins_registered()
+        try:
+            plugin = plugin_registry().resolve(indicator_type)
+        except Exception as exc:
+            raise RuntimeError(
+                f"indicator_signal_runtime_plugin_missing: indicator_id={inst_id} indicator_type={indicator_type}"
+            ) from exc
+        if getattr(plugin, "signal_emitter", None) is None:
+            raise RuntimeError(
+                f"indicator_signal_runtime_emitter_missing: indicator_id={inst_id} indicator_type={indicator_type}"
+            )
 
-        indicator_name = getattr(instance, "NAME", instance.__class__.__name__)
-        cache_spec = self._ctx.breakout_cache.spec_for(indicator_name)
-        requested_rule_ids = self._normalise_enabled_rules(rule_config)
-        cache_ctx = BreakoutCacheContext(
-            cache_spec=cache_spec,
-            cache_key=None,
-            requested_rule_ids=requested_rule_ids,
+        logger.info(
+            "event=indicator_signal_runtime_input_source indicator_id=%s indicator_type=%s source=prepared_runtime_artifacts",
+            inst_id,
+            indicator_type,
         )
-        if cache_spec is not None:
-            cache_ctx.cache_key = self._ctx.breakout_cache.build_cache_key(
-                meta.get("id"),
-                indicator_name,
-                symbol,
-                interval,
-                start,
-                end,
-                cache_spec.config_signature_builder(rule_config),
+        emitted: List[BaseSignal] = []
+        previous_candle: Optional[Candle] = None
+        t_loop_start = perf_counter()
+        apply_ms = 0.0
+        snapshot_ms = 0.0
+        emitter_ms = 0.0
+        convert_ms = 0.0
+        emitted_raw = 0
+        bar_count = 0
+        diagnostics_sum: Dict[str, float] = {}
+        diagnostics_max: Dict[str, float] = {}
+        for timestamp, row in df.iterrows():
+            bar_count += 1
+            candle_time = timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp
+            if getattr(candle_time, "tzinfo", None) is None:
+                candle_time = candle_time.replace(tzinfo=timezone.utc)
+            else:
+                candle_time = candle_time.astimezone(timezone.utc)
+            candle = Candle(
+                time=candle_time,
+                open=float(row.get("open")),
+                high=float(row.get("high")),
+                low=float(row.get("low")),
+                close=float(row.get("close")),
+                volume=float(row.get("volume")) if row.get("volume") is not None else None,
             )
-            self._maybe_hydrate_cache_context(rule_config, cache_ctx, inst_id=meta.get("id"))
-        return rule_config, cache_ctx
+            payload = dict(prepared_snapshot_payload)
+            t_emit = perf_counter()
+            result = plugin.signal_emitter(payload, candle, previous_candle)
+            emitter_ms += (perf_counter() - t_emit) * 1000.0
+            if isinstance(result, Mapping):
+                raw_diagnostics = result.get("diagnostics")
+                if isinstance(raw_diagnostics, Mapping):
+                    for key, value in raw_diagnostics.items():
+                        metric_name = str(key).strip()
+                        if not metric_name:
+                            continue
+                        numeric: Optional[float] = None
+                        if isinstance(value, bool):
+                            numeric = 1.0 if value else 0.0
+                        elif isinstance(value, (int, float)):
+                            numeric = float(value)
+                        if numeric is None:
+                            continue
+                        diagnostics_sum[metric_name] = diagnostics_sum.get(metric_name, 0.0) + numeric
+                        current_max = diagnostics_max.get(metric_name)
+                        if current_max is None or numeric > current_max:
+                            diagnostics_max[metric_name] = numeric
+            signals = result.get("signals") if isinstance(result, Mapping) else []
+            if isinstance(signals, Sequence):
+                emitted_raw += len(signals)
+                for signal in signals:
+                    if not isinstance(signal, Mapping):
+                        continue
+                    t_convert = perf_counter()
+                    converted = self._signal_from_runtime_payload(
+                        signal,
+                        default_symbol=symbol,
+                        indicator_id=inst_id,
+                        timeframe_seconds=timeframe_to_seconds(timeframe) or 0,
+                        runtime_scope=str(prepared_snapshot_payload.get("_runtime_scope") or ""),
+                    )
+                    convert_ms += (perf_counter() - t_convert) * 1000.0
+                    if converted is not None:
+                        emitted.append(converted)
+            previous_candle = candle
+            if bar_count % 1000 == 0:
+                logger.debug(
+                    "event=indicator_signal_runtime_progress indicator_id=%s indicator_type=%s bars_processed=%s emitted_raw=%s emitted_converted=%s apply_ms=%.3f snapshot_ms=%.3f emitter_ms=%.3f convert_ms=%.3f diagnostics_sum=%s diagnostics_max=%s",
+                    inst_id,
+                    indicator_type,
+                    bar_count,
+                    emitted_raw,
+                    len(emitted),
+                    apply_ms,
+                    snapshot_ms,
+                    emitter_ms,
+                    convert_ms,
+                    diagnostics_sum,
+                    diagnostics_max,
+                )
+        loop_ms = (perf_counter() - t_loop_start) * 1000.0
+        logger.info(
+            "event=indicator_signal_runtime_complete indicator_id=%s indicator_type=%s signals=%s bars=%s emitted_raw=%s duration_loop_ms=%.3f duration_apply_ms=%.3f duration_snapshot_ms=%.3f duration_emitter_ms=%.3f duration_convert_ms=%.3f",
+            inst_id,
+            indicator_type,
+            len(emitted),
+            len(df),
+            emitted_raw,
+            loop_ms,
+            apply_ms,
+            snapshot_ms,
+            emitter_ms,
+            convert_ms,
+        )
+        logger.info(
+            "event=indicator_signal_runtime_diagnostics indicator_id=%s indicator_type=%s diagnostics_sum=%s diagnostics_max=%s",
+            inst_id,
+            indicator_type,
+            diagnostics_sum,
+            diagnostics_max,
+        )
+        return emitted
 
-    def _apply_breakout_defaults(
-        self, instance, stored_params: Mapping[str, Any], rule_config: Dict[str, Any]
-    ) -> None:
-        if "pivot_breakout_confirmation_bars" not in rule_config:
-            pivot_bars = stored_params.get("pivot_breakout_confirmation_bars")
-            if pivot_bars is None and hasattr(instance, "pivot_breakout_confirmation_bars"):
-                pivot_bars = getattr(instance, "pivot_breakout_confirmation_bars")
-            rule_config["pivot_breakout_confirmation_bars"] = coerce_int(
-                pivot_bars,
-                _DEFAULT_PIVOT_BREAKOUT_CONFIG.confirmation_bars,
-                minimum=1,
+    def _build_precomputed_runtime_payload(
+        self,
+        *,
+        inst_id: str,
+        meta: Mapping[str, Any],
+        instance: Any,
+        symbol: str,
+        runtime_scope: str,
+        source_timeframe: str,
+        chart_timeframe: str,
+        profile_source_timeframe: str,
+    ) -> Dict[str, Any]:
+        builder = getattr(instance, "build_runtime_signal_payload", None)
+        if not callable(builder):
+            raise RuntimeError(
+                "indicator_signal_runtime_payload_builder_missing: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')}"
             )
-        if "market_profile_breakout_confirmation_bars" not in rule_config:
-            mp_bars = stored_params.get("market_profile_breakout_confirmation_bars")
-            if mp_bars is None and hasattr(instance, "market_profile_breakout_confirmation_bars"):
-                mp_bars = getattr(instance, "market_profile_breakout_confirmation_bars")
-            rule_config["market_profile_breakout_confirmation_bars"] = coerce_int(
-                mp_bars,
-                _DEFAULT_MARKET_PROFILE_BREAKOUT_CONFIG.confirmation_bars,
-                minimum=1,
+        try:
+            builder_kwargs = {
+                "indicator_id": inst_id,
+                "params": dict(meta.get("params") or {}),
+                "symbol": symbol,
+                "color": meta.get("color"),
+            }
+            if str(meta.get("type") or "").strip().lower() == "market_profile":
+                builder_kwargs["chart_timeframe"] = str(chart_timeframe or "")
+            payload = builder(**builder_kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"indicator_signal_precomputed_payload_failed: indicator_id={inst_id} indicator_type={meta.get('type')}"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise RuntimeError(
+                "indicator_signal_precomputed_payload_invalid: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=non_mapping"
             )
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, Sequence):
+            raise RuntimeError(
+                "indicator_signal_precomputed_payload_invalid: "
+                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profiles"
+            )
+        normalized = dict(payload)
+        normalized["_indicator_id"] = inst_id
+        normalized["symbol"] = symbol
+        normalized["_runtime_scope"] = runtime_scope
+        normalized["source_timeframe"] = str(source_timeframe or "")
+        normalized["chart_timeframe"] = str(chart_timeframe or "")
+        normalized["source_timeframe_seconds"] = timeframe_to_seconds(source_timeframe) or 0
+        normalized["profile_source_timeframe"] = str(profile_source_timeframe or "")
+        if str(meta.get("type") or "").strip().lower() == "market_profile":
+            if not isinstance(normalized.get("profile_params"), Mapping):
+                raise RuntimeError(
+                    "indicator_signal_precomputed_payload_invalid: "
+                    f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profile_params"
+                )
+        logger.info(
+            "event=indicator_signal_precomputed_payload_ready indicator_id=%s indicator_type=%s profiles=%s",
+            inst_id,
+            meta.get("type"),
+            len(profiles),
+        )
+        return normalized
 
-    def _maybe_add_market_profile_payloads(
-        self, instance, df, rule_config: Dict[str, Any], interval: str, symbol: str
-    ) -> None:
-        if isinstance(instance, MarketProfileIndicator) and "rule_payloads" not in rule_config:
-            params = resolve_market_profile_params(
-                instance,
-                use_merged_value_areas=rule_config.get("market_profile_use_merged_value_areas"),
-                merge_threshold=rule_config.get("market_profile_merge_threshold"),
-                min_merge_sessions=rule_config.get("market_profile_merge_min_sessions"),
-            )
-            rule_config["market_profile_use_merged_value_areas"] = params.use_merged_value_areas
-            rule_config["market_profile_merge_threshold"] = params.merge_threshold
-            rule_config["market_profile_merge_min_sessions"] = params.min_merge_sessions
+    def _signal_from_runtime_payload(
+        self,
+        signal: Mapping[str, Any],
+        *,
+        default_symbol: str,
+        indicator_id: str,
+        timeframe_seconds: int,
+        runtime_scope: str,
+    ) -> Optional[BaseSignal]:
+        signal_type = str(signal.get("type") or "").strip()
+        if not signal_type:
+            return None
+        signal_time_raw = signal.get("signal_time", signal.get("time"))
+        ts = self._coerce_signal_time(signal_time_raw)
+        if ts is None:
+            return None
+        symbol = str(signal.get("symbol") or default_symbol or "").strip()
+        if not symbol:
+            return None
+        confidence = signal.get("confidence")
+        try:
+            confidence_value = float(confidence) if confidence is not None else 1.0
+        except (TypeError, ValueError):
+            confidence_value = 1.0
+        metadata = {
+            key: value
+            for key, value in signal.items()
+            if key not in {"type", "symbol", "time", "confidence", "metadata"}
+        }
+        nested_metadata = signal.get("metadata")
+        if isinstance(nested_metadata, Mapping):
+            for key, value in nested_metadata.items():
+                metadata.setdefault(str(key), value)
+        inferred_direction = _derive_direction_from_metadata(metadata)
+        if inferred_direction and not metadata.get("direction"):
+            metadata["direction"] = inferred_direction
+        inferred_bias = _derive_bias_from_metadata(metadata)
+        if inferred_bias and not metadata.get("bias"):
+            metadata["bias"] = inferred_bias
+        metadata.setdefault("signal_type", signal_type)
+        metadata.setdefault("signal_time", int(ts.timestamp()))
+        metadata.setdefault("indicator_id", indicator_id)
+        metadata.setdefault("timeframe_seconds", int(timeframe_seconds))
+        metadata.setdefault("runtime_scope", runtime_scope)
+        metadata.setdefault("symbol", symbol)
+        metadata.setdefault("rule_id", signal_type)
+        metadata.setdefault("pattern_id", metadata.get("rule_id") or signal_type)
+        identity = self._rule_identity_from_id(str(metadata.get("rule_id") or signal_type))
+        metadata.setdefault("rule_family", identity.family)
+        metadata.setdefault("rule_version", identity.version)
+        contract_payload: Dict[str, Any] = {
+            "signal_type": signal_type,
+            "signal_time": metadata.get("signal_time"),
+            "symbol": symbol,
+            "timeframe_seconds": metadata.get("timeframe_seconds"),
+            "indicator_id": metadata.get("indicator_id"),
+            "rule_id": metadata.get("rule_id"),
+            "pattern_id": metadata.get("pattern_id"),
+            "runtime_scope": metadata.get("runtime_scope"),
+            "known_at": metadata.get("known_at"),
+            "metadata": metadata,
+        }
+        assert_signal_contract(contract_payload)
+        assert_no_execution_fields(contract_payload)
+        return BaseSignal(
+            type=signal_type,
+            symbol=symbol,
+            time=ts,
+            confidence=confidence_value,
+            metadata=metadata,
+        )
 
-            # Log merge parameters to diagnose discrepancies between Signal Preview and Generate Signals
-            logger.info(
-                "market_profile_merge_config | use_merged=%s | threshold=%s | min_sessions=%s | from_config=%s | instance_values=[use_merged=%s, threshold=%s, min_sessions=%s]",
-                rule_config.get("market_profile_use_merged_value_areas"),
-                rule_config.get("market_profile_merge_threshold"),
-                rule_config.get("market_profile_merge_min_sessions"),
-                {
-                    "has_use_merged": "market_profile_use_merged_value_areas" in rule_config,
-                    "has_threshold": "market_profile_merge_threshold" in rule_config,
-                    "has_min_sessions": "market_profile_merge_min_sessions" in rule_config,
-                },
-                getattr(instance, "use_merged_value_areas", None),
-                getattr(instance, "merge_threshold", None),
-                getattr(instance, "min_merge_sessions", None),
-            )
-
-            payloads = build_value_area_payloads(
-                instance,
-                df,
-                runtime_indicator=instance,
-                interval=interval,
-                symbol=symbol,
-                use_merged=params.use_merged_value_areas,
-                merge_threshold=params.merge_threshold,
-                min_merge_sessions=params.min_merge_sessions,
-            )
-            rule_config["rule_payloads"] = payloads
+    @staticmethod
+    def _coerce_signal_time(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return None
 
     def _normalise_enabled_rules(
         self, rule_config: Dict[str, Any]
@@ -309,106 +763,6 @@ class IndicatorSignalExecutor:
         rule_config.pop("enabled_rules", None)
         return None
 
-    def _maybe_hydrate_cache_context(
-        self, rule_config: Dict[str, Any], cache_ctx: BreakoutCacheContext, *, inst_id: Optional[str]
-    ) -> None:
-        cache_spec = cache_ctx.cache_spec
-        if cache_spec is None or cache_ctx.cache_key is None:
-            return
-        if (
-            cache_ctx.requested_rule_ids
-            and cache_spec.retest_rule_id in cache_ctx.requested_rule_ids
-            and cache_spec.breakout_rule_id not in cache_ctx.requested_rule_ids
-        ):
-            cached_breakouts = self._ctx.breakout_cache.get_cached_breakouts(cache_ctx.cache_key)
-            if cached_breakouts:
-                cache_ctx.using_cached_breakouts = True
-                rule_config[cache_spec.cache_context_key] = cached_breakouts
-                rule_config[cache_spec.ready_flag_key] = True
-                if cache_spec.initialised_flag_key:
-                    rule_config[cache_spec.initialised_flag_key] = True
-                for extra_key, extra_value in cache_spec.context_defaults.items():
-                    rule_config.setdefault(extra_key, extra_value)
-                logger.debug(
-                    "event=indicator_breakout_cache_hit indicator=%s rule=%s entries=%d",
-                    inst_id,
-                    cache_spec.breakout_rule_id,
-                    len(cached_breakouts),
-                )
-            else:
-                cache_ctx.drop_breakout_from_response = True
-                current_rules = list(rule_config.get("enabled_rules", []))
-                if cache_spec.breakout_rule_id not in current_rules:
-                    current_rules.append(cache_spec.breakout_rule_id)
-                if current_rules:
-                    rule_config["enabled_rules"] = current_rules
-                    cache_ctx.requested_rule_ids = set(current_rules)
-                logger.debug(
-                    "event=indicator_breakout_cache_miss indicator=%s rule=%s",
-                    inst_id,
-                    cache_spec.breakout_rule_id,
-                    )
-
-    def _run_rules(
-        self,
-        instance,
-        df,
-        rule_config: Dict[str, Any],
-        inst_id: str,
-        symbol: str,
-        interval: str,
-        start: str,
-        end: str,
-    ):
-        indicator_name = getattr(instance, "NAME", instance.__class__.__name__)
-        noisy_keys = {"rule_payloads"}
-        cache_spec = self._ctx.breakout_cache.spec_for(indicator_name)
-        if cache_spec is not None:
-            noisy_keys.add(cache_spec.cache_context_key)
-        log_config: Dict[str, Any] = {}
-        for key, value in rule_config.items():
-            if key in noisy_keys:
-                try:
-                    length = len(value)  # type: ignore[arg-type]
-                except Exception:
-                    length = "?"
-                log_config[key] = f"<{key}:len={length}>"
-            else:
-                log_config[key] = value
-        logger.info(
-            "event=indicator_signal_execute indicator=%s name=%s symbol=%s interval=%s start=%s end=%s config=%s",
-            inst_id,
-            indicator_name,
-            symbol,
-            interval,
-            start,
-            end,
-            log_config,
-        )
-        return self._ctx.signal_runner.run_rules(instance, df, **rule_config)
-
-    def _persist_breakout_cache(
-        self, signals_all: Sequence[BaseSignal], cache_ctx: BreakoutCacheContext, inst_id: str
-    ) -> None:
-        cache_spec = cache_ctx.cache_spec
-        if cache_spec is None or cache_ctx.cache_key is None or cache_ctx.using_cached_breakouts:
-            return
-        enabled_for_run = cache_ctx.requested_rule_ids
-        ran_breakout = enabled_for_run is None or cache_spec.breakout_rule_id in enabled_for_run
-        if ran_breakout:
-            breakout_payloads = [
-                self._ctx.breakout_cache.flatten_breakout_signal(sig)
-                for sig in signals_all
-                if sig.type == "breakout"
-            ]
-            self._ctx.breakout_cache.store_breakout_cache(cache_ctx.cache_key, breakout_payloads)
-            logger.debug(
-                "event=indicator_breakout_cache_store indicator=%s rule=%s entries=%d",
-                inst_id,
-                cache_spec.breakout_rule_id,
-                len(breakout_payloads),
-            )
-
     def _filter_signals(
         self, signals_all: Sequence[BaseSignal], cache_ctx: BreakoutCacheContext
     ) -> Sequence[BaseSignal]:
@@ -422,10 +776,20 @@ class IndicatorSignalExecutor:
             )
             filtered_signals = []
             matched_count = 0
+            compatible_family_matches = 0
             for idx, sig in enumerate(signals_all):
                 identifiers = self._collect_signal_identifiers(sig)
                 intersection = identifiers.intersection(cache_ctx.requested_rule_ids)
                 matched = bool(intersection)
+                compatibility_reason: Optional[str] = None
+                if (
+                    not matched
+                    and cache_ctx.requested_rule_identities
+                    and self._signal_matches_requested_identity(sig, cache_ctx.requested_rule_identities)
+                ):
+                    matched = True
+                    compatible_family_matches += 1
+                    compatibility_reason = "family_version_compat"
                 if matched:
                     filtered_signals.append(sig)
                     matched_count += 1
@@ -450,22 +814,22 @@ class IndicatorSignalExecutor:
                         matched,
                         sorted(intersection) if intersection else [],
                     )
+                    if compatibility_reason:
+                        logger.info(
+                            "signal_filtering_compat_match | reason=%s | requested=%s | signal_rule_id=%s | signal_family=%s | signal_version=%s",
+                            compatibility_reason,
+                            sorted(cache_ctx.requested_rule_ids),
+                            metadata_rule_id,
+                            sig_metadata.get("rule_family") if isinstance(sig_metadata, dict) else None,
+                            sig_metadata.get("rule_version") if isinstance(sig_metadata, dict) else None,
+                        )
             logger.info(
-                "signal_filtering_after_rules | filtered_signals=%d | matched=%d | dropped=%d",
+                "signal_filtering_after_rules | filtered_signals=%d | matched=%d | dropped=%d | compatible_family_matches=%d",
                 len(filtered_signals),
                 matched_count,
                 len(signals_all) - matched_count,
+                compatible_family_matches,
             )
-            if cache_ctx.drop_breakout_from_response:
-                before_drop = len(filtered_signals)
-                filtered_signals = [
-                    sig for sig in filtered_signals if sig.type != "breakout"
-                ]
-                logger.info(
-                    "signal_filtering_after_breakout_drop | before=%d | after=%d",
-                    before_drop,
-                    len(filtered_signals),
-                )
         if len(filtered_signals) != len(signals_all):
             logger.debug(
                 "event=indicator_signal_filtered indicator=%s total=%d returned=%d requested_rules=%s",
@@ -522,6 +886,53 @@ class IndicatorSignalExecutor:
         else:
             variants.add(f"{identifier}_rule")
         return variants
+
+    @staticmethod
+    def _rule_identity_from_id(rule_id: str) -> RuleIdentity:
+        raw = str(rule_id or "").strip().lower()
+        if not raw:
+            return RuleIdentity(raw_id="", family="", version=None)
+        base = raw[:-5] if raw.endswith("_rule") else raw
+        match = re.match(r"^(?P<family>.+)_v(?P<version>\d+)$", base)
+        if match:
+            family = str(match.group("family") or "").strip().lower()
+            version = int(match.group("version"))
+            return RuleIdentity(raw_id=raw, family=family, version=version)
+        return RuleIdentity(raw_id=raw, family=base, version=None)
+
+    def _signal_matches_requested_identity(
+        self,
+        signal: BaseSignal,
+        requested: Sequence[RuleIdentity],
+    ) -> bool:
+        metadata = signal.metadata if isinstance(signal.metadata, Mapping) else {}
+        rule_id = str(metadata.get("rule_id") or "").strip().lower()
+        family = str(metadata.get("rule_family") or "").strip().lower()
+        version_raw = metadata.get("rule_version")
+        version: Optional[int]
+        try:
+            version = int(version_raw) if version_raw is not None else None
+        except (TypeError, ValueError):
+            version = None
+        if not family and rule_id:
+            derived = self._rule_identity_from_id(rule_id)
+            family = derived.family
+            version = derived.version if version is None else version
+        if not family:
+            return False
+        for selector in requested:
+            if selector.family != family:
+                continue
+            if selector.version is None:
+                return True
+            if version is None:
+                # Allow unversioned runtime emissions to satisfy explicit version
+                # selectors within the same family while version rollout is in
+                # progress.
+                return True
+            if selector.version == version:
+                return True
+        return False
 
 
 __all__ = ["IndicatorSignalExecutor", "BreakoutCacheContext"]

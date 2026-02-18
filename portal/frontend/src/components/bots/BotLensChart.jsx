@@ -198,7 +198,6 @@ export function BotLensChart({
   }, [timeframe])
 
   useEffect(() => {
-    if (!BOTLENS_DEBUG) return
     const summary = resolvedOverlays.reduce((acc, ov) => {
       const type = ov?.type || 'unknown'
       acc[type] = (acc[type] || 0) + 1
@@ -206,8 +205,16 @@ export function BotLensChart({
     }, {})
     const regime = summary.regime_overlay || 0
     const regimeMarkers = summary.regime_markers || 0
-    console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
-  }, [resolvedOverlays])
+    logger.info('overlay_render_input', {
+      overlays_total: resolvedOverlays.length,
+      overlays_by_type: summary,
+      regime_overlay: regime,
+      regime_markers: regimeMarkers,
+    })
+    if (BOTLENS_DEBUG) {
+      console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
+    }
+  }, [logger, resolvedOverlays])
 
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
@@ -501,6 +508,16 @@ export function BotLensChart({
       tradeRegions: showTradeRegions ? tradeRegions : [],
       tradePriceLines: showTradeRays ? tradePriceLines : [],
       candleData,
+    })
+    logger.info('overlay_render_artifacts', {
+      overlays_total: resolvedOverlays.length,
+      markers: Array.isArray(artifacts?.markers) ? artifacts.markers.length : 0,
+      touch_points: Array.isArray(artifacts?.touchPoints) ? artifacts.touchPoints.length : 0,
+      boxes: Array.isArray(artifacts?.boxes) ? artifacts.boxes.length : 0,
+      segments: Array.isArray(artifacts?.segments) ? artifacts.segments.length : 0,
+      polylines: Array.isArray(artifacts?.polylines) ? artifacts.polylines.length : 0,
+      bubbles: Array.isArray(artifacts?.bubbles) ? artifacts.bubbles.length : 0,
+      price_lines: Array.isArray(artifacts?.priceLines) ? artifacts.priceLines.length : 0,
     })
     const overlayResult = applyArtifacts(artifacts)
     if (debugRanges) {

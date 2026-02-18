@@ -6,6 +6,9 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
+from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+from engines.bot_runtime.core.indicator_state.plugins.registry import IndicatorPluginManifest
+from engines.bot_runtime.core.indicator_state.contracts import IndicatorStateDelta, IndicatorStateSnapshot
 from portal.backend.main import app
 from signals.engine import signal_generator as engine
 from signals.rules.pivot import PivotLevelIndicator
@@ -13,21 +16,34 @@ from signals.rules.pivot import PivotLevelIndicator
 
 def test_indicator_service_registers_pivot_rules():
     module = importlib.import_module("portal.backend.service.indicators.indicator_service")
-    original_registry = dict(engine._REGISTRY)
+    registry = plugin_registry()
+    original_plugins = dict(registry._plugins)
+    original_pending_rules = dict(registry._pending_signal_rules)
+    original_pending_overlays = dict(registry._pending_signal_overlay_adapters)
 
     try:
-        engine._REGISTRY.clear()
+        registry._plugins.clear()
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_overlay_adapters.clear()
         importlib.reload(module)
 
-        assert PivotLevelIndicator.NAME in engine._REGISTRY
+        assert tuple(registry.get_signal_rules(PivotLevelIndicator.NAME))
     finally:
-        engine._REGISTRY.clear()
-        engine._REGISTRY.update(original_registry)
+        registry._plugins.clear()
+        registry._plugins.update(original_plugins)
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_rules.update(original_pending_rules)
+        registry._pending_signal_overlay_adapters.clear()
+        registry._pending_signal_overlay_adapters.update(original_pending_overlays)
 
 
 class _DummyFrame:
     def __init__(self, timestamps):
         self._index = tuple(timestamps)
+        self._rows = tuple(
+            {"open": 100.0 + idx, "high": 101.0 + idx, "low": 99.0 + idx, "close": 100.5 + idx, "volume": 10.0}
+            for idx, _ in enumerate(self._index)
+        )
         self.empty = len(self._index) == 0
 
     def copy(self):
@@ -36,6 +52,10 @@ class _DummyFrame:
     @property
     def index(self):
         return self._index
+
+    def iterrows(self):
+        for idx, timestamp in enumerate(self._index):
+            yield timestamp, dict(self._rows[idx])
 
     def __len__(self):
         return len(self._index)
@@ -102,8 +122,6 @@ def signal_test_env(monkeypatch):
         monkeypatch.setattr(svc, "_load_indicator_record", lambda req_id: record if req_id == inst_id else (_raise_missing()))
         monkeypatch.setattr(svc, "AlpacaProvider", lambda: DummyProvider(df))
 
-        engine_registry = dict(engine._REGISTRY)
-
         def dummy_rule(context, payload):
             return [
                 {
@@ -124,8 +142,52 @@ def signal_test_env(monkeypatch):
                 }
             ]
 
-        monkeypatch.setattr(engine, "_REGISTRY", engine_registry)
         engine.register_indicator_rules(_DummyIndicator.NAME, [dummy_rule], overlay_adapter=dummy_overlay)
+        registry = plugin_registry()
+
+        class _DummyRuntimeEngine:
+            def initialize(self, window_context):
+                return {"revision": 0, "known_at": None, "formed_at": None}
+
+            def apply_bar(self, state, bar):
+                state["revision"] = int(state.get("revision") or 0) + 1
+                state["known_at"] = bar.time
+                state["formed_at"] = bar.time
+                return IndicatorStateDelta(changed=True, revision=state["revision"], known_at=bar.time)
+
+            def snapshot(self, state):
+                known_at = state.get("known_at") or datetime.fromtimestamp(0, tz=timezone.utc)
+                formed_at = state.get("formed_at") or known_at
+                return IndicatorStateSnapshot(
+                    revision=int(state.get("revision") or 0),
+                    known_at=known_at,
+                    formed_at=formed_at,
+                    source_timeframe="1h",
+                    payload={},
+                )
+
+        def _dummy_signal_emitter(payload, candle, previous_candle):
+            return {
+                "signals": [
+                    {
+                        "type": "breakout",
+                        "symbol": "ES",
+                        "time": candle.time,
+                        "confirmation": 1,
+                        "rule_id": "dummy_rule",
+                        "pattern_id": "dummy_rule",
+                    }
+                ]
+            }
+
+        registry.register(
+            IndicatorPluginManifest(
+                indicator_type=_DummyIndicator.NAME,
+                engine_factory=lambda _meta: _DummyRuntimeEngine(),
+                evaluation_mode="rolling",
+                signal_emitter=_dummy_signal_emitter,
+            )
+        )
 
         client = TestClient(app)
         return client, inst_id

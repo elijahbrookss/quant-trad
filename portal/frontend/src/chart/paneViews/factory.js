@@ -4,6 +4,7 @@ import { createSegmentPaneView } from './segmentPaneView';
 import { createPolylinePaneView } from './polylinePaneView';
 import { createSignalBubblePaneView } from './signalBubblePaneView';
 import { createMarkerPaneView } from './markerPaneView';
+import { createHighlightBandPaneView } from './highlightBandPaneView';
 
 const toSec = (t) => (typeof t === 'number' && t > 2e10 ? Math.floor(t / 1000) : t);
 
@@ -14,6 +15,7 @@ export const PaneViewType = {
   POLYLINE: 'polyline',
   SIGNAL_BUBBLE: 'signal_bubble',
   MARKER: 'marker',
+  HIGHLIGHT_BAND: 'highlight_band',
 };
 
 export class PaneViewManager {
@@ -34,6 +36,7 @@ export class PaneViewManager {
     else if (type === PaneViewType.POLYLINE) view = createPolylinePaneView(this.ts);
     else if (type === PaneViewType.SIGNAL_BUBBLE) view = createSignalBubblePaneView(this.ts);
     else if (type === PaneViewType.MARKER) view = createMarkerPaneView(this.ts);
+    else if (type === PaneViewType.HIGHLIGHT_BAND) view = createHighlightBandPaneView(this.ts);
     else throw new Error(`Unknown pane view: ${type}`);
     const base = view.defaultOptions?.() ?? {};
     const s = this.chart.addCustomSeries(view, {
@@ -191,6 +194,23 @@ export class PaneViewManager {
       .map(([time, entries]) => ({ time, originalData: { markers: entries } }));
 
     this.series.get(PaneViewType.MARKER).setData(data);
+  }
+
+  setHighlightBands(bands) {
+    this.ensure(PaneViewType.HIGHLIGHT_BAND);
+    const normalized = (bands || []).map((b) => ({
+      ...b,
+      x1: toSec(b.x1),
+      x2: toSec(b.x2),
+    }));
+    this.views.get(PaneViewType.HIGHLIGHT_BAND).setBands(normalized);
+
+    const times = [...new Set(normalized.flatMap((b) => [b.x1, b.x2]))]
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b)
+      .map((time) => ({ time, originalData: {} }));
+
+    this.series.get(PaneViewType.HIGHLIGHT_BAND).setData(times);
   }
 
 

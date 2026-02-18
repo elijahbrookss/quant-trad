@@ -228,13 +228,6 @@ class IndicatorInstanceUpdater:
         color_only_update = params_unchanged and (color_provided or name)
 
         if color_only_update:
-            # Fast path: only update metadata without rebuilding indicator
-            cached_inst = self._get_cached_instance(inst_id)
-            if cached_inst is None:
-                # If not cached, need full rebuild anyway
-                color_only_update = False
-
-        if color_only_update:
             # Update only color/name in metadata without rebuilding
             meta_payload = dict(meta)
             if name:

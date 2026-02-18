@@ -287,23 +287,6 @@ export const IndicatorSection = ({ chartId }) => {
     setIsLoading(false);
   }, [bulkActionLoading, chartState?.overlayLoading, isLoading, jobState.busy, refreshingList]);
 
-  // Safety valve: clear overlayLoading if it lingers with no active jobs
-  useEffect(() => {
-    if (!chartState?.overlayLoading) return undefined;
-    const timer = setTimeout(() => {
-      const snapshot = getChart(chartId);
-      const active =
-        jobState.busy ||
-        refreshingList ||
-        bulkActionLoading ||
-        isLoading;
-      if (!active && snapshot?.overlayLoading) {
-        updateChart(chartId, { overlayLoading: false });
-      }
-    }, 1800);
-    return () => clearTimeout(timer);
-  }, [bulkActionLoading, chartId, chartState?.overlayLoading, getChart, isLoading, jobState.busy, refreshingList, updateChart]);
-
   // Derive ISO start/end from dateRange
   const [startISO, endISO] = useMemo(() => {
     const [s, e] = chartState?.dateRange || []
@@ -471,11 +454,20 @@ export const IndicatorSection = ({ chartId }) => {
       active.map(async (ind) => {
         try {
           const payload = await fetchIndicatorOverlays(ind.id, body);
+          const rawPayload = payload?.payload || payload
+          const count = (key) => (Array.isArray(rawPayload?.[key]) ? rawPayload[key].length : 0)
           info('overlay_fetch_success', {
             indicatorId: ind.id,
             indicatorType: ind.type,
             instrument_id: chartState?.instrument_id,
             hasPayload: Boolean(payload),
+            overlay_type: payload?.type || ind.type,
+            boxes: count('boxes'),
+            markers: count('markers'),
+            price_lines: count('price_lines'),
+            segments: count('segments'),
+            polylines: count('polylines'),
+            profiles: count('profiles'),
           });
           if (!payload) return null;
           if (payload?.type && payload?.payload) {
@@ -866,8 +858,6 @@ export const IndicatorSection = ({ chartId }) => {
 
   // Regenerate signals
   const generateSignals = async (id) => {
-    if (guardBusy('generate_signals')) return;
-    startJob('Generating signals…', { indicatorId: id, type: 'signals' });
     info('signal_generation_start', {
       indicatorId: id,
       chartState: {
@@ -927,8 +917,6 @@ export const IndicatorSection = ({ chartId }) => {
     } catch (e) {
       setError(e.message);
       logError('signal_generation_failed', e);
-    } finally {
-      finishJob();
     }
   };
 
@@ -1088,8 +1076,9 @@ export const IndicatorSection = ({ chartId }) => {
     });
   };
 
-  const isSignalsLoading = !!chartState?.signalsLoading
-  const signalsLoadingFor = chartState?.signalsLoadingFor
+  const signalsLoadingByIndicator = chartState?.signalsLoadingByIndicator && typeof chartState.signalsLoadingByIndicator === 'object'
+    ? chartState.signalsLoadingByIndicator
+    : {}
 
   const typeOptions = useMemo(() => {
     const unique = new Set();
@@ -1350,7 +1339,7 @@ export const IndicatorSection = ({ chartId }) => {
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-08)] px-4 py-3">
               <div className="flex items-center gap-3 text-xs font-semibold text-[color:var(--accent-text-soft)]">
                 <span>{selectedIds.size} selected</span>
-                <span className="text-[11px] text-slate-500">Single-job guard prevents concurrent runs.</span>
+                <span className="text-[11px] text-slate-500">Signals run per-indicator and replace only that indicator&apos;s prior signals.</span>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
                 <button
@@ -1397,8 +1386,8 @@ export const IndicatorSection = ({ chartId }) => {
 
           <div className="space-y-2">
             {paginatedIndicators.map(indicator => {
-              const isGenerating = (isSignalsLoading && signalsLoadingFor === indicator.id) || (jobState.busy && jobState.indicatorId === indicator.id && jobState.type === 'signals')
-              const disableSignals = actionLocked || (isSignalsLoading && signalsLoadingFor !== indicator.id)
+              const isGenerating = Boolean(signalsLoadingByIndicator?.[indicator.id])
+              const disableSignals = actionLocked || isGenerating
               const isSelected = selectedIds.has(indicator.id)
               return (
                 <IndicatorCard

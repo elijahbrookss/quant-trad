@@ -122,7 +122,7 @@ def test_generate_indicator_payloads_uses_runtime_input_plan(monkeypatch):
 
     assert missing == []
     assert total == 0
-    assert captured["interval"] == "30m"
+    assert captured["interval"] == "5m"
     assert captured["start"] == "2026-01-01T00:00:00+00:00"
     assert "runtime_input_plan" in captured["config"]
     assert payloads["ind-1"]["runtime_input_plan"]["source_timeframe"] == "30m"

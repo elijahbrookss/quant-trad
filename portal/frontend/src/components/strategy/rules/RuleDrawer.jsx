@@ -9,6 +9,8 @@ import { buildRuleConditionSummary, buildRuleDefaultName } from './ruleUtils.js'
 import { FilterBuilder } from '../filters/FilterBuilder.jsx'
 import { buildFilterPayload, buildFilterPreview, createEmptyPredicate } from '../filters/filterUtils.js'
 
+const RULE_DRAWER_FORM_ID = 'strategy-rule-drawer-form'
+
 export const RuleDrawer = ({
   open,
   indicators = [],
@@ -126,7 +128,11 @@ export const RuleDrawer = ({
             </button>
           </header>
 
-          <form className="flex-1 space-y-5 overflow-y-auto px-5 py-4" onSubmit={handleSave}>
+          <form
+            id={RULE_DRAWER_FORM_ID}
+            className="flex-1 space-y-5 overflow-y-auto px-5 py-4"
+            onSubmit={handleSave}
+          >
             <div className="rounded-lg border border-white/10 bg-black/30 px-4 py-3">
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Condition summary</p>
               <p className="mt-1 text-sm text-slate-200">{conditionSummary}</p>
@@ -382,7 +388,7 @@ export const RuleDrawer = ({
 
           <footer className="flex items-center justify-end gap-2 border-t border-white/10 px-5 py-3">
             <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-            <Button type="submit" disabled={submitting || !canSubmit}>
+            <Button type="submit" form={RULE_DRAWER_FORM_ID} disabled={submitting || !canSubmit}>
               {submitting ? 'Saving…' : 'Save rule'}
             </Button>
           </footer>

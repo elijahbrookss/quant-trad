@@ -46,8 +46,11 @@ services:
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
       DEBUG: ${DEBUG:-true}
       ENV: ${ENV:-dev}
+      QUANTLAB_WORKER_PROCESSES: ${QUANTLAB_WORKER_PROCESSES:-3}
+      STATS_WORKER_PROCESSES: ${STATS_WORKER_PROCESSES:-2}
     ports:
       - "8000:8000"
+    command: ["python", "-m", "portal.backend.run_backend"]
     depends_on:
       - tsdb
     volumes:

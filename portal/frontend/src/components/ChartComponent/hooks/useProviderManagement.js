@@ -55,6 +55,7 @@ export function useProviderManagement({
   const [credentialsInputs, setCredentialsInputs] = useState({});
   const [credentialsSaving, setCredentialsSaving] = useState(false);
   const [credentialsError, setCredentialsError] = useState(null);
+  const [credentialsSavedAt, setCredentialsSavedAt] = useState(0);
 
   // Reload providers from API
   const reloadProviders = useCallback(async () => {
@@ -245,6 +246,7 @@ export function useProviderManagement({
         credentials: credentialsInputs,
       });
       await reloadProviders();
+      setCredentialsSavedAt(Date.now());
       closeCredentialsModal();
     } catch (err) {
       setCredentialsError(err?.message || 'Unable to save credentials.');
@@ -282,6 +284,7 @@ export function useProviderManagement({
     setCredentialsInputs,
     credentialsSaving,
     credentialsError,
+    credentialsSavedAt,
     openCredentialsModal,
     closeCredentialsModal,
     handleSaveCredentials,
