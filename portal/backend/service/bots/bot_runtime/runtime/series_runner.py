@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Protocol
+import concurrent.futures
 
 class SeriesState(Protocol):
     """Minimal series state surface needed by runners."""
@@ -36,6 +37,7 @@ class SeriesRunnerContext:
     thread_name: Callable[[SeriesState, int], str]
     log_debug: Callable[[str, Optional[SeriesState], Optional[dict]], None]
     log_info: Callable[[str, Optional[SeriesState], Optional[dict]], None]
+    log_error: Callable[[str, Optional[SeriesState], Optional[dict]], None]
 
 
 class SeriesRunner(Protocol):
@@ -72,14 +74,16 @@ class InlineSeriesRunner:
                     continue
                 break
             for state in due_states:
-                self._ctx.step_series_state(state)
+                if not _safe_step(self._ctx, state):
+                    stop_event.set()
+                    break
 
     def stop(self) -> None:
         return
 
 
 class ThreadedSeriesRunner:
-    """One thread per series with independent pacing."""
+    """One thread per series with independent pacing. (Deprecated: prefer PoolSeriesRunner.)"""
 
     def __init__(self, ctx: SeriesRunnerContext) -> None:
         self._ctx = ctx
@@ -141,7 +145,9 @@ class ThreadedSeriesRunner:
                     {"bar_index": state.bar_index, "total_bars": state.total_bars},
                 )
                 break
-            self._ctx.step_series_state(state)
+            if not _safe_step(self._ctx, state):
+                stop_event.set()
+                break
             self._log_step_heartbeat(state)
 
     def _log_wait_if_needed(self, state: SeriesState, delay: float, next_at: datetime) -> None:
@@ -169,3 +175,53 @@ class ThreadedSeriesRunner:
             state,
             {"bar_index": state.bar_index, "total_bars": state.total_bars},
         )
+
+
+class PoolSeriesRunner:
+    """Runner that uses a fixed-size worker pool to step due series states."""
+
+    def __init__(self, ctx: SeriesRunnerContext, *, max_workers: int) -> None:
+        self._ctx = ctx
+        self._max_workers = max(max_workers, 1)
+
+    def run(self) -> None:
+        stop_event = self._ctx.stop_event
+        pause_event = self._ctx.pause_event
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+            while not stop_event.is_set():
+                if not pause_event.wait(timeout=0.2):
+                    continue
+                now = datetime.now(timezone.utc)
+                due_states = self._ctx.due_series_states(now)
+                if not due_states:
+                    if self._ctx.live_mode and self._ctx.append_live_candles_if_needed():
+                        continue
+                    next_at = self._ctx.next_step_time()
+                    if next_at:
+                        interval = max((next_at - now).total_seconds(), 0)
+                        self._ctx.pace(interval, True)
+                        continue
+                    break
+                futures = [executor.submit(_safe_step, self._ctx, state) for state in due_states]
+                for future, state in zip(futures, due_states):
+                    if not future.result():
+                        stop_event.set()
+                        for pending in futures:
+                            pending.cancel()
+                        break
+
+    def stop(self) -> None:
+        return
+
+
+def _safe_step(ctx: SeriesRunnerContext, state: SeriesState) -> bool:
+    try:
+        ctx.step_series_state(state)
+    except Exception as exc:
+        ctx.log_error(
+            "series_step_failed",
+            state,
+            {"error": str(exc), "exception": repr(exc)},
+        )
+        return False
+    return True

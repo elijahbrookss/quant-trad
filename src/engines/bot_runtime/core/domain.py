@@ -6,7 +6,7 @@ import logging
 import math
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -14,6 +14,14 @@ import risk as risk_math
 from atm import merge_templates
 from .execution import FillRejection, FillResult
 from .execution_adapter import ExecutionAdapter
+from .execution_intent import ExecutionIntent, LimitParams
+from .execution_model import ExecutionModel
+from .execution_runtime import DeterministicExecutionModel
+from .entry_execution import EntryExecutionCoordinator, PendingEntry
+from .entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
+from .events import ExitEvent, ExitSettlementPayload
+from .exit_settlement import ExitSettlement, ExitSettlementService
+from .fees import FeeResolver, FeeSchedule
 from utils.log_context import build_log_context, merge_log_context, with_log_context
 from .amount_constraints import normalize_qty_with_constraints, resolve_amount_constraints
 from .margin import calculate_max_qty_by_margin, resolve_instrument_type, InstrumentType
@@ -32,6 +40,7 @@ _TIMEFRAME_MULTIPLIERS = {
 
 if TYPE_CHECKING:
     from .execution import SpotExecutionModel
+    from .execution_intent import ExecutionOutcome
 
 
 def isoformat(value: Optional[datetime]) -> Optional[str]:
@@ -122,14 +131,28 @@ def normalize_epoch(value: Any) -> Optional[int]:
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
-        return int(value)
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        # Treat 13-digit unix values as milliseconds.
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     text = str(value).strip()
     if not text:
         return None
     if text.isdigit():
-        return int(text)
+        numeric = float(text)
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     try:
-        return int(float(text))
+        numeric = float(text)
+        if not math.isfinite(numeric):
+            return None
+        if abs(numeric) > 2e10:
+            numeric = numeric / 1000.0
+        return int(numeric)
     except (TypeError, ValueError):
         pass
     try:
@@ -191,6 +214,91 @@ class StrategySignal:
 
     epoch: int
     direction: str
+
+
+@dataclass
+class EntryValidation:
+    """Validation result for entry sizing and intent construction."""
+
+    ok: bool
+    rejection_reason: Optional[str] = None
+    rejection_detail: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class EntryRequest:
+    """Prepared entry sizing and intent information for execution."""
+
+    trade_id: Optional[str]
+    order_intent_id: Optional[str]
+    direction: str
+    requested_qty: float
+    qty_raw: float
+    r_ticks: float
+    r_value: Optional[float]
+    atr_at_entry: Optional[float]
+    r_multiple_at_entry: Optional[float]
+    order_type: str
+    limit_params: Optional[LimitParams]
+    side: str
+    requested_price: float
+    intent: Optional[ExecutionIntent]
+    validation: EntryValidation
+    margin_info: Optional[Dict[str, Any]]
+    was_margin_capped: bool
+
+
+@dataclass
+class CandleSnapshot:
+    """Minimal candle context for execution fills."""
+
+    time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    atr: Optional[float] = None
+    lookback_15: Optional[Dict[str, Optional[float]]] = None
+
+    def is_complete(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.time,
+                self.open,
+                self.high,
+                self.low,
+                self.close,
+            )
+        )
+
+
+@dataclass
+class EntryFill:
+    """Normalized entry fill event for execution adapters."""
+
+    order_intent_id: str
+    trade_id: str
+    candle: Optional[CandleSnapshot]
+    filled_qty: float
+    fill_price: float
+    fee_paid: float
+    liquidity_role: Optional[str]
+    fill_time: Optional[str]
+    raw: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class EntryFillResult:
+    """Result of applying an entry fill against domain state."""
+
+    status: str
+    pending: Optional[PendingEntry]
+    position: Optional[LadderPosition]
+    events: List[Dict[str, Any]]
+    settlement_payloads: List[Dict[str, Any]]
+    rejection_reason: Optional[str] = None
+    rejection_detail: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -313,9 +421,12 @@ class LadderPosition:
     direction: str
     stop_price: float
     tick_size: float
+    entry_order: Optional[Dict[str, Any]] = None
+    entry_outcome: Optional[Dict[str, Any]] = None
     execution_model: Optional["SpotExecutionModel"] = None
     execution_adapter: Optional[ExecutionAdapter] = None
     wallet_gateway: Optional[WalletGateway] = None
+    exit_settlement: Optional[ExitSettlement] = None
     base_currency: Optional[str] = None
     quote_currency_code: Optional[str] = None
     legs: List[Leg] = field(default_factory=list)
@@ -405,6 +516,11 @@ class LadderPosition:
             instrument=self.instrument,
         )
 
+    def _exit_settlement(self) -> ExitSettlement:
+        if self.exit_settlement:
+            return self.exit_settlement
+        return ExitSettlementService(self.wallet_gateway)
+
     def _update_excursions(self, candle: Candle) -> None:
         favorable_price = candle.high if self.direction == "long" else candle.low
         adverse_price = candle.low if self.direction == "long" else candle.high
@@ -425,9 +541,9 @@ class LadderPosition:
             return "margin"
         return None
 
-    def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, str]]:
+    def _apply_leg_fills(self, candle: Candle) -> List[Dict[str, Any]]:
         """Check if candle price hits any target levels and process fills."""
-        events: List[Dict[str, str]] = []
+        events: List[Dict[str, Any]] = []
         ordered = sorted(self.legs, key=lambda leg: leg.ticks)
 
         for leg in ordered:
@@ -444,8 +560,8 @@ class LadderPosition:
                 continue
 
             fill_result = None
+            side = "sell" if self.direction == "long" else "buy"
             if self._uses_wallet_execution():
-                side = "sell" if self.direction == "long" else "buy"
                 fill_result, rejection = self._execute_spot_fill(
                     leg.target_price, leg.contracts, side=side
                 )
@@ -524,27 +640,34 @@ class LadderPosition:
             leg.contracts = exit_qty
             leg.pnl = pnl
             self._record_pnl(pnl)
+            fee_value = (
+                float(fill_result.fee)
+                if fill_result
+                else abs(exit_price * self.contract_size * exit_qty) * float(self.taker_fee_rate or 0.0)
+            )
+            notional = float(fill_result.notional) if fill_result else abs(exit_price * self.contract_size * exit_qty)
             if fill_result:
                 self._apply_fee_amount(fill_result.fee)
-                if self.wallet_gateway:
-                    self.wallet_gateway.apply_fill(
-                        event_type="EXIT_FILL",
-                        side=side,
-                        base_currency=self.base_currency or "",
-                        quote_currency=self.quote_currency_code or "",
-                        qty=fill_result.filled_qty,
-                        price=fill_result.fill_price,
-                        fee=fill_result.fee,
-                        notional=fill_result.notional,
-                        symbol=None,
-                        trade_id=self.trade_id,
-                        leg_id=leg.leg_id,
-                        position_direction=self.direction,
-                        accounting_mode=self._accounting_mode(),
-                        realized_pnl=pnl,
-                    )
             else:
                 self._apply_fee(exit_price, exit_qty)
+
+            settlement_payload: ExitSettlementPayload = {
+                "event_type": "EXIT_FILL",
+                "side": side,
+                "base_currency": self.base_currency or "",
+                "quote_currency": self.quote_currency_code or "",
+                "qty": exit_qty,
+                "price": exit_price,
+                "fee": fee_value,
+                "notional": notional,
+                "trade_id": self.trade_id,
+                "leg_id": leg.leg_id or "",
+                "position_direction": self.direction,
+                "accounting_mode": self._accounting_mode(),
+                "realized_pnl": pnl,
+                "allow_short_borrow": bool(self.short_requires_borrow),
+                "instrument": self.instrument or {},
+            }
 
             events.append(
                 {
@@ -559,6 +682,7 @@ class LadderPosition:
                     "contracts": exit_qty,
                     "ticks": leg.ticks,
                     "direction": self.direction,
+                    "settlement": settlement_payload,
                 }
             )
 
@@ -625,8 +749,8 @@ class LadderPosition:
         candidate = self.best_price - distance_price if self.direction == "long" else self.best_price + distance_price
         self.stop_price = risk_math.clamp_stop(self.stop_price, candidate, self.direction)
 
-    def _apply_stop(self, candle: Candle) -> List[Dict[str, str]]:
-        events: List[Dict[str, str]] = []
+    def _apply_stop(self, candle: Candle) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
         triggered = False
         if self.direction == "long" and candle.low <= self.stop_price:
             triggered = True
@@ -638,8 +762,8 @@ class LadderPosition:
                 if leg.status != "open":
                     continue
                 fill_result = None
+                side = "sell" if self.direction == "long" else "buy"
                 if self._uses_wallet_execution():
-                    side = "sell" if self.direction == "long" else "buy"
                     fill_result, rejection = self._execute_spot_fill(
                         self.stop_price, leg.contracts, side=side
                     )
@@ -718,27 +842,33 @@ class LadderPosition:
                 leg.contracts = exit_qty
                 leg.pnl = pnl
                 self._record_pnl(pnl)
+                fee_value = (
+                    float(fill_result.fee)
+                    if fill_result
+                    else abs(exit_price * self.contract_size * exit_qty) * float(self.taker_fee_rate or 0.0)
+                )
+                notional = float(fill_result.notional) if fill_result else abs(exit_price * self.contract_size * exit_qty)
                 if fill_result:
                     self._apply_fee_amount(fill_result.fee)
-                    if self.wallet_gateway:
-                        self.wallet_gateway.apply_fill(
-                            event_type="EXIT_FILL",
-                            side=side,
-                            base_currency=self.base_currency or "",
-                            quote_currency=self.quote_currency_code or "",
-                            qty=fill_result.filled_qty,
-                            price=fill_result.fill_price,
-                            fee=fill_result.fee,
-                            notional=fill_result.notional,
-                            symbol=None,
-                            trade_id=self.trade_id,
-                            leg_id=leg.leg_id,
-                            position_direction=self.direction,
-                            accounting_mode=self._accounting_mode(),
-                            realized_pnl=pnl,
-                        )
                 else:
                     self._apply_fee(exit_price, exit_qty)
+                settlement_payload: ExitSettlementPayload = {
+                    "event_type": "EXIT_FILL",
+                    "side": side,
+                    "base_currency": self.base_currency or "",
+                    "quote_currency": self.quote_currency_code or "",
+                    "qty": exit_qty,
+                    "price": exit_price,
+                    "fee": fee_value,
+                    "notional": notional,
+                    "trade_id": self.trade_id,
+                    "leg_id": leg.leg_id or "",
+                    "position_direction": self.direction,
+                    "accounting_mode": self._accounting_mode(),
+                    "realized_pnl": pnl,
+                    "allow_short_borrow": bool(self.short_requires_borrow),
+                    "instrument": self.instrument or {},
+                }
                 events.append(
                     {
                         "type": "stop",
@@ -752,6 +882,7 @@ class LadderPosition:
                         "pnl": round(pnl, 4),
                         "ticks": tick_distance,
                         "direction": self.direction,
+                        "settlement": settlement_payload,
                     }
                 )
             self.closed_at = candle.time
@@ -759,10 +890,10 @@ class LadderPosition:
             self.closed_at = candle.time
         return events
 
-    def apply_bar(self, candle: Candle) -> List[Dict[str, str]]:
+    def apply_bar(self, candle: Candle) -> List[Dict[str, Any]]:
         """Advance the position with the latest candle."""
 
-        events: List[Dict[str, str]] = []
+        events: List[Dict[str, Any]] = []
         self._update_excursions(candle)
         leg_events = self._apply_leg_fills(candle)
         events.extend(leg_events)
@@ -798,6 +929,8 @@ class LadderPosition:
             "created_at": self.created_at,
             "entry_time": isoformat(self.entry_time),
             "entry_price": round(self.entry_price, 4),
+            "entry_order": dict(self.entry_order or {}),
+            "entry_outcome": dict(self.entry_outcome or {}),
             "direction": self.direction,
             "stop_price": round(self.stop_price, 4),
             "moved_to_breakeven": self.moved_to_breakeven,
@@ -921,6 +1054,8 @@ class LadderRiskEngine:
         self.stop_r_multiple = coerce_float(self.template.get("stop_r_multiple"))
 
         self.stop_adjustments_config: List[Dict[str, Any]] = list(self.template.get("stop_adjustments") or [])
+        self.execution_mode = str(self.template.get("execution_mode") or "market").lower()
+        self.limit_maker_config: Dict[str, Any] = dict(self.template.get("limit_maker") or {})
 
         # Resolve contract_size (config > instrument > 1.0)
         config_contract = coerce_float(self.template.get("contract_size"))
@@ -993,6 +1128,18 @@ class LadderRiskEngine:
         config_taker = coerce_float(self.template.get("taker_fee_rate"))
         instrument_taker = coerce_float(self.instrument.get("taker_fee_rate"))
         self.taker_fee = coalesce_numeric(config_taker, instrument_taker, default=0.0, allow_zero=True)
+        self.execution_intent_model: ExecutionModel = DeterministicExecutionModel(
+            FeeResolver(
+                FeeSchedule(
+                    maker_rate=float(self.maker_fee or 0.0),
+                    taker_rate=float(self.taker_fee or 0.0),
+                    source="template_or_instrument",
+                )
+            )
+        )
+        self.entry_settlement: EntrySettlement = EntrySettlementService(self)
+        self.exit_settlement: ExitSettlement = ExitSettlementService(None)
+        self.entry_execution = EntryExecutionCoordinator(self)
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         configured_context = build_log_context(
@@ -1000,6 +1147,7 @@ class LadderRiskEngine:
             targets=",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
             stop_ticks=self.stop_ticks,
             tick_size=self.tick_size,
+            execution_mode=self.execution_mode,
         )
         logger.info(with_log_context("ladder_risk_configured", configured_context))
 
@@ -1010,6 +1158,14 @@ class LadderRiskEngine:
     def attach_execution_adapter(self, adapter: ExecutionAdapter) -> None:
         """Inject a run-type specific execution adapter (backtest/paper/live)."""
         self.execution_adapter = adapter
+
+    def attach_entry_settlement(self, settlement: EntrySettlement) -> None:
+        """Inject a custom entry settlement adapter (paper/live)."""
+        self.entry_settlement = settlement
+
+    def attach_exit_settlement(self, settlement: ExitSettlement) -> None:
+        """Inject a custom exit settlement adapter (paper/live)."""
+        self.exit_settlement = settlement
 
     def _validate_template(self, template: Dict[str, Any]) -> None:
         """Validate that required fields are present in template - same for all modes."""
@@ -1080,6 +1236,537 @@ class LadderRiskEngine:
                 }
             )
         return orders
+
+    @staticmethod
+    def _new_order_intent_id() -> str:
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def _new_trade_id() -> str:
+        return str(uuid.uuid4())
+
+    def _normalize_qty(self, requested_qty: float):
+        return normalize_qty_with_constraints(self.amount_constraints, requested_qty)
+
+    def _resolve_execution_model(self) -> ExecutionModel:
+        return self.execution_intent_model
+
+    def attach_execution_model(self, model: ExecutionModel) -> None:
+        """Inject a run-type specific execution model for intent evaluation."""
+        self.execution_intent_model = model
+
+    def _resolve_anchor_price(
+        self,
+        candle: Candle,
+        *,
+        anchor: str,
+    ) -> float:
+        anchor = str(anchor or "signal_price").lower()
+        if anchor == "next_bar_open":
+            return float(candle.open)
+        if anchor == "prior_close":
+            return float(candle.close)
+        return float(candle.close)
+
+    def _resolve_limit_offset(
+        self,
+        candle: Candle,
+        *,
+        offset_type: str,
+        offset_value: float,
+        r_value: Optional[float],
+    ) -> float:
+        offset_type = str(offset_type or "ticks").lower()
+        if offset_type == "atr_pct":
+            if not self._has_valid_atr(candle.atr):
+                return 0.0
+            return float(candle.atr) * float(offset_value or 0.0)
+        if offset_type == "r_fraction":
+            if r_value in (None, 0):
+                return 0.0
+            return float(r_value) * float(offset_value or 0.0)
+        return float(offset_value or 0.0) * float(self.tick_size)
+
+    def _build_limit_params(
+        self,
+        candle: Candle,
+        *,
+        direction: str,
+        r_value: Optional[float],
+    ) -> LimitParams:
+        anchor_price = str(self.limit_maker_config.get("anchor_price") or "signal_price").lower()
+        offset_type = str(self.limit_maker_config.get("offset_type") or "ticks").lower()
+        offset_value = float(self.limit_maker_config.get("offset_value") or 0.0)
+        validity_window = int(self.limit_maker_config.get("validity_window") or 1)
+        fallback = str(self.limit_maker_config.get("fallback") or "cancel").lower()
+        anchor_value = self._resolve_anchor_price(candle, anchor=anchor_price)
+        offset = self._resolve_limit_offset(
+            candle,
+            offset_type=offset_type,
+            offset_value=offset_value,
+            r_value=r_value,
+        )
+        if direction == "long":
+            limit_price = anchor_value - offset
+        else:
+            limit_price = anchor_value + offset
+        return LimitParams(
+            anchor_price=anchor_price,
+            offset_type=offset_type,
+            offset_value=float(offset_value),
+            validity_window=max(validity_window, 1),
+            fallback=fallback,
+            limit_price=float(limit_price),
+        )
+
+    def build_entry_request(self, candle: Candle, direction: str) -> EntryRequest:
+        atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
+        r_ticks = self._compute_r_ticks(candle)
+
+        r_value = self._r_value(candle)
+        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
+            r_value = float(self.stop_r_multiple) * float(r_value)
+
+        risk_based_qty = self._calculate_total_contracts(r_ticks)
+        capped_qty, was_margin_capped, margin_info = self._cap_qty_by_margin(
+            risk_qty=risk_based_qty,
+            price=candle.close,
+            direction=direction,
+        )
+
+        if margin_info and margin_info.get("reason") == "margin_calculation_failed":
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="MARGIN_CALCULATION_FAILED",
+                error=margin_info.get("error"),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=float(capped_qty),
+                qty_raw=float(capped_qty),
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason="MARGIN_CALCULATION_FAILED",
+                    rejection_detail=margin_info,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        if capped_qty <= 0:
+            rejection_detail = margin_info or {"risk_qty": risk_based_qty}
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="QTY_CAPPED_TO_ZERO",
+                risk_qty=risk_based_qty,
+                capped_qty=capped_qty,
+                was_margin_capped=was_margin_capped,
+                price=candle.close,
+                direction=direction,
+                margin_reason=margin_info.get("reason") if margin_info else None,
+                margin_error=margin_info.get("error") if margin_info else None,
+                available_collateral=margin_info.get("available_collateral") if margin_info else None,
+                max_qty_by_margin=margin_info.get("max_qty_by_margin") if margin_info else None,
+                cost_per_contract=margin_info.get("cost_per_contract") if margin_info else None,
+                margin_per_contract=margin_info.get("margin_per_contract") if margin_info else None,
+                fee_per_contract=margin_info.get("fee_per_contract") if margin_info else None,
+                margin_rate=margin_info.get("margin_rate") if margin_info else None,
+                margin_method=margin_info.get("calculation_method") if margin_info else None,
+                balance_trace=margin_info.get("balance_trace") if margin_info else None,
+                qty_step=self.qty_step,
+                min_qty=self.min_qty,
+                max_qty=self.max_qty,
+                min_notional=self.min_notional,
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=float(capped_qty),
+                qty_raw=float(capped_qty),
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason="QTY_CAPPED_TO_ZERO",
+                    rejection_detail=rejection_detail,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        qty_raw = float(capped_qty)
+        requested_qty = float(capped_qty)
+        normalization = self._normalize_qty(requested_qty)
+        if not normalization.ok:
+            rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
+            rejection_detail = normalization.to_log_dict()
+            context = merge_log_context(
+                build_log_context(
+                    symbol=self.instrument.get("symbol"),
+                    reason=rejection_reason,
+                ),
+                build_log_context(**rejection_detail),
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryRequest(
+                trade_id=None,
+                order_intent_id=None,
+                direction=direction,
+                requested_qty=requested_qty,
+                qty_raw=qty_raw,
+                r_ticks=float(r_ticks),
+                r_value=r_value,
+                atr_at_entry=atr_at_entry,
+                r_multiple_at_entry=self.r_multiple,
+                order_type="market" if self.execution_mode != "limit_maker" else "limit_maker",
+                limit_params=None,
+                side="buy" if direction == "long" else "sell",
+                requested_price=float(candle.close),
+                intent=None,
+                validation=EntryValidation(
+                    ok=False,
+                    rejection_reason=rejection_reason,
+                    rejection_detail=rejection_detail,
+                ),
+                margin_info=margin_info,
+                was_margin_capped=was_margin_capped,
+            )
+
+        requested_qty = float(normalization.qty_final)
+
+        order_type = "market" if self.execution_mode != "limit_maker" else "limit_maker"
+        limit_params: Optional[LimitParams] = None
+        if order_type == "limit_maker":
+            limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
+
+        order_intent_id = self._new_order_intent_id()
+        trade_id = self._new_trade_id()
+        side = "buy" if direction == "long" else "sell"
+        intent = ExecutionIntent(
+            order_id=order_intent_id,
+            side=side,
+            qty=requested_qty,
+            symbol=str(self.instrument.get("symbol") or ""),
+            order_type=order_type,
+            requested_price=float(candle.close),
+            limit_params=limit_params,
+            metadata={
+                "direction": direction,
+                "symbol": self.instrument.get("symbol"),
+            },
+        )
+
+        return EntryRequest(
+            trade_id=trade_id,
+            order_intent_id=order_intent_id,
+            direction=direction,
+            requested_qty=requested_qty,
+            qty_raw=qty_raw,
+            r_ticks=float(r_ticks),
+            r_value=r_value,
+            atr_at_entry=atr_at_entry,
+            r_multiple_at_entry=self.r_multiple,
+            order_type=order_type,
+            limit_params=limit_params,
+            side=side,
+            requested_price=float(candle.close),
+            intent=intent,
+            validation=EntryValidation(ok=True),
+            margin_info=margin_info,
+            was_margin_capped=was_margin_capped,
+        )
+
+    def build_entry_fill(
+        self,
+        *,
+        pending: PendingEntry,
+        outcome: "ExecutionOutcome",
+        candle: Candle,
+    ) -> EntryFill:
+        fill_price = float(outcome.avg_fill_price or candle.close)
+        return EntryFill(
+            order_intent_id=str(pending.order_intent_id),
+            trade_id=str(pending.trade_id),
+            candle=CandleSnapshot(
+                time=candle.time,
+                open=float(candle.open),
+                high=float(candle.high),
+                low=float(candle.low),
+                close=float(candle.close),
+                atr=candle.atr,
+                lookback_15=candle.lookback_15,
+            ),
+            filled_qty=float(outcome.filled_qty or 0.0),
+            fill_price=fill_price,
+            fee_paid=float(outcome.fee_paid or 0.0),
+            liquidity_role=str(outcome.fee_role or "unknown"),
+            fill_time=outcome.filled_at or outcome.updated_at,
+            raw={"outcome": asdict(outcome)},
+        )
+
+    def apply_entry_fill(
+        self,
+        *,
+        request: EntryRequest,
+        pending: Optional[PendingEntry],
+        fill: EntryFill,
+    ) -> EntryFillResult:
+        events: List[Dict[str, Any]] = []
+        settlement_payloads: List[Dict[str, Any]] = []
+
+        if fill.filled_qty <= 0:
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_FILL_EMPTY",
+                rejection_detail={"filled_qty": fill.filled_qty},
+            )
+
+        if pending is None:
+            pending = PendingEntry(
+                request=request,
+                intent=request.intent or ExecutionIntent(
+                    order_id=str(request.order_intent_id or ""),
+                    side=request.side,
+                    qty=request.requested_qty,
+                    symbol=str(self.instrument.get("symbol") or ""),
+                    order_type=request.order_type,
+                    requested_price=request.requested_price,
+                    limit_params=request.limit_params,
+                    metadata={"direction": request.direction, "symbol": self.instrument.get("symbol")},
+                ),
+                direction=request.direction,
+                qty_raw=request.qty_raw,
+                requested_qty=request.requested_qty,
+                r_ticks=float(request.r_ticks),
+                r_value=request.r_value,
+                atr_at_entry=request.atr_at_entry,
+                r_multiple_at_entry=request.r_multiple_at_entry,
+                order_intent_id=str(request.order_intent_id),
+                trade_id=str(request.trade_id),
+                validity_remaining=0,
+                fallback=request.limit_params.fallback if request.limit_params else "cancel",
+                remaining_qty=float(request.requested_qty),
+            )
+
+        filled_qty_total = float(pending.filled_qty) + float(fill.filled_qty)
+        filled_notional_total = float(pending.filled_notional) + (float(fill.filled_qty) * float(fill.fill_price))
+        fees_paid_total = float(pending.fees_paid) + float(fill.fee_paid or 0.0)
+        remaining_qty = max(float(request.requested_qty) - filled_qty_total, 0.0)
+        avg_fill_price = filled_notional_total / filled_qty_total if filled_qty_total else 0.0
+
+        outcome_payload = {}
+        if isinstance(fill.raw, dict):
+            outcome_payload = dict(fill.raw.get("outcome") or {})
+        if fill.candle is None or not fill.candle.is_complete():
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_CANDLE_MISSING",
+                rejection_detail={"order_intent_id": pending.order_intent_id},
+            )
+        candle = Candle(
+            time=fill.candle.time,
+            open=float(fill.candle.open),
+            high=float(fill.candle.high),
+            low=float(fill.candle.low),
+            close=float(fill.candle.close),
+            atr=fill.candle.atr,
+            lookback_15=fill.candle.lookback_15,
+        )
+
+        pending.filled_qty = filled_qty_total
+        pending.filled_notional = filled_notional_total
+        pending.fees_paid = fees_paid_total
+        pending.remaining_qty = remaining_qty
+
+        if filled_qty_total + 1e-12 < float(request.requested_qty):
+            return EntryFillResult(
+                status="pending",
+                pending=pending,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+            )
+
+        notional = abs(avg_fill_price * self.contract_size * filled_qty_total)
+        if self.min_notional not in (None, 0) and notional < float(self.min_notional):
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason="MIN_NOTIONAL_NOT_MET",
+                notional=round(notional, 4),
+                min_notional=self.min_notional,
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="MIN_NOTIONAL_NOT_MET",
+                rejection_detail={"notional": notional, "min_notional": self.min_notional},
+            )
+
+        base_currency, quote_currency = self._resolve_base_quote()
+        use_wallet_execution = bool(self.execution_adapter and self._wallet_gateway)
+        if use_wallet_execution:
+            settled = self.entry_settlement.apply_entry_fill(
+                EntrySettlementContext(
+                    side=pending.intent.side,
+                    filled_qty=filled_qty_total,
+                    entry_price=avg_fill_price,
+                    notional=notional,
+                    fee_paid=fees_paid_total,
+                    trade_id=pending.trade_id,
+                    direction=pending.direction,
+                    qty_raw=pending.qty_raw,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                )
+            )
+            if not settled:
+                return EntryFillResult(
+                    status="rejected",
+                    pending=None,
+                    position=None,
+                    events=events,
+                    settlement_payloads=settlement_payloads,
+                    rejection_reason="ENTRY_SETTLEMENT_FAILED",
+                    rejection_detail={"trade_id": pending.trade_id},
+                )
+
+        stop_price = self._calculate_stop_price(avg_fill_price, pending.direction, pending.r_ticks)
+        legs = self._build_legs(
+            candle,
+            pending.direction,
+            pending.r_ticks,
+            filled_qty_total,
+            entry_price=avg_fill_price,
+            qty_raw=pending.qty_raw,
+            qty_final=filled_qty_total,
+            order_intent_id=pending.order_intent_id,
+            side=pending.intent.side,
+        )
+        if not legs:
+            rounded_qty = (
+                self._floor_to_step(pending.requested_qty, self.qty_step)
+                if self.qty_step not in (None, 0)
+                else pending.requested_qty
+            )
+            rejection_reason = "QTY_ROUNDS_TO_ZERO" if rounded_qty <= 0 else "TP_LEGS_EMPTY"
+            context = build_log_context(
+                symbol=self.instrument.get("symbol"),
+                reason=rejection_reason,
+                requested_qty=pending.requested_qty,
+                rounded_qty=rounded_qty,
+                qty_step=self.qty_step,
+                min_qty=self.min_qty,
+                min_notional=self.min_notional,
+                tp_leg_count=len(self.orders),
+                tp_allocation=self._last_tp_allocation,
+            )
+            logger.warning(with_log_context("entry_rejected", context))
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=None,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason=rejection_reason,
+                rejection_detail={
+                    "requested_qty": pending.requested_qty,
+                    "rounded_qty": rounded_qty,
+                    "symbol": self.instrument.get("symbol"),
+                    "qty_step": self.qty_step,
+                    "min_qty": self.min_qty,
+                    "min_notional": self.min_notional,
+                    "tp_leg_count": len(self.orders),
+                    "tp_allocation": self._last_tp_allocation,
+                },
+            )
+
+        runtime_stop_adjustments = self._build_stop_adjustments(legs, pending.r_ticks)
+        breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, pending.r_ticks)
+        trailing_activation_ticks = self._trailing_activation_ticks(legs, pending.r_ticks)
+        trailing_distance_ticks = self._trailing_distance_ticks(pending.atr_at_entry)
+        position = self._build_position(
+            candle=candle,
+            entry_price=avg_fill_price,
+            stop_price=stop_price,
+            direction=pending.direction,
+            entry_order=asdict(pending.intent),
+            entry_outcome=outcome_payload
+            or {
+                "avg_fill_price": avg_fill_price,
+                "filled_qty": filled_qty_total,
+                "fee_paid": fees_paid_total,
+                "fee_role": fill.liquidity_role,
+                "filled_at": fill.fill_time,
+            },
+            legs=legs,
+            breakeven_ticks=breakeven_ticks,
+            trailing_activation_ticks=trailing_activation_ticks,
+            trailing_distance_ticks=trailing_distance_ticks,
+            runtime_stop_adjustments=runtime_stop_adjustments,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
+            atr_at_entry=pending.atr_at_entry,
+            r_multiple_at_entry=pending.r_multiple_at_entry,
+            r_value=pending.r_value,
+            r_ticks=pending.r_ticks,
+            trade_id=pending.trade_id,
+            pre_entry_context=getattr(candle, "lookback_15", None),
+            use_wallet_execution=use_wallet_execution,
+        )
+        position.apply_entry_fee(fees_paid_total)
+
+        events.append(
+            {
+                "type": "entry_opened",
+                "trade_id": pending.trade_id,
+                "order_intent_id": pending.order_intent_id,
+                "avg_fill_price": avg_fill_price,
+                "filled_qty": filled_qty_total,
+                "fee_paid": fees_paid_total,
+                "direction": pending.direction,
+            }
+        )
+
+        return EntryFillResult(
+            status="opened",
+            pending=None,
+            position=position,
+            events=events,
+            settlement_payloads=settlement_payloads,
+        )
 
     @staticmethod
     def _has_valid_atr(value: Optional[float]) -> bool:
@@ -1185,6 +1872,71 @@ class LadderRiskEngine:
             )
         return adjustments
 
+    def _build_position(
+        self,
+        *,
+        candle: Candle,
+        entry_price: float,
+        stop_price: float,
+        direction: str,
+        entry_order: Dict[str, Any],
+        entry_outcome: Dict[str, Any],
+        legs: List[Leg],
+        breakeven_ticks: float,
+        trailing_activation_ticks: Optional[float],
+        trailing_distance_ticks: Optional[float],
+        runtime_stop_adjustments: List[Dict[str, Any]],
+        base_currency: Optional[str],
+        quote_currency: Optional[str],
+        atr_at_entry: Optional[float],
+        r_multiple_at_entry: Optional[float],
+        r_value: Optional[float],
+        r_ticks: Optional[float],
+        trade_id: str,
+        pre_entry_context: Optional[Dict[str, Optional[float]]],
+        use_wallet_execution: bool,
+    ) -> LadderPosition:
+        self.trailing_config = (
+            self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), dict) else {}
+        )
+        self._last_tp_allocation = None
+        trailing_atr_multiple = float(self.trailing_config.get("atr_multiplier") or 0.0)
+
+        return LadderPosition(
+            entry_time=candle.time,
+            entry_price=entry_price,
+            entry_order=entry_order,
+            entry_outcome=entry_outcome,
+            direction=direction,
+            stop_price=stop_price,
+            tick_size=self.tick_size,
+            execution_model=self.execution_model if use_wallet_execution else None,
+            execution_adapter=self.execution_adapter if use_wallet_execution else None,
+            wallet_gateway=self._wallet_gateway if use_wallet_execution else None,
+            exit_settlement=self.exit_settlement,
+            base_currency=base_currency,
+            quote_currency_code=quote_currency,
+            legs=legs,
+            breakeven_trigger_ticks=breakeven_ticks,
+            tick_value=self.tick_value,
+            contract_size=self.contract_size,
+            maker_fee_rate=self.maker_fee,
+            taker_fee_rate=self.taker_fee,
+            quote_currency=self.quote_currency,
+            short_requires_borrow=bool(self.short_requires_borrow),
+            instrument=self.instrument if use_wallet_execution else None,
+            atr_at_entry=atr_at_entry,
+            r_multiple_at_entry=r_multiple_at_entry,
+            r_value=r_value,
+            r_ticks=r_ticks,
+            trailing_activation_ticks=trailing_activation_ticks,
+            trailing_distance_ticks=trailing_distance_ticks,
+            trailing_atr_multiple=trailing_atr_multiple,
+            pre_entry_context=pre_entry_context,
+            stop_adjustments=runtime_stop_adjustments,
+            trade_id=trade_id,
+        )
+
     def _r_value(self, candle: Candle) -> Optional[float]:
         """Calculate the monetary value of 1R (ATR * multiplier * tick_value)."""
         if not self._has_valid_atr(candle.atr):
@@ -1197,7 +1949,7 @@ class LadderRiskEngine:
             return None
         return float((candle.atr * self.r_multiple) / self.tick_size)
 
-    def _calculate_stop_price(self, candle: Candle, direction: str, r_ticks: float) -> float:
+    def _calculate_stop_price(self, entry_price: float, direction: str, r_ticks: float) -> float:
         """Calculate initial stop loss price for position.
 
         Args:
@@ -1213,8 +1965,8 @@ class LadderRiskEngine:
 
         stop_distance = r_ticks * self.tick_size
         if direction == "long":
-            return candle.close - stop_distance
-        return candle.close + stop_distance
+            return entry_price - stop_distance
+        return entry_price + stop_distance
 
     def _floor_to_step(self, qty: float, step: float) -> float:
         if step in (None, 0):
@@ -1448,6 +2200,7 @@ class LadderRiskEngine:
         r_ticks: Optional[float],
         total_contracts: float,
         *,
+        entry_price: float,
         qty_raw: Optional[float] = None,
         qty_final: Optional[float] = None,
         order_intent_id: Optional[str] = None,
@@ -1478,14 +2231,14 @@ class LadderRiskEngine:
             if r_multiple not in (None, 0) and r_ticks not in (None, 0):
                 computed_ticks = float(r_multiple) * float(r_ticks)
                 distance = computed_ticks * self.tick_size
-                target_price = candle.close + distance if direction == "long" else candle.close - distance
+                target_price = entry_price + distance if direction == "long" else entry_price - distance
                 target_ticks = int(round(computed_ticks))
             elif ticks is not None:
                 distance = ticks * self.tick_size
-                target_price = candle.close + distance if direction == "long" else candle.close - distance
+                target_price = entry_price + distance if direction == "long" else entry_price - distance
             elif price is not None:
                 target_price = float(price)
-                computed_ticks = risk_math.ticks_from_entry(candle.close, target_price, direction, self.tick_size)
+                computed_ticks = risk_math.ticks_from_entry(entry_price, target_price, direction, self.tick_size)
                 target_ticks = int(round(computed_ticks))
 
             if target_price is None:
@@ -1597,287 +2350,8 @@ class LadderRiskEngine:
 
         return legs
 
-    def _new_position(self, candle: Candle, direction: str) -> Optional[LadderPosition]:
-        """Create a new ladder position from current candle and signal direction."""
-        # Calculate risk metrics - _compute_r_ticks will raise if ATR invalid or config missing
-        atr_at_entry = candle.atr if self._has_valid_atr(candle.atr) else None
-        r_ticks = self._compute_r_ticks(candle)  # Raises ValueError if stop cannot be computed
-
-        r_value = self._r_value(candle)
-        if self.stop_r_multiple not in (None, 0) and r_value not in (None, 0):
-            r_value = float(self.stop_r_multiple) * float(r_value)
-
-        # Calculate position size based on risk (raw qty before exchange constraints)
-        risk_based_qty = self._calculate_total_contracts(r_ticks)
-
-        # Cap qty by available margin for futures/derivatives
-        # This prevents wallet rejection by sizing within margin constraints upfront
-        capped_qty, was_margin_capped, margin_info = self._cap_qty_by_margin(
-            risk_qty=risk_based_qty,
-            price=candle.close,
-            direction=direction,
-        )
-
-        # Check for margin calculation failure
-        if margin_info and margin_info.get("reason") == "margin_calculation_failed":
-            self.last_rejection_reason = "MARGIN_CALCULATION_FAILED"
-            self.last_rejection_detail = margin_info
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
-                reason="MARGIN_CALCULATION_FAILED",
-                error=margin_info.get("error"),
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-
-        if capped_qty <= 0:
-            self.last_rejection_reason = "QTY_CAPPED_TO_ZERO"
-            self.last_rejection_detail = margin_info or {"risk_qty": risk_based_qty}
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
-                reason="QTY_CAPPED_TO_ZERO",
-                risk_qty=risk_based_qty,
-                capped_qty=capped_qty,
-                was_margin_capped=was_margin_capped,
-                price=candle.close,
-                direction=direction,
-                margin_reason=margin_info.get("reason") if margin_info else None,
-                margin_error=margin_info.get("error") if margin_info else None,
-                available_collateral=margin_info.get("available_collateral") if margin_info else None,
-                max_qty_by_margin=margin_info.get("max_qty_by_margin") if margin_info else None,
-                cost_per_contract=margin_info.get("cost_per_contract") if margin_info else None,
-                margin_per_contract=margin_info.get("margin_per_contract") if margin_info else None,
-                fee_per_contract=margin_info.get("fee_per_contract") if margin_info else None,
-                margin_rate=margin_info.get("margin_rate") if margin_info else None,
-                margin_method=margin_info.get("calculation_method") if margin_info else None,
-                balance_trace=margin_info.get("balance_trace") if margin_info else None,
-                qty_step=self.qty_step,
-                min_qty=self.min_qty,
-                max_qty=self.max_qty,
-                min_notional=self.min_notional,
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-
-        order_intent_id = str(uuid.uuid4())
-        trade_id = str(uuid.uuid4())
-        qty_raw = capped_qty
-        requested_qty = capped_qty
-        normalization = normalize_qty_with_constraints(self.amount_constraints, requested_qty)
-        if not normalization.ok:
-            self.last_rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
-            self.last_rejection_detail = normalization.to_log_dict()
-            context = merge_log_context(
-                build_log_context(
-                    symbol=self.instrument.get("symbol"),
-                    reason=self.last_rejection_reason,
-                ),
-                build_log_context(**normalization.to_log_dict()),
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-        requested_qty = float(normalization.qty_final)
-
-        fill_result: Optional[FillResult] = None
-        base_currency = None
-        quote_currency = None
-        side = "buy" if direction == "long" else "sell"
-        use_wallet_execution = bool(self.execution_adapter and self._wallet_gateway)
-        if use_wallet_execution:
-            fill_result, rejection = self.execution_adapter.fill_market(
-                side=side,
-                requested_qty=requested_qty,
-                price=candle.close,
-                fee_rate=self.taker_fee or 0.0,
-                enforce_price_tick=False,
-            )
-            if rejection:
-                self.last_rejection_reason = rejection.reason
-                self.last_rejection_detail = {
-                    "requested_qty": requested_qty,
-                    "price": candle.close,
-                    **(rejection.metadata or {}),
-                }
-                context = build_log_context(
-                    symbol=self.instrument.get("symbol"),
-                    reason=rejection.reason,
-                    requested_qty=requested_qty,
-                    price=round(candle.close, 4),
-                )
-                logger.warning(with_log_context("entry_rejected", context))
-                return None
-
-        if use_wallet_execution:
-            if not fill_result:
-                raise ValueError("Execution adapter did not return a fill for spot execution")
-            base_currency, quote_currency = self._resolve_base_quote()
-            allowed, reason, payload = self._wallet_gateway.can_apply(
-                side=side,
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                qty=fill_result.filled_qty,
-                qty_raw=qty_raw,
-                qty_final=fill_result.filled_qty,
-                notional=fill_result.notional,
-                fee=fill_result.fee,
-                short_requires_borrow=bool(self.short_requires_borrow),
-                instrument=self.instrument,
-            )
-            if not allowed:
-                self._wallet_gateway.reject(reason, payload)
-                self.last_rejection_reason = reason
-                self.last_rejection_detail = payload
-                context = merge_log_context(
-                    build_log_context(
-                        symbol=self.instrument.get("symbol"),
-                        reason=reason,
-                        qty=fill_result.filled_qty,
-                        price=round(fill_result.fill_price, 4),
-                    ),
-                    build_log_context(
-                        available=payload.get("available"),
-                        required=payload.get("required"),
-                        required_used=payload.get("required_used"),
-                        required_full_notional=payload.get("required_full_notional"),
-                        available_collateral=payload.get("available_collateral"),
-                        currency=payload.get("currency"),
-                        notional=payload.get("notional"),
-                        fee=payload.get("fee"),
-                        qty_raw=payload.get("qty_raw"),
-                        qty_final=payload.get("qty_final"),
-                        instrument_type=payload.get("instrument_type"),
-                        margin_rate=payload.get("margin_rate"),
-                        required_margin=payload.get("required_margin"),
-                        fee_buffer=payload.get("fee_buffer"),
-                        safety_buffer=payload.get("safety_buffer"),
-                        margin_method=payload.get("margin_method"),
-                        margin_session=payload.get("margin_session"),
-                        margin_leg=payload.get("margin_leg"),
-                        margin_rate_source_path=payload.get("margin_rate_source_path"),
-                        margin_total_required=payload.get("margin_total_required"),
-                        margin_calc_type=payload.get("margin_calc_type"),
-                        shortfall=payload.get("shortfall"),
-                        margin_error=payload.get("margin_error"),
-                    ),
-                )
-                logger.warning(with_log_context("wallet_entry_rejected", context))
-                return None
-            accounting_mode = None
-            inst_type = resolve_instrument_type(self.instrument)
-            if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
-                accounting_mode = "margin"
-            self._wallet_gateway.apply_fill(
-                event_type="ENTRY_FILL",
-                side=side,
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                qty=fill_result.filled_qty,
-                price=fill_result.fill_price,
-                fee=fill_result.fee,
-                notional=fill_result.notional,
-                symbol=self.instrument.get("symbol"),
-                trade_id=trade_id,
-                position_direction=direction,
-                accounting_mode=accounting_mode,
-                realized_pnl=0.0,
-            )
-
-        total_contracts = fill_result.filled_qty if fill_result else requested_qty
-
-        # Build position components
-        stop_price = self._calculate_stop_price(candle, direction, r_ticks)
-        legs = self._build_legs(
-            candle,
-            direction,
-            r_ticks,
-            total_contracts,
-            qty_raw=qty_raw,
-            qty_final=total_contracts,
-            order_intent_id=order_intent_id,
-            side=side,
-        )
-        if not legs:
-            rounded_qty = (
-                self._floor_to_step(requested_qty, self.qty_step)
-                if self.qty_step not in (None, 0)
-                else requested_qty
-            )
-            rejection_reason = "QTY_ROUNDS_TO_ZERO" if rounded_qty <= 0 else "TP_LEGS_EMPTY"
-            self.last_rejection_reason = rejection_reason
-            self.last_rejection_detail = {
-                "requested_qty": requested_qty,
-                "rounded_qty": rounded_qty,
-                "symbol": self.instrument.get("symbol"),
-                "qty_step": self.qty_step,
-                "min_qty": self.min_qty,
-                "min_notional": self.min_notional,
-                "tp_leg_count": len(self.orders),
-                "tp_allocation": self._last_tp_allocation,
-            }
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
-                reason=rejection_reason,
-                requested_qty=requested_qty,
-                rounded_qty=rounded_qty,
-                qty_step=self.qty_step,
-                min_qty=self.min_qty,
-                min_notional=self.min_notional,
-                tp_leg_count=len(self.orders),
-                tp_allocation=self._last_tp_allocation,
-            )
-            logger.warning(with_log_context("entry_rejected", context))
-            return None
-
-        # Configure stop management
-        runtime_stop_adjustments = self._build_stop_adjustments(legs, r_ticks)
-        breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(legs, r_ticks)
-        trailing_activation_ticks = self._trailing_activation_ticks(legs, r_ticks)
-        trailing_distance_ticks = self._trailing_distance_ticks(atr_at_entry)
-
-        # Get trailing config
-        self.trailing_config = self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), Mapping) else {}
-        self._last_tp_allocation: Optional[Dict[str, Any]] = None
-
-        # Create position
-        position = LadderPosition(
-            entry_time=candle.time,
-            entry_price=fill_result.fill_price if fill_result else candle.close,
-            direction=direction,
-            stop_price=stop_price,
-            tick_size=self.tick_size,
-            execution_model=self.execution_model if use_wallet_execution else None,
-            execution_adapter=self.execution_adapter if use_wallet_execution else None,
-            wallet_gateway=self._wallet_gateway if use_wallet_execution else None,
-            base_currency=base_currency,
-            quote_currency_code=quote_currency,
-            legs=legs,
-            breakeven_trigger_ticks=breakeven_ticks,
-            tick_value=self.tick_value,
-            contract_size=self.contract_size,
-            maker_fee_rate=self.maker_fee,
-            taker_fee_rate=self.taker_fee,
-            quote_currency=self.quote_currency,
-            short_requires_borrow=bool(self.short_requires_borrow),
-            instrument=self.instrument if use_wallet_execution else None,
-            atr_at_entry=atr_at_entry,
-            r_multiple_at_entry=self.r_multiple,
-            r_value=r_value,
-            r_ticks=r_ticks,
-            trailing_activation_ticks=trailing_activation_ticks,
-            trailing_distance_ticks=trailing_distance_ticks,
-            trailing_atr_multiple=float(self.trailing_config.get("atr_multiplier") or 0.0),
-            pre_entry_context=getattr(candle, "lookback_15", None),
-            stop_adjustments=runtime_stop_adjustments,
-            trade_id=trade_id,
-        )
-        if fill_result:
-            position.apply_entry_fee(fill_result.fee)
-        else:
-            position.register_entry_fee()
-        return position
-
     def maybe_enter(self, candle: Candle, direction: Optional[str]) -> Optional[LadderPosition]:
-        if direction is None or self.active_trade is not None:
+        if direction is None or self.active_trade is not None or self.entry_execution.has_pending:
             return None
         if not self.execution_adapter:
             raise ValueError("Execution adapter is required for trade execution")
@@ -1893,7 +2367,7 @@ class LadderRiskEngine:
             )
             logger.warning(with_log_context("short_entry_rejected", context))
             return None
-        self.active_trade = self._new_position(candle, direction)
+        self.active_trade = self.entry_execution.submit_entry(candle, direction)
         if self.active_trade is None:
             return None
         self.trades.append(self.active_trade)
@@ -1901,7 +2375,12 @@ class LadderRiskEngine:
 
     def step(self, candle: Candle) -> List[Dict[str, Any]]:
         if self.active_trade is None:
-            return []
+            new_trade = self.entry_execution.process_pending(candle)
+            if new_trade:
+                self.active_trade = new_trade
+                self.trades.append(self.active_trade)
+            if self.active_trade is None:
+                return []
         events = self.active_trade.apply_bar(candle)
         if not self.active_trade.is_active():
             self.active_trade = None

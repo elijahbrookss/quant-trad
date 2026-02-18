@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+import threading
+import time
 from typing import Dict, Optional, Tuple
 
 from core.logger import logger
+from utils.perf_log import get_obs_enabled
 
 from ..config import runtime_config_from_env
 from ..services import DataPersistence, NullPersistence
@@ -55,10 +59,53 @@ class ProviderRegistry:
     ) -> BaseDataProvider:
         provider, resolved_venue = _resolve_ids(provider_id, venue or exchange)
         cache_key = (provider, resolved_venue or "")
+        should_log = get_obs_enabled()
+        get_started = time.perf_counter() if should_log else 0.0
 
         if cache_key in self.cache:
+            if should_log:
+                get_ms = (time.perf_counter() - get_started) * 1000.0
+                logger.debug(
+                    "cache.get | event=cache.get cache_name=provider_registry cache_scope=process "
+                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                    f"{provider}:{resolved_venue or ''}",
+                    get_ms,
+                    os.getpid(),
+                    threading.current_thread().name,
+                )
+                logger.debug(
+                    "cache.hit | event=cache.hit cache_name=provider_registry cache_scope=process "
+                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                    f"{provider}:{resolved_venue or ''}",
+                    get_ms,
+                    os.getpid(),
+                    threading.current_thread().name,
+                )
             return self.cache[cache_key]
 
+        if should_log:
+            get_ms = (time.perf_counter() - get_started) * 1000.0
+            logger.debug(
+                "cache.get | event=cache.get cache_name=provider_registry cache_scope=process "
+                "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                f"{provider}:{resolved_venue or ''}",
+                get_ms,
+                os.getpid(),
+                threading.current_thread().name,
+            )
+            logger.debug(
+                "cache.miss | event=cache.miss cache_name=provider_registry cache_scope=process "
+                "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                f"{provider}:{resolved_venue or ''}",
+                get_ms,
+                os.getpid(),
+                threading.current_thread().name,
+            )
+
+        # NOTE: In-memory provider instance cache (per-process, no eviction).
+        # NOTE: No locks; not thread-safe for concurrent writes.
+        # NOTE: Multiprocessing/container-per-bot will duplicate provider instances.
+        build_started = time.perf_counter() if should_log else 0.0
         provider_cfg = get_provider_config(provider)
         if not provider_cfg:
             raise ValueError(f"Unsupported provider: {provider}")
@@ -87,6 +134,16 @@ class ProviderRegistry:
 
         self.cache[cache_key] = instance
         logger.debug("provider_factory_cached provider=%s venue=%s", provider, resolved_venue)
+        if should_log:
+            build_ms = (time.perf_counter() - build_started) * 1000.0
+            logger.debug(
+                "cache.set | event=cache.set cache_name=provider_registry cache_scope=process "
+                "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                f"{provider}:{resolved_venue or ''}",
+                build_ms,
+                os.getpid(),
+                threading.current_thread().name,
+            )
         return instance
 
 

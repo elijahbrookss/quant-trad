@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import logging
 from signals.overlays.transformers import apply_overlay_transform
+from utils.perf_log import LogThrottle, get_obs_log_throttle_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class ChartStateBuilder:
         self._normalise_epoch = normalise_epoch_fn
         self._log_sequence = log_sequence_fn
         self._strategy_key = strategy_key_fn
+        self._regime_log_throttle = LogThrottle(interval_s=get_obs_log_throttle_seconds())
 
     def visible_candles(
         self,
@@ -32,7 +34,7 @@ class ChartStateBuilder:
             return candles
         normalized = (status or "").lower()
         total = len(primary.candles)
-        if normalized in {"idle", "initialising", "completed", "stopped"}:
+        if normalized in {"completed", "stopped"}:
             visible = total
         else:
             visible = min(max(bar_index, 0), total)
@@ -67,7 +69,8 @@ class ChartStateBuilder:
             overlay_type = str(overlay.get("type") if isinstance(overlay, Mapping) else "") or ""
             if transformed is None:
                 if overlay_type in {"regime_overlay", "regime_markers"}:
-                    logger.debug(
+                    self._log_regime_debug(
+                        "regime_overlay_skipped_transform",
                         "regime_overlay_skipped_transform | epoch=%s | type=%s",
                         current_epoch,
                         overlay_type,
@@ -85,7 +88,8 @@ class ChartStateBuilder:
                     known_at = None
                     if isinstance(payload, Mapping):
                         known_at = payload.get("known_at") or payload.get("knownAt")
-                    logger.debug(
+                    self._log_regime_debug(
+                        "regime_overlay_visible",
                         "regime_overlay_visible | epoch=%s | type=%s | boxes=%s | segments=%s | markers=%s | instrument_id=%s | symbol=%s | known_at=%s",
                         current_epoch,
                         overlay_type,
@@ -105,7 +109,8 @@ class ChartStateBuilder:
                     known_at = None
                     if isinstance(payload, Mapping):
                         known_at = payload.get("known_at") or payload.get("knownAt")
-                    logger.debug(
+                    self._log_regime_debug(
+                        "regime_overlay_trimmed_out",
                         "regime_overlay_trimmed_out | epoch=%s | type=%s | known_at=%s | payload_keys=%s | instrument_id=%s | symbol=%s",
                         current_epoch,
                         overlay_type,
@@ -160,7 +165,8 @@ class ChartStateBuilder:
 
             box_span = _extents(box_list, "x1", "x2")
             seg_span = _extents(seg_list, "x1", "x2")
-            logger.debug(
+            self._log_regime_debug(
+                "regime_overlay_visible_summary",
                 "regime_overlay_visible_summary | epoch=%s | overlays=%s | boxes=%s | segments=%s | markers=%s | instruments=%s | symbols=%s | box_span=%s | segment_span=%s | known_at=%s",
                 current_epoch,
                 len(regime_visible),
@@ -393,3 +399,10 @@ class ChartStateBuilder:
         if known_at is None:
             return True
         return known_at <= current_epoch
+
+    def _log_regime_debug(self, key: str, message: str, *args: Any) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        if not self._regime_log_throttle.should_log(key):
+            return
+        logger.debug(message, *args)

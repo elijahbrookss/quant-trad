@@ -51,10 +51,11 @@ _discover_signal_rules()
 
 # Export commonly used items for convenience
 from .base import BaseSignal
-from .engine.signal_generator import signal_rule, overlay_adapter
+from .engine.signal_generator import indicator_plugin, overlay_adapter, signal_rule
 
 __all__ = [
     "BaseSignal",
     "signal_rule",
     "overlay_adapter",
+    "indicator_plugin",
 ]

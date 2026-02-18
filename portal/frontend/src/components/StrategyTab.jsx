@@ -47,6 +47,7 @@ const StrategyTab = ({ chartId }) => {
   const [savingInstrument, setSavingInstrument] = useState(false)
   const [instrumentError, setInstrumentError] = useState(null)
   const [quickUpdateStatus, setQuickUpdateStatus] = useState({ saving: false, error: null, savedAt: null })
+  const [strategyListCollapsed, setStrategyListCollapsed] = useState(false)
   const {
     strategies,
     indicators,
@@ -498,40 +499,65 @@ const StrategyTab = ({ chartId }) => {
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+      <div className={`grid gap-5 ${strategyListCollapsed ? 'lg:grid-cols-[56px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
         <div className="space-y-3">
-          <div className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-black/40 px-3 py-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-slate-300">Strategies</span>
-              <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-slate-500">{strategies.length}</span>
-            </div>
-            <button
-              onClick={openCreateStrategy}
-              className="rounded p-1 text-slate-500 transition hover:bg-white/5 hover:text-slate-300"
-              title="Add new strategy"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-            </button>
-          </div>
-
-          {loading ? (
-            <div className="flex items-center justify-center rounded-xl border border-dashed border-white/[0.06] bg-black/20 p-10">
-              <div className="text-center">
-                <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-white/60"></div>
-                <p className="mt-3 text-xs text-slate-500">Loading strategies…</p>
+          <div className={`rounded-lg border border-white/[0.06] bg-black/40 ${strategyListCollapsed ? 'px-2 py-2' : 'px-3 py-2'}`}>
+            <div className={`flex items-center ${strategyListCollapsed ? 'flex-col gap-2' : 'justify-between'}`}>
+              {strategyListCollapsed ? (
+                <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-slate-500">{strategies.length}</span>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-slate-300">Strategies</span>
+                  <span className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-slate-500">{strategies.length}</span>
+                </div>
+              )}
+              <div className={`flex items-center ${strategyListCollapsed ? 'flex-col gap-1.5' : 'gap-1.5'}`}>
+                <button
+                  onClick={() => setStrategyListCollapsed((prev) => !prev)}
+                  className="rounded p-1 text-slate-500 transition hover:bg-white/5 hover:text-slate-300"
+                  title={strategyListCollapsed ? 'Expand strategy list' : 'Collapse strategy list'}
+                >
+                  {strategyListCollapsed ? (
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  ) : (
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={openCreateStrategy}
+                  className="rounded p-1 text-slate-500 transition hover:bg-white/5 hover:text-slate-300"
+                  title="Add new strategy"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                </button>
               </div>
             </div>
-          ) : (
-            <StrategyGrid
-              strategies={strategies}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              onEdit={openEditStrategy}
-              onDelete={handleDeleteStrategy}
-              layout="stacked"
-            />
+          </div>
+
+          {!strategyListCollapsed && (
+            loading ? (
+              <div className="flex items-center justify-center rounded-xl border border-dashed border-white/[0.06] bg-black/20 p-10">
+                <div className="text-center">
+                  <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-white/60"></div>
+                  <p className="mt-3 text-xs text-slate-500">Loading strategies…</p>
+                </div>
+              </div>
+            ) : (
+              <StrategyGrid
+                strategies={strategies}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                onEdit={openEditStrategy}
+                onDelete={handleDeleteStrategy}
+                layout="stacked"
+              />
+            )
           )}
         </div>
 

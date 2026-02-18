@@ -16,6 +16,7 @@ from .models import Base
 
 
 logger = logging.getLogger(__name__)
+_SCHEMA_LOCK_KEY = 9021001
 
 
 class Database:
@@ -109,10 +110,87 @@ class Database:
                 )
 
         require_table("portal_bot_runs")
+        require_table("portal_bot_run_steps")
         require_table("portal_bot_trades")
         require_table("portal_bots")
+        require_table("portal_async_jobs")
+        assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
+        assert_columns("portal_async_jobs")
+        with self._engine.begin() as conn:
+            # Serialize schema/index DDL across backend + workers.
+            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+            try:
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_bot_started_at "
+                    "ON portal_bot_run_steps (bot_id, started_at DESC)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_step_started_at "
+                    "ON portal_bot_run_steps (run_id, step_name, started_at DESC)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_started_at "
+                    "ON portal_bot_run_steps (run_id, started_at DESC)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_started_at "
+                    "ON portal_bot_runs (bot_id, started_at DESC)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_ended_at "
+                    "ON portal_bot_runs (bot_id, ended_at DESC)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_run_entry_time "
+                    "ON portal_bot_trades (run_id, entry_time)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_bot_exit_time "
+                    "ON portal_bot_trades (bot_id, exit_time)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_bot_trade_events_trade_event_time "
+                    "ON portal_bot_trade_events (trade_id, event_time)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_status_available "
+                    "ON portal_async_jobs (status, available_at, created_at)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_type_status "
+                    "ON portal_async_jobs (job_type, status, created_at)",
+                )
+                self._create_index_best_effort(
+                    conn,
+                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_partition "
+                    "ON portal_async_jobs (job_type, status, partition_hash, created_at)",
+                )
+            finally:
+                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+
+    @staticmethod
+    def _create_index_best_effort(conn, ddl: str) -> None:
+        try:
+            conn.execute(text(ddl))
+        except SQLAlchemyError as exc:
+            msg = str(exc).lower()
+            # Concurrent startup can race on index creation. Continue when index already exists.
+            if "already exists" in msg or "duplicate" in msg:
+                logger.warning("portal_db_index_exists_race | ddl=%s | error=%s", ddl, exc)
+                return
+            raise
 
     @property
     def available(self) -> bool:

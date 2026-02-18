@@ -56,7 +56,6 @@ class BacktestAdapter(ExecutionAdapter):
                 ),
                 slippage_bps=slippage_bps,
             )
-
     def fill_market(
         self,
         *,

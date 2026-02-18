@@ -5,6 +5,8 @@ import types
 
 import pytest
 
+from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+
 if "pandas" not in sys.modules:
     class _DummyTimestamp:
         def __init__(self, value=None):
@@ -41,13 +43,22 @@ from signals.engine.signal_generator import (
 
 @pytest.fixture(autouse=True)
 def reset_registry():
-    original = dict(signal_generator._REGISTRY)
-    signal_generator._REGISTRY.clear()
+    registry = plugin_registry()
+    original_plugins = dict(registry._plugins)
+    original_pending_rules = dict(registry._pending_signal_rules)
+    original_pending_overlays = dict(registry._pending_signal_overlay_adapters)
+    registry._plugins.clear()
+    registry._pending_signal_rules.clear()
+    registry._pending_signal_overlay_adapters.clear()
     try:
         yield
     finally:
-        signal_generator._REGISTRY.clear()
-        signal_generator._REGISTRY.update(original)
+        registry._plugins.clear()
+        registry._plugins.update(original_plugins)
+        registry._pending_signal_rules.clear()
+        registry._pending_signal_rules.update(original_pending_rules)
+        registry._pending_signal_overlay_adapters.clear()
+        registry._pending_signal_overlay_adapters.update(original_pending_overlays)
 
 
 class DummyIndicator:
@@ -441,16 +452,7 @@ def test_market_profile_signal_logging_summary(monkeypatch, caplog):
 
     signals_rules_module = types.ModuleType("signals.rules")
     signals_rules_module.__path__ = []
-    market_profile_module = types.ModuleType("signals.rules.market_profile")
-    market_profile_module.__path__ = []
-    bootstrap_module = types.ModuleType("signals.rules.market_profile._bootstrap")
-    bootstrap_module.ensure_breakouts_ready = lambda *_, **__: None
-    market_profile_module._bootstrap = bootstrap_module
-    signals_rules_module.market_profile = market_profile_module
-
     sys.modules.setdefault("signals.rules", signals_rules_module)
-    sys.modules.setdefault("signals.rules.market_profile", market_profile_module)
-    sys.modules.setdefault("signals.rules.market_profile._bootstrap", bootstrap_module)
 
     caplog.set_level(logging.INFO, logger="signals.engine.signal_generator")
 
@@ -490,5 +492,5 @@ def test_market_profile_signal_logging_summary(monkeypatch, caplog):
     assert breakout_called["payload"] == {"foo": "bar"}
     assert len(signals) == 3
     assert "Signal run triggered | indicator=market_profile | payloads=1" in caplog.text
-    assert "Market profile signal summary | total=3 | breakouts=2 | retests=1" in caplog.text
+    assert "Signal type summary | indicator=market_profile | total=3 | counts={'breakout': 2, 'retest': 1}" in caplog.text
     assert "Signal run complete | indicator=market_profile | total_signals=3" in caplog.text

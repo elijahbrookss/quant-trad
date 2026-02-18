@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
-import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles, toSec } from './chartDataUtils.js'
+import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
 import { useOverlaySync } from './hooks/useOverlaySync.js'
 import { useTradeMarkers } from './hooks/useTradeMarkers.js'
@@ -20,6 +20,100 @@ import {
   findNearestCandleTime,
 } from './regimeReadoutUtils.js'
 
+const parseTimeframeToSeconds = (rawTimeframe) => {
+  const text = (rawTimeframe || '').toString().trim().toLowerCase()
+  if (!text) return null
+  const match = text.match(/^(\d+)\s*([a-z]+)$/)
+  if (!match) return null
+  const amount = Number(match[1])
+  const unit = match[2]
+  if (!Number.isFinite(amount) || amount <= 0) return null
+
+  if (unit === 's' || unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') {
+    return amount
+  }
+  if (unit === 'm' || unit === 'min' || unit === 'mins' || unit === 'minute' || unit === 'minutes') {
+    return amount * 60
+  }
+  if (unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours') {
+    return amount * 3600
+  }
+  if (unit === 'd' || unit === 'day' || unit === 'days') {
+    return amount * 86400
+  }
+  if (unit === 'w' || unit === 'wk' || unit === 'wks' || unit === 'week' || unit === 'weeks') {
+    return amount * 7 * 86400
+  }
+  if (unit === 'mo' || unit === 'mon' || unit === 'month' || unit === 'months') {
+    return amount * 30 * 86400
+  }
+  if (unit === 'y' || unit === 'yr' || unit === 'yrs' || unit === 'year' || unit === 'years') {
+    return amount * 365 * 86400
+  }
+  return null
+}
+
+const buildTickMarkFormatter = (timeframeSeconds) => {
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400
+  const minuteGranularity = Number.isFinite(timeframeSeconds) && timeframeSeconds < 3600
+  const intradayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+  const dayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const dateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: 'short',
+    day: '2-digit',
+  })
+
+  return (timeValue) => {
+    const epoch = typeof timeValue === 'number'
+      ? timeValue
+      : typeof timeValue?.timestamp === 'function'
+        ? Number(timeValue.timestamp())
+        : Number.isFinite(timeValue?.timestamp)
+          ? Number(timeValue.timestamp)
+          : null
+    if (!Number.isFinite(epoch)) return ''
+    const date = new Date(epoch * 1000)
+    if (Number.isNaN(date.getTime())) return ''
+
+    if (!intraday) {
+      return dateFormatter.format(date)
+    }
+
+    if (minuteGranularity) {
+      return intradayFormatter.format(date)
+    }
+
+    const hour = date.getUTCHours()
+    const minute = date.getUTCMinutes()
+    if (hour === 0 && minute === 0) {
+      return dayFormatter.format(date)
+    }
+    return intradayFormatter.format(date)
+  }
+}
+
+const deriveTimeScaleOptions = (timeframe) => {
+  const timeframeSeconds = parseTimeframeToSeconds(timeframe)
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400
+  const showSeconds = Number.isFinite(timeframeSeconds) && timeframeSeconds < 60
+  return {
+    borderVisible: false,
+    timeVisible: intraday || !Number.isFinite(timeframeSeconds),
+    secondsVisible: showSeconds,
+    tickMarkFormatter: buildTickMarkFormatter(timeframeSeconds),
+  }
+}
+
 const chartOptions = {
   layout: {
     textColor: '#d4d7e1',
@@ -29,7 +123,7 @@ const chartOptions = {
     vertLines: { color: 'rgba(150, 150, 150, 0.05)' },
     horzLines: { color: 'rgba(150, 150, 150, 0.05)' },
   },
-  timeScale: { borderVisible: false },
+  timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
   rightPriceScale: {
     borderVisible: false,
     scaleMargins: {
@@ -58,6 +152,7 @@ export function BotLensChart({
   debugRanges = false,
   className = '',
   heightClass = 'h-[360px]',
+  timeframe = null,
   overlayVisibility = {},
 }) {
   const containerRef = useRef(null)
@@ -97,7 +192,12 @@ export function BotLensChart({
   const showRegimeReadout = overlayVisibility.regime_readout !== false
 
   useEffect(() => {
-    if (!BOTLENS_DEBUG) return
+    const chart = chartRef.current
+    if (!chart) return
+    chart.applyOptions({ timeScale: deriveTimeScaleOptions(timeframe) })
+  }, [timeframe])
+
+  useEffect(() => {
     const summary = resolvedOverlays.reduce((acc, ov) => {
       const type = ov?.type || 'unknown'
       acc[type] = (acc[type] || 0) + 1
@@ -105,8 +205,16 @@ export function BotLensChart({
     }, {})
     const regime = summary.regime_overlay || 0
     const regimeMarkers = summary.regime_markers || 0
-    console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
-  }, [resolvedOverlays])
+    logger.info('overlay_render_input', {
+      overlays_total: resolvedOverlays.length,
+      overlays_by_type: summary,
+      regime_overlay: regime,
+      regime_markers: regimeMarkers,
+    })
+    if (BOTLENS_DEBUG) {
+      console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
+    }
+  }, [logger, resolvedOverlays])
 
   const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
   const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
@@ -400,6 +508,16 @@ export function BotLensChart({
       tradeRegions: showTradeRegions ? tradeRegions : [],
       tradePriceLines: showTradeRays ? tradePriceLines : [],
       candleData,
+    })
+    logger.info('overlay_render_artifacts', {
+      overlays_total: resolvedOverlays.length,
+      markers: Array.isArray(artifacts?.markers) ? artifacts.markers.length : 0,
+      touch_points: Array.isArray(artifacts?.touchPoints) ? artifacts.touchPoints.length : 0,
+      boxes: Array.isArray(artifacts?.boxes) ? artifacts.boxes.length : 0,
+      segments: Array.isArray(artifacts?.segments) ? artifacts.segments.length : 0,
+      polylines: Array.isArray(artifacts?.polylines) ? artifacts.polylines.length : 0,
+      bubbles: Array.isArray(artifacts?.bubbles) ? artifacts.bubbles.length : 0,
+      price_lines: Array.isArray(artifacts?.priceLines) ? artifacts.priceLines.length : 0,
     })
     const overlayResult = applyArtifacts(artifacts)
     if (debugRanges) {

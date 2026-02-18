@@ -99,6 +99,22 @@ def test_confidence_gate_blocks_low_confidence_switches():
     assert blocked["structure"]["state"] == "trend"
 
 
+def test_axis_switch_blocked_logs_are_disabled_by_default(caplog):
+    config = RegimeStabilizerConfig(
+        min_confidence=0.8,
+        confirm_bars={"structure": 1, "volatility": 1, "liquidity": 1, "expansion": 1},
+        smoothing_axes=(),
+        smoothing_features=(),
+    )
+    stabilizer = RegimeStabilizer(config)
+
+    stabilizer.stabilize(_regime(directional_efficiency=0.7, confidence=0.95))
+    with caplog.at_level("DEBUG"):
+        stabilizer.stabilize(_regime(directional_efficiency=0.2, range_position=0.5, confidence=0.5))
+
+    assert "regime_axis_switch_blocked" not in caplog.text
+
+
 def test_short_blocks_merge_into_previous_block():
     start = datetime(2024, 1, 1)
     points = []

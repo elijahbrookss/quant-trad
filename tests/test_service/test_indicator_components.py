@@ -113,6 +113,7 @@ from portal.backend.service.indicators.indicator_cache import IndicatorCacheMana
 from portal.backend.service.indicators.indicator_factory import IndicatorFactory
 from portal.backend.service.indicators.indicator_repository import IndicatorRepository
 from indicators.runtime.indicator_signal_runner import IndicatorSignalRunner
+from portal.backend.service.indicators.indicator_service.instances import IndicatorInstanceUpdater
 
 
 class _StubRepo(IndicatorRepository):
@@ -319,3 +320,63 @@ def test_breakout_cache_overlay_clone_updates_symbol():
 
     assert getattr(clone, "symbol", None) == "BTC"
     assert getattr(clone, "interval", None) == "15m"
+
+
+def test_indicator_update_color_only_skips_rebuild_without_runtime_context(monkeypatch):
+    record = {
+        "id": "inst-color",
+        "type": "dummy",
+        "name": "Original",
+        "params": {"window": 14},
+        "enabled": True,
+        "color": "#111111",
+    }
+
+    class _Repo:
+        def __init__(self, payload):
+            self._payload = dict(payload)
+            self.upserts = []
+
+        def get(self, inst_id):
+            if inst_id != self._payload["id"]:
+                return None
+            return dict(self._payload)
+
+        def upsert(self, payload):
+            self.upserts.append(dict(payload))
+            self._payload = dict(payload)
+
+    class _Factory:
+        def build_meta_from_record(self, payload):
+            return dict(payload)
+
+    class _SignalRunner:
+        def build_signal_catalog(self, _indicator_type):
+            return []
+
+    ctx = types.SimpleNamespace(
+        repository=_Repo(record),
+        factory=_Factory(),
+        signal_runner=_SignalRunner(),
+    )
+    updater = IndicatorInstanceUpdater(ctx=ctx)
+
+    def _unexpected(*_args, **_kwargs):
+        raise AssertionError("rebuild path must not be used for color-only updates")
+
+    monkeypatch.setattr(updater, "_ensure_ctor_params", _unexpected)
+    monkeypatch.setattr(updater, "_pop_data_context", _unexpected)
+
+    updated = updater.update(
+        "inst-color",
+        "dummy",
+        params={"window": 14},
+        name="Updated",
+        color="#22cc88",
+        color_provided=True,
+    )
+
+    assert updated["name"] == "Updated"
+    assert updated["color"] == "#22cc88"
+    assert updated["params"] == {"window": 14}
+    assert len(ctx.repository.upserts) == 1

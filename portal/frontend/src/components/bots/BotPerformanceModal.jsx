@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { TriangleAlert, X, Check, Maximize2, Minimize2 } from 'lucide-react'
+import { TriangleAlert, X, Check, Maximize2, Minimize2, ExternalLink } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { toSec } from './chartDataUtils.js'
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx'
@@ -40,6 +40,43 @@ const STATUS_LABELS = {
   crashed: 'Bot crashed',
 }
 
+const GRAFANA_BASE_URL =
+  import.meta?.env?.VITE_GRAFANA_BASE_URL
+  || import.meta?.env?.REACT_APP_GRAFANA_BASE_URL
+  || 'http://localhost:3000'
+const GRAFANA_BOT_RUN_ATTRIBUTION_UID =
+  import.meta?.env?.VITE_GRAFANA_BOT_RUN_ATTRIBUTION_UID
+  || import.meta?.env?.REACT_APP_GRAFANA_BOT_RUN_ATTRIBUTION_UID
+  || 'qt-bot-run-attribution'
+
+function IdChip({ label, value }) {
+  if (!value) return null
+  const handleCopy = async () => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(String(value))
+      }
+    } catch {
+      // Best-effort copy; no UI disruption on failure.
+    }
+  }
+
+  return (
+    <div className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-900/70 px-2 py-1">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">{label}</span>
+      <code className="max-w-[240px] truncate text-[11px] text-slate-300">{value}</code>
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400 transition-colors hover:border-slate-600 hover:text-slate-200"
+        title={`Copy ${label}`}
+      >
+        Copy
+      </button>
+    </div>
+  )
+}
+
 export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   const [bootLine, setBootLine] = useState(BOOTLINE_POOL.generic[0])
   const [bootDots, setBootDots] = useState(1)
@@ -65,7 +102,6 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
     streamStatus,
   } = useBotPerformance({ bot, open, onRefresh })
 
-  const logs = payload?.logs || []
   const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
   const warnings = useMemo(() => {
     const fromPayload = Array.isArray(payload?.warnings) ? payload.warnings : []
@@ -84,6 +120,20 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
   }, [payload?.warnings, runtimeWarnings])
   const strategies = payload?.meta?.strategies || []
   const runtime = payload?.runtime || {}
+  const runIdDisplay = runtime?.run_id || payload?.run_id || bot?.last_run_artifact?.run_id || null
+  const botIdDisplay = bot?.id || runtime?.bot_id || null
+  const grafanaRunLink = useMemo(() => {
+    if (!runIdDisplay) return null
+    if (!GRAFANA_BASE_URL || !GRAFANA_BOT_RUN_ATTRIBUTION_UID) return null
+    try {
+      const base = String(GRAFANA_BASE_URL).replace(/\/+$/, '')
+      const url = new URL(`${base}/d/${encodeURIComponent(GRAFANA_BOT_RUN_ATTRIBUTION_UID)}`)
+      url.searchParams.set('var-run_id', String(runIdDisplay))
+      return url.toString()
+    } catch {
+      return null
+    }
+  }, [runIdDisplay])
   const seriesList = Array.isArray(payload?.series) ? payload.series : []
   const isBacktestRun = (bot?.run_type || '').toLowerCase() === 'backtest'
   const visibleWarnings = showAllWarnings ? warnings : warnings.slice(0, 5)
@@ -591,6 +641,7 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
                   overlays={visibleOverlays}
                   playbackSpeed={chartPlaybackSpeed}
                   mode={chartMode}
+                  timeframe={activeSeries?.timeframe || bot?.timeframe || null}
                   heightClass={chartHeightClass}
                   overlayVisibility={overlayVisibility}
                 />
@@ -678,14 +729,32 @@ export function BotPerformanceModal({ bot, open, onClose, onRefresh }) {
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-xl font-medium text-slate-50">{bot?.name}</h3>
             <p className="mt-0.5 text-sm text-slate-400">Decision trace and execution context</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <IdChip label="Bot ID" value={botIdDisplay} />
+              <IdChip label="Run ID" value={runIdDisplay} />
+            </div>
           </div>
-          <button
-            type="button"
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/50 text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-300"
-            onClick={onClose}
-          >
-            <X className="size-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {grafanaRunLink ? (
+              <a
+                href={grafanaRunLink}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-sky-900/60 bg-sky-950/30 px-3 text-xs font-medium text-sky-300 transition-colors hover:border-sky-800/80 hover:bg-sky-950/50"
+                title="Open this run in Grafana"
+              >
+                <ExternalLink className="size-3.5" />
+                <span>Grafana</span>
+              </a>
+            ) : null}
+            <button
+              type="button"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-900/50 text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-900 hover:text-slate-300"
+              onClick={onClose}
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </header>
 
         <div className="flex flex-1 flex-col gap-5 overflow-auto">

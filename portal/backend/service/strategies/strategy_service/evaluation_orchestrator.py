@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
@@ -327,6 +328,7 @@ class StrategyEvaluationOrchestrator:
             raise ValueError(f"Instrument {instrument_id} is missing a datasource")
 
         run_id = uuid.uuid4().hex
+        indicator_started = time.perf_counter()
         indicator_payloads, missing_indicators, total_signals = self._dependencies.generate_indicator_payloads(
             strategy_id=inputs.strategy_id,
             instrument_id=instrument_id,
@@ -341,7 +343,9 @@ class StrategyEvaluationOrchestrator:
             base_config=inputs.config,
             run_id=run_id,
         )
+        indicator_eval_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
+        rule_started = time.perf_counter()
         rule_results = [rule.evaluate(indicator_payloads) for rule in self._record.rules.values()]
         for res in rule_results:
             res["signal_conditions"] = {
@@ -413,6 +417,7 @@ class StrategyEvaluationOrchestrator:
         ]
 
         chart_markers = markers.build_chart_markers(buy_signals, sell_signals)
+        rule_eval_ms = max((time.perf_counter() - rule_started) * 1000.0, 0.0)
 
         logger.info(
             "strategy_signals_generated | strategy=%s instrument_id=%s symbol=%s interval=%s start=%s end=%s buys=%d sells=%d",
@@ -526,6 +531,10 @@ class StrategyEvaluationOrchestrator:
             "missing_indicators": missing_indicators,
             "status": status,
             "total_signals": total_signals,
+            "perf": {
+                "indicator_eval_ms": indicator_eval_ms,
+                "rule_eval_ms": rule_eval_ms,
+            },
         }
 
 

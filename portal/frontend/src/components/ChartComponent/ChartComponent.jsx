@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createPortal } from 'react-dom';
 import { createChart, CandlestickSeries } from 'lightweight-charts';
 import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
@@ -57,33 +56,96 @@ const saveChartPreferences = (prefs) => {
   }
 };
 
+const parseTimeframeToSeconds = (rawTimeframe) => {
+  const text = (rawTimeframe || '').toString().trim().toLowerCase();
+  if (!text) return null;
+  const match = text.match(/^(\d+)\s*([a-z]+)$/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2];
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  if (unit === 's' || unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') {
+    return amount;
+  }
+  if (unit === 'm' || unit === 'min' || unit === 'mins' || unit === 'minute' || unit === 'minutes') {
+    return amount * 60;
+  }
+  if (unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours') {
+    return amount * 3600;
+  }
+  if (unit === 'd' || unit === 'day' || unit === 'days') {
+    return amount * 86400;
+  }
+  if (unit === 'w' || unit === 'wk' || unit === 'wks' || unit === 'week' || unit === 'weeks') {
+    return amount * 7 * 86400;
+  }
+  if (unit === 'mo' || unit === 'mon' || unit === 'month' || unit === 'months') {
+    return amount * 30 * 86400;
+  }
+  if (unit === 'y' || unit === 'yr' || unit === 'yrs' || unit === 'year' || unit === 'years') {
+    return amount * 365 * 86400;
+  }
+  return null;
+};
+
+const buildTickMarkFormatter = (timeframeSeconds) => {
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const minuteGranularity = Number.isFinite(timeframeSeconds) && timeframeSeconds < 3600;
+  const intradayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const dayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const dateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: 'short',
+    day: '2-digit',
+  });
+
+  return (timeValue) => {
+    const epoch = typeof timeValue === 'number'
+      ? timeValue
+      : typeof timeValue?.timestamp === 'function'
+        ? Number(timeValue.timestamp())
+        : Number.isFinite(timeValue?.timestamp)
+          ? Number(timeValue.timestamp)
+          : null;
+    if (!Number.isFinite(epoch)) return '';
+    const date = new Date(epoch * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+
+    if (!intraday) {
+      return dateFormatter.format(date);
+    }
+    if (minuteGranularity) {
+      return intradayFormatter.format(date);
+    }
+
+    const hour = date.getUTCHours();
+    const minute = date.getUTCMinutes();
+    if (hour === 0 && minute === 0) {
+      return dayFormatter.format(date);
+    }
+    return intradayFormatter.format(date);
+  };
+};
+
 const deriveTimeScaleOptions = (rawInterval) => {
-  const interval = (rawInterval || '').toString().toLowerCase();
-  const base = { timeVisible: true, secondsVisible: false };
-
-  if (!interval) return base;
-
-  if (interval.endsWith('s')) {
-    return { ...base, secondsVisible: true };
-  }
-
-  if (interval.endsWith('m')) {
-    return base;
-  }
-
-  if (interval.endsWith('h')) {
-    return base;
-  }
-
-  if (interval.endsWith('d')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  if (interval.endsWith('w') || interval.endsWith('mo') || interval.endsWith('y')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  return base;
+  const timeframeSeconds = parseTimeframeToSeconds(rawInterval);
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const showSeconds = Number.isFinite(timeframeSeconds) && timeframeSeconds < 60;
+  return {
+    timeVisible: intraday || !Number.isFinite(timeframeSeconds),
+    secondsVisible: showSeconds,
+    tickMarkFormatter: buildTickMarkFormatter(timeframeSeconds),
+  };
 };
 
 const normalizeExchangeId = (value) => (value ?? '').toString().trim().toLowerCase();
@@ -153,6 +215,7 @@ export const ChartComponent = ({ chartId }) => {
   const [palOpen, setPalOpen] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataLoaderContext, setDataLoaderContext] = useState(null);
+  const [candleTimes, setCandleTimes] = useState([]);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
@@ -161,7 +224,6 @@ export const ChartComponent = ({ chartId }) => {
     message: 'Preparing chart…',
   });
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [fullscreenHost, setFullscreenHost] = useState(null);
   const markChartState = useCallback((state, message = null) => {
     setChartStateNotice({ state, message });
   }, []);
@@ -182,24 +244,6 @@ export const ChartComponent = ({ chartId }) => {
     modeRef,
     dateRangeRef,
   });
-
-
-  useEffect(() => {
-    if (!isFullscreen) return undefined;
-    if (typeof document === 'undefined') return undefined;
-
-    const node = document.createElement('div');
-    node.className = 'fixed inset-0 z-[9999] bg-[#01030e]';
-    document.body.appendChild(node);
-    setFullscreenHost(node);
-
-    return () => {
-      setFullscreenHost((current) => (current === node ? null : current));
-      if (node.parentNode) {
-        node.parentNode.removeChild(node);
-      }
-    };
-  }, [isFullscreen]);
 
 
   // Save chart preferences to localStorage whenever they change
@@ -245,17 +289,15 @@ export const ChartComponent = ({ chartId }) => {
   }, [isFullscreen]);
 
   useEffect(() => {
-    if (!isFullscreen) return undefined;
-    if (typeof window === 'undefined') return undefined;
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        setIsFullscreen(false);
-      }
+    if (typeof document === 'undefined') return undefined;
+    const onFullscreenChange = () => {
+      const shell = chartShellRef.current;
+      const active = Boolean(shell && document.fullscreenElement === shell);
+      setIsFullscreen(active);
     };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isFullscreen, setIsFullscreen]);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
 
   const connection = useConnectionMonitor({ name: 'QuantLab API' });
   const {
@@ -292,6 +334,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Refs for chart and DOM.
   const chartContainerElRef = useRef(null);
+  const chartShellRef = useRef(null);
   const [chartMountNode, setChartMountNode] = useState(null);
   const attachChartContainerRef = useCallback((node) => {
     chartContainerElRef.current = node;
@@ -303,6 +346,7 @@ export const ChartComponent = ({ chartId }) => {
   const pvMgrRef = useRef(null);
   const lastBarRef = useRef(null);
   const barSpacingRef = useRef(null);
+  const signalDetailsRef = useRef([]);
   const timeframeWarningRef = useRef(null);
   const activeSeriesKeyRef = useRef({
     symbol: null,
@@ -319,9 +363,33 @@ export const ChartComponent = ({ chartId }) => {
   const providerRef = useRef(providerMgmt.providerId);
   const venueRef = useRef(providerMgmt.venueId);
 
-  const toggleFullscreen = useCallback(() => {
-    setIsFullscreen((prev) => !prev);
-  }, [setIsFullscreen]);
+  const toggleFullscreen = useCallback(async () => {
+    if (typeof document === 'undefined') return;
+
+    if (!isFullscreen) {
+      const shell = chartShellRef.current;
+      if (!shell || typeof shell.requestFullscreen !== 'function') {
+        warn('fullscreen_unavailable', { reason: 'requestFullscreen_missing' });
+        return;
+      }
+      try {
+        await shell.requestFullscreen();
+      } catch (err) {
+        warn('fullscreen_enter_failed', { error: String(err?.message || err) });
+      }
+      return;
+    }
+
+    if (typeof document.exitFullscreen !== 'function') {
+      warn('fullscreen_unavailable', { reason: 'exitFullscreen_missing' });
+      return;
+    }
+    try {
+      await document.exitFullscreen();
+    } catch (err) {
+      warn('fullscreen_exit_failed', { error: String(err?.message || err) });
+    }
+  }, [isFullscreen, warn]);
 
   const normalizedExchange = useMemo(() => normalizeExchangeId(exchange), [exchange]);
   const supportsLive = useMemo(() => {
@@ -368,6 +436,7 @@ export const ChartComponent = ({ chartId }) => {
     barSpacingRef,
     logger,
     setDataLoading,
+    signalDetailsRef,
   });
 
   useEffect(() => {
@@ -565,6 +634,7 @@ export const ChartComponent = ({ chartId }) => {
           low: c.low,
           close: c.close,
         }));
+      setCandleTimes(data.map((row) => row.time));
 
       if (!seriesRef.current) {
         warn('series missing');
@@ -876,6 +946,7 @@ export const ChartComponent = ({ chartId }) => {
         provider_id: providerRef.current,
         venue_id: venueRef.current,
         exchange: exchangeRef.current || null,
+        overlayLoading: true, // hold loader until IndicatorTab finishes overlay refresh
       });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;
@@ -1037,6 +1108,7 @@ export const ChartComponent = ({ chartId }) => {
     if (isSeriesChange) {
       lastBarRef.current = null;
       barSpacingRef.current = null;
+      setCandleTimes([]);
       try {
         seriesRef.current?.setData?.([]);
       } catch {
@@ -1053,7 +1125,8 @@ export const ChartComponent = ({ chartId }) => {
       venue_id: nextVenue,
       exchange: nextExchange || null,
       overlays: [],
-      overlayLoading: false,
+      // Overlay refresh is triggered after data load via bumpRefresh; keep loading visible.
+      overlayLoading: true,
     });
 
     const behavior = options.behavior ?? 'replace';
@@ -1075,6 +1148,11 @@ export const ChartComponent = ({ chartId }) => {
 
     return result;
   }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, windowConfig.dateRange, datasource, exchange, warn, syncOverlays, showWarning, providerMgmt.providerId, providerMgmt.venueId, markChartState]);
+
+  useEffect(() => {
+    if (!providerMgmt.credentialsSavedAt) return;
+    void handleApply({}, { behavior: 'replace', loaderReason: 'credentials-saved' });
+  }, [providerMgmt.credentialsSavedAt, handleApply]);
 
   const handleSymbolInputCommit = useCallback(() => {
     const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
@@ -1293,7 +1371,11 @@ export const ChartComponent = ({ chartId }) => {
 
   const chartSurface = (
     <ChartSurface
+      shellRef={chartShellRef}
       containerRef={attachChartContainerRef}
+      chartRef={chartRef}
+      pvMgrRef={pvMgrRef}
+      candleTimes={candleTimes}
       isFullscreen={isFullscreen}
       toggleFullscreen={toggleFullscreen}
       symbolDisplay={symbolDisplay}
@@ -1309,9 +1391,7 @@ export const ChartComponent = ({ chartId }) => {
     />
   );
 
-  const renderedChartSurface = isFullscreen && fullscreenHost
-    ? createPortal(chartSurface, fullscreenHost)
-    : chartSurface;
+  const renderedChartSurface = chartSurface;
 
   return (
     <>
@@ -1413,7 +1493,11 @@ export const ChartComponent = ({ chartId }) => {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="rounded-full bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200">Credentials</span>
                 <span>
-                  {providerMgmt.selectedVenueStatus.state !== 'available'
+                  {providerMgmt.selectedVenueStatus.state === 'invalid_credentials'
+                    ? `Stored credentials for ${providerMgmt.selectedVenueValue || 'venue'} cannot be decrypted with the current key. Re-save API keys.`
+                    : providerMgmt.selectedProviderStatus.state === 'invalid_credentials'
+                    ? `Stored credentials for ${providerMgmt.providerId || 'provider'} cannot be decrypted with the current key. Re-save API keys.`
+                    : providerMgmt.selectedVenueStatus.state !== 'available'
                     ? `Missing secrets for ${providerMgmt.selectedVenueValue || 'venue'}: ${(providerMgmt.selectedVenueStatus.missing || []).join(', ')}`
                     : `Missing secrets for ${providerMgmt.providerId || 'provider'}: ${(providerMgmt.selectedProviderStatus.missing || []).join(', ')}`}
                 </span>
@@ -1423,7 +1507,9 @@ export const ChartComponent = ({ chartId }) => {
                 onClick={() => providerMgmt.openCredentialsModal(providerMgmt.providerId, providerMgmt.selectedVenueValue, providerMgmt.selectedVenueStatus.required?.length ? providerMgmt.selectedVenueStatus.required : providerMgmt.selectedProviderStatus.required)}
                 className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-10)]"
               >
-                Add API keys
+                {providerMgmt.selectedVenueStatus.state === 'invalid_credentials' || providerMgmt.selectedProviderStatus.state === 'invalid_credentials'
+                  ? 'Re-save API keys'
+                  : 'Add API keys'}
               </button>
             </div>
           )}

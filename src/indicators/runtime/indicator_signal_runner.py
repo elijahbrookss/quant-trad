@@ -51,26 +51,6 @@ _RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
                 },
             ],
         },
-        "market_profile_retest_v2": {
-            "signal_type": "retest",
-            "directions": [
-                {
-                    "id": "long",
-                    "label": "Long retest",
-                    "description": (
-                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
-                        " favouring continuation to the upside."
-                    ),
-                },
-                {
-                    "id": "short",
-                    "label": "Short retest",
-                    "description": (
-                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds," " signalling continuation lower."
-                    ),
-                },
-            ],
-        },
     },
     "pivot_level": {
         "pivot_breakout": {
@@ -80,6 +60,14 @@ _RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "signal_type": "retest",
         },
     },
+}
+
+_RULE_SUNSET: Dict[str, set[str]] = {
+    "market_profile": {
+        "market_profile_breakout_v2",
+        "market_profile_retest_v2",
+        "market_profile_breakout_v3_confirmed",
+    }
 }
 
 
@@ -122,6 +110,8 @@ class IndicatorSignalRunner:
         for entry in rule_meta:
             rule_id = str(entry.get("id", "")).strip()
             if not rule_id:
+                continue
+            if rule_id.lower() in _RULE_SUNSET.get(indicator_key, set()):
                 continue
             hint = hints_for_indicator.get(rule_id.lower(), {})
             signal_type = hint.get("signal_type") or self._guess_signal_type(

@@ -1,0 +1,644 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Completed Runs",
+      "description": "How many bot runs finished in the selected time window. A sudden drop usually means runs are failing or stalling before completion.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_bot_runs WHERE $__timeFilter(COALESCE(ended_at, started_at)) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${status}' = '__all' OR status = '${status}') AND status = 'completed';"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Run Duration p50 / p95 (seconds)",
+      "description": "Median and p95 full-run duration. If p95 keeps climbing while p50 is flat, only some runs are degrading; if both climb, the whole system is slowing down.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p50' AS metric, percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (ended_at - started_at)))::double precision AS value FROM portal_bot_runs WHERE $__timeFilter(started_at) AND ended_at IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${status}' = '__all' OR status = '${status}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (ended_at - started_at)))::double precision AS value FROM portal_bot_runs WHERE $__timeFilter(started_at) AND ended_at IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${status}' = '__all' OR status = '${status}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Step Duration p95 by Step (ms)",
+      "description": "Shows p95 latency for each step. A step line that rises over time is your likely drift source.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY 1, step_name ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Selected Step Avg / p95 (ms)",
+      "description": "Zoom in on one step to confirm gradual slowdown. If both average and p95 trend up, the step itself is drifting, not just outliers.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'avg' AS metric, avg(duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${step_name}' = '__all' OR step_name = '${step_name}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${step_name}' = '__all' OR step_name = '${step_name}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 100 },
+              { "color": "red", "value": 250 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Step Throughput (events/min)",
+      "description": "How many step traces are recorded per minute. If throughput falls while runtime rises, work is backing up or waiting on I/O.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, (count(*)::double precision * 60.0) / GREATEST($__interval_ms / 1000.0, 1.0) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY 1, step_name ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Step Error Rate (%)",
+      "description": "Percent of step traces marked failed. Anything consistently above 1% is worth immediate investigation.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, 100.0 * avg(CASE WHEN ok THEN 0.0 ELSE 1.0 END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY 1, step_name ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Step Drift Detector (Last vs Previous Window)",
+      "description": "Compares recent average step time to the previous equal window. Ratios above 1.5x indicate real drift, above 2.0x is severe.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH bounds AS ( SELECT $__timeFrom()::timestamptz AS t_from, $__timeTo()::timestamptz AS t_to ), win AS ( SELECT (t_to - t_from) AS span, t_to, t_from, t_from - (t_to - t_from) AS prev_from FROM bounds ), recent AS ( SELECT step_name, avg(duration_ms)::double precision AS avg_ms FROM portal_bot_run_steps, win WHERE started_at >= win.t_from AND started_at <= win.t_to AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY step_name ), previous AS ( SELECT step_name, avg(duration_ms)::double precision AS avg_ms FROM portal_bot_run_steps, win WHERE started_at >= win.prev_from AND started_at < win.t_from AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY step_name ) SELECT r.step_name, ROUND(r.avg_ms::numeric, 2)::double precision AS recent_avg_ms, CASE WHEN p.avg_ms IS NULL THEN NULL ELSE ROUND(p.avg_ms::numeric, 2)::double precision END AS previous_avg_ms, ROUND((r.avg_ms / NULLIF(p.avg_ms, 0))::numeric, 2)::double precision AS drift_ratio FROM recent r LEFT JOIN previous p ON p.step_name = r.step_name ORDER BY drift_ratio DESC NULLS LAST, recent_avg_ms DESC LIMIT 25;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "drift_ratio"
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Slowest Runs",
+      "description": "Longest runs with step volume and trade counts. Use this to find outlier runs, then drill into that run_id.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT r.run_id, r.bot_id, r.status, ROUND(EXTRACT(EPOCH FROM (r.ended_at - r.started_at))::numeric, 2)::double precision AS run_seconds, COALESCE(s.step_events, 0) AS step_events, COALESCE(t.trade_count, 0) AS trades, r.started_at FROM portal_bot_runs r LEFT JOIN ( SELECT run_id, count(*) AS step_events FROM portal_bot_run_steps GROUP BY run_id ) s ON s.run_id = r.run_id LEFT JOIN ( SELECT run_id, count(*) AS trade_count FROM portal_bot_trades GROUP BY run_id ) t ON t.run_id = r.run_id WHERE $__timeFilter(r.started_at) AND r.ended_at IS NOT NULL AND ('${bot_id}' = '__all' OR r.bot_id = '${bot_id}') AND ('${status}' = '__all' OR r.status = '${status}') ORDER BY run_seconds DESC LIMIT 50;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Slowest Steps in Selected Run",
+      "description": "Breaks down one run by step latency. If one step dominates total time, optimize that first.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT step_name, count(*) AS calls, ROUND(avg(duration_ms)::numeric, 2)::double precision AS avg_ms, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 2)::double precision AS p95_ms, ROUND(max(duration_ms)::numeric, 2)::double precision AS max_ms, ROUND((sum(duration_ms) / NULLIF(sum(sum(duration_ms)) OVER (), 0) * 100.0)::numeric, 2)::double precision AS total_time_pct FROM portal_bot_run_steps WHERE ('${run_id}' = '__all' OR run_id = '${run_id}') AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') GROUP BY step_name ORDER BY total_time_pct DESC NULLS LAST, p95_ms DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Run Duration vs Trades per Run",
+      "description": "Correlates runtime with trading activity. If duration increases while trades stay flat, overhead is growing in non-trading steps.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(r.started_at, $__interval), 'run_seconds' AS metric, avg(EXTRACT(EPOCH FROM (r.ended_at - r.started_at)))::double precision AS value FROM portal_bot_runs r WHERE $__timeFilter(r.started_at) AND r.ended_at IS NOT NULL AND ('${bot_id}' = '__all' OR r.bot_id = '${bot_id}') AND ('${status}' = '__all' OR r.status = '${status}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(r.started_at, $__interval), 'trades_per_run' AS metric, avg(COALESCE(t.trade_count, 0))::double precision AS value FROM portal_bot_runs r LEFT JOIN ( SELECT run_id, count(*) AS trade_count FROM portal_bot_trades GROUP BY run_id ) t ON t.run_id = r.run_id WHERE $__timeFilter(r.started_at) AND ('${bot_id}' = '__all' OR r.bot_id = '${bot_id}') AND ('${status}' = '__all' OR r.status = '${status}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "run_seconds"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Internal Phase p95 (ms)",
+      "description": "This splits the main step into internal phases. The phase line that trends upward is your real slowdown source.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name IN ('step_signal_eval', 'step_decision_flow', 'step_trade_event_processing', 'step_finalize_bar', 'step_update_state', 'step_push_update') GROUP BY 1, step_name ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Internal Phase Breakdown (Selected Run)",
+      "description": "Average, p95, and total share by phase for one run. Focus first on phases with both high p95 and high total-time percentage.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS ( SELECT step_name, duration_ms FROM portal_bot_run_steps WHERE ('${run_id}' = '__all' OR run_id = '${run_id}') AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND step_name IN ('step_signal_eval', 'step_decision_flow', 'step_trade_event_processing', 'step_finalize_bar', 'step_update_state', 'step_push_update') ) SELECT step_name, count(*) AS calls, ROUND(avg(duration_ms)::numeric, 2)::double precision AS avg_ms, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 2)::double precision AS p95_ms, ROUND(sum(duration_ms)::numeric, 2)::double precision AS total_ms, ROUND((sum(duration_ms) / NULLIF(sum(sum(duration_ms)) OVER (), 0) * 100.0)::numeric, 2)::double precision AS total_time_pct FROM base GROUP BY step_name ORDER BY total_time_pct DESC NULLS LAST, p95_ms DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Push Payload Size p95 (KB)",
+      "description": "How large each bar update payload is. A rising payload size usually means serialized candles/trades are growing and driving CPU + network cost.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY ((context->>'payload_bytes')::double precision / 1024.0))::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name = 'step_push_update' AND (context->>'payload_bytes') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kbytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Push Payload Object Counts",
+      "description": "Tracks how many candles, trades, logs, and decisions are included in each update. If these keep growing, step time drift is expected.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'candles' AS metric, avg((context->>'candles_count')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name = 'step_push_update' AND (context->>'candles_count') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'trades' AS metric, avg((context->>'trades_count')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name = 'step_push_update' AND (context->>'trades_count') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'logs' AS metric, avg((context->>'logs_count')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name = 'step_push_update' AND (context->>'logs_count') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'decisions' AS metric, avg((context->>'decisions_count')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') AND step_name = 'step_push_update' AND (context->>'decisions_count') IS NOT NULL GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["quant-trad", "postgres", "timescaledb", "bot-profiler"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "label": "Bot",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_runs WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "status",
+        "label": "Run Status",
+        "type": "custom",
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "completed,error,stopped,running",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT run_id AS __value, run_id AS __text FROM portal_bot_runs WHERE ('${bot_id}' = '__all' OR bot_id = '${bot_id}') ORDER BY started_at DESC LIMIT 500;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "step_name",
+        "label": "Step",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM portal_bot_run_steps WHERE ('${bot_id}' = '__all' OR bot_id = '${bot_id}') ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Quant-Trad: Bot Run Profiler",
+  "uid": "quanttrad-bot-profiler",
+  "version": 5001,
+  "weekStart": ""
+}

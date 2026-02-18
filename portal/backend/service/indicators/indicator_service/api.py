@@ -80,6 +80,22 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
         "default_params": defaults,
         "field_types": field_types,
     }
+    runtime_input_specs = [
+        {
+            "source_timeframe": spec.source_timeframe,
+            "source_timeframe_param": spec.source_timeframe_param,
+            "lookback_bars": spec.lookback_bars,
+            "lookback_bars_param": spec.lookback_bars_param,
+            "lookback_days": spec.lookback_days,
+            "lookback_days_param": spec.lookback_days_param,
+            "session_scope": spec.session_scope,
+            "alignment": spec.alignment,
+            "normalization": spec.normalization,
+        }
+        for spec in ctx.factory.get_runtime_input_specs_for_type(type_id)
+    ]
+    if runtime_input_specs:
+        details["runtime_input_specs"] = runtime_input_specs
 
     rule_meta = ctx.signal_runner.build_signal_catalog(indicator_name)
     if rule_meta:
@@ -245,6 +261,24 @@ def generate_signals_for_instance(
         datasource=datasource,
         exchange=exchange,
         config=config,
+    )
+
+
+def runtime_input_plan_for_instance(
+    inst_id: str,
+    *,
+    strategy_interval: str,
+    start: str,
+    end: str,
+    ctx: IndicatorServiceContext = _context,
+) -> Dict[str, Any]:
+    record = load_indicator_record(inst_id, ctx=ctx)
+    meta = build_meta_from_record(record, ctx=ctx)
+    return ctx.factory.build_runtime_input_plan(
+        meta,
+        strategy_interval=strategy_interval,
+        start=start,
+        end=end,
     )
 
 

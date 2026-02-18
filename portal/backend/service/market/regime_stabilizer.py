@@ -10,6 +10,7 @@ from .regime_engine import _classify_expansion, _classify_liquidity, _classify_s
 from .regime_config import RegimeStabilizerConfig
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 
 @dataclass
@@ -342,7 +343,7 @@ class RegimeStabilizer:
         if confidence < min_confidence and not allow_override:
             axis_state.candidate_state = None
             axis_state.candidate_count = 0
-            if previous_state != desired_state:
+            if previous_state != desired_state and self._config.log_axis_switch_blocked:
                 logger.debug(
                     "regime_axis_switch_blocked | axis=%s from=%s desired=%s confidence=%s min_conf=%s bar_time=%s instrument_id=%s timeframe_seconds=%s",
                     axis,
@@ -366,7 +367,7 @@ class RegimeStabilizer:
             axis_state.current_state = desired_state
             axis_state.candidate_state = None
             axis_state.candidate_count = 0
-            if previous_state != axis_state.current_state:
+            if previous_state != axis_state.current_state and self._config.log_axis_switch_confirmed:
                 logger.info(
                     "regime_axis_switch_confirmed | axis=%s from=%s to=%s confidence=%s min_conf=%s confirm_required=%s bar_time=%s instrument_id=%s timeframe_seconds=%s override=%s",
                     axis,

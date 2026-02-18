@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -25,7 +27,9 @@ from engines.bot_runtime.core.domain import (
 )
 from portal.backend.service.market.stats_repository import build_stats_snapshot
 from portal.backend.service.market.stats_queue import REGIME_VERSION
+from signals.contract import assert_no_execution_fields, assert_signal_contract
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context, with_log_context
+from utils.perf_log import get_obs_enabled, get_obs_slow_ms, perf_log
 from signals.overlays.schema import build_overlay
 from .regime_overlay import build_regime_overlays
 from .models import Strategy
@@ -47,6 +51,7 @@ class StrategySeries:
     timeframe: str
     datasource: Optional[str]
     exchange: Optional[str]
+    # NOTE: Per-series in-memory cache of candles/signals for runtime execution.
     candles: List[Candle]
     signals: Deque[StrategySignal] = field(default_factory=deque)
     overlays: List[Dict[str, Any]] = field(default_factory=list)
@@ -58,6 +63,10 @@ class StrategySeries:
     instrument: Optional[Dict[str, Any]] = None
     atm_template: Dict[str, Any] = field(default_factory=dict)
     trade_overlay: Optional[Dict[str, Any]] = None
+    replay_start_index: int = 0
+    bootstrap_completed: bool = False
+    bootstrap_indicator_overlays: int = 0
+    bootstrap_total_overlays: int = 0
 
 
 class SeriesBuilder:
@@ -80,6 +89,27 @@ class SeriesBuilder:
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
         self._warning_sink = warning_sink
+        self._obs_enabled = get_obs_enabled(config)
+        self._obs_slow_ms = get_obs_slow_ms(config)
+        configured_lookback = config.get("incremental_signal_lookback_bars", 200)
+        try:
+            parsed_lookback = int(configured_lookback)
+        except (TypeError, ValueError):
+            parsed_lookback = 200
+        self._incremental_signal_lookback_bars = max(parsed_lookback, 1)
+        # Disabled by default to preserve signal correctness unless explicitly enabled.
+        self._indicator_incremental_eval = bool(config.get("indicator_runtime_incremental_eval", False))
+        configured_indicator_source_lookback = config.get("indicator_runtime_source_lookback_bars", 2)
+        try:
+            parsed_indicator_source_lookback = int(configured_indicator_source_lookback)
+        except (TypeError, ValueError):
+            parsed_indicator_source_lookback = 2
+        self._indicator_source_lookback_bars = max(parsed_indicator_source_lookback, 1)
+        self._regime_snapshot_cache: Dict[str, Dict[str, Any]] = {}
+        self._indicator_overlay_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        self._indicator_runtime_state: Dict[str, Dict[str, Any]] = {}
+        self._overlay_runtime_cache_lock = threading.RLock()
+        self._regime_cache_lock = threading.RLock()
 
     def _runtime_log_context(self, **fields: object) -> Dict[str, object]:
         return build_log_context(bot_id=self.bot_id, bot_mode=self.run_type, **fields)
@@ -106,7 +136,12 @@ class SeriesBuilder:
 
     def reset(self) -> None:
         # Overlay caching now handled by shared IndicatorOverlayCache in the service context.
-        # Nothing local to reset.
+        # Reset runtime-scoped caches for a clean run.
+        with self._overlay_runtime_cache_lock:
+            self._indicator_overlay_runtime_cache.clear()
+            self._indicator_runtime_state.clear()
+        with self._regime_cache_lock:
+            self._regime_snapshot_cache.clear()
         return
 
     def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
@@ -137,14 +172,25 @@ class SeriesBuilder:
         from ....market.candle_service import fetch_ohlcv
         from ....strategies import strategy_service
 
-        df = fetch_ohlcv(
-            series.symbol,
-            start_iso,
-            end_iso,
-            series.timeframe,
-            datasource=series.datasource,
-            exchange=series.exchange,
-        )
+        series_context = self._series_log_context(series)
+        with perf_log(
+            "bot_runtime_fetch_ohlcv",
+            logger=logger,
+            base_context=series_context,
+            enabled=self._obs_enabled,
+            slow_ms=self._obs_slow_ms,
+            start_iso=start_iso,
+            end_iso=end_iso,
+        ) as perf:
+            df = fetch_ohlcv(
+                series.symbol,
+                start_iso,
+                end_iso,
+                series.timeframe,
+                datasource=series.datasource,
+                exchange=series.exchange,
+            )
+            perf.add_fields(rows_returned=len(df) if df is not None else 0)
         if df is None or getattr(df, "empty", False):
             return False
         self._maybe_emit_data_limit_warning(
@@ -181,16 +227,41 @@ class SeriesBuilder:
             )
             logger.info(with_log_context("append_series_updates_call", call_context))
 
-            evaluation = strategy_service.evaluate(
-                strategy_id=series.strategy_id,
-                start=series.window_start or start_iso,
-                end=end_iso,
-                interval=series.timeframe,
-                symbol=series.symbol,
-                datasource=series.datasource,
-                exchange=series.exchange,
-                config=config,
-            )
+            # NOTE: NO CACHE – strategy evaluation re-computes per call.
+            cache_key_summary = f"{series.symbol}:{series.timeframe}:{series.window_start or start_iso}->{end_iso}"
+            with perf_log(
+                "cache.absent",
+                logger=logger,
+                base_context=series_context,
+                enabled=self._obs_enabled,
+                slow_ms=self._obs_slow_ms,
+                operation_name="strategy_service.evaluate",
+                cache_scope="none",
+                cache_key_summary=cache_key_summary,
+            ):
+                with perf_log(
+                    "bot_runtime_strategy_evaluate",
+                    logger=logger,
+                    base_context=series_context,
+                    enabled=self._obs_enabled,
+                    slow_ms=self._obs_slow_ms,
+                    strategy_id=series.strategy_id,
+                ) as perf:
+                    evaluation = strategy_service.evaluate(
+                        strategy_id=series.strategy_id,
+                        start=series.window_start or start_iso,
+                        end=end_iso,
+                        interval=series.timeframe,
+                        symbol=series.symbol,
+                        datasource=series.datasource,
+                        exchange=series.exchange,
+                        config=config,
+                    )
+                    chart_markers = evaluation.get("chart_markers") or {}
+                    perf.add_fields(
+                        buy_markers_count=len(chart_markers.get("buy", [])),
+                        sell_markers_count=len(chart_markers.get("sell", [])),
+                    )
             overlays = self._extract_indicator_overlays(evaluation)
             if self._include_indicator_overlays:
                 overlays.extend(
@@ -216,7 +287,6 @@ class SeriesBuilder:
             )
             overlays.extend(regime_overlays)
             series.overlays = overlays
-            chart_markers = evaluation.get("chart_markers") or {}
             marker_context = self._series_log_context(
                 series,
                 chart_markers_keys=sorted(chart_markers.keys()),
@@ -256,14 +326,31 @@ class SeriesBuilder:
         from ....market.candle_service import fetch_ohlcv
 
         try:
-            df = fetch_ohlcv(
-                symbol,
-                start_iso,
-                end_iso,
-                timeframe,
+            runtime_context = self._runtime_log_context(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
                 datasource=datasource,
                 exchange=exchange,
             )
+            with perf_log(
+                "bot_runtime_fetch_ohlcv",
+                logger=logger,
+                base_context=runtime_context,
+                enabled=self._obs_enabled,
+                slow_ms=self._obs_slow_ms,
+                start_iso=start_iso,
+                end_iso=end_iso,
+            ) as perf:
+                df = fetch_ohlcv(
+                    symbol,
+                    start_iso,
+                    end_iso,
+                    timeframe,
+                    datasource=datasource,
+                    exchange=exchange,
+                )
+                perf.add_fields(rows_returned=len(df) if df is not None else 0)
         except Exception as exc:
             message = f"Failed to fetch OHLCV data: {exc}"
             raise RuntimeError(message) from exc
@@ -355,12 +442,23 @@ class SeriesBuilder:
         timeframe: str,
         instrument_id: str,
         strategy: Any,
+        *,
+        include_walk_forward_markers: bool = False,
+        evaluation_config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evaluate strategy and generate signals."""
         from ....strategies import strategy_service
 
         try:
             config = {"mode": self.run_type}
+            if isinstance(evaluation_config, Mapping):
+                for key, value in evaluation_config.items():
+                    if value is None:
+                        continue
+                    if isinstance(value, Mapping):
+                        config[key] = dict(value)
+                    else:
+                        config[key] = value
             rules = strategy.rules if hasattr(strategy, "rules") else {}
             context = self._strategy_log_context(
                 strategy,
@@ -398,7 +496,7 @@ class SeriesBuilder:
                 instrument_payload = evaluation
             # Log what we got back
             chart_markers = instrument_payload.get("chart_markers", {}) if isinstance(instrument_payload, dict) else {}
-            if isinstance(instrument_payload, dict):
+            if include_walk_forward_markers and isinstance(instrument_payload, dict):
                 walk_forward_markers = self._build_walk_forward_markers(
                     strategy,
                     instrument_payload.get("indicator_results") or {},
@@ -437,13 +535,48 @@ class SeriesBuilder:
             if not isinstance(signals, Sequence):
                 continue
             cleaned: List[Dict[str, Any]] = []
+            payload_timeframe_seconds = None
+            for timeframe_key in ("chart_timeframe_seconds", "source_timeframe_seconds", "timeframe_seconds"):
+                try:
+                    candidate = int(payload.get(timeframe_key))  # type: ignore[arg-type]
+                except (TypeError, ValueError, AttributeError):
+                    candidate = 0
+                if candidate > 0:
+                    payload_timeframe_seconds = candidate
+                    break
+            payload_runtime_scope = str(payload.get("_runtime_scope") or "") if isinstance(payload, Mapping) else ""
             for signal in signals:
                 if not isinstance(signal, Mapping):
                     continue
-                epoch = evaluator._extract_signal_epoch(signal)
+                signal_copy = dict(signal)
+                signal_copy.setdefault("indicator_id", str(indicator_id))
+                if payload_timeframe_seconds is not None:
+                    signal_copy.setdefault("timeframe_seconds", payload_timeframe_seconds)
+                if payload_runtime_scope:
+                    signal_copy.setdefault("runtime_scope", payload_runtime_scope)
+                signal_copy.setdefault("rule_id", signal_copy.get("type"))
+                signal_copy.setdefault("pattern_id", signal_copy.get("rule_id") or signal_copy.get("type"))
+                metadata = signal_copy.get("metadata")
+                if isinstance(metadata, Mapping):
+                    metadata_copy = dict(metadata)
+                else:
+                    metadata_copy = {}
+                metadata_copy.setdefault("rule_id", signal_copy.get("rule_id"))
+                metadata_copy.setdefault("pattern_id", signal_copy.get("pattern_id"))
+                metadata_copy.setdefault("indicator_id", signal_copy.get("indicator_id"))
+                metadata_copy.setdefault("runtime_scope", signal_copy.get("runtime_scope"))
+                metadata_copy.setdefault("timeframe_seconds", signal_copy.get("timeframe_seconds"))
+                if "signal_time" in signal_copy:
+                    metadata_copy.setdefault("signal_time", signal_copy.get("signal_time"))
+                elif "time" in signal_copy:
+                    metadata_copy.setdefault("signal_time", signal_copy.get("time"))
+                signal_copy["metadata"] = metadata_copy
+                assert_signal_contract(signal_copy)
+                assert_no_execution_fields(signal_copy)
+                epoch = evaluator._extract_signal_epoch(signal_copy)
                 if epoch is None:
                     continue
-                cleaned.append(dict(signal))
+                cleaned.append(signal_copy)
                 all_epochs.add(epoch)
             if cleaned:
                 cleaned.sort(key=lambda entry: evaluator._extract_signal_epoch(entry) or 0)
@@ -785,31 +918,39 @@ class SeriesBuilder:
         # Extract risk multiplier for this instrument
         risk_multiplier = instrument_link.risk_multiplier or 1.0
 
-        # Determine time window
+        # Determine time window. Backtests now seed with bounded warmup and replay forward event-by-event.
+        replay_start_index = 0
+        window_start_iso: Optional[str] = None
         if self.run_type == "backtest":
-            start_iso = self.config.get("backtest_start")
-            end_iso = self.config.get("backtest_end")
-            if not start_iso or not end_iso:
-                start_iso, end_iso = self._resolve_live_window()
+            configured_start = self.config.get("backtest_start")
+            configured_end = self.config.get("backtest_end")
+            if not configured_start or not configured_end:
+                raise RuntimeError("Backtest runtime requires both backtest_start and backtest_end")
+            start_iso = str(configured_start)
+            end_iso = str(configured_end)
+            warmup_bars = self._resolve_backtest_warmup_bars(strategy, timeframe)
+            candles, replay_start_index, window_start_iso = self._build_backtest_candles_with_warmup(
+                symbol=symbol,
+                timeframe=timeframe,
+                datasource=datasource,
+                exchange=exchange,
+                strategy_id=strategy.id,
+                backtest_start_iso=start_iso,
+                backtest_end_iso=end_iso,
+                warmup_bars=warmup_bars,
+            )
         else:
             start_iso, end_iso = self._resolve_live_window()
-
-        # Step 2: Fetch and build candles
-        df = self._fetch_ohlcv_data(
-            symbol, start_iso, end_iso, timeframe, datasource, exchange, strategy.id
-        )
-        candles = self._build_candles(df, timeframe)
+            window_start_iso = start_iso
+            # Paper/live placeholders still use the same event-driven runtime semantics.
+            df = self._fetch_ohlcv_data(
+                symbol, start_iso, end_iso, timeframe, datasource, exchange, strategy.id
+            )
+            candles = self._build_candles(df, timeframe)
         if not candles:
             raise RuntimeError(f"No valid candles could be built for strategy {strategy.id}")
         if self._log_candle_sequence:
             self._log_candle_sequence("build_series", strategy.id, candles)
-
-        # Step 3: Evaluate strategy for signals and overlays
-        evaluation = self._evaluate_strategy(
-            start_iso, end_iso, timeframe, instrument_id, strategy
-        )
-        overlays = self._extract_indicator_overlays(evaluation)
-        signals = self._build_signals_from_markers(evaluation.get("chart_markers") or {})
 
         # Step 4: Resolve instrument and build ATM template
         instrument = self._instrument_for(datasource, exchange, symbol)
@@ -853,33 +994,9 @@ class SeriesBuilder:
         )
         logger.info(with_log_context("bot_runtime_series_ready", ready_context))
 
-        overlay_entries: List[Dict[str, Any]] = []
-        if self._include_indicator_overlays:
-            overlay_entries = self._indicator_overlay_entries(
-                series_meta,  # Use dict for backward compatibility
-                start_iso,
-                end_iso,
-                timeframe,
-                symbol,
-                datasource,
-                exchange,
-            )
-            overlays = overlays + overlay_entries
-        regime_overlays = self._build_regime_overlays(
-            instrument_id=instrument_id,
-            candles=candles,
-            timeframe=timeframe,
-            strategy_id=strategy.id,
-            symbol=symbol,
-        )
-        if regime_overlays:
-            for ov in regime_overlays:
-                if isinstance(ov, dict):
-                    ov.setdefault("instrument_id", instrument_id)
-                    ov.setdefault("symbol", symbol)
-                    ov.setdefault("timeframe", timeframe)
-                    ov.setdefault("strategy_id", strategy.id)
-            overlays.extend(regime_overlays)
+        # No precomputed signals/overlays in runtime path. These are evaluated incrementally per bar.
+        overlays: List[Dict[str, Any]] = []
+        signals = deque()
         return StrategySeries(
             strategy_id=strategy.id,
             name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
@@ -891,12 +1008,311 @@ class SeriesBuilder:
             signals=signals,
             overlays=overlays,
             risk_engine=risk_engine,
-            window_start=start_iso,
+            window_start=window_start_iso,
             window_end=end_iso,
             meta=series_meta,
             instrument=instrument,
             atm_template=atm_template,
+            replay_start_index=replay_start_index,
         )
+
+    def _build_backtest_candles_with_warmup(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        strategy_id: str,
+        backtest_start_iso: str,
+        backtest_end_iso: str,
+        warmup_bars: int = 100,
+    ) -> Tuple[List[Candle], int, str]:
+        start_ts = pd.to_datetime(backtest_start_iso, utc=True)
+        end_ts = pd.to_datetime(backtest_end_iso, utc=True)
+        if pd.isna(start_ts) or pd.isna(end_ts):
+            raise RuntimeError("Invalid backtest_start or backtest_end timestamp")
+        if start_ts >= end_ts:
+            raise RuntimeError("backtest_start must be before backtest_end")
+
+        # Bounded seed window before replay start for indicator-state priming.
+        tf_delta = timeframe_duration(timeframe)
+        if tf_delta is None or tf_delta.total_seconds() <= 0:
+            raise RuntimeError(f"Unsupported timeframe '{timeframe}' for warmup fetch")
+        safe_warmup_bars = max(int(warmup_bars or 100), 1)
+        warmup_start_ts = start_ts - (tf_delta * safe_warmup_bars)
+
+        warmup_candles: List[Candle] = []
+        try:
+            warmup_df = self._fetch_ohlcv_data(
+                symbol=symbol,
+                start_iso=isoformat(warmup_start_ts.to_pydatetime()),
+                end_iso=backtest_start_iso,
+                timeframe=timeframe,
+                datasource=datasource,
+                exchange=exchange,
+                strategy_id=strategy_id,
+            )
+            warmup_candles = [
+                candle for candle in self._build_candles(warmup_df, timeframe)
+                if candle.time <= start_ts.to_pydatetime()
+            ]
+        except RuntimeError:
+            # Warmup is bounded and best-effort; replay candles remain mandatory.
+            warmup_candles = []
+        if len(warmup_candles) > safe_warmup_bars:
+            warmup_candles = warmup_candles[-safe_warmup_bars:]
+
+        replay_df = self._fetch_ohlcv_data(
+            symbol=symbol,
+            start_iso=backtest_start_iso,
+            end_iso=backtest_end_iso,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            strategy_id=strategy_id,
+        )
+        replay_candles = [
+            candle for candle in self._build_candles(replay_df, timeframe)
+            if candle.time >= start_ts.to_pydatetime() and candle.time <= end_ts.to_pydatetime()
+        ]
+        if not replay_candles:
+            raise RuntimeError(f"No replay candles found between {backtest_start_iso} and {backtest_end_iso}")
+
+        combined = warmup_candles + replay_candles
+        deduped: Dict[int, Candle] = {}
+        for candle in combined:
+            deduped[int(candle.time.timestamp())] = candle
+        ordered = [deduped[key] for key in sorted(deduped.keys())]
+        replay_start_index = 0
+        for idx, candle in enumerate(ordered):
+            if candle.time >= start_ts.to_pydatetime():
+                replay_start_index = idx
+                break
+        return ordered, replay_start_index, isoformat(warmup_start_ts.to_pydatetime())
+
+    def _resolve_backtest_warmup_bars(self, strategy: Strategy, timeframe: str) -> int:
+        # Strategy/runtime warmup is intentionally separate from indicator-
+        # specific fetch windows (e.g. indicator days_back settings).
+        default_bars = 100
+        configured = self.config.get("backtest_warmup_bars")
+        if configured is not None:
+            try:
+                parsed = int(configured)
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+        return default_bars
+
+    def evaluate_incremental_for_bar(
+        self,
+        *,
+        series: StrategySeries,
+        candle: Candle,
+        visible_candles: Sequence[Candle],
+        last_evaluated_epoch: int = 0,
+    ) -> Tuple[Deque[StrategySignal], List[Dict[str, Any]], Dict[str, Optional[float]]]:
+        """Evaluate signals/overlays only up to the current bar (no lookahead)."""
+        stage_started = time.perf_counter()
+        end_iso = isoformat(candle.time)
+        start_iso = str(series.window_start or end_iso)
+        timeframe_delta = timeframe_duration(series.timeframe)
+        if timeframe_delta and timeframe_delta.total_seconds() > 0:
+            bounded_start = candle.time - (timeframe_delta * self._incremental_signal_lookback_bars)
+            bounded_start_iso = isoformat(bounded_start)
+            if series.window_start:
+                start_iso = max(str(series.window_start), bounded_start_iso)
+            else:
+                start_iso = bounded_start_iso
+        instrument_id = None
+        if isinstance(series.instrument, Mapping):
+            instrument_id = series.instrument.get("id")
+        if not instrument_id:
+            raise RuntimeError(f"Series {series.strategy_id} is missing instrument id for incremental evaluation")
+
+        strategy_obj = SimpleNamespace(
+            id=series.strategy_id,
+            rules=(series.meta or {}).get("rules") or {},
+        )
+        evaluation_config = None
+        if self._indicator_incremental_eval:
+            evaluation_config = self._indicator_runtime_eval_config(
+                series=series,
+                start_iso=start_iso,
+                end_iso=end_iso,
+            )
+        strategy_eval_started = time.perf_counter()
+        evaluation = self._evaluate_strategy(
+            start_iso=start_iso,
+            end_iso=end_iso,
+            timeframe=series.timeframe,
+            instrument_id=str(instrument_id),
+            strategy=strategy_obj,
+            include_walk_forward_markers=False,
+            evaluation_config=evaluation_config,
+        )
+        strategy_eval_ms = max((time.perf_counter() - strategy_eval_started) * 1000.0, 0.0)
+
+        chart_markers = evaluation.get("chart_markers") or {}
+        current_epoch = int(candle.time.timestamp())
+        signals = deque(
+            signal
+            for signal in self._build_signals_from_markers(chart_markers)
+            if signal.epoch == current_epoch and signal.epoch > last_evaluated_epoch
+        )
+
+        overlay_started = time.perf_counter()
+        overlays = self._extract_indicator_overlays(evaluation)
+        strategy_meta = series.meta or {}
+        indicator_links = list(strategy_meta.get("indicator_links") or [])
+        indicator_ids = strategy_meta.get("indicator_ids")
+        if not indicator_links and isinstance(indicator_ids, list):
+            indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
+        indicators_count = float(len(indicator_links))
+        if self._include_indicator_overlays:
+            overlays.extend(
+                self._indicator_overlay_entries(
+                    strategy_meta,
+                    start_iso,
+                    end_iso,
+                    series.timeframe,
+                    series.symbol,
+                    series.datasource,
+                    series.exchange,
+                )
+            )
+        regime_overlays = self._build_regime_overlays(
+            instrument_id=instrument_id or "",
+            candles=list(visible_candles),
+            timeframe=series.timeframe,
+            strategy_id=series.strategy_id,
+            symbol=series.symbol,
+        )
+        overlays.extend(regime_overlays)
+        overlays_update_ms = max((time.perf_counter() - overlay_started) * 1000.0, 0.0)
+        perf_payload = evaluation.get("perf") if isinstance(evaluation, Mapping) else None
+        indicator_eval_ms: Optional[float] = None
+        rule_eval_ms: Optional[float] = None
+        if isinstance(perf_payload, Mapping):
+            raw_indicator = perf_payload.get("indicator_eval_ms")
+            raw_rule = perf_payload.get("rule_eval_ms")
+            try:
+                indicator_eval_ms = float(raw_indicator) if raw_indicator is not None else None
+            except (TypeError, ValueError):
+                indicator_eval_ms = None
+            try:
+                rule_eval_ms = float(raw_rule) if raw_rule is not None else None
+            except (TypeError, ValueError):
+                rule_eval_ms = None
+        total_eval_ms = max((time.perf_counter() - stage_started) * 1000.0, 0.0)
+        return signals, overlays, {
+            "epochs_evaluated_this_tick": 1.0,
+            "strategy_eval_ms": strategy_eval_ms,
+            "indicator_eval_ms": indicator_eval_ms,
+            "rule_eval_ms": rule_eval_ms,
+            "signals_emitted_count": float(len(signals)),
+            "overlays_update_ms": overlays_update_ms,
+            "indicators_count": indicators_count,
+            "total_eval_ms": total_eval_ms,
+        }
+
+    @staticmethod
+    def _series_runtime_key(series: StrategySeries) -> str:
+        return ":".join(
+            [
+                str(series.strategy_id or ""),
+                str(series.symbol or "").upper(),
+                str(series.timeframe or ""),
+                str(series.datasource or "").lower(),
+                str(series.exchange or "").lower(),
+            ]
+        )
+
+    def _indicator_runtime_eval_config(
+        self,
+        *,
+        series: StrategySeries,
+        start_iso: str,
+        end_iso: str,
+    ) -> Dict[str, Any]:
+        if not self._indicator_incremental_eval:
+            return {}
+
+        from ....indicators import indicator_service
+
+        strategy_meta = series.meta or {}
+        links = list(strategy_meta.get("indicator_links") or [])
+        if not links and strategy_meta.get("indicator_ids"):
+            links = [{"indicator_id": indicator_id} for indicator_id in strategy_meta.get("indicator_ids") if indicator_id]
+        if not links:
+            return {}
+
+        overrides: Dict[str, Dict[str, Any]] = {}
+        series_key = self._series_runtime_key(series)
+        for link in links:
+            indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
+            if not indicator_id:
+                continue
+            try:
+                if self._indicator_ctx is None:
+                    indicator_meta = indicator_service.get_instance_meta(indicator_id)
+                    runtime_plan = indicator_service.runtime_input_plan_for_instance(
+                        indicator_id,
+                        strategy_interval=str(series.timeframe),
+                        start=start_iso,
+                        end=end_iso,
+                    )
+                else:
+                    indicator_meta = indicator_service.get_instance_meta(indicator_id, ctx=self._indicator_ctx)
+                    runtime_plan = indicator_service.runtime_input_plan_for_instance(
+                        indicator_id,
+                        strategy_interval=str(series.timeframe),
+                        start=start_iso,
+                        end=end_iso,
+                        ctx=self._indicator_ctx,
+                    )
+            except Exception:
+                continue
+            if not bool(runtime_plan.get("incremental_eval", False)):
+                continue
+            source_timeframe = str(runtime_plan.get("source_timeframe") or series.timeframe)
+            override_start = str(runtime_plan.get("start") or start_iso)
+            try:
+                source_delta = timeframe_duration(source_timeframe)
+                source_seconds = int(source_delta.total_seconds()) if source_delta else 0
+            except Exception:
+                source_seconds = 0
+            if source_seconds > 0:
+                end_ts = pd.Timestamp(end_iso)
+                if end_ts.tzinfo is None:
+                    end_ts = end_ts.tz_localize(timezone.utc)
+                else:
+                    end_ts = end_ts.tz_convert(timezone.utc)
+                source_bucket = int(end_ts.timestamp()) // source_seconds
+                state_key = f"{series_key}:{indicator_id}"
+                with self._overlay_runtime_cache_lock:
+                    prior_state = self._indicator_runtime_state.get(state_key) or {}
+                prior_bucket = prior_state.get("last_source_bucket")
+                if isinstance(prior_bucket, int):
+                    start_bucket = max(prior_bucket - (self._indicator_source_lookback_bars - 1), 0)
+                else:
+                    start_bucket = max(source_bucket - (self._indicator_source_lookback_bars - 1), 0)
+                override_start = isoformat(datetime.fromtimestamp(start_bucket * source_seconds, tz=timezone.utc))
+                with self._overlay_runtime_cache_lock:
+                    self._indicator_runtime_state[state_key] = {
+                        "last_source_bucket": source_bucket,
+                        "source_timeframe": source_timeframe,
+                        "last_end": end_iso,
+                    }
+            overrides[indicator_id] = {
+                "start": override_start,
+                "end": end_iso,
+                "source_timeframe": source_timeframe,
+            }
+        if not overrides:
+            return {}
+        return {"runtime_input_plan_overrides": overrides}
 
     @staticmethod
     def _overlay_summary(overlays: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -1123,13 +1539,115 @@ class SeriesBuilder:
                 exchange=ex,
             )
             logger.info(with_log_context("bot_overlay_request", request_context))
+
+            # Resolve indicator runtime plan so overlay recompute cadence follows the indicator's source timeframe.
+            try:
+                if self._indicator_ctx is None:
+                    runtime_input_plan = indicator_service.runtime_input_plan_for_instance(
+                        indicator_id,
+                        strategy_interval=str(interval),
+                        start=start_iso,
+                        end=end_iso,
+                    )
+                else:
+                    runtime_input_plan = indicator_service.runtime_input_plan_for_instance(
+                        indicator_id,
+                        strategy_interval=str(interval),
+                        start=start_iso,
+                        end=end_iso,
+                        ctx=self._indicator_ctx,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    with_log_context(
+                        "bot_overlay_runtime_input_plan_failed",
+                        self._runtime_log_context(
+                            indicator_id=indicator_id,
+                            indicator_type=indicator_type,
+                            start=start_iso,
+                            end=end_iso,
+                            timeframe=interval,
+                            error=str(exc),
+                        ),
+                    )
+                )
+                runtime_input_plan = {}
+
+            plan_start = str(runtime_input_plan.get("start") or start_iso)
+            plan_end = str(runtime_input_plan.get("end") or end_iso)
+            plan_interval = str(runtime_input_plan.get("source_timeframe") or interval)
+            try:
+                source_timeframe_seconds = int(timeframe_duration(plan_interval).total_seconds())
+            except Exception:
+                source_timeframe_seconds = 0
+            source_bucket = None
+            if source_timeframe_seconds > 0:
+                try:
+                    source_bucket = int(pd.Timestamp(plan_end).timestamp()) // source_timeframe_seconds
+                except Exception:
+                    source_bucket = None
+
+            overlay_runtime_key = ":".join(
+                [
+                    indicator_id,
+                    str(window_symbol or "").upper(),
+                    str(ds or "").lower(),
+                    str(ex or "").lower(),
+                    str(plan_interval),
+                ]
+            )
+            incremental_cache_fingerprint = None
+            if source_bucket is not None:
+                with self._overlay_runtime_cache_lock:
+                    cached = self._indicator_overlay_runtime_cache.get(overlay_runtime_key)
+                if cached and cached.get("source_bucket") == source_bucket:
+                    cached_overlay = cached.get("overlay")
+                    if isinstance(cached_overlay, Mapping):
+                        overlays.append(deepcopy(dict(cached_overlay)))
+                        logger.debug(
+                            with_log_context(
+                                "bot_overlay_runtime_cache_hit",
+                                self._runtime_log_context(
+                                    indicator_id=indicator_id,
+                                    indicator_type=indicator_type,
+                                    source_timeframe=plan_interval,
+                                    source_bucket=source_bucket,
+                                ),
+                            )
+                        )
+                        continue
+                if cached and self._indicator_ctx is not None:
+                    cache = getattr(self._indicator_ctx, "incremental_cache", None)
+                    if cache is not None and hasattr(cache, "fingerprint_for"):
+                        try:
+                            incremental_cache_fingerprint = cache.fingerprint_for(indicator_id, str(window_symbol))
+                        except Exception:
+                            incremental_cache_fingerprint = None
+                if cached and incremental_cache_fingerprint is not None:
+                    if cached.get("cache_fingerprint") == incremental_cache_fingerprint:
+                        cached_overlay = cached.get("overlay")
+                        if isinstance(cached_overlay, Mapping):
+                            overlays.append(deepcopy(dict(cached_overlay)))
+                            logger.debug(
+                                with_log_context(
+                                    "bot_overlay_runtime_cache_hit",
+                                    self._runtime_log_context(
+                                        indicator_id=indicator_id,
+                                        indicator_type=indicator_type,
+                                        source_timeframe=plan_interval,
+                                        source_bucket=source_bucket,
+                                        cache_hit_reason="incremental_cache_fingerprint",
+                                    ),
+                                )
+                            )
+                            continue
             try:
                 if self._indicator_ctx is None:
                     payload = indicator_service.overlays_for_instance(
                         indicator_id,
-                        start=start_iso,
-                        end=end_iso,
-                        interval=str(interval),
+                        start=plan_start,
+                        end=plan_end,
+                        interval=str(plan_interval),
                         symbol=window_symbol,
                         datasource=ds,
                         exchange=ex,
@@ -1138,9 +1656,9 @@ class SeriesBuilder:
                 else:
                     payload = indicator_service.overlays_for_instance(
                         indicator_id,
-                        start=start_iso,
-                        end=end_iso,
-                        interval=str(interval),
+                        start=plan_start,
+                        end=plan_end,
+                        interval=str(plan_interval),
                         symbol=window_symbol,
                         datasource=ds,
                         exchange=ex,
@@ -1180,6 +1698,13 @@ class SeriesBuilder:
                 }
             )
             overlays.append(overlay)
+            if source_bucket is not None:
+                with self._overlay_runtime_cache_lock:
+                    self._indicator_overlay_runtime_cache[overlay_runtime_key] = {
+                        "source_bucket": source_bucket,
+                        "overlay": deepcopy(overlay),
+                        "cache_fingerprint": incremental_cache_fingerprint,
+                    }
             appended_context = self._runtime_log_context(
                 indicator_id=indicator_id,
                 total_overlays=len(overlays),
@@ -1268,36 +1793,16 @@ class SeriesBuilder:
             return []
         start_dt = candles[0].time
         end_dt = candles[-1].time
-        stats_snapshot = build_stats_snapshot(
-            instrument_ids=[instrument_id],
+        regime_rows = self._regime_rows_for_window(
+            instrument_id=instrument_id,
+            timeframe=timeframe,
             timeframe_seconds=timeframe_seconds,
-            start=start_dt,
-            end=end_dt,
-            regime_versions=[REGIME_VERSION],
-            include_latest_regime=True,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            strategy_id=strategy_id,
+            symbol=symbol,
         )
         logger.debug(
-            with_log_context(
-                "bot_regime_overlay_snapshot_built",
-                self._runtime_log_context(
-                    strategy_id=strategy_id,
-                    symbol=symbol,
-                    instrument_id=instrument_id,
-                    timeframe=timeframe,
-                    timeframe_seconds=timeframe_seconds,
-                    regime_rows=len(stats_snapshot.regime_stats_by_version),
-                    start=start_dt,
-                    end=end_dt,
-                ),
-            )
-        )
-        regime_rows: Dict[datetime, Mapping[str, Any]] = {}
-        for (inst_id, candle_time, version), regime in stats_snapshot.regime_stats_by_version.items():
-            if inst_id != instrument_id or str(version) != str(REGIME_VERSION):
-                continue
-            if candle_time:
-                regime_rows[candle_time] = regime
-        logger.info(
             with_log_context(
                 "bot_regime_rows_collected",
                 self._runtime_log_context(
@@ -1382,6 +1887,181 @@ class SeriesBuilder:
             )
         return overlays
 
+    def _regime_rows_for_window(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+        timeframe_seconds: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        strategy_id: Optional[str],
+        symbol: Optional[str],
+    ) -> Dict[datetime, Mapping[str, Any]]:
+        start_norm = self._to_utc_naive(start_dt)
+        end_norm = self._to_utc_naive(end_dt)
+        cache_key = f"{instrument_id}:{timeframe_seconds}:{REGIME_VERSION}"
+        with self._regime_cache_lock:
+            cached = self._regime_snapshot_cache.get(cache_key)
+            if cached is None:
+                rows = self._fetch_regime_rows(
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    cache_state="miss",
+                )
+                self._regime_snapshot_cache[cache_key] = {
+                    "start": start_norm,
+                    "end": end_norm,
+                    "rows": dict(rows),
+                }
+                return rows
+
+            cached_start = self._to_utc_naive_optional(cached.get("start"))
+            cached_end = self._to_utc_naive_optional(cached.get("end"))
+            cached_rows = cached.get("rows") if isinstance(cached.get("rows"), Mapping) else {}
+            if not isinstance(cached_start, datetime) or not isinstance(cached_end, datetime):
+                rows = self._fetch_regime_rows(
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    cache_state="rebuild",
+                )
+                self._regime_snapshot_cache[cache_key] = {
+                    "start": start_norm,
+                    "end": end_norm,
+                    "rows": dict(rows),
+                }
+                return rows
+
+            needs_older = start_norm < cached_start
+            needs_newer = end_norm > cached_end
+            rows = dict(cached_rows)
+            if needs_older:
+                older_rows = self._fetch_regime_rows(
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    start_dt=start_norm,
+                    end_dt=cached_start,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    cache_state="partial_older",
+                )
+                rows.update(older_rows)
+            if needs_newer:
+                newer_rows = self._fetch_regime_rows(
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    start_dt=cached_end,
+                    end_dt=end_norm,
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    cache_state="partial_newer",
+                )
+                rows.update(newer_rows)
+
+            # Bound cache memory to the active window.
+            window_rows = {
+                candle_time: payload
+                for candle_time, payload in rows.items()
+                if start_norm <= self._to_utc_naive(candle_time) <= end_norm
+            }
+            self._regime_snapshot_cache[cache_key] = {
+                "start": start_norm,
+                "end": end_norm,
+                "rows": dict(window_rows),
+            }
+            return window_rows
+
+    def _fetch_regime_rows(
+        self,
+        *,
+        instrument_id: str,
+        timeframe_seconds: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        strategy_id: Optional[str],
+        symbol: Optional[str],
+        timeframe: str,
+        cache_state: str,
+    ) -> Dict[datetime, Mapping[str, Any]]:
+        if end_dt < start_dt:
+            return {}
+        stats_cache_key = f"{instrument_id}:{timeframe_seconds}:{start_dt.isoformat()}->{end_dt.isoformat()}"
+        with perf_log(
+            "cache.lookup",
+            logger=logger,
+            base_context=self._runtime_log_context(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                cache_state=cache_state,
+            ),
+            enabled=self._obs_enabled,
+            slow_ms=self._obs_slow_ms,
+            operation_name="build_stats_snapshot",
+            cache_scope="series_builder_regime",
+            cache_key_summary=stats_cache_key,
+        ):
+            stats_snapshot = build_stats_snapshot(
+                instrument_ids=[instrument_id],
+                timeframe_seconds=timeframe_seconds,
+                start=start_dt,
+                end=end_dt,
+                regime_versions=[REGIME_VERSION],
+                include_latest_regime=True,
+            )
+        logger.debug(
+            with_log_context(
+                "bot_regime_overlay_snapshot_built",
+                self._runtime_log_context(
+                    strategy_id=strategy_id,
+                    symbol=symbol,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    timeframe_seconds=timeframe_seconds,
+                    regime_rows=len(stats_snapshot.regime_stats_by_version),
+                    start=start_dt,
+                    end=end_dt,
+                    cache_state=cache_state,
+                ),
+            )
+        )
+        regime_rows: Dict[datetime, Mapping[str, Any]] = {}
+        for (inst_id, candle_time, version), regime in stats_snapshot.regime_stats_by_version.items():
+            if inst_id != instrument_id or str(version) != str(REGIME_VERSION):
+                continue
+            if candle_time:
+                regime_rows[self._to_utc_naive(candle_time)] = regime
+        return regime_rows
+
+    @staticmethod
+    def _to_utc_naive(value: Any) -> datetime:
+        if not isinstance(value, datetime):
+            raise TypeError(f"Expected datetime value, received {type(value).__name__}")
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _to_utc_naive_optional(value: Any) -> Optional[datetime]:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
     @staticmethod
     def _indicator_overlay_cache_key(
         indicator_id: str,
@@ -1416,26 +2096,15 @@ class SeriesBuilder:
     def _overlay_options_for_indicator(
         indicator_type: str, params: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        """Extract overlay options using single-key lookup (no dual-key fallbacks)."""
-        if indicator_type != "market_profile":
-            return {}
-
-        options: Dict[str, Any] = {}
-
-        # Direct key access (no dual-key fallback to market_profile_ prefix)
-        for key in ("use_merged_value_areas", "merge_threshold", "min_merge_sessions",
-                    "extend_value_area_to_chart_end"):
-            if key in params:
-                options[key] = params[key]
-
-        # Debug log to verify extraction
+        """Extract optional per-indicator overlay options from metadata."""
+        raw = params.get("overlay_options") if isinstance(params, Mapping) else None
+        options = dict(raw) if isinstance(raw, Mapping) else {}
         context = build_log_context(
             indicator_type=indicator_type,
-            params_keys=list(params.keys()),
-            options=options,
+            params_keys=list(params.keys()) if isinstance(params, Mapping) else [],
+            options_keys=sorted(options.keys()),
         )
         logger.debug(with_log_context("overlay_options_extracted", context))
-
         return options
 
     @staticmethod
@@ -1459,34 +2128,18 @@ class SeriesBuilder:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
             if epoch is not None and known_at is not None and known_at > epoch:
-                logger.debug(
-                    with_log_context(
-                        "signal_known_at_delay",
-                        build_log_context(
-                            original_epoch=epoch,
-                            known_at=known_at,
-                            direction="long",
-                        ),
-                    )
+                raise RuntimeError(
+                    f"signal_contract_invalid: known_at({known_at}) must be <= signal_time({epoch}) for long marker"
                 )
-                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="long"))
         for entry in sell_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
             if epoch is not None and known_at is not None and known_at > epoch:
-                logger.debug(
-                    with_log_context(
-                        "signal_known_at_delay",
-                        build_log_context(
-                            original_epoch=epoch,
-                            known_at=known_at,
-                            direction="short",
-                        ),
-                    )
+                raise RuntimeError(
+                    f"signal_contract_invalid: known_at({known_at}) must be <= signal_time({epoch}) for short marker"
                 )
-                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="short"))
         queued.sort(key=lambda signal: signal.epoch)

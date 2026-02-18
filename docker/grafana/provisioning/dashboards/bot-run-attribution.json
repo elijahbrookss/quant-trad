@@ -1,0 +1,594 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "A) step_push_update p50/p95 (ms)",
+      "description": "Primary slowdown detector. p50 shows typical cost, p95 shows tail risk. A rising p50 and p95 over run time means push_update work is drifting, not just sporadic spikes.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p50' AS metric, percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "B) Payload Growth Indicators",
+      "description": "Tracks what push_update is carrying: payload size and content counts. Use this to test whether latency growth follows larger payloads/candle history.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'payload_kb_p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY ((NULLIF(context->>'payload_bytes', ''))::double precision / 1024.0))::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND (context->>'payload_bytes') IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'candles_count_avg' AS metric, avg((NULLIF(context->>'candles_count', ''))::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND (context->>'candles_count') IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'trades_count_avg' AS metric, avg((NULLIF(context->>'trades_count', ''))::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND (context->>'trades_count') IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'series_count_avg' AS metric, avg((NULLIF(context->>'series_count', ''))::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND (context->>'series_count') IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "payload_kb_p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "kbytes"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "C) build_state_ms p95",
+      "description": "Cost of building chart/runtime state before transport. Rising trend implies server-side state assembly work is growing with run progression.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY CASE WHEN jsonb_typeof((context::jsonb)->'build_state_ms') = 'number' THEN (context->>'build_state_ms')::double precision WHEN (context->>'build_state_ms') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'build_state_ms')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "D) serialize_ms p95",
+      "description": "Cost of turning push payload into transport format. If this rises with payload_kb, serialization is a major contributor to total push_update drift.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY CASE WHEN jsonb_typeof((context::jsonb)->'serialize_ms') = 'number' THEN (context->>'serialize_ms')::double precision WHEN (context->>'serialize_ms') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'serialize_ms')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "E) enqueue_ms p95",
+      "description": "Dispatch/fanout overhead after payload is prepared. Flat low values mean queue/send handoff is not the bottleneck; rising values indicate send-path pressure.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY CASE WHEN jsonb_typeof((context::jsonb)->'enqueue_ms') = 'number' THEN (context->>'enqueue_ms')::double precision WHEN (context->>'enqueue_ms') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'enqueue_ms')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "F) subscriber_count avg",
+      "description": "Average active subscribers during each interval. Use with latency panels to distinguish intrinsic payload cost from fanout/subscriber-driven behavior.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), avg(CASE WHEN jsonb_typeof((context::jsonb)->'subscriber_count') = 'number' THEN (context->>'subscriber_count')::double precision WHEN (context->>'subscriber_count') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'subscriber_count')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "G) dropped_messages sum/avg",
+      "description": "Backpressure indicator. Non-zero dropped counts suggest downstream queue saturation and message shedding; near-zero suggests no delivery pressure.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'dropped_sum' AS metric, sum(CASE WHEN jsonb_typeof((context::jsonb)->'dropped_messages') = 'number' THEN (context->>'dropped_messages')::double precision WHEN (context->>'dropped_messages') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'dropped_messages')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'dropped_avg' AS metric, avg(CASE WHEN jsonb_typeof((context::jsonb)->'dropped_messages') = 'number' THEN (context->>'dropped_messages')::double precision WHEN (context->>'dropped_messages') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'dropped_messages')::double precision END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "H) ms_per_kb_p95",
+      "description": "Normalization metric: latency per KB of payload. Rising values indicate worsening efficiency; flat/falling values indicate mostly a 'more bytes' effect.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY CASE WHEN (context->>'payload_bytes') ~ '^[0-9]+(\\.[0-9]+)?$' AND (context->>'payload_bytes')::double precision > 0 THEN duration_ms / ((context->>'payload_bytes')::double precision / 1024.0) END)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND (context->>'payload_bytes') IS NOT NULL AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "I) Correlation Table (Selected Scope)",
+      "description": "Summary strength-of-relationship view for selected filters/time range. Correlation near +1 or -1 is strong linear linkage; near 0 suggests weak linear dependence.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS ( SELECT duration_ms, CASE WHEN jsonb_typeof((context::jsonb)->'payload_bytes') = 'number' THEN (context->>'payload_bytes')::double precision WHEN (context->>'payload_bytes') ~ '^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'payload_bytes')::double precision END AS payload_bytes, CASE WHEN jsonb_typeof((context::jsonb)->'build_state_ms') = 'number' THEN (context->>'build_state_ms')::double precision WHEN (context->>'build_state_ms') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'build_state_ms')::double precision END AS build_state_ms, CASE WHEN jsonb_typeof((context::jsonb)->'serialize_ms') = 'number' THEN (context->>'serialize_ms')::double precision WHEN (context->>'serialize_ms') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'serialize_ms')::double precision END AS serialize_ms, CASE WHEN jsonb_typeof((context::jsonb)->'subscriber_count') = 'number' THEN (context->>'subscriber_count')::double precision WHEN (context->>'subscriber_count') ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (context->>'subscriber_count')::double precision END AS subscriber_count FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_push_update' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) ) SELECT count(*) AS samples, count(build_state_ms) AS build_state_samples, count(serialize_ms) AS serialize_samples, count(subscriber_count) AS subscriber_samples, corr(duration_ms, payload_bytes) AS corr_duration_payload_bytes, corr(duration_ms, build_state_ms) AS corr_duration_build_state_ms, corr(duration_ms, serialize_ms) AS corr_duration_serialize_ms, corr(duration_ms, subscriber_count) AS corr_duration_subscriber_count FROM base;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "J) Per-Bar Critical Path p95 (ms)",
+      "description": "Usefulness: High. Necessity: High. Top-level per-bar budget across dominant steps.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name IN ('step_series_state','step_finalize_bar','step_push_update','step_update_state') AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND (${run_id:sqlstring} = '__all' OR run_id = ${run_id:sqlstring}) GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "K) New Per-Bar Stage Timers p95 (ms)",
+      "description": "Usefulness: High. Necessity: High. Reads new step_series_state context timers for precise hotspot attribution.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'candle_update_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'candle_update_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'candle_update_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'overlays_update_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'overlays_update_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'overlays_update_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'pending_signals_ops_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'pending_signals_ops_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'pending_signals_ops_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'execution_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'execution_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'stats_update_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'stats_update_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'stats_update_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'persistence_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'persistence_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'persistence_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'delta_build_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'delta_build_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'delta_build_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'delta_serialize_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'delta_serialize_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'delta_serialize_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'stream_emit_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'stream_emit_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'stream_emit_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "L) Driver Counts (avg)",
+      "description": "Usefulness: Medium-High. Necessity: Medium. Correlate timer growth with operational counts.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'indicators_count_avg' AS metric, avg(NULLIF(context->>'indicators_count','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'indicators_count' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'overlay_points_changed_avg' AS metric, avg(NULLIF(context->>'overlay_points_changed','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'overlay_points_changed' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'signals_emitted_count_avg' AS metric, avg(NULLIF(context->>'signals_emitted_count','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'signals_emitted_count' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'trades_touched_count_avg' AS metric, avg(NULLIF(context->>'trades_touched_count','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'trades_touched_count' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'subscribers_count_avg' AS metric, avg(NULLIF(context->>'subscribers_count','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'subscribers_count' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "M) Stats Reuse Health (Fix 1)",
+      "description": "Usefulness: High after fix rollout. Necessity: Medium. Confirms push path reused precomputed stats instead of rescanning every bar.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS ( SELECT CASE WHEN lower(COALESCE(context->>'stats_reused','false')) IN ('true','t','1') THEN 1 ELSE 0 END AS reused, NULLIF(context->>'stats_update_ms','')::double precision AS stats_update_ms, duration_ms AS push_duration_ms FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_push_update' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) ) SELECT count(*) AS samples, sum(reused) AS reused_samples, round(((sum(reused)::double precision / NULLIF(count(*),0)) * 100.0)::numeric, 2) AS reused_pct, round(avg(stats_update_ms)::numeric, 4) AS avg_stats_update_ms_in_push, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY push_duration_ms)::numeric, 3) AS p95_push_ms FROM base;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "N) Execution Substage Breakdown p95 (ms)",
+      "description": "Break execution_ms into decision flow, bar/intrabar prime, settlement, and trade-event processing. Use this to isolate where step_series_state spends multi-second time.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'execution_decision_flow_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_decision_flow_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'execution_decision_flow_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'execution_prime_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_prime_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'execution_prime_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'execution_settlement_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_settlement_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'execution_settlement_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'execution_trade_event_processing_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_trade_event_processing_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'execution_trade_event_processing_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "O) Signal Eval Internals p95 (ms)",
+      "description": "Break step_signal_eval into strategy_eval_ms, indicator_eval_ms, and rule_eval_ms to verify whether indicator/rule evaluation dominates per-bar latency.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'step_signal_eval_duration_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'strategy_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'strategy_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND context ? 'strategy_eval_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'indicator_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'indicator_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND context ? 'indicator_eval_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'rule_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'rule_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND context ? 'rule_eval_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "P) Trace/Persistence Overhead p95 (ms)",
+      "description": "Shows instrumentation/write overhead using trace step durations plus db_commit_ms/persistence_ms from step_series_state context.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name IN ('step_signal_eval','step_decision_flow','step_trade_event_processing','step_finalize_bar','step_update_state') AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1,2 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'db_commit_ms_ctx' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'db_commit_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'db_commit_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 UNION ALL SELECT $__timeGroupAlias(started_at, $__interval), 'persistence_ms_ctx' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'persistence_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND context ? 'persistence_ms' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "Q) Slowest Bars (Top 20)",
+      "description": "Top slow bars from step_series_state with substage timing context. Use this to inspect exact bar indexes and stage distribution for worst-case events.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at, run_id, bot_id, NULLIF(context->>'bar_index','')::int AS bar_index, duration_ms AS step_series_state_ms, NULLIF(context->>'candle_update_ms','')::double precision AS candle_update_ms, NULLIF(context->>'overlays_update_ms','')::double precision AS overlays_update_ms, NULLIF(context->>'pending_signals_ops_ms','')::double precision AS pending_signals_ops_ms, NULLIF(context->>'execution_ms','')::double precision AS execution_ms, NULLIF(context->>'execution_decision_flow_ms','')::double precision AS execution_decision_flow_ms, NULLIF(context->>'execution_prime_ms','')::double precision AS execution_prime_ms, NULLIF(context->>'execution_settlement_ms','')::double precision AS execution_settlement_ms, NULLIF(context->>'execution_trade_event_processing_ms','')::double precision AS execution_trade_event_processing_ms, NULLIF(context->>'stats_update_ms','')::double precision AS stats_update_ms, NULLIF(context->>'persistence_ms','')::double precision AS persistence_ms, NULLIF(context->>'db_commit_ms','')::double precision AS db_commit_ms, NULLIF(context->>'delta_build_ms','')::double precision AS delta_build_ms, NULLIF(context->>'delta_serialize_ms','')::double precision AS delta_serialize_ms, NULLIF(context->>'stream_emit_ms','')::double precision AS stream_emit_ms, NULLIF(context->>'overlay_points_changed','')::double precision AS overlay_points_changed, NULLIF(context->>'signals_emitted_count','')::double precision AS signals_emitted_count, NULLIF(context->>'trades_touched_count','')::double precision AS trades_touched_count FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND ('${bot_id}'='__all' OR bot_id='${bot_id}') AND (${run_id:sqlstring}='__all' OR run_id=${run_id:sqlstring}) ORDER BY duration_ms DESC LIMIT 20;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["quant-trad", "bot-profiler", "attribution"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "label": "Bot",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_runs WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT run_id AS __value, run_id AS __text FROM portal_bot_runs WHERE ('${bot_id}' = '__all' OR bot_id = '${bot_id}') ORDER BY started_at DESC LIMIT 500;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "description": "Use this dashboard to attribute per-bar slowdown during a bot run. Core push-update panels (A-I) isolate payload and transport costs. Critical-path panels (J-Q) add per-bar stage timing, signal/execution internals, trace overhead, and worst-bar inspection.",
+  "title": "Quant-Trad: Bot Run Attribution",
+  "uid": "qt-bot-run-attribution",
+  "version": 5005
+}

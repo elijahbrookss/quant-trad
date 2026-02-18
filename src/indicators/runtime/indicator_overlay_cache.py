@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
+import time
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
+from utils.perf_log import get_obs_enabled
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class IndicatorOverlayCache:
@@ -17,6 +24,8 @@ class IndicatorOverlayCache:
     enabled_types: Set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
+        # NOTE: In-memory LRU overlay cache keyed by inst_id/type/symbol/interval/window/datasource/exchange/signature.
+        # NOTE: Per-process cache with no locks; not thread-safe for concurrent writers.
         self._cache: "OrderedDict[Tuple[Any, ...], Dict[str, Any]]" = OrderedDict()
 
     def enable_type(self, indicator_type: str) -> None:
@@ -95,8 +104,21 @@ class IndicatorOverlayCache:
     def _enforce_limit(self) -> None:
         if self.max_entries is None:
             return
+        should_log = get_obs_enabled()
         while len(self._cache) > self.max_entries:
-            self._cache.popitem(last=False)
+            evict_start = time.perf_counter() if should_log else 0.0
+            cache_key, _ = self._cache.popitem(last=False)
+            if should_log:
+                evict_ms = (time.perf_counter() - evict_start) * 1000.0
+                cache_key_summary = f"{cache_key[0]}:{cache_key[2]}:{cache_key[3]}"
+                logger.debug(
+                    "cache.eviction | event=cache.eviction cache_name=indicator_overlay_cache cache_scope=process "
+                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
+                    cache_key_summary,
+                    evict_ms,
+                    os.getpid(),
+                    threading.current_thread().name,
+                )
 
     def _normalize(self, value: Any) -> Any:
         if isinstance(value, dict):

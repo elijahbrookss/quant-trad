@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from ....market.candle_service import fetch_ohlcv
 from engines.bot_runtime.core.domain import Candle, coerce_float
 from utils.log_context import build_log_context, merge_log_context, series_log_context, with_log_context
+from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +26,21 @@ class IntrabarManager:
         build_candles: Callable[[Any, Optional[str]], List[Candle]],
         timeframe_seconds: Callable[[Optional[str]], Optional[float]],
         strategy_key_fn: Callable[[Any], str],
+        obs_enabled: Optional[bool] = None,
+        obs_sample_rate: Optional[float] = None,
     ) -> None:
         self.bot_id = bot_id
         self._fetcher = fetcher
         self._build_candles = build_candles
         self._timeframe_seconds = timeframe_seconds
         self._strategy_key = strategy_key_fn
+        self._obs_enabled = get_obs_enabled() if obs_enabled is None else obs_enabled
+        self._obs_sample_rate = (
+            get_obs_step_sample_rate() if obs_sample_rate is None else obs_sample_rate
+        )
+        # NOTE: Runtime-scoped in-memory cache. Key=strategy+symbol+timeframe+interval+start epoch.
+        # NOTE: No eviction; multiprocessing/container-per-bot will duplicate work.
+        # NOTE: Guarded by lock but not safe for concurrent mutation outside this instance.
         self._cache: Dict[str, List[Candle]] = {}
         self._snapshots: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
@@ -51,13 +63,64 @@ class IntrabarManager:
         if start is None or end is None or end <= start:
             return []
         key = self._intrabar_cache_key(series, start, interval)
+        cache_key_summary = f"{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{start.date().isoformat()}"
+        should_log = self._obs_enabled and should_sample(self._obs_sample_rate)
+        get_started = time.perf_counter() if should_log else 0.0
         with self._lock:
             cached = self._cache.get(key)
+        if should_log:
+            get_ms = (time.perf_counter() - get_started) * 1000.0
+            base_context = merge_log_context(
+                series_log_context(series),
+                build_log_context(
+                    bot_id=self.bot_id,
+                    cache_name="intrabar_candles",
+                    cache_scope="runtime",
+                    cache_key_summary=cache_key_summary,
+                    time_taken_ms=get_ms,
+                    pid=os.getpid(),
+                    thread_name=threading.current_thread().name,
+                ),
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.get",
+                    merge_log_context(base_context, build_log_context(event="cache.get")),
+                )
+            )
+            hit_event = "cache.hit" if cached is not None else "cache.miss"
+            logger.debug(
+                with_log_context(
+                    hit_event,
+                    merge_log_context(base_context, build_log_context(event=hit_event)),
+                )
+            )
         if cached is not None:
             return cached
+        fetch_started = time.perf_counter() if should_log else 0.0
         sub_candles = self._fetch_intrabar_candles(series, start, end, interval)
         with self._lock:
             self._cache[key] = sub_candles
+        if should_log:
+            fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
+            set_context = merge_log_context(
+                series_log_context(series),
+                build_log_context(
+                    bot_id=self.bot_id,
+                    cache_name="intrabar_candles",
+                    cache_scope="runtime",
+                    cache_key_summary=cache_key_summary,
+                    time_taken_ms=fetch_ms,
+                    pid=os.getpid(),
+                    thread_name=threading.current_thread().name,
+                ),
+            )
+            logger.debug(
+                with_log_context(
+                    "cache.set",
+                    merge_log_context(set_context, build_log_context(event="cache.set")),
+                )
+            )
         return sub_candles
 
     def update_snapshot(self, series: Any, candle: Candle, minute_bar: Candle) -> Dict[str, Any]:

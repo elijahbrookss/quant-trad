@@ -55,7 +55,7 @@ def _build_markers_for_results(
             epoch = evaluator._extract_signal_epoch(signal)
             known_at = _extract_known_at_epoch(signal)
             price = _extract_signal_price(signal)
-            if epoch is None or price is None:
+            if epoch is None:
                 continue
             direction = evaluator._infer_signal_direction(signal) or ("long" if action == "buy" else "short")
             label = f"{rule_name} ({direction})" if direction else rule_name
@@ -63,21 +63,21 @@ def _build_markers_for_results(
             if dedupe_key in seen_keys:
                 continue
             seen_keys.add(dedupe_key)
-            markers.append(
-                {
-                    "time": epoch,
-                    "price": price,
-                    "color": color,
-                    "shape": shape,
-                    "text": label,
-                    "size": 1,
-                    "subtype": "strategy_signal",
-                    "direction": direction,
-                    "rule_id": res.get("rule_id"),
-                    "position": "belowBar" if action == "buy" else "aboveBar",
-                    "known_at": known_at,
-                }
-            )
+            marker = {
+                "time": epoch,
+                "color": color,
+                "shape": shape,
+                "text": label,
+                "size": 1,
+                "subtype": "strategy_signal",
+                "direction": direction,
+                "rule_id": res.get("rule_id"),
+                "position": "belowBar" if action == "buy" else "aboveBar",
+                "known_at": known_at,
+            }
+            if price is not None:
+                marker["price"] = price
+            markers.append(marker)
 
     return markers
 

@@ -286,6 +286,39 @@ def normalise_template(
     schema_version = payload.get("schema_version", 1)
     result["schema_version"] = schema_version
 
+    execution_mode = payload.get("execution_mode") or payload.get("executionMode")
+    if execution_mode is not None:
+        result["execution_mode"] = str(execution_mode or "market").lower()
+
+    limit_maker_payload = payload.get("limit_maker") or payload.get("limitMaker")
+    if isinstance(limit_maker_payload, Mapping):
+        if "limit_maker" not in result or not isinstance(result["limit_maker"], Mapping):
+            result["limit_maker"] = {}
+        anchor_price = limit_maker_payload.get("anchor_price") or limit_maker_payload.get("anchorPrice")
+        if anchor_price is not None:
+            result["limit_maker"]["anchor_price"] = str(anchor_price or "").lower()
+        offset = limit_maker_payload.get("offset")
+        if isinstance(offset, Mapping):
+            offset_type = offset.get("type") or offset.get("offset_type") or offset.get("offsetType")
+            offset_value = offset.get("value") or offset.get("offset_value") or offset.get("offsetValue")
+            if offset_type is not None:
+                result["limit_maker"]["offset_type"] = str(offset_type or "").lower()
+            if offset_value is not None:
+                result["limit_maker"]["offset_value"] = _coerce_float(offset_value, 0.0) or 0.0
+        else:
+            offset_type = limit_maker_payload.get("offset_type") or limit_maker_payload.get("offsetType")
+            offset_value = limit_maker_payload.get("offset_value") or limit_maker_payload.get("offsetValue")
+            if offset_type is not None:
+                result["limit_maker"]["offset_type"] = str(offset_type or "").lower()
+            if offset_value is not None:
+                result["limit_maker"]["offset_value"] = _coerce_float(offset_value, 0.0) or 0.0
+        validity_window = limit_maker_payload.get("validity_window") or limit_maker_payload.get("validityWindow")
+        if validity_window is not None:
+            result["limit_maker"]["validity_window"] = max(_coerce_int(validity_window, 1) or 1, 1)
+        fallback = limit_maker_payload.get("fallback")
+        if fallback is not None:
+            result["limit_maker"]["fallback"] = str(fallback or "").lower()
+
     # Handle nested initial_stop object (schema v2)
     initial_stop_config = payload.get("initial_stop")
     # Schema v2: nested initial_stop object

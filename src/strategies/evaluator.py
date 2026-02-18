@@ -42,6 +42,8 @@ def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
         return None
 
     candidates: List[Any] = []
+    if "signal_time" in signal:
+        candidates.append(signal.get("signal_time"))
     if "time" in signal:
         candidates.append(signal.get("time"))
     if "timestamp" in signal:
@@ -50,6 +52,7 @@ def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
     metadata = signal.get("metadata")
     if isinstance(metadata, Mapping):
         for key in (
+            "signal_time",
             "time",
             "timestamp",
             "bar_time",
@@ -57,7 +60,6 @@ def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
             "candle_time",
             "event_time",
             "retest_time",
-            "signal_time",
         ):
             if key in metadata:
                 candidates.append(metadata.get(key))
