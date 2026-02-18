@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
 from engines.bot_runtime.core.indicator_state.contracts import OverlayProjectionInput
+from engines.bot_runtime.core.indicator_state.overlay_projection import project_overlay_delta
 from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
 from signals.overlays.schema import normalize_overlays
 
@@ -18,6 +19,7 @@ def build_runtime_state_overlay(
     *,
     indicator_id: str,
     meta: Mapping[str, Any],
+    instance: Any = None,
     df: Any,
     symbol: str,
     timeframe: str,
@@ -60,15 +62,27 @@ def build_runtime_state_overlay(
             "indicator_id": indicator_id,
         }
     )
+    projection_state: Dict[str, Any] = {"seq": 0, "revision": -1, "entries": {}}
     for candle in candles:
         engine.apply_bar(state, candle)
-    snapshot = engine.snapshot(state)
-    entries = plugin.overlay_projector(
-        OverlayProjectionInput(
+        snapshot = engine.snapshot(state)
+        projection_input = OverlayProjectionInput(
             snapshot=snapshot,
-            previous_projection_state={"seq": 0, "revision": -1, "entries": {}},
+            previous_projection_state=projection_state,
         )
-    )
+        projection_delta = project_overlay_delta(
+            projection_input=projection_input,
+            entry_projector=plugin.overlay_projector,
+        )
+        if not projection_delta.ops:
+            continue
+        entries = _normalize_projected_entries(
+            indicator_type=indicator_type,
+            projected=plugin.overlay_projector(projection_input),
+        )
+        projection_state["seq"] = projection_delta.seq
+        projection_state["revision"] = snapshot.revision
+        projection_state["entries"] = entries
     projection_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
     logger.info(
         "event=overlay_runtime_state_projection_done indicator_id=%s indicator_type=%s candles=%s duration_ms=%.3f",
@@ -77,6 +91,7 @@ def build_runtime_state_overlay(
         len(candles),
         projection_ms,
     )
+    entries = projection_state.get("entries")
     if not isinstance(entries, Mapping) or not entries:
         raise LookupError("No overlays computed for given window")
 
@@ -105,6 +120,26 @@ def build_runtime_state_overlay(
     if normalized_count == 0:
         raise LookupError("No overlays computed for given window")
     return None
+
+
+def _normalize_projected_entries(
+    *,
+    indicator_type: str,
+    projected: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    normalized_entries: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(projected, Mapping):
+        raise RuntimeError(f"overlay_runtime_state_projection_invalid: indicator_type={indicator_type}")
+    for entry_key, entry_value in projected.items():
+        if not isinstance(entry_value, Mapping):
+            continue
+        normalized = normalize_overlays(indicator_type, [dict(entry_value)])
+        if not normalized:
+            raise RuntimeError(
+                f"overlay_runtime_state_projection_normalize_failed: indicator_type={indicator_type} entry_key={entry_key}"
+            )
+        normalized_entries[str(entry_key)] = dict(normalized[0])
+    return normalized_entries
 
 
 def _runtime_projection_enabled(overlay_options: Mapping[str, Any]) -> bool:

@@ -14,6 +14,7 @@ from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_pl
 from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
 from indicators.config import DataContext
 from signals.base import BaseSignal
+from signals.contract import assert_no_execution_fields, assert_signal_contract
 
 from .context import IndicatorServiceContext, _context
 from ...market import instrument_service
@@ -27,6 +28,98 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 _SIGNAL_EXEC_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+
+def _to_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    if hasattr(value, "timestamp"):
+        try:
+            return int(value.timestamp())
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _profile_cache_signature(instance: Any) -> Tuple[Any, ...]:
+    """Return a stable signature of profile state to prevent stale signal cache hits."""
+
+    getter = getattr(instance, "get_profiles", None)
+    if not callable(getter):
+        return ("no_profiles_getter",)
+    try:
+        profiles = list(getter() or [])
+    except Exception:
+        return ("profiles_getter_failed",)
+    if not profiles:
+        return ("profiles_empty", 0)
+
+    first = profiles[0]
+    last = profiles[-1]
+    return (
+        "profiles_v1",
+        len(profiles),
+        _to_epoch_seconds(getattr(first, "start", None)),
+        _to_epoch_seconds(getattr(first, "end", None)),
+        float(getattr(first, "vah", 0.0) or 0.0),
+        float(getattr(first, "val", 0.0) or 0.0),
+        int(getattr(first, "session_count", 1) or 1),
+        _to_epoch_seconds(getattr(last, "start", None)),
+        _to_epoch_seconds(getattr(last, "end", None)),
+        float(getattr(last, "vah", 0.0) or 0.0),
+        float(getattr(last, "val", 0.0) or 0.0),
+        int(getattr(last, "session_count", 1) or 1),
+    )
+
+
+def _derive_bias_from_metadata(metadata: Mapping[str, Any]) -> Optional[str]:
+    direction = str(metadata.get("direction") or "").strip().lower()
+    breakout_direction = str(metadata.get("breakout_direction") or "").strip().lower()
+    pointer_direction = str(metadata.get("pointer_direction") or "").strip().lower()
+    variant = str(metadata.get("variant") or "").strip().lower()
+    candidate = direction or breakout_direction or pointer_direction
+    if not candidate:
+        if "up" in variant or "above" in variant:
+            candidate = "up"
+        elif "down" in variant or "below" in variant:
+            candidate = "down"
+    if candidate in {"long", "up", "above", "bull", "bullish", "buy"}:
+        return "bullish"
+    if candidate in {"short", "down", "below", "bear", "bearish", "sell"}:
+        return "bearish"
+    return None
+
+
+def _derive_direction_from_metadata(metadata: Mapping[str, Any]) -> Optional[str]:
+    direction = str(metadata.get("direction") or "").strip().lower()
+    if direction in {"long", "short"}:
+        return direction
+    breakout_direction = str(metadata.get("breakout_direction") or "").strip().lower()
+    pointer_direction = str(metadata.get("pointer_direction") or "").strip().lower()
+    bias = str(metadata.get("bias") or "").strip().lower()
+    if breakout_direction in {"above", "up"} or pointer_direction == "up" or bias == "bullish":
+        return "long"
+    if breakout_direction in {"below", "down"} or pointer_direction == "down" or bias == "bearish":
+        return "short"
+    return None
 
 
 @dataclass
@@ -80,6 +173,9 @@ class IndicatorSignalExecutor:
         plan_start = str(runtime_plan.get("start") or start)
         plan_end = str(runtime_plan.get("end") or end)
         plan_interval = str(runtime_plan.get("source_timeframe") or interval)
+        signal_start = str(start)
+        signal_end = str(end)
+        signal_interval = str(interval)
         requested_rule_ids = self._normalise_enabled_rules(dict(config or {}))
         requested_rule_identities = (
             [self._rule_identity_from_id(rule_id) for rule_id in sorted(requested_rule_ids)]
@@ -87,39 +183,43 @@ class IndicatorSignalExecutor:
             else None
         )
         provider, data_ctx = self._prepare_provider(
-            entry.meta, sym, plan_start, plan_end, plan_interval, datasource, exchange
+            entry.meta, sym, signal_start, signal_end, signal_interval, datasource, exchange
         )
         include_overlays = bool((config or {}).get("include_overlays", False))
+        profile_signature = _profile_cache_signature(entry.instance)
         cache_key = self._build_cache_key(
             inst_id=inst_id,
             meta=entry.meta,
+            profile_signature=profile_signature,
             symbol=sym,
             datasource=datasource,
             exchange=exchange,
-            plan_start=plan_start,
-            plan_end=plan_end,
-            plan_interval=plan_interval,
+            plan_start=signal_start,
+            plan_end=signal_end,
+            plan_interval=signal_interval,
             config=config or {},
             include_overlays=include_overlays,
         )
         cached_payload = _SIGNAL_EXEC_CACHE.get(cache_key)
         if cached_payload is not None:
             logger.info(
-                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s",
+                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s profile_signature=%s",
                 inst_id,
                 entry.meta.get("type"),
                 sym,
-                plan_interval,
+                signal_interval,
                 include_overlays,
+                profile_signature,
             )
             return deepcopy(cached_payload)
         t_fetch_start = perf_counter()
-        df = self._load_candles(provider, data_ctx, inst_id, sym, plan_interval)
+        df = self._load_candles(provider, data_ctx, inst_id, sym, signal_interval)
         t_fetch_ms = (perf_counter() - t_fetch_start) * 1000.0
         logger.info(
-            "event=indicator_signal_mode indicator_id=%s indicator_type=%s mode=runtime_state source_timeframe=%s requested_rules=%s",
+            "event=indicator_signal_mode indicator_id=%s indicator_type=%s mode=runtime_state signal_timeframe=%s profile_source_timeframe=%s requested_rules=%s",
             inst_id,
             entry.meta.get("type"),
+            signal_interval,
             plan_interval,
             sorted(requested_rule_ids) if requested_rule_ids else None,
         )
@@ -135,9 +235,10 @@ class IndicatorSignalExecutor:
             meta=entry.meta,
             instance=entry.instance,
             symbol=sym,
-            runtime_scope=f"{plan_start}|{plan_end}|{plan_interval}",
-            source_timeframe=plan_interval,
+            runtime_scope=f"{signal_start}|{signal_end}|{signal_interval}",
+            source_timeframe=signal_interval,
             chart_timeframe=interval,
+            profile_source_timeframe=plan_interval,
         )
         t_artifacts_ms = (perf_counter() - t_artifacts_start) * 1000.0
         logger.info(
@@ -154,7 +255,7 @@ class IndicatorSignalExecutor:
             meta=entry.meta,
             df=df,
             symbol=sym,
-            timeframe=plan_interval,
+            timeframe=signal_interval,
             prepared_snapshot_payload=precomputed_runtime_payload,
         )
         t_runtime_ms = (perf_counter() - t_runtime_start) * 1000.0
@@ -185,7 +286,7 @@ class IndicatorSignalExecutor:
             inst_id,
             entry.meta.get("type"),
             sym,
-            plan_interval,
+            signal_interval,
             len(df) if df is not None else 0,
             len(signals_all),
             len(filtered),
@@ -207,6 +308,7 @@ class IndicatorSignalExecutor:
         *,
         inst_id: str,
         meta: Mapping[str, Any],
+        profile_signature: Tuple[Any, ...],
         symbol: str,
         datasource: Optional[str],
         exchange: Optional[str],
@@ -238,6 +340,7 @@ class IndicatorSignalExecutor:
             str(plan_end),
             str(plan_interval),
             params_items,
+            profile_signature,
             enabled_rules_key,
             bool(include_overlays),
         )
@@ -432,6 +535,9 @@ class IndicatorSignalExecutor:
                     converted = self._signal_from_runtime_payload(
                         signal,
                         default_symbol=symbol,
+                        indicator_id=inst_id,
+                        timeframe_seconds=timeframe_to_seconds(timeframe) or 0,
+                        runtime_scope=str(prepared_snapshot_payload.get("_runtime_scope") or ""),
                     )
                     convert_ms += (perf_counter() - t_convert) * 1000.0
                     if converted is not None:
@@ -485,6 +591,7 @@ class IndicatorSignalExecutor:
         runtime_scope: str,
         source_timeframe: str,
         chart_timeframe: str,
+        profile_source_timeframe: str,
     ) -> Dict[str, Any]:
         builder = getattr(instance, "build_runtime_signal_payload", None)
         if not callable(builder):
@@ -493,12 +600,15 @@ class IndicatorSignalExecutor:
                 f"indicator_id={inst_id} indicator_type={meta.get('type')}"
             )
         try:
-            payload = builder(
-                indicator_id=inst_id,
-                params=dict(meta.get("params") or {}),
-                symbol=symbol,
-                color=meta.get("color"),
-            )
+            builder_kwargs = {
+                "indicator_id": inst_id,
+                "params": dict(meta.get("params") or {}),
+                "symbol": symbol,
+                "color": meta.get("color"),
+            }
+            if str(meta.get("type") or "").strip().lower() == "market_profile":
+                builder_kwargs["chart_timeframe"] = str(chart_timeframe or "")
+            payload = builder(**builder_kwargs)
         except Exception as exc:
             raise RuntimeError(
                 f"indicator_signal_precomputed_payload_failed: indicator_id={inst_id} indicator_type={meta.get('type')}"
@@ -521,8 +631,13 @@ class IndicatorSignalExecutor:
         normalized["source_timeframe"] = str(source_timeframe or "")
         normalized["chart_timeframe"] = str(chart_timeframe or "")
         normalized["source_timeframe_seconds"] = timeframe_to_seconds(source_timeframe) or 0
-        if "profile_params" not in normalized:
-            normalized["profile_params"] = dict(meta.get("params") or {})
+        normalized["profile_source_timeframe"] = str(profile_source_timeframe or "")
+        if str(meta.get("type") or "").strip().lower() == "market_profile":
+            if not isinstance(normalized.get("profile_params"), Mapping):
+                raise RuntimeError(
+                    "indicator_signal_precomputed_payload_invalid: "
+                    f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profile_params"
+                )
         logger.info(
             "event=indicator_signal_precomputed_payload_ready indicator_id=%s indicator_type=%s profiles=%s",
             inst_id,
@@ -536,11 +651,15 @@ class IndicatorSignalExecutor:
         signal: Mapping[str, Any],
         *,
         default_symbol: str,
+        indicator_id: str,
+        timeframe_seconds: int,
+        runtime_scope: str,
     ) -> Optional[BaseSignal]:
         signal_type = str(signal.get("type") or "").strip()
         if not signal_type:
             return None
-        ts = self._coerce_signal_time(signal.get("time"))
+        signal_time_raw = signal.get("signal_time", signal.get("time"))
+        ts = self._coerce_signal_time(signal_time_raw)
         if ts is None:
             return None
         symbol = str(signal.get("symbol") or default_symbol or "").strip()
@@ -554,11 +673,43 @@ class IndicatorSignalExecutor:
         metadata = {
             key: value
             for key, value in signal.items()
-            if key not in {"type", "symbol", "time", "confidence"}
+            if key not in {"type", "symbol", "time", "confidence", "metadata"}
         }
+        nested_metadata = signal.get("metadata")
+        if isinstance(nested_metadata, Mapping):
+            for key, value in nested_metadata.items():
+                metadata.setdefault(str(key), value)
+        inferred_direction = _derive_direction_from_metadata(metadata)
+        if inferred_direction and not metadata.get("direction"):
+            metadata["direction"] = inferred_direction
+        inferred_bias = _derive_bias_from_metadata(metadata)
+        if inferred_bias and not metadata.get("bias"):
+            metadata["bias"] = inferred_bias
+        metadata.setdefault("signal_type", signal_type)
+        metadata.setdefault("signal_time", int(ts.timestamp()))
+        metadata.setdefault("indicator_id", indicator_id)
+        metadata.setdefault("timeframe_seconds", int(timeframe_seconds))
+        metadata.setdefault("runtime_scope", runtime_scope)
+        metadata.setdefault("symbol", symbol)
+        metadata.setdefault("rule_id", signal_type)
+        metadata.setdefault("pattern_id", metadata.get("rule_id") or signal_type)
         identity = self._rule_identity_from_id(str(metadata.get("rule_id") or signal_type))
         metadata.setdefault("rule_family", identity.family)
         metadata.setdefault("rule_version", identity.version)
+        contract_payload: Dict[str, Any] = {
+            "signal_type": signal_type,
+            "signal_time": metadata.get("signal_time"),
+            "symbol": symbol,
+            "timeframe_seconds": metadata.get("timeframe_seconds"),
+            "indicator_id": metadata.get("indicator_id"),
+            "rule_id": metadata.get("rule_id"),
+            "pattern_id": metadata.get("pattern_id"),
+            "runtime_scope": metadata.get("runtime_scope"),
+            "known_at": metadata.get("known_at"),
+            "metadata": metadata,
+        }
+        assert_signal_contract(contract_payload)
+        assert_no_execution_fields(contract_payload)
         return BaseSignal(
             type=signal_type,
             symbol=symbol,

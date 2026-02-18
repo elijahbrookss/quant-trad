@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from portal.backend.db import AsyncJobRecord, db
 
@@ -22,6 +23,7 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_RETRY = "retry"
 TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED}
+DEFAULT_RUNNING_TIMEOUT_SECONDS = float(os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS", "1800"))
 
 
 @dataclass(frozen=True)
@@ -44,8 +46,63 @@ def _utcnow() -> datetime:
 def _partition_hash(partition_key: Optional[str]) -> int:
     if not partition_key:
         return 0
-    digest = hashlib.md5(partition_key.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16)
+    # Use a stable signed 32-bit hash so values fit SQL INTEGER range.
+    digest = hashlib.md5(partition_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], byteorder="big", signed=True)
+
+
+def _partition_slot(partition_hash: int, partition_total: int) -> int:
+    total = max(1, int(partition_total))
+    value = int(partition_hash or 0)
+    return ((value % total) + total) % total
+
+
+def _running_timeout_seconds() -> float:
+    raw = os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS")
+    if raw is None:
+        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
+
+
+def _reclaim_stale_running_jobs(
+    *,
+    session,
+    job_types: Sequence[str],
+    now: datetime,
+) -> int:
+    timeout_seconds = _running_timeout_seconds()
+    if timeout_seconds <= 0:
+        return 0
+    stale_before = now - timedelta(seconds=timeout_seconds)
+    stmt = (
+        update(AsyncJobRecord)
+        .where(AsyncJobRecord.status == STATUS_RUNNING)
+        .where(AsyncJobRecord.job_type.in_(list(job_types)))
+        .where(AsyncJobRecord.locked_at.is_not(None))
+        .where(AsyncJobRecord.locked_at < stale_before)
+        .values(
+            status=STATUS_RETRY,
+            available_at=now,
+            updated_at=now,
+            lock_owner=None,
+            locked_at=None,
+            error=f"async_job_reclaimed_timeout: running>{int(timeout_seconds)}s",
+        )
+    )
+    result = session.execute(stmt)
+    reclaimed = int(result.rowcount or 0)
+    if reclaimed > 0:
+        logger.warning(
+            "async_job_reclaimed_stale_running | jobs=%s timeout_seconds=%s stale_before=%s job_types=%s",
+            reclaimed,
+            int(timeout_seconds),
+            stale_before.isoformat() + "Z",
+            ",".join(sorted(set(str(j) for j in job_types))),
+        )
+    return reclaimed
 
 
 def _json_safe(value: Any) -> Any:
@@ -141,6 +198,7 @@ def claim_next_job(
 
     now = _utcnow()
     with db.session() as session:
+        _reclaim_stale_running_jobs(session=session, job_types=wanted, now=now)
         stmt = (
             select(AsyncJobRecord)
             .where(AsyncJobRecord.status.in_([STATUS_QUEUED, STATUS_RETRY]))
@@ -151,7 +209,9 @@ def claim_next_job(
             .limit(1)
         )
         if int(partition_total) > 1:
-            stmt = stmt.where((AsyncJobRecord.partition_hash % int(partition_total)) == int(partition_index))
+            total = int(partition_total)
+            normalized_slot = ((AsyncJobRecord.partition_hash % total) + total) % total
+            stmt = stmt.where(normalized_slot == int(partition_index))
 
         record = session.execute(stmt).scalars().first()
         if record is None:

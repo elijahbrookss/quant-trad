@@ -90,6 +90,17 @@ class IndicatorOverlayBuilder:
         )
         if cached_payload is not None:
             logger.info("event=overlay_cache_hit indicator_id=%s", inst_id)
+            if isinstance(cached_payload, Mapping):
+                payload_obj = cached_payload.get("payload")
+                if isinstance(payload_obj, Mapping):
+                    boxes = payload_obj.get("boxes")
+                    sample_box = boxes[0] if isinstance(boxes, list) and boxes else None
+                    logger.debug(
+                        "event=overlay_cache_hit_payload indicator_id=%s boxes=%s sample_box=%s",
+                        inst_id,
+                        len(boxes) if isinstance(boxes, list) else 0,
+                        sample_box,
+                    )
             if isinstance(cached_payload, dict) and "type" in cached_payload and "payload" in cached_payload:
                 try:
                     cached_overlay = self._apply_walk_forward_visibility(
@@ -140,6 +151,7 @@ class IndicatorOverlayBuilder:
         runtime_overlay = build_runtime_state_overlay(
             indicator_id=inst_id,
             meta=entry.meta,
+            instance=entry.instance,
             df=df,
             symbol=sym,
             timeframe=interval,

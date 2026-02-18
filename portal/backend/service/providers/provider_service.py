@@ -31,7 +31,21 @@ def provider_payloads() -> List[Dict[str, Any]]:
 
     venues_by_provider: Dict[str, List[Dict[str, Any]]] = {}
     for venue in list_venues():
-        venue_status = resolve_status(venue.provider_id, venue.id)
+        try:
+            venue_status = resolve_status(venue.provider_id, venue.id)
+        except Exception as exc:  # pragma: no cover - defensive hardening
+            logger.exception(
+                "provider_venue_status_resolve_failed | provider=%s venue=%s error=%s",
+                venue.provider_id,
+                venue.id,
+                exc,
+            )
+            venue_status = {
+                "state": "error",
+                "missing": [],
+                "required": [],
+                "message": f"status_resolution_failed: {exc}",
+            }
         venues_by_provider.setdefault(venue.provider_id, []).append(
             {
                 "id": venue.id,
@@ -47,7 +61,20 @@ def provider_payloads() -> List[Dict[str, Any]]:
 
     payload: List[Dict[str, Any]] = []
     for provider in list_providers():
-        status = resolve_status(provider.id, None)
+        try:
+            status = resolve_status(provider.id, None)
+        except Exception as exc:  # pragma: no cover - defensive hardening
+            logger.exception(
+                "provider_status_resolve_failed | provider=%s error=%s",
+                provider.id,
+                exc,
+            )
+            status = {
+                "state": "error",
+                "missing": [],
+                "required": [],
+                "message": f"status_resolution_failed: {exc}",
+            }
         payload.append(
             {
                 "id": provider.id,
@@ -77,8 +104,14 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
     else:
         provider_status = resolve_status(provider_cfg.id, None)
         if provider_status.get("state") != "available":
-            missing = provider_status.get("missing", [])
-            errors["provider_id"] = f"Provider unavailable; missing secrets: {', '.join(missing)}"
+            if provider_status.get("state") == "invalid_credentials":
+                errors["provider_id"] = (
+                    "Provider credentials cannot be decrypted with the current key. "
+                    "Re-save provider API keys."
+                )
+            else:
+                missing = provider_status.get("missing", [])
+                errors["provider_id"] = f"Provider unavailable; missing secrets: {', '.join(missing)}"
 
     venue_cfg = get_venue_config(normalized_venue) if normalized_venue else None
     if normalized_venue and not venue_cfg:
@@ -88,8 +121,14 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
     elif venue_cfg:
         venue_status = resolve_status(venue_cfg.provider_id, venue_cfg.id)
         if venue_status.get("state") != "available":
-            missing = venue_status.get("missing", [])
-            errors["venue_id"] = f"Venue unavailable; missing secrets: {', '.join(missing)}"
+            if venue_status.get("state") == "invalid_credentials":
+                errors["venue_id"] = (
+                    "Venue credentials cannot be decrypted with the current key. "
+                    "Re-save venue API keys."
+                )
+            else:
+                missing = venue_status.get("missing", [])
+                errors["venue_id"] = f"Venue unavailable; missing secrets: {', '.join(missing)}"
 
     if provider_cfg and not normalized_venue:
         venues = provider_cfg.supported_venues

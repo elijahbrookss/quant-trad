@@ -27,6 +27,7 @@ from engines.bot_runtime.core.domain import (
 )
 from portal.backend.service.market.stats_repository import build_stats_snapshot
 from portal.backend.service.market.stats_queue import REGIME_VERSION
+from signals.contract import assert_no_execution_fields, assert_signal_contract
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms, perf_log
 from signals.overlays.schema import build_overlay
@@ -534,13 +535,48 @@ class SeriesBuilder:
             if not isinstance(signals, Sequence):
                 continue
             cleaned: List[Dict[str, Any]] = []
+            payload_timeframe_seconds = None
+            for timeframe_key in ("chart_timeframe_seconds", "source_timeframe_seconds", "timeframe_seconds"):
+                try:
+                    candidate = int(payload.get(timeframe_key))  # type: ignore[arg-type]
+                except (TypeError, ValueError, AttributeError):
+                    candidate = 0
+                if candidate > 0:
+                    payload_timeframe_seconds = candidate
+                    break
+            payload_runtime_scope = str(payload.get("_runtime_scope") or "") if isinstance(payload, Mapping) else ""
             for signal in signals:
                 if not isinstance(signal, Mapping):
                     continue
-                epoch = evaluator._extract_signal_epoch(signal)
+                signal_copy = dict(signal)
+                signal_copy.setdefault("indicator_id", str(indicator_id))
+                if payload_timeframe_seconds is not None:
+                    signal_copy.setdefault("timeframe_seconds", payload_timeframe_seconds)
+                if payload_runtime_scope:
+                    signal_copy.setdefault("runtime_scope", payload_runtime_scope)
+                signal_copy.setdefault("rule_id", signal_copy.get("type"))
+                signal_copy.setdefault("pattern_id", signal_copy.get("rule_id") or signal_copy.get("type"))
+                metadata = signal_copy.get("metadata")
+                if isinstance(metadata, Mapping):
+                    metadata_copy = dict(metadata)
+                else:
+                    metadata_copy = {}
+                metadata_copy.setdefault("rule_id", signal_copy.get("rule_id"))
+                metadata_copy.setdefault("pattern_id", signal_copy.get("pattern_id"))
+                metadata_copy.setdefault("indicator_id", signal_copy.get("indicator_id"))
+                metadata_copy.setdefault("runtime_scope", signal_copy.get("runtime_scope"))
+                metadata_copy.setdefault("timeframe_seconds", signal_copy.get("timeframe_seconds"))
+                if "signal_time" in signal_copy:
+                    metadata_copy.setdefault("signal_time", signal_copy.get("signal_time"))
+                elif "time" in signal_copy:
+                    metadata_copy.setdefault("signal_time", signal_copy.get("time"))
+                signal_copy["metadata"] = metadata_copy
+                assert_signal_contract(signal_copy)
+                assert_no_execution_fields(signal_copy)
+                epoch = evaluator._extract_signal_epoch(signal_copy)
                 if epoch is None:
                     continue
-                cleaned.append(dict(signal))
+                cleaned.append(signal_copy)
                 all_epochs.add(epoch)
             if cleaned:
                 cleaned.sort(key=lambda entry: evaluator._extract_signal_epoch(entry) or 0)
@@ -2092,34 +2128,18 @@ class SeriesBuilder:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
             if epoch is not None and known_at is not None and known_at > epoch:
-                logger.debug(
-                    with_log_context(
-                        "signal_known_at_delay",
-                        build_log_context(
-                            original_epoch=epoch,
-                            known_at=known_at,
-                            direction="long",
-                        ),
-                    )
+                raise RuntimeError(
+                    f"signal_contract_invalid: known_at({known_at}) must be <= signal_time({epoch}) for long marker"
                 )
-                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="long"))
         for entry in sell_markers:
             epoch = SeriesBuilder._normalise_epoch(entry.get("time"))
             known_at = SeriesBuilder._normalise_epoch(entry.get("known_at"))
             if epoch is not None and known_at is not None and known_at > epoch:
-                logger.debug(
-                    with_log_context(
-                        "signal_known_at_delay",
-                        build_log_context(
-                            original_epoch=epoch,
-                            known_at=known_at,
-                            direction="short",
-                        ),
-                    )
+                raise RuntimeError(
+                    f"signal_contract_invalid: known_at({known_at}) must be <= signal_time({epoch}) for short marker"
                 )
-                epoch = known_at
             if epoch is not None:
                 queued.append(StrategySignal(epoch=epoch, direction="short"))
         queued.sort(key=lambda signal: signal.epoch)

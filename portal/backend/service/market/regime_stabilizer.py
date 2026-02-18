@@ -10,6 +10,7 @@ from .regime_engine import _classify_expansion, _classify_liquidity, _classify_s
 from .regime_config import RegimeStabilizerConfig
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 
 @dataclass
