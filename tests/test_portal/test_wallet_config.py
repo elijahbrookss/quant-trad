@@ -1,6 +1,8 @@
 import pytest
 
-from portal.backend.service.bots.bot_service import _validate_wallet_config
+from portal.backend.service.bots.config_service import BotConfigService
+
+_validate_wallet_config = BotConfigService.validate_wallet_config
 
 
 def test_wallet_config_requires_balances():

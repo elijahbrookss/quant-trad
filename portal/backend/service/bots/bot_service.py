@@ -23,11 +23,6 @@ def _broadcast_bot_stream(event: str, payload: Dict[str, Any]) -> None:
     _stream_manager.broadcast(event, payload)
 
 
-def _validate_wallet_config(wallet_config):
-    """Backward-compatible import path for tests and callers."""
-
-    return _config_service.validate_wallet_config(wallet_config)
-
 
 def list_bots() -> List[Dict[str, object]]:
     return _config_service.list_bots()
@@ -123,5 +118,4 @@ __all__ = [
     "bots_stream",
     "bot_settings_catalog",
     "watchdog_status",
-    "_validate_wallet_config",
 ]

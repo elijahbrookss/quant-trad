@@ -29,7 +29,7 @@ class BotConfigService:
 
     def create_bot(self, name: str, **payload: object) -> Dict[str, object]:
         bot_id = payload.get("id") or str(uuid.uuid4())
-        strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"), payload.get("strategy_id"))
+        strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"))
         run_type = str(payload.get("run_type") or "backtest").lower()
         wallet_config = self.validate_wallet_config(payload.get("wallet_config"))
 
@@ -64,8 +64,8 @@ class BotConfigService:
             raise KeyError(f"Bot {bot_id} was not found")
         record = bots[bot_id]
 
-        if "strategy_ids" in payload or "strategy_id" in payload:
-            strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"), payload.get("strategy_id"))
+        if "strategy_ids" in payload:
+            strategy_ids = self.validate_strategy_ids(payload.get("strategy_ids"))
             record["strategy_ids"] = strategy_ids
             record["strategy_id"] = strategy_ids[0]
         if "name" in payload and payload["name"] is not None:
@@ -249,15 +249,12 @@ class BotConfigService:
             "runtime_env": env_rows,
         }
 
-    def validate_strategy_ids(self, strategy_ids: Optional[Iterable[str]], fallback: Optional[str] = None) -> List[str]:
+    def validate_strategy_ids(self, strategy_ids: Optional[Iterable[str]]) -> List[str]:
         candidates: List[str] = []
         if strategy_ids:
             for strategy_id in strategy_ids:
                 if strategy_id:
                     candidates.append(str(strategy_id))
-        if not candidates and fallback:
-            candidates = [fallback]
-
         deduped: List[str] = []
         seen = set()
         for strategy_id in candidates:

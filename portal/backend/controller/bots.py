@@ -52,10 +52,6 @@ class BotBase(BaseModel):
 
     name: str
     strategy_ids: List[str] = Field(default_factory=list)
-    strategy_id: Optional[str] = Field(
-        default=None,
-        description="Deprecated single-strategy field maintained for backwards compatibility.",
-    )
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     mode: str = Field(default="instant", pattern="^(instant|walk-forward)$")
@@ -80,7 +76,6 @@ class BotUpdateRequest(BaseModel):
 
     name: Optional[str] = None
     strategy_ids: Optional[List[str]] = None
-    strategy_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
     # timeframe is intentionally managed by strategies; bots don't own it
