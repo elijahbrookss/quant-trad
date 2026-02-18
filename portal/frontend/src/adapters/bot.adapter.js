@@ -1,4 +1,5 @@
 import { createLogger } from '../utils/logger.js'
+import { openSse } from './realtime.adapter.js'
 
 const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 const log = createLogger('BotAdapter')
@@ -64,14 +65,13 @@ export async function stopBot(botId) {
 
 
 export function openBotsStream() {
-  try {
-    const url = new URL('/api/bots/stream', BASE)
-    return new EventSource(url, { withCredentials: false })
-  } catch (err) {
-    log.warn('bots_stream_init_failed', err)
-    return null
+  const source = openSse('/api/bots/stream', { withCredentials: false, base: BASE })
+  if (!source) {
+    log.warn('bots_stream_init_failed')
   }
+  return source
 }
+
 
 
 export async function fetchBotSettingsCatalog() {

@@ -2,15 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { createLogger } from '../../utils/logger.js'
-
-const API_BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
-
-const toWsBase = () => {
-  const base = String(API_BASE || '').trim() || 'http://localhost:8000'
-  if (base.startsWith('https://')) return base.replace('https://', 'wss://')
-  if (base.startsWith('http://')) return base.replace('http://', 'ws://')
-  return base
-}
+import { openWebSocket } from '../../adapters/realtime.adapter.js'
 
 export function BotLensLiveModal({ bot, open, onClose }) {
   const logger = useMemo(() => createLogger('BotLensLiveModal'), [])
@@ -22,16 +14,21 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   useEffect(() => {
     if (!open || !bot?.id) return undefined
 
-    const wsBase = toWsBase()
-    const url = new URL(`/api/bots/ws/${encodeURIComponent(bot.id)}`, wsBase)
-    const socket = new WebSocket(url)
+    const path = `/api/bots/ws/${encodeURIComponent(bot.id)}`
+    const socket = openWebSocket(path)
+    if (!socket) {
+      setStatus('error')
+      setError('Live BotLens stream failed to initialize.')
+      logger.warn('botlens_ws_init_failed', { bot_id: bot.id, path })
+      return undefined
+    }
     socketRef.current = socket
     setStatus('connecting')
     setError(null)
 
     socket.onopen = () => {
       setStatus('open')
-      logger.info('botlens_ws_connected', { bot_id: bot.id, url: url.toString() })
+      logger.info('botlens_ws_connected', { bot_id: bot.id, path })
     }
 
     socket.onmessage = (event) => {
