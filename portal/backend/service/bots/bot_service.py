@@ -17,11 +17,9 @@ from .runner import DockerBotRunner
 from .bot_stream import BotStreamManager
 from ..storage.storage import (
     delete_bot,
-    get_bot_run,
     load_bots,
     load_strategies,
     upsert_bot,
-    upsert_bot_run,
 )
 
 
@@ -38,91 +36,10 @@ def _broadcast_bot_stream(event: str, payload: Mapping[str, Any]) -> None:
     _BOT_STREAM_MANAGER.broadcast(event, payload)
 
 
-def _persist_runtime_patch(bot_id: str, patch: Mapping[str, Any]) -> None:
-    """Persist runtime-driven status/stat updates for *bot_id*."""
-
-    if not patch:
-        return
-    runtime_payload = patch.get("runtime")
-    if runtime_payload:
-        _broadcast_bot_stream(
-            "bot_runtime",
-            {"bot_id": bot_id, "runtime": dict(runtime_payload)},
-        )
-    bots = {bot["id"]: bot for bot in load_bots()}
-    record = bots.get(bot_id)
-    if not record:
-        return
-    mutable = dict(record)
-    updates = {key: patch[key] for key in ("status", "last_stats", "last_run_at") if key in patch}
-    if not updates:
-        return
-    status = str(updates.get("status") or "").lower()
-    if status in {"completed", "stopped", "error"}:
-        get_watchdog().unregister_bot(bot_id)
-        mutable["runner_id"] = None
-        mutable["heartbeat_at"] = None
-    mutable.update(updates)
-    upsert_bot(mutable)
-    snapshot = dict(mutable)
-    runtime = _RUNTIME.get(bot_id)
-    if runtime:
-        snapshot["runtime"] = runtime.snapshot()
-    _broadcast_bot_stream("bot_status", {"bot": snapshot})
-
-    if isinstance(runtime_payload, Mapping):
-        _upsert_run_row_from_runtime(record, runtime_payload)
-
-
-def _upsert_run_row_from_runtime(bot: Mapping[str, Any], runtime_payload: Mapping[str, Any]) -> None:
-    """Ensure portal_bot_runs has a row for this runtime run_id.
-
-    We persist at least once when run starts, and update again for terminal states.
-    """
-
-    run_id = str(runtime_payload.get("run_id") or "").strip()
-    if not run_id:
-        return
-    runtime_status = str(runtime_payload.get("status") or bot.get("status") or "").lower()
-    if not runtime_status:
-        return
-    terminal_states = {"completed", "stopped", "error", "crashed"}
-
-    existing = get_bot_run(run_id)
-    should_upsert = existing is None or runtime_status in terminal_states
-    if not should_upsert:
-        return
-
-    payload: Dict[str, Any] = {
-        "run_id": run_id,
-        "bot_id": bot.get("id"),
-        "bot_name": bot.get("name"),
-        "strategy_id": bot.get("strategy_id"),
-        "run_type": bot.get("run_type") or "backtest",
-        "status": runtime_status,
-        "backtest_start": bot.get("backtest_start"),
-        "backtest_end": bot.get("backtest_end"),
-        "started_at": runtime_payload.get("started_at") or bot.get("last_run_at"),
-        "ended_at": runtime_payload.get("ended_at") if runtime_status in terminal_states else None,
-        "summary": dict(runtime_payload.get("stats") or {}),
-    }
-    try:
-        upsert_bot_run(payload)
-    except Exception as exc:  # noqa: BLE001 - persistence boundary
-        logger.warning(
-            "bot_run_upsert_from_runtime_failed | bot_id=%s | run_id=%s | status=%s | error=%s",
-            bot.get("id"),
-            run_id,
-            runtime_status,
-            exc,
-        )
-
-
 def _now_iso() -> str:
     """Return the current UTC timestamp in ISO format."""
 
     return datetime.utcnow().isoformat() + "Z"
-
 
 
 def _coerce_playback_speed(value: Optional[object]) -> float:
@@ -218,8 +135,6 @@ def _validate_wallet_config(wallet_config: Optional[Mapping[str, Any]]) -> Dict[
             f"wallet_config balances must sum to at least {MIN_STARTING_WALLET}"
         )
     return {"balances": normalized}
-
-
 
 
 def _validate_bot_env(value: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -534,10 +449,8 @@ def pause_bot(bot_id: str) -> Dict[str, object]:
     raise RuntimeError("Pause is not supported for container-only bot runtime")
 
 
-
 def resume_bot(bot_id: str) -> Dict[str, object]:
     raise RuntimeError("Resume is not supported for container-only bot runtime")
-
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
