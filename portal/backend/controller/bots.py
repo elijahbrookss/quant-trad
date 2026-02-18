@@ -227,6 +227,8 @@ async def start_bot(bot_id: str) -> Dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/{bot_id}/stop", response_model=BotResponse)
