@@ -15,7 +15,14 @@ def _candle(ts: str, close: float) -> Candle:
 
 def test_market_profile_state_engine_rolls_session_and_updates_revision() -> None:
     engine = MarketProfileStateEngine()
-    state = engine.initialize({"symbol": "BTC/USD"})
+    state = engine.initialize(
+        {
+            "symbol": "BTC/USD",
+            "timeframe": "1h",
+            "strategy_id": "strat-1",
+            "indicator_id": "ind-1",
+        }
+    )
 
     first = engine.apply_bar(state, _candle("2024-01-01T00:00:00Z", 100.0))
     assert first.changed is True
@@ -35,6 +42,9 @@ def test_market_profile_state_engine_rolls_session_and_updates_revision() -> Non
     assert profiles[0]["start"].isoformat().startswith("2024-01-01T00:00:00")
     assert profiles[0]["end"].isoformat().startswith("2024-01-01T23:59:59")
     assert snapshot.revision == 2
+    assert snapshot.payload["chart_timeframe"] == "1h"
+    assert snapshot.payload["chart_timeframe_seconds"] == 3600
+    assert snapshot.payload["_indicator_id"] == "ind-1"
 
 
 def test_market_profile_overlay_projection_emits_profiles_and_params() -> None:

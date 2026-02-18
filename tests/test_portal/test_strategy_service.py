@@ -106,6 +106,30 @@ def test_build_markers_uses_metadata_time():
     assert marker["price"] == 80.5
 
 
+def test_build_markers_prefers_signal_time_over_time() -> None:
+    rule_result = {
+        "rule_id": "market_profile_breakout_v3_confirmed",
+        "rule_name": "Breakout v3",
+        "signals": [
+            {
+                "type": "breakout",
+                "time": "2025-01-03T11:00:00Z",
+                "metadata": {
+                    "signal_time": "2025-01-03T12:00:00Z",
+                    "price": 100.25,
+                },
+            }
+        ],
+    }
+
+    chart_markers = markers._build_markers_for_results([rule_result], action="buy")
+    assert len(chart_markers) == 1
+    marker = chart_markers[0]
+    expected_epoch = int(datetime(2025, 1, 3, 12, tzinfo=timezone.utc).timestamp())
+    assert marker["time"] == expected_epoch
+    assert marker["price"] == 100.25
+
+
 def test_pivot_retest_signals_match_strategy_conditions():
     condition = RuleCondition(
         indicator_id="indicator-1",
