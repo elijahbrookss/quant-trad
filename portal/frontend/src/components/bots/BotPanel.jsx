@@ -10,6 +10,7 @@ import {
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { createLogger } from '../../utils/logger.js'
 import { BotCreateModal } from './create/BotCreateModal.jsx'
+import { BotLensLiveModal } from './BotLensLiveModal.jsx'
 import { buildDefaultForm } from './create/botCreateFormDefaults.js'
 import { useBotCreateForm } from './create/useBotCreateForm.js'
 import { BotCard, sortBots } from './BotCard.jsx'
@@ -50,6 +51,7 @@ export function BotPanel() {
   } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
+  const [lensBot, setLensBot] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -539,6 +541,7 @@ export function BotPanel() {
                 onStart={handleStart}
                 onStop={handleStop}
                 onDelete={handleDelete}
+                onOpen={setLensBot}
                 pendingStart={pendingStart}
                 pendingDelete={pendingDelete}
               />
@@ -546,6 +549,7 @@ export function BotPanel() {
           )}
         </div>
 
+        <BotLensLiveModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} />
         <BotCreateModal
           open={createOpen}
           onClose={closeCreateModal}

@@ -1,4 +1,4 @@
-import { Play, Square, Trash2, RotateCw, TriangleAlert, X } from 'lucide-react'
+import { Play, Square, Trash2, RotateCw, TriangleAlert, X, Eye } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
@@ -66,6 +66,7 @@ export const BotCard = memo(function BotCard({
   onStart,
   onStop,
   onDelete,
+  onOpen,
   pendingStart,
   pendingDelete,
 }) {
@@ -122,6 +123,7 @@ export const BotCard = memo(function BotCard({
   const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error'
   const isIdle = runtimeStatus === 'idle'
   const showViewError = isCrashed
+  const showLens = ['running', 'starting', 'paused', 'completed', 'stopped', 'error', 'crashed'].includes(runtimeStatus)
   const startLabel =
     runtimeStatus === 'completed'
       ? 'Rerun'
@@ -171,7 +173,6 @@ export const BotCard = memo(function BotCard({
     return `${formatDateShort(bot.backtest_start)} → ${formatDateShort(bot.backtest_end)}`
   }, [runType, bot.backtest_start, bot.backtest_end])
 
-  const reportRunId = bot?.last_run_artifact?.run_id || bot?.runtime?.run_id || null
   const errorPayload = bot?.runtime?.error || bot?.last_run_artifact?.error || null
   const errorMessage = typeof errorPayload === 'string' ? errorPayload : errorPayload?.message || 'Bot crashed'
   const errorMeta = typeof errorPayload === 'object' && errorPayload ? errorPayload : {}
@@ -297,6 +298,9 @@ export const BotCard = memo(function BotCard({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
+          {showLens && (
+            <ActionButton onClick={() => onOpen?.(bot)} icon={<Eye className="size-3" />} label="Live Lens" size="sm" />
+          )}
           {showViewError && (
             <ActionButton
               onClick={() => setErrorOpen(true)}
