@@ -6,16 +6,15 @@ import asyncio
 import json
 import math
 from collections.abc import Mapping as AbcMapping
+from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
-from datetime import datetime
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
 from ..service.bots.telemetry_stream import telemetry_hub
-
 
 router = APIRouter()
 
@@ -26,7 +25,6 @@ def _sanitize_json(value: Any) -> Any:
     if isinstance(value, AbcMapping):
         return {key: _sanitize_json(payload_value) for key, payload_value in value.items()}
     if isinstance(value, datetime):
-        # ISO8601 Z-suffixed UTC string
         try:
             return value.replace(tzinfo=None).isoformat() + "Z"
         except Exception:
@@ -68,8 +66,6 @@ class BotBase(BaseModel):
 class BotCreateRequest(BotBase):
     """Payload for creating a bot."""
 
-    pass
-
 
 class BotUpdateRequest(BaseModel):
     """Patch payload for updating a bot."""
@@ -78,7 +74,6 @@ class BotUpdateRequest(BaseModel):
     strategy_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    # timeframe is intentionally managed by strategies; bots don't own it
     mode: Optional[str] = Field(default=None, pattern="^(instant|walk-forward)$")
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
@@ -101,35 +96,13 @@ class BotResponse(BotBase):
     runtime: Optional[Dict[str, Any]] = None
 
 
-class BotPerformanceResponse(BaseModel):
-    """Chart payload for bot lens."""
-
-    candles: List[Dict[str, Any]]
-    trades: List[Dict[str, Any]]
-    stats: Dict[str, Any]
-    overlays: List[Dict[str, Any]] = Field(default_factory=list)
-    logs: List[Dict[str, Any]] = Field(default_factory=list)
-    meta: Dict[str, Any] = Field(default_factory=dict)
-    runtime: Optional[Dict[str, Any]] = None
-
-
-class BotLogsResponse(BaseModel):
-    """Runtime log payload."""
-
-    logs: List[Dict[str, Any]] = Field(default_factory=list)
-
-
 @router.get("/", response_model=List[BotResponse])
 async def list_bots() -> List[Dict[str, Any]]:
-    """Return all bot configs."""
-
     return bot_service.list_bots()
 
 
 @router.post("/", response_model=BotResponse, status_code=201)
 async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
-    """Create a new bot configuration."""
-
     try:
         return bot_service.create_bot(**body.dict())
     except ValueError as exc:
@@ -138,25 +111,18 @@ async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
 
 
-
-
 @router.get("/settings-catalog")
 async def bot_settings_catalog() -> Dict[str, Any]:
-    """Return bot runtime settings metadata and masked environment visibility."""
-
     return bot_service.bot_settings_catalog()
 
 
 @router.get("/watchdog")
 async def bot_watchdog_status() -> Dict[str, Any]:
-    """Return watchdog status and run immediate stale/container checks."""
-
     return bot_service.watchdog_status()
+
 
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
-    """Stream bot status updates across all bots via server-sent events."""
-
     release, channel, initial = bot_service.bots_stream()
 
     async def event_iterator():
@@ -183,18 +149,14 @@ async def stream_bots() -> StreamingResponse:
 
 @router.get("/{bot_id}", response_model=BotResponse)
 async def get_bot(bot_id: str) -> Dict[str, Any]:
-    """Return a single bot configuration."""
-
     try:
         return bot_service.get_bot(bot_id)
-    except KeyError as exc:  # pragma: no cover - FastAPI path
+    except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
 
 
 @router.put("/{bot_id}", response_model=BotResponse)
 async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
-    """Update bot attributes."""
-
     try:
         payload = body.dict(exclude_unset=True)
         return bot_service.update_bot(bot_id, **payload)
@@ -206,16 +168,12 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
 
 @router.delete("/{bot_id}", status_code=204, response_class=Response)
 async def delete_bot(bot_id: str) -> Response:
-    """Delete a bot."""
-
     bot_service.delete_bot_record(bot_id)
     return Response(status_code=204)
 
 
 @router.post("/{bot_id}/start", response_model=BotResponse)
 async def start_bot(bot_id: str) -> Dict[str, Any]:
-    """Start the bot runtime."""
-
     try:
         return bot_service.start_bot(bot_id)
     except KeyError as exc:
@@ -228,124 +186,12 @@ async def start_bot(bot_id: str) -> Dict[str, Any]:
 
 @router.post("/{bot_id}/stop", response_model=BotResponse)
 async def stop_bot(bot_id: str) -> Dict[str, Any]:
-    """Stop the bot runtime."""
-
     try:
         return bot_service.stop_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-
-
-@router.get("/{bot_id}/status")
-async def get_bot_status(bot_id: str) -> Dict[str, Any]:
-    """Return live runtime status."""
-
-    try:
-        return bot_service.runtime_status(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.get("/{bot_id}/logs", response_model=BotLogsResponse)
-async def get_bot_logs(bot_id: str, limit: int = 200) -> Dict[str, Any]:
-    """Return recent runtime logs for a bot."""
-
-    try:
-        logs = bot_service.runtime_logs(bot_id, limit=limit)
-        return {"logs": logs}
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.post("/{bot_id}/pause", response_model=BotResponse)
-async def pause_bot(bot_id: str) -> Dict[str, Any]:
-    """Pause a running bot."""
-
-    try:
-        return bot_service.pause_bot(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.post("/{bot_id}/resume", response_model=BotResponse)
-async def resume_bot(bot_id: str) -> Dict[str, Any]:
-    """Resume a paused bot."""
-
-    try:
-        return bot_service.resume_bot(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.get("/{bot_id}/performance", response_model=BotPerformanceResponse)
-async def get_bot_performance(bot_id: str) -> Dict[str, Any]:
-    """Return candle and trade payloads for the lens chart."""
-
-    try:
-        return bot_service.performance(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.get("/{bot_id}/regime_overlays")
-async def get_bot_regime_overlays(bot_id: str) -> Dict[str, Any]:
-    """Return raw and visible regime overlays for debugging (pre-trim + post-trim)."""
-
-    try:
-        return bot_service.regime_overlays(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.get("/{bot_id}/stream")
-async def stream_bot(bot_id: str) -> StreamingResponse:
-    """Stream incremental bot updates via server-sent events."""
-
-    try:
-        release, channel, initial = bot_service.stream(bot_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-    async def event_iterator():
-        try:
-            yield _format_sse(initial.get("type", "snapshot"), initial)
-            while True:
-                try:
-                    payload = await asyncio.to_thread(channel.get)
-                except asyncio.CancelledError:
-                    break
-                if not payload:
-                    continue
-                event_type = payload.get("type", "update")
-                yield _format_sse(event_type, payload)
-        finally:
-            release()
-
-    headers = {
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",
-    }
-    return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
 
 
 @router.websocket("/ws/telemetry/ingest")

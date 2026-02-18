@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from queue import Queue
-from typing import Any, Callable, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping
 
 from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
@@ -69,30 +68,6 @@ class BotRuntimeControlService:
         self._broadcast("bot", {"bot": bot})
         return bot
 
-    @staticmethod
-    def pause_bot(bot_id: str) -> Dict[str, object]:
-        _ = bot_id
-        raise RuntimeError("Pause is not supported for container-only bot runtime")
-
-    @staticmethod
-    def resume_bot(bot_id: str) -> Dict[str, object]:
-        _ = bot_id
-        raise RuntimeError("Resume is not supported for container-only bot runtime")
-
-    @staticmethod
-    def runtime_status(bot_id: str) -> Dict[str, object]:
-        _ = bot_id
-        raise RuntimeError("In-process runtime status is removed; use container telemetry stream and persisted status")
-
-    @staticmethod
-    def runtime_logs(bot_id: str, limit: int = 200):
-        _ = (bot_id, limit)
-        raise RuntimeError("In-process runtime logs are removed; use docker logs for bot containers")
-
-    @staticmethod
-    def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
-        _ = bot_id
-        raise RuntimeError("Use websocket telemetry and DB snapshots for container runtime")
 
     def bots_stream(self):
         return self._stream_manager.subscribe_all(self._config.list_bots)

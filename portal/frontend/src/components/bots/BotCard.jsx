@@ -1,6 +1,5 @@
-import { Play, Square, Eye, Trash2, Pause, RotateCw, TriangleAlert, X } from 'lucide-react'
+import { Play, Square, Trash2, RotateCw, TriangleAlert, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
@@ -66,14 +65,10 @@ export const BotCard = memo(function BotCard({
   nowEpochMs,
   onStart,
   onStop,
-  onPause,
-  onResume,
   onDelete,
-  onOpen,
   pendingStart,
   pendingDelete,
 }) {
-  const navigate = useNavigate()
   const [errorOpen, setErrorOpen] = useState(false)
   const [warningsOpen, setWarningsOpen] = useState(false)
   const assignedName = useMemo(() => {
@@ -118,8 +113,6 @@ export const BotCard = memo(function BotCard({
         : 0
   const progressPct = Math.min(100, Math.max(0, progressValue * 100))
   const showProgress = progressPct > 0 || ['running', 'starting', 'paused'].includes(runtimeStatus)
-  const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
-  const showResume = runtimeStatus === 'paused'
   const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
   const canStart = ['idle', 'stopped', 'completed', 'error', 'crashed'].includes(runtimeStatus)
@@ -128,8 +121,6 @@ export const BotCard = memo(function BotCard({
   const isStopped = runtimeStatus === 'stopped'
   const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error'
   const isIdle = runtimeStatus === 'idle'
-  const showDetails = !isCompleted && !isStopped && !isCrashed && !isIdle
-  const showViewReport = isCompleted
   const showViewError = isCrashed
   const startLabel =
     runtimeStatus === 'completed'
@@ -306,20 +297,6 @@ export const BotCard = memo(function BotCard({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          {showDetails && (
-            <ActionButton onClick={() => onOpen(bot)} icon={<Eye className="size-3" />} label="Details" size="sm" />
-          )}
-          {showViewReport && (
-            <ActionButton
-              onClick={() => {
-                const path = reportRunId ? `/reports?runId=${reportRunId}` : '/reports'
-                navigate(path)
-              }}
-              icon={<Eye className="size-3" />}
-              label="View Report"
-              size="sm"
-            />
-          )}
           {showViewError && (
             <ActionButton
               onClick={() => setErrorOpen(true)}
@@ -328,12 +305,6 @@ export const BotCard = memo(function BotCard({
               size="sm"
               variant="danger"
             />
-          )}
-          {showPause && (
-            <ActionButton onClick={() => onPause(bot.id)} icon={<Pause className="size-3" />} label="Pause" size="sm" />
-          )}
-          {showResume && (
-            <ActionButton onClick={() => onResume(bot.id)} icon={<Play className="size-3" />} label="Resume" size="sm" variant="success" />
           )}
           {canStop && (
             <ActionButton onClick={() => onStop(bot.id)} icon={<Square className="size-3" />} label="Stop" size="sm" />

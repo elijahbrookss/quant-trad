@@ -61,39 +61,7 @@ export async function stopBot(botId) {
   return request(`/api/bots/${botId}/stop`, { method: 'POST' })
 }
 
-export async function pauseBot(botId) {
-  return request(`/api/bots/${botId}/pause`, { method: 'POST' })
-}
 
-export async function resumeBot(botId) {
-  return request(`/api/bots/${botId}/resume`, { method: 'POST' })
-}
-
-export async function fetchBotStatus(botId) {
-  return request(`/api/bots/${botId}/status`)
-}
-
-export async function fetchBotPerformance(botId) {
-  return request(`/api/bots/${botId}/performance`)
-}
-
-export async function fetchBotLogs(botId, limit = 200) {
-  const params = new URLSearchParams()
-  if (limit) params.set('limit', String(limit))
-  const query = params.toString() ? `?${params.toString()}` : ''
-  return request(`/api/bots/${botId}/logs${query}`)
-}
-
-export function openBotStream(botId) {
-  if (!botId) return null
-  try {
-    const url = new URL(`/api/bots/${botId}/stream`, BASE)
-    return new EventSource(url, { withCredentials: false })
-  } catch (err) {
-    log.warn('bot_stream_init_failed', { botId }, err)
-    return null
-  }
-}
 
 export function openBotsStream() {
   try {

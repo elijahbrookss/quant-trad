@@ -6,12 +6,9 @@ import {
   startBot as startBotApi,
   stopBot as stopBotApi,
   deleteBot as deleteBotApi,
-  pauseBot as pauseBotApi,
-  resumeBot as resumeBotApi,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
 import { createLogger } from '../../utils/logger.js'
-import { BotPerformanceModal } from './BotPerformanceModal.jsx'
 import { BotCreateModal } from './create/BotCreateModal.jsx'
 import { buildDefaultForm } from './create/botCreateFormDefaults.js'
 import { useBotCreateForm } from './create/useBotCreateForm.js'
@@ -53,7 +50,6 @@ export function BotPanel() {
   } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
-  const [lensBot, setLensBot] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -332,31 +328,7 @@ export function BotPanel() {
     }
   }
 
-  const handlePause = async (botId) => {
-    setError(null)
-    logger.info('bot_pause_requested', { bot_id: botId })
-    try {
-      const payload = await pauseBotApi(botId)
-      upsertBot(payload)
-      loadBots(false)
-    } catch (err) {
-      logger.error('bot_pause_failed', { bot_id: botId, message: err?.message }, err)
-      setError(err?.message || 'Unable to pause bot')
-    }
-  }
 
-  const handleResume = async (botId) => {
-    setError(null)
-    logger.info('bot_resume_requested', { bot_id: botId })
-    try {
-      const payload = await resumeBotApi(botId)
-      upsertBot(payload)
-      loadBots(false)
-    } catch (err) {
-      logger.error('bot_resume_failed', { bot_id: botId, message: err?.message }, err)
-      setError(err?.message || 'Unable to resume bot')
-    }
-  }
 
   const handleDelete = async (botId) => {
     if (!botId) return
@@ -566,10 +538,7 @@ export function BotPanel() {
                 nowEpochMs={nowEpochMs}
                 onStart={handleStart}
                 onStop={handleStop}
-                onPause={handlePause}
-                onResume={handleResume}
                 onDelete={handleDelete}
-                onOpen={setLensBot}
                 pendingStart={pendingStart}
                 pendingDelete={pendingDelete}
               />
@@ -577,7 +546,6 @@ export function BotPanel() {
           )}
         </div>
 
-        <BotPerformanceModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} onRefresh={loadBots} />
         <BotCreateModal
           open={createOpen}
           onClose={closeCreateModal}
