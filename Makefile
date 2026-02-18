@@ -231,3 +231,21 @@ branch-artifact: ## Build artifact with all commits and merged PRs for a branch 
 	branch=$${BRANCH:-$$(git branch --show-current)}; \
 	if [ -z "$$branch" ]; then echo "✗ Could not determine branch (not on a branch?)"; exit 1; fi; \
 	scripts/automation/branch_artifact_builder.sh "$$branch"
+
+
+BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
+BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
+
+.PHONY: bots-up bots-down bots-ps bots-logs
+
+bots-up: ## Start isolated bot containers stack
+	@$(BOTS_COMPOSE_CMD) up -d
+
+bots-down: ## Stop isolated bot containers stack
+	@$(BOTS_COMPOSE_CMD) down --remove-orphans
+
+bots-ps: ## List isolated bot containers
+	@$(BOTS_COMPOSE_CMD) ps
+
+bots-logs: ## Tail isolated bot containers logs
+	@$(BOTS_COMPOSE_CMD) logs -f

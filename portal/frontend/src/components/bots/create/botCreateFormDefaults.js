@@ -21,6 +21,8 @@ export function buildDefaultForm() {
     backtest_start: '',
     backtest_end: '',
     strategy_ids: [],
+    snapshot_interval_ms: 1000,
+    bot_env: {},
     wallet_balances: [EMPTY_WALLET_ROW()],
   }
 }

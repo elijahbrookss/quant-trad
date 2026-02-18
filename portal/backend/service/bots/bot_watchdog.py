@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 from typing import Callable, Dict, List, Optional, Set
 
@@ -254,6 +255,40 @@ class BotWatchdog:
 
         return crashed_ids
 
+    def verify_container_ownership(self) -> List[str]:
+        """Verify running bot rows still map to live docker containers."""
+
+        from ..storage.storage import load_bots
+
+        failed: List[str] = []
+        for bot in load_bots():
+            if str(bot.get("status") or "").lower() != "running":
+                continue
+            container_id = str(bot.get("runner_id") or "").strip()
+            if not container_id:
+                continue
+            proc = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container_id],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            is_running = proc.returncode == 0 and str(proc.stdout or "").strip().lower() == "true"
+            if is_running:
+                continue
+            bot_id = str(bot.get("id") or "")
+            if not bot_id:
+                continue
+            if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_id}"):
+                failed.append(bot_id)
+                logger.error(
+                    "bot_watchdog_container_missing | bot_id=%s | container_id=%s | stderr=%s",
+                    bot_id,
+                    container_id,
+                    str(proc.stderr or "").strip(),
+                )
+        return failed
+
     def start_background_monitor(self) -> None:
         """Start background threads for heartbeat emission and orphan detection.
 
@@ -320,6 +355,7 @@ class BotWatchdog:
         while not self._stop_event.is_set():
             try:
                 self.scan_stale_heartbeats()
+                self.verify_container_ownership()
             except Exception as exc:
                 logger.exception("bot_watchdog_monitor_loop_error | error=%s", exc)
 

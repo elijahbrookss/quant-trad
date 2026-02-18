@@ -51,7 +51,7 @@ from engines.bot_runtime.core.indicator_state import (
     plugin_registry,
     project_overlay_delta,
 )
-from ....indicators.indicator_service.context import IndicatorServiceContext, _context as indicator_context
+from ....indicators.indicator_service.context import IndicatorServiceContext
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
 from .persistence_buffer import TradePersistenceBuffer
@@ -190,9 +190,18 @@ class BotRuntime:
         for indicator_type in get_overlay_cache_types():
             overlay_cache.enable_type(indicator_type)
         self._overlay_cache = overlay_cache
+        runtime_indicator_ctx = IndicatorServiceContext.for_bot_runtime(
+            cache_scope_id=f"{self.bot_id}:{uuid.uuid4()}"
+        )
         self._indicator_ctx = IndicatorServiceContext.fork_with_overlay_cache(
-            indicator_context,
+            runtime_indicator_ctx,
             overlay_cache,
+        )
+        logger.info(
+            "bot_runtime_indicator_context | bot_id=%s | cache_owner=%s | cache_scope_id=%s",
+            self.bot_id,
+            self._indicator_ctx.cache_owner,
+            self._indicator_ctx.cache_scope_id,
         )
         self._obs_enabled = get_obs_enabled(self.config)
         self._obs_step_sample_rate = get_obs_step_sample_rate(self.config)

@@ -15,6 +15,7 @@ from ...db import (
     BotRecord,
     BotRunRecord,
     BotRunStepRecord,
+    BotRunSnapshotRecord,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,
@@ -443,6 +444,10 @@ def upsert_bot(payload: Dict[str, Any]) -> None:
                 record.risk = dict(payload.get("risk") or {})
             if "wallet_config" in payload:
                 record.wallet_config = dict(payload.get("wallet_config") or {})
+            if "snapshot_interval_ms" in payload:
+                record.snapshot_interval_ms = int(payload.get("snapshot_interval_ms") or 0)
+            if "bot_env" in payload:
+                record.bot_env = dict(payload.get("bot_env") or {})
             record.backtest_start = _parse_optional_timestamp(payload.get("backtest_start")) or record.backtest_start
             record.backtest_end = _parse_optional_timestamp(payload.get("backtest_end")) or record.backtest_end
             record.status = payload.get("status") or record.status
@@ -1422,3 +1427,39 @@ def record_bot_run_step(payload: Dict[str, Any]) -> None:
             session.add(record)
     except SQLAlchemyError as exc:
         logger.warning("bot_run_step_persist_failed | run_id=%s | step=%s | error=%s", run_id, step_name, exc)
+
+
+def record_bot_run_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not db.available:
+        raise RuntimeError("database is required for bot snapshots")
+    with db.session() as session:
+        row = BotRunSnapshotRecord(
+            run_id=str(payload.get("run_id") or ""),
+            bot_id=str(payload.get("bot_id") or ""),
+            series_key=str(payload.get("series_key") or ""),
+            snapshot_seq=int(payload.get("snapshot_seq") or 0),
+            snapshot_payload=dict(payload.get("snapshot_payload") or {}),
+            updated_at=_utcnow(),
+        )
+        session.add(row)
+        session.flush()
+        return row.to_dict()
+
+
+def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:
+    if not db.available:
+        raise RuntimeError("database is required for bot status persistence")
+    with db.session() as session:
+        bot = session.get(BotRecord, bot_id)
+        if bot is None:
+            raise KeyError(f"Bot {bot_id} was not found")
+        bot.status = status
+        bot.updated_at = _utcnow()
+        run = session.get(BotRunRecord, run_id)
+        if run is None:
+            run = BotRunRecord(run_id=run_id, bot_id=bot_id, status=status, started_at=_utcnow())
+            session.add(run)
+        run.status = "telemetry_degraded" if telemetry_degraded else status
+        run.updated_at = _utcnow()
+        if status in {"stopped", "failed"}:
+            run.ended_at = _utcnow()

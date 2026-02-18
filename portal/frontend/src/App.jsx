@@ -6,9 +6,12 @@ import { IndicatorSection } from './components/IndicatorTab.jsx'
 import StrategyTab from './components/StrategyTab.jsx'
 import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
-import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, X } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, Settings, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
 import { ReportsPage } from './components/reports/ReportsPage.jsx'
+import { GlobalSettingsModal } from './components/GlobalSettingsModal.jsx'
+import { usePortalSettings } from './contexts/PortalSettingsContext.jsx'
+import { useAccentColor } from './contexts/AccentColorContext.jsx'
 
 const navItems = [
   {
@@ -199,6 +202,9 @@ function AppShell({ chartId }) {
   const mountedRef = useRef(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const { settings } = usePortalSettings()
+  const { setAccentColor } = useAccentColor()
   const location = useLocation()
 
   useEffect(() => {
@@ -278,6 +284,12 @@ function AppShell({ chartId }) {
     setSidebarOpen(false)
   }, [location.pathname])
 
+  useEffect(() => {
+    if (settings?.accentColor) {
+      setAccentColor(settings.accentColor)
+    }
+  }, [settings?.accentColor, setAccentColor])
+
   const healthMessage = chart.healthStatus === 'error'
     ? (chart.healthMessage || healthErrorRef.current)
     : null
@@ -312,6 +324,14 @@ function AppShell({ chartId }) {
                 <div className="text-lg font-semibold text-slate-100">{currentNav?.label}</div>
               </div>
               <div className="ml-auto hidden items-center gap-3 text-xs text-slate-400 md:flex">
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)] hover:text-[color:var(--accent-text-strong)]"
+                  aria-label="Open global settings"
+                >
+                  <Settings className="size-4" />
+                </button>
                 <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 uppercase tracking-[0.2em]">QuantTrad</span>
               </div>
             </div>
@@ -436,6 +456,7 @@ function AppShell({ chartId }) {
               </Routes>
             </div>
           </main>
+          <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         </div>
       </div>
     </div>

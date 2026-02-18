@@ -404,6 +404,8 @@ class BotRecord(Base):
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
     wallet_config = Column(JSON, nullable=False, default=dict)
+    snapshot_interval_ms = Column(Integer, nullable=False, default=1000)
+    bot_env = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
     last_stats = Column(JSON, nullable=False, default=dict)
@@ -429,6 +431,8 @@ class BotRecord(Base):
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
             "wallet_config": dict(self.wallet_config or {}),
+            "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
+            "bot_env": dict(self.bot_env or {}),
             "status": self.status,
             "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
             "last_stats": dict(self.last_stats or {}),
@@ -620,6 +624,32 @@ class BotRunStepRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
+
+
+
+class BotRunSnapshotRecord(Base):
+    """Durable runtime snapshots for BotLens and recovery."""
+
+    __tablename__ = "portal_bot_run_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False)
+    bot_id = Column(String(64), nullable=False)
+    series_key = Column(String(255), nullable=False)
+    snapshot_seq = Column(Integer, nullable=False)
+    snapshot_payload = Column(JSONB, nullable=False, default=dict)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "series_key": self.series_key,
+            "snapshot_seq": int(self.snapshot_seq or 0),
+            "snapshot_payload": dict(self.snapshot_payload or {}),
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
 
 class AsyncJobRecord(Base):
     """Database-backed async job used by API and worker processes."""

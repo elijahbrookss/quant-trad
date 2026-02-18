@@ -104,3 +104,8 @@ export function openBotsStream() {
     return null
   }
 }
+
+
+export async function fetchBotSettingsCatalog() {
+  return request('/api/bots/settings-catalog')
+}

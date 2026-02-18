@@ -26,7 +26,6 @@ _PROFILE_RESOLUTION_CACHE: Dict[tuple[Any, ...], List[Any]] = {}
 _PROFILE_CACHE_LOCK = threading.Lock()
 _PROFILE_KNOWN_EPOCHS_CACHE: Dict[tuple[Any, ...], List[int]] = {}
 _PROFILE_RUNTIME_VIEW_CACHE: Dict[tuple[Any, ...], List[Dict[str, Any]]] = {}
-_MP_RUNTIME_STATE: Dict[tuple[str, str, str], Dict[str, Any]] = {}
 
 
 def _bias_from_direction(direction: str) -> str:
@@ -179,7 +178,7 @@ def market_profile_rule_payload(
                 _PROFILE_RUNTIME_VIEW_CACHE[cache_key] = runtime_views
         cache_hit = True
     runtime_key = (indicator_id, symbol, runtime_scope)
-    runtime_state = _get_runtime_state(runtime_key=runtime_key, current_epoch=current_epoch)
+    runtime_state = _get_runtime_state(snapshot_payload=snapshot_payload, runtime_key=runtime_key, current_epoch=current_epoch)
     bar_epoch = int(candle.time.timestamp())
     v3_outcome = _market_profile_breakout_v3_payload(
         snapshot_payload=snapshot_payload,
@@ -712,20 +711,24 @@ def _resolve_float(
     return max(min_value, float(default))
 
 
-def _get_runtime_state(*, runtime_key: tuple[str, str, str], current_epoch: int) -> Dict[str, Any]:
-    with _PROFILE_CACHE_LOCK:
-        state = _MP_RUNTIME_STATE.get(runtime_key)
-        if state is None:
-            state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
-            _MP_RUNTIME_STATE[runtime_key] = state
-            return state
-        last_epoch = state.get("last_epoch")
-        if isinstance(last_epoch, int) and current_epoch <= last_epoch:
-            state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
-            _MP_RUNTIME_STATE[runtime_key] = state
-        return state
-
-
+def _get_runtime_state(
+    *, snapshot_payload: Mapping[str, Any], runtime_key: tuple[str, str, str], current_epoch: int
+) -> Dict[str, Any]:
+    storage = snapshot_payload.get("_runtime_state_storage")
+    if not isinstance(storage, MutableMapping):
+        storage = {}
+        if isinstance(snapshot_payload, MutableMapping):
+            snapshot_payload["_runtime_state_storage"] = storage
+    temporal_key = f"{runtime_key[0]}|{runtime_key[1]}|{runtime_key[2]}|{int(current_epoch)}"
+    state = storage.get(temporal_key)
+    if not isinstance(state, dict):
+        state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
+        storage[temporal_key] = state
+    last_epoch = state.get("last_epoch")
+    if isinstance(last_epoch, int) and current_epoch <= last_epoch:
+        state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
+        storage[temporal_key] = state
+    return state
 def _build_runtime_view(profile: Any) -> Dict[str, Any]:
     end_epoch = _to_epoch(getattr(profile, "end", None))
     if end_epoch is None:

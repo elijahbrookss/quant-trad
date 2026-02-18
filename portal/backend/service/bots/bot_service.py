@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from queue import Queue
@@ -11,8 +12,8 @@ import logging
 
 from ..market import instrument_service
 from ..risk.atm import merge_templates, template_metrics
-from .bot_runtime import BotRuntime
 from .bot_watchdog import get_watchdog
+from .runner import DockerBotRunner
 from .bot_stream import BotStreamManager
 from ..storage.storage import (
     delete_bot,
@@ -26,7 +27,6 @@ from ..storage.storage import (
 
 logger = logging.getLogger(__name__)
 
-_RUNTIME: Dict[str, BotRuntime] = {}
 _BOT_STREAM_MANAGER = BotStreamManager()
 MIN_STARTING_WALLET = 10.0
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
@@ -220,6 +220,66 @@ def _validate_wallet_config(wallet_config: Optional[Mapping[str, Any]]) -> Dict[
     return {"balances": normalized}
 
 
+
+
+def _validate_bot_env(value: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("bot_env must be an object map")
+    normalized: Dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key or "").strip().upper()
+        if not key:
+            continue
+        if not key.replace("_", "").isalnum() or not (key[0].isalpha() or key[0] == "_"):
+            raise ValueError(f"Invalid env var key: {raw_key}")
+        normalized[key] = "" if raw_value is None else str(raw_value)
+    return normalized
+
+
+def _mask_env_value(key: str, value: Optional[str]) -> str:
+    k = str(key or "").upper()
+    secret_hint = any(token in k for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "PASS", "DSN"))
+    if secret_hint:
+        return "***"
+    return "" if value is None else str(value)
+
+
+def bot_settings_catalog() -> Dict[str, Any]:
+    exposed = [
+        "BOT_RUNTIME_IMAGE",
+        "BOT_RUNTIME_NETWORK",
+        "BACKEND_TELEMETRY_WS_URL",
+        "SNAPSHOT_INTERVAL_MS",
+        "BOT_WATCHDOG_HEARTBEAT_INTERVAL",
+        "BOT_WATCHDOG_STALE_THRESHOLD",
+        "BOT_WATCHDOG_MONITOR_INTERVAL",
+        "PG_DSN",
+    ]
+    env_rows: List[Dict[str, Any]] = []
+    for key in exposed:
+        current = os.getenv(key)
+        env_rows.append(
+            {
+                "key": key,
+                "value": _mask_env_value(key, current),
+                "is_secret": _mask_env_value(key, current) == "***",
+                "is_set": current not in (None, ""),
+            }
+        )
+
+    return {
+        "bot_defaults": {
+            "snapshot_interval_ms": int(os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "1000") or "1000"),
+            "env_templates": [
+                {"key": "SNAPSHOT_INTERVAL_MS", "default": os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "1000")},
+                {"key": "BACKEND_TELEMETRY_WS_URL", "default": os.getenv("BACKEND_TELEMETRY_WS_URL", "")},
+            ],
+        },
+        "runtime_env": env_rows,
+    }
+
 def _validate_strategy_ids(
     strategy_ids: Optional[Iterable[str]],
     fallback: Optional[str] = None,
@@ -312,32 +372,12 @@ def _validate_instrument_policy(bot: Mapping[str, object]) -> None:
                 )
 
 
-def _runtime_for(bot_id: str, config: Dict[str, object]) -> BotRuntime:
-    """Return a cached runtime for the bot, creating one if required."""
-
-    runtime = _RUNTIME.get(bot_id)
-    payload = dict(config)
-    if runtime is None:
-        runtime = BotRuntime(
-            bot_id,
-            payload,
-            state_callback=lambda patch, *, _bot_id=bot_id: _persist_runtime_patch(_bot_id, patch),
-        )
-        _RUNTIME[bot_id] = runtime
-    else:
-        runtime.apply_config(payload)
-    return runtime
-
-
 def list_bots() -> List[Dict[str, object]]:
-    """Return all bot configs enriched with runtime status."""
+    """Return all bot configs."""
 
     bots = load_bots()
     for bot in bots:
         bot["instrument_type"] = _instrument_policy_from_bot(bot)
-        runtime = _RUNTIME.get(bot["id"])
-        if runtime:
-            bot["runtime"] = runtime.snapshot()
     return bots
 
 
@@ -368,9 +408,13 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
         "backtest_end": _coerce_isoformat(payload.get("backtest_end")),
         "risk": dict(payload.get("risk") or {}),
         "wallet_config": wallet_config,
+        "snapshot_interval_ms": int(payload.get("snapshot_interval_ms") or 0),
+        "bot_env": _validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {}),
         "status": "idle",
         "last_stats": {},
     }
+    if int(record.get("snapshot_interval_ms") or 0) <= 0:
+        raise ValueError("snapshot_interval_ms is required and must be > 0")
     _apply_instrument_policy(record, payload.get("instrument_type"))
     _validate_backtest_window(record)
     upsert_bot(record)
@@ -415,11 +459,19 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
         record["backtest_end"] = _coerce_isoformat(payload.get("backtest_end"))
     if "wallet_config" in payload and payload["wallet_config"] is not None:
         record["wallet_config"] = _validate_wallet_config(payload.get("wallet_config"))
+    if "snapshot_interval_ms" in payload and payload["snapshot_interval_ms"] is not None:
+        interval = int(payload["snapshot_interval_ms"])
+        if interval <= 0:
+            raise ValueError("snapshot_interval_ms is required and must be > 0")
+        record["snapshot_interval_ms"] = interval
+    if "bot_env" in payload:
+        next_env = _validate_bot_env(payload.get("bot_env") if isinstance(payload.get("bot_env"), Mapping) else {})
+        current_env = dict(record.get("bot_env") or {})
+        if str(record.get("status") or "").lower() == "running" and next_env != current_env:
+            raise ValueError("Bot env settings changed. Stop and restart the bot to apply new env vars.")
+        record["bot_env"] = next_env
     _validate_backtest_window(record)
     upsert_bot(record)
-    runtime = _RUNTIME.get(bot_id)
-    if runtime:
-        runtime.apply_config(record)
     logger.info("[BotService] bot updated", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot", {"bot": record})
     return record
@@ -428,9 +480,6 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
 def delete_bot_record(bot_id: str) -> None:
     """Delete a bot and stop its runtime if needed."""
 
-    runtime = _RUNTIME.pop(bot_id, None)
-    if runtime:
-        runtime.stop()
     get_watchdog().unregister_bot(bot_id)
     delete_bot(bot_id)
     logger.info("[BotService] bot deleted", extra={"bot_id": bot_id})
@@ -438,7 +487,7 @@ def delete_bot_record(bot_id: str) -> None:
 
 
 def start_bot(bot_id: str) -> Dict[str, object]:
-    """Start the runtime for the requested bot."""
+    """Start the runtime for the requested bot (container-only)."""
 
     bots = {bot["id"]: bot for bot in load_bots()}
     if bot_id not in bots:
@@ -452,79 +501,43 @@ def start_bot(bot_id: str) -> Dict[str, object]:
     _validate_strategy_existence(bot)
     _validate_instrument_policy(bot)
 
-    logger.info(
-        "[BotService] starting bot with strategies",
-        extra={"bot_id": bot_id, "strategy_ids": bot["strategy_ids"]},
-    )
-    logger.info("[BotService] bot runtime start requested", extra={"bot_id": bot_id})
-    runtime = _runtime_for(bot_id, bot)
-    runtime.reset_if_finished()
-    get_watchdog().register_bot(bot_id)
-    runtime.start()
-    logger.info("[BotService] bot runtime start dispatched", extra={"bot_id": bot_id})
+    runner = DockerBotRunner.from_env()
+    container_id = runner.start_bot(bot=bot)
     bot["status"] = "running"
+    bot["runner_id"] = container_id
     bot["last_run_at"] = _now_iso()
-    bot["runtime"] = runtime.snapshot()
-    if isinstance(bot.get("runtime"), Mapping):
-        _upsert_run_row_from_runtime(bot, bot.get("runtime"))
     upsert_bot(bot)
-    logger.info("[BotService] bot started", extra={"bot_id": bot_id})
+    logger.info("bot_container_started | bot_id=%s | container_id=%s", bot_id, container_id)
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
 def stop_bot(bot_id: str) -> Dict[str, object]:
-    """Stop a running bot."""
+    """Stop a running bot container."""
 
-    runtime = _RUNTIME.get(bot_id)
-    if runtime:
-        runtime.stop()
+    runner = DockerBotRunner.from_env()
+    runner.stop_bot(bot_id=bot_id)
     get_watchdog().unregister_bot(bot_id)
     bots = {bot["id"]: bot for bot in load_bots()}
     if bot_id not in bots:
         raise KeyError(f"Bot {bot_id} was not found")
     bot = bots[bot_id]
     bot["status"] = "stopped"
+    bot["runner_id"] = None
     upsert_bot(bot)
-    logger.info("[BotService] bot stopped", extra={"bot_id": bot_id})
+    logger.info("bot_container_stopped | bot_id=%s", bot_id)
     _broadcast_bot_stream("bot", {"bot": bot})
     return bot
 
 
 def pause_bot(bot_id: str) -> Dict[str, object]:
-    """Pause a running bot and persist status."""
+    raise RuntimeError("Pause is not supported for container-only bot runtime")
 
-    runtime = _RUNTIME.get(bot_id)
-    if runtime is None:
-        raise KeyError(f"Bot {bot_id} has not been started")
-    runtime.pause()
-    bots = {bot["id"]: bot for bot in load_bots()}
-    if bot_id not in bots:
-        raise KeyError(f"Bot {bot_id} was not found")
-    bot = bots[bot_id]
-    bot["status"] = "paused"
-    upsert_bot(bot)
-    logger.info("[BotService] bot paused", extra={"bot_id": bot_id})
-    _broadcast_bot_stream("bot", {"bot": bot})
-    return bot
 
 
 def resume_bot(bot_id: str) -> Dict[str, object]:
-    """Resume a paused bot."""
+    raise RuntimeError("Resume is not supported for container-only bot runtime")
 
-    runtime = _RUNTIME.get(bot_id)
-    if runtime is None:
-        raise KeyError(f"Bot {bot_id} has not been started")
-    runtime.resume()
-    bots = {bot["id"]: bot for bot in load_bots()}
-    if bot_id not in bots:
-        raise KeyError(f"Bot {bot_id} was not found")
-    bot = bots[bot_id]
-    bot["status"] = "running"
-    upsert_bot(bot)
-    logger.info("[BotService] bot resumed", extra={"bot_id": bot_id})
-    _broadcast_bot_stream("bot", {"bot": bot})
-    return bot
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
@@ -533,9 +546,6 @@ def get_bot(bot_id: str) -> Dict[str, object]:
     for bot in load_bots():
         if bot["id"] == bot_id:
             bot["instrument_type"] = _instrument_policy_from_bot(bot)
-            runtime = _RUNTIME.get(bot_id)
-            if runtime:
-                bot["runtime"] = runtime.snapshot()
             return bot
     raise KeyError(f"Bot {bot_id} was not found")
 
@@ -543,49 +553,35 @@ def get_bot(bot_id: str) -> Dict[str, object]:
 def runtime_status(bot_id: str) -> Dict[str, object]:
     """Return live runtime data for a bot."""
 
-    runtime = _RUNTIME.get(bot_id)
-    if not runtime:
-        raise KeyError(f"Bot {bot_id} has not been started")
-    return runtime.snapshot()
+    raise RuntimeError("In-process runtime status is removed; use container telemetry stream and persisted status")
 
 
 def runtime_logs(bot_id: str, limit: int = 200) -> List[Dict[str, Any]]:
     """Return recent runtime log entries for a bot."""
 
-    bot = get_bot(bot_id)
-    runtime = _runtime_for(bot_id, bot)
-    runtime.warm_up()
-    return runtime.logs(limit)
+    raise RuntimeError("In-process runtime logs are removed; use docker logs for bot containers")
 
 
 def stream(bot_id: str) -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
-    """Return a release callback, queue, and initial payload for SSE streaming."""
+    """Container runtime path only."""
 
-    bot = get_bot(bot_id)
-    status = str(bot.get("status") or "idle").lower()
-    runtime = _RUNTIME.get(bot_id)
-    if runtime is None:
-        if status == "idle":
-            raise ValueError("Bot has not been started yet.")
-        runtime = _runtime_for(bot_id, bot)
-    else:
-        runtime.apply_config(bot)
-    runtime.warm_up()
-    token, channel = runtime.subscribe()
-
-    def _release() -> None:
-        runtime.unsubscribe(token)
-
-    initial = runtime.chart_payload()
-    initial.setdefault("meta", _performance_meta(bot))
-    initial.setdefault("type", "snapshot")
-    return _release, channel, initial
+    raise RuntimeError("Use websocket telemetry and DB snapshots for container runtime")
 
 
 def bots_stream() -> Tuple[Callable[[], None], Queue, Dict[str, Any]]:
     """Return a release callback, queue, and initial payload for all-bots SSE."""
 
     return _BOT_STREAM_MANAGER.subscribe_all(list_bots)
+
+
+def watchdog_status() -> Dict[str, Any]:
+    watchdog = get_watchdog()
+    stale = watchdog.scan_stale_heartbeats()
+    containers = watchdog.verify_container_ownership()
+    status = watchdog.status()
+    status["stale_marked_failed"] = stale
+    status["container_marked_failed"] = containers
+    return status
 
 
 def _indicator_meta(strategy: Dict[str, object]) -> List[Dict[str, object]]:
@@ -676,70 +672,13 @@ def _performance_meta(bot: Dict[str, object]) -> Dict[str, object]:
 
 
 def performance(bot_id: str) -> Dict[str, object]:
-    """Return candle, trade, stat, and metadata payloads for the lens chart."""
+    """Container runtime path only."""
 
-    bot = get_bot(bot_id)
-    runtime = _RUNTIME.get(bot_id)
-    status = str(bot.get("status") or "idle").lower()
-    payload: Dict[str, Any]
-    if runtime is not None:
-        runtime.apply_config(bot)
-        runtime.warm_up()
-        payload = runtime.chart_payload()
-        payload.setdefault("logs", runtime.logs())
-    elif status == "idle":
-        payload = {
-            "candles": [],
-            "trades": [],
-            "stats": bot.get("last_stats") or {},
-            "overlays": [],
-            "logs": [],
-            "warnings": [],
-            "inactive": True,
-            "message": "Start this bot to stream performance data.",
-            "runtime": {
-                "status": status,
-                "progress": 0.0,
-                "paused": False,
-                "next_bar_in_seconds": None,
-            },
-        }
-    else:
-        runtime = _runtime_for(bot_id, bot)
-        runtime.apply_config(bot)
-        runtime.warm_up()
-        payload = runtime.chart_payload()
-        payload.setdefault("logs", runtime.logs())
-    payload["meta"] = _performance_meta(bot)
-    if runtime is not None:
-        payload["runtime"] = runtime.snapshot()
-    else:
-        payload.setdefault("runtime", {"status": status})
-    return payload
+    raise RuntimeError("Performance API from in-process runtime is removed for container runtime")
 
 
 def regime_overlays(bot_id: str) -> Dict[str, Any]:
-    """Return raw vs visible regime overlays for debugging."""
+    """Container runtime path only."""
 
-    bot = get_bot(bot_id)
-    runtime = _RUNTIME.get(bot_id) or _runtime_for(bot_id, bot)
-    runtime.apply_config(bot)
-    runtime.warm_up()
-    return runtime.regime_overlay_dump()
+    raise RuntimeError("Regime overlay debug endpoint is unavailable for container runtime")
 
-
-__all__ = [
-    "create_bot",
-    "delete_bot_record",
-    "get_bot",
-    "list_bots",
-    "pause_bot",
-    "performance",
-    "runtime_logs",
-    "resume_bot",
-    "runtime_status",
-    "stream",
-    "start_bot",
-    "stop_bot",
-    "update_bot",
-]

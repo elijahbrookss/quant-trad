@@ -53,8 +53,10 @@ export function useBotCreateForm(initialForm = buildDefaultForm()) {
     return { walletConfig: { balances }, walletError: null }
   }, [form.wallet_balances])
 
-  const handleChange = useCallback((event) => {
-    const { name, value } = event.target
+  const handleChange = useCallback((eventOrName, directValue = undefined) => {
+    const isEvent = eventOrName && typeof eventOrName === 'object' && eventOrName.target
+    const name = isEvent ? eventOrName.target.name : String(eventOrName || '')
+    const value = isEvent ? eventOrName.target.value : directValue
     setForm((prev) => {
       const next = { ...prev, [name]: value }
       if (name === 'run_type' && value !== 'backtest') {

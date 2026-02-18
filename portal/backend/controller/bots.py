@@ -8,12 +8,13 @@ import math
 from collections.abc import Mapping as AbcMapping
 from typing import Any, Dict, List, Mapping, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
 from datetime import datetime
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
+from ..service.bots.telemetry_stream import telemetry_hub
 
 
 router = APIRouter()
@@ -63,6 +64,8 @@ class BotBase(BaseModel):
     backtest_start: Optional[str] = None
     backtest_end: Optional[str] = None
     wallet_config: Dict[str, Any] = Field(default_factory=dict)
+    snapshot_interval_ms: int = Field(..., gt=0)
+    bot_env: Dict[str, str] = Field(default_factory=dict)
     instrument_type: Optional[str] = None
 
 
@@ -85,6 +88,8 @@ class BotUpdateRequest(BaseModel):
     playback_speed: Optional[float] = Field(default=None, ge=0)
     focus_symbol: Optional[str] = None
     wallet_config: Optional[Dict[str, Any]] = None
+    snapshot_interval_ms: Optional[int] = Field(default=None, gt=0)
+    bot_env: Optional[Dict[str, str]] = None
     instrument_type: Optional[str] = None
 
 
@@ -134,7 +139,24 @@ async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
         return bot_service.create_bot(**body.dict())
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
+
+
+
+@router.get("/settings-catalog")
+async def bot_settings_catalog() -> Dict[str, Any]:
+    """Return bot runtime settings metadata and masked environment visibility."""
+
+    return bot_service.bot_settings_catalog()
+
+
+@router.get("/watchdog")
+async def bot_watchdog_status() -> Dict[str, Any]:
+    """Return watchdog status and run immediate stale/container checks."""
+
+    return bot_service.watchdog_status()
 
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
@@ -215,6 +237,8 @@ async def stop_bot(bot_id: str) -> Dict[str, Any]:
         return bot_service.stop_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/{bot_id}/status")
@@ -225,6 +249,8 @@ async def get_bot_status(bot_id: str) -> Dict[str, Any]:
         return bot_service.runtime_status(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/{bot_id}/logs", response_model=BotLogsResponse)
@@ -236,6 +262,8 @@ async def get_bot_logs(bot_id: str, limit: int = 200) -> Dict[str, Any]:
         return {"logs": logs}
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/{bot_id}/pause", response_model=BotResponse)
@@ -246,6 +274,8 @@ async def pause_bot(bot_id: str) -> Dict[str, Any]:
         return bot_service.pause_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/{bot_id}/resume", response_model=BotResponse)
@@ -256,6 +286,8 @@ async def resume_bot(bot_id: str) -> Dict[str, Any]:
         return bot_service.resume_bot(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/{bot_id}/performance", response_model=BotPerformanceResponse)
@@ -266,6 +298,8 @@ async def get_bot_performance(bot_id: str) -> Dict[str, Any]:
         return bot_service.performance(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/{bot_id}/regime_overlays")
@@ -276,6 +310,8 @@ async def get_bot_regime_overlays(bot_id: str) -> Dict[str, Any]:
         return bot_service.regime_overlays(bot_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -290,6 +326,8 @@ async def stream_bot(bot_id: str) -> StreamingResponse:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
     async def event_iterator():
         try:
@@ -311,3 +349,29 @@ async def stream_bot(bot_id: str) -> StreamingResponse:
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
+
+
+@router.websocket("/ws/telemetry/ingest")
+async def bot_telemetry_ingest(websocket: WebSocket) -> None:
+    await websocket.accept()
+    while True:
+        try:
+            payload = await websocket.receive_json()
+        except WebSocketDisconnect:
+            break
+        bot_id = str(payload.get("bot_id") or "").strip()
+        if not bot_id:
+            continue
+        await telemetry_hub.broadcast(bot_id=bot_id, payload=payload)
+
+
+@router.websocket("/ws/{bot_id}")
+async def bot_lens_ws(bot_id: str, websocket: WebSocket) -> None:
+    await telemetry_hub.add_viewer(bot_id=bot_id, ws=websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await telemetry_hub.remove_viewer(bot_id=bot_id, ws=websocket)

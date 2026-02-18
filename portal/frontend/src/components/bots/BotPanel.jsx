@@ -17,12 +17,28 @@ import { buildDefaultForm } from './create/botCreateFormDefaults.js'
 import { useBotCreateForm } from './create/useBotCreateForm.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
+import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
 
 const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+
+const parseEnvText = (text) => {
+  const next = {}
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const idx = trimmed.indexOf('=')
+    if (idx <= 0) continue
+    const key = trimmed.slice(0, idx).trim()
+    const value = trimmed.slice(idx + 1).trim()
+    if (key) next[key] = value
+  }
+  return next
+}
 
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
+  const { settings } = usePortalSettings()
   const {
     form,
     walletConfig,
@@ -255,6 +271,8 @@ export function BotPanel() {
       const { wallet_balances, ...rest } = form
       const payloadBody = {
         ...rest,
+        snapshot_interval_ms: Number(form.snapshot_interval_ms || 1000),
+        bot_env: form.bot_env || {},
         mode: normalizedMode,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
@@ -469,6 +487,12 @@ export function BotPanel() {
             onClick={() => {
               logger.info('bot_create_modal_open')
               setCreateError(null)
+              resetForm({
+                strategy_ids: form.strategy_ids || [],
+                run_type: form.run_type || 'backtest',
+                snapshot_interval_ms: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
+                bot_env: parseEnvText(settings?.botDefaults?.envText || ''),
+              })
               setCreateOpen(true)
             }}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"

@@ -114,10 +114,12 @@ class Database:
         require_table("portal_bot_trades")
         require_table("portal_bots")
         require_table("portal_async_jobs")
+        require_table("portal_bot_run_snapshots")
         assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
         assert_columns("portal_async_jobs")
+        assert_columns("portal_bot_run_snapshots")
         with self._engine.begin() as conn:
             # Serialize schema/index DDL across backend + workers.
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})

@@ -1,3 +1,5 @@
+name: quant-trad
+
 services:
   frontend:
     profiles: [core]

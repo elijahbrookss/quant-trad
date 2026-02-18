@@ -23,6 +23,7 @@ from portal.backend.service.indicators.indicator_service.api import (
     generate_signals_for_instance,
     overlays_for_instance,
 )
+from portal.backend.service.indicators.indicator_service.context import IndicatorServiceContext
 
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ def _worker_identity() -> tuple[str, int, int]:
     return worker_id, index, total
 
 
-def _process_overlay(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _process_overlay(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
     return overlays_for_instance(
         inst_id=str(payload["inst_id"]),
         start=str(payload["start"]),
@@ -64,10 +65,11 @@ def _process_overlay(payload: Dict[str, Any]) -> Dict[str, Any]:
         exchange=payload.get("exchange"),
         instrument_id=payload.get("instrument_id"),
         overlay_options=payload.get("overlay_options") if isinstance(payload.get("overlay_options"), dict) else None,
+        ctx=ctx,
     )
 
 
-def _process_signals(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
     return generate_signals_for_instance(
         inst_id=str(payload["inst_id"]),
         start=str(payload["start"]),
@@ -77,6 +79,7 @@ def _process_signals(payload: Dict[str, Any]) -> Dict[str, Any]:
         datasource=payload.get("datasource"),
         exchange=payload.get("exchange"),
         config=payload.get("config") if isinstance(payload.get("config"), dict) else None,
+        ctx=ctx,
     )
 
 
@@ -100,11 +103,14 @@ def main() -> int:
         )
         return 2
 
+    indicator_ctx = IndicatorServiceContext.for_quantlab_worker(cache_scope_id=worker_id)
     logger.info(
-        "quantlab_worker_ready | worker_id=%s partition_index=%s partition_total=%s",
+        "quantlab_worker_ready | worker_id=%s partition_index=%s partition_total=%s | cache_owner=%s | cache_scope_id=%s",
         worker_id,
         partition_index,
         partition_total,
+        indicator_ctx.cache_owner,
+        indicator_ctx.cache_scope_id,
     )
 
     while not _STOP:
@@ -126,9 +132,9 @@ def main() -> int:
         started = time.monotonic()
         try:
             if job.job_type == JOB_TYPE_OVERLAYS:
-                result = _process_overlay(job.payload)
+                result = _process_overlay(job.payload, ctx=indicator_ctx)
             elif job.job_type == JOB_TYPE_SIGNALS:
-                result = _process_signals(job.payload)
+                result = _process_signals(job.payload, ctx=indicator_ctx)
             else:
                 raise RuntimeError(f"unknown_job_type: {job.job_type}")
             complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
