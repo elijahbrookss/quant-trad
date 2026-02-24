@@ -1,72 +1,23 @@
-"""
-Signals package with automatic signal rule discovery.
+"""Shared signal contracts and execution helpers."""
 
-This package automatically discovers and imports all signal rule modules,
-triggering @signal_rule decorator registration without manual imports.
-
-Simply import this package to register all signals:
-    import signals  # Auto-discovers all signal rules
-"""
-
-import importlib
-import pkgutil
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-def _discover_signal_rules():
-    """
-    Auto-discover and import all signal rule modules.
-
-    Walks through signals/rules/ and imports all modules to trigger
-    @signal_rule decorator execution and registration.
-    """
-    try:
-        import signals.rules as rules_package
-
-        discovered_count = 0
-        failed_count = 0
-        for importer, modname, ispkg in pkgutil.walk_packages(
-            path=rules_package.__path__,
-            prefix=f"{rules_package.__name__}.",
-        ):
-            # Import leaf modules (where @signal_rule decorators are)
-            if not ispkg:
-                try:
-                    importlib.import_module(modname)
-                    discovered_count += 1
-                except Exception as e:
-                    failed_count += 1
-                    logger.warning(f"Failed to import signal module {modname}: {e}")
-
-        if failed_count > 0:
-            logger.warning(
-                "signal_rule_modules_discovered_with_failures | discovered=%s failed=%s",
-                discovered_count,
-                failed_count,
-            )
-        else:
-            logger.debug(
-                "signal_rule_modules_discovered | discovered=%s",
-                discovered_count,
-            )
-
-    except ImportError as e:
-        logger.warning(f"Could not import signals.rules package: {e}")
-
-
-# Trigger auto-discovery when this package is imported
-_discover_signal_rules()
-
-
-# Export commonly used items for convenience
 from .base import BaseSignal
-from .engine.signal_generator import indicator_plugin, overlay_adapter, signal_rule
+from .contract import (
+    assert_no_execution_fields,
+    assert_signal_contract,
+    assert_signal_time_is_closed_bar,
+)
+from .engine.signal_generator import (
+    build_signal_overlays,
+    describe_indicator_rules,
+    run_indicator_rules,
+)
 
 __all__ = [
     "BaseSignal",
-    "signal_rule",
-    "overlay_adapter",
-    "indicator_plugin",
+    "assert_signal_contract",
+    "assert_no_execution_fields",
+    "assert_signal_time_is_closed_bar",
+    "run_indicator_rules",
+    "build_signal_overlays",
+    "describe_indicator_rules",
 ]

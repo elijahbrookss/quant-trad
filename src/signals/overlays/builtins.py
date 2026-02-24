@@ -41,43 +41,12 @@ def _discover_indicator_overlay_modules() -> None:
     )
 
 
-def _discover_signal_rule_modules() -> None:
-    """Import signals.rules modules so rule-owned overlay decorators register."""
-    try:
-        import signals.rules as rules_pkg
-    except Exception as exc:
-        logger.warning("overlay_signal_rule_discovery_failed | error=%s", exc)
-        return
-
-    discovered = 0
-    failed = 0
-    for _importer, modname, ispkg in pkgutil.walk_packages(
-        path=rules_pkg.__path__,
-        prefix=f"{rules_pkg.__name__}.",
-    ):
-        if ispkg:
-            continue
-        try:
-            importlib.import_module(modname)
-            discovered += 1
-        except Exception as exc:
-            failed += 1
-            logger.warning("overlay_signal_rule_import_failed | module=%s error=%s", modname, exc)
-    logger.debug(
-        "overlay_signal_rule_modules_discovered | discovered=%s failed=%s",
-        discovered,
-        failed,
-    )
-
-
 def ensure_builtin_overlays_registered() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
 
     _discover_indicator_overlay_modules()
-
-    _discover_signal_rule_modules()
 
     # Non-indicator overlays are registered explicitly here.
     register_overlay_type(
