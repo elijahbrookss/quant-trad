@@ -56,6 +56,21 @@ Nothing “snaps into existence” retroactively.
 
 If an artifact would not exist yet in live trading, it must not exist yet in the system.
 
+## Engine Consistency Rule
+
+All derived outputs must come from one runtime state-engine timeline:
+
+`initialize -> apply_bar -> snapshot`
+
+This applies to indicators, overlays, signals, strategy previews, bot runtime, and playback views.
+
+- Do not add alternate reconstruction paths for the same artifact.
+- Do not read mutable engine internals from outside the engine.
+- If required data is missing from `snapshot.payload`, add it to the engine contract.
+- If a consumer cannot run from snapshots, fail loud with actionable context.
+
+This rule exists to prevent semantic drift and preserve trust across the platform.
+
 ---
 
 ## Logging Is Part of the Product
