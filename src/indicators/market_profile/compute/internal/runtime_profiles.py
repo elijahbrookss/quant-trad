@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from indicators.market_profile.domain import Profile, ValueArea
-from indicators.market_profile._internal.merging import merge_profiles
+from indicators.market_profile.compute.models import Profile, ValueArea
+from indicators.market_profile.compute.internal.merging import merge_profiles
 
 logger = logging.getLogger(__name__)
 _LAST_RESOLUTION_LOG_SIGNATURE: Dict[Tuple[str, str, str, str], Tuple[int, int]] = {}

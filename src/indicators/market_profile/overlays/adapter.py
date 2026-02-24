@@ -6,9 +6,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from indicators.market_profile import MarketProfileIndicator
+from indicators.market_profile.compute.engine import MarketProfileIndicator
 from signals.base import BaseSignal
-from signals.engine.signal_generator import overlay_adapter
 from signals.overlays.schema import build_overlay
 from signals.overlays.registry import overlay_type
 from signals.overlays.transformers import overlay_transformer
@@ -369,7 +368,6 @@ def _apply_collision_avoidance(
     payload_keys=("boxes", "markers", "bubbles"),
     ui_color="#38bdf8",
 )
-@overlay_adapter("market_profile")
 def market_profile_overlay_adapter(
     signals: Sequence[BaseSignal],
     plot_df: pd.DataFrame,
@@ -856,7 +854,7 @@ def market_profile_overlay_transformer(
     strategy_id = overlay.get("strategy_id") or payload.get("strategy_id")
 
     try:
-        from indicators.market_profile._internal.runtime_profiles import (
+        from indicators.market_profile.compute.internal.runtime_profiles import (
             profile_identity,
             resolve_effective_profiles,
         )

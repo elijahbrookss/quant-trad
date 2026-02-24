@@ -6,7 +6,6 @@ from mplfinance.plotting import make_addplot
 
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
-from indicators.registry import indicator
 
 def _to_unix_s(ts) -> int:
     ts = pd.Timestamp(ts)
@@ -16,7 +15,6 @@ def _to_unix_s(ts) -> int:
         ts = ts.tz_convert("UTC")
     return int(ts.timestamp())
 
-@indicator(name="vwap", inputs=["ohlcv"], outputs=["vwap", "bands"])
 class VWAPIndicator(ComputeIndicator):
     """
     Computes anchored VWAP and its rolling standard-deviation bands (VWAP ± nσ).

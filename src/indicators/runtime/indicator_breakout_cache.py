@@ -15,17 +15,20 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 import pandas as pd
 
 from indicators.market_profile import MarketProfileIndicator
+from indicators.market_profile.signals import (
+    BREAKOUT_CACHE_INITIALIZED_FLAG,
+    BREAKOUT_CACHE_KEY,
+    BREAKOUT_READY_FLAG,
+    MarketProfileBreakoutConfig,
+)
 from indicators.config import DataContext
 from indicators.pivot_level import PivotLevelIndicator
+from indicators.pivot_level.signals import (
+    PivotBreakoutConfig,
+    _PIVOT_BREAKOUT_READY_FLAG,
+)
 from signals.engine.market_profile import resolve_market_profile_params
 from signals.base import BaseSignal
-from signals.rules.market_profile import (
-    MarketProfileBreakoutConfig,
-    _BREAKOUT_CACHE_INITIALISED,
-    _BREAKOUT_CACHE_KEY,
-    _BREAKOUT_READY_FLAG,
-)
-from signals.rules.pivot import PivotBreakoutConfig, _PIVOT_BREAKOUT_READY_FLAG
 from utils.log_context import build_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
@@ -310,16 +313,16 @@ class IndicatorBreakoutCache:
             MarketProfileIndicator.NAME: BreakoutCacheSpec(
                 breakout_rule_id="market_profile_breakout",
                 retest_rule_id="market_profile_retest",
-                cache_context_key=_BREAKOUT_CACHE_KEY,
-                ready_flag_key=_BREAKOUT_READY_FLAG,
-                initialised_flag_key=_BREAKOUT_CACHE_INITIALISED,
+                cache_context_key=BREAKOUT_CACHE_KEY,
+                ready_flag_key=BREAKOUT_READY_FLAG,
+                initialised_flag_key=BREAKOUT_CACHE_INITIALIZED_FLAG,
                 config_signature_builder=self._market_profile_breakout_signature,
                 rule_signal_types={
                     "market_profile_breakout": {"breakout"},
                     "market_profile_retest": {"retest"},
                     "market_profile_retest_v2": {"retest"},
                 },
-                context_defaults={_BREAKOUT_CACHE_INITIALISED: True},
+                context_defaults={BREAKOUT_CACHE_INITIALIZED_FLAG: True},
             ),
         }
 

@@ -6,9 +6,8 @@ from typing import Any, Dict, List, Sequence
 
 import pandas as pd
 
-from .indicator import TL, TrendlineIndicator
+from ..compute.engine import TL, TrendlineIndicator
 from signals.base import BaseSignal
-from signals.engine.signal_generator import overlay_adapter
 from signals.overlays.registry import overlay_type
 from signals.overlays.schema import build_overlay, PolylinePayload
 
@@ -50,7 +49,6 @@ def _line_segment(line: TL, index: pd.DatetimeIndex) -> PolylinePayload:
     payload_keys=("polylines", "markers"),
     ui_color="#a855f7",
 )
-@overlay_adapter(TrendlineIndicator)
 def trendline_overlay_adapter(
     signals: Sequence[BaseSignal],
     plot_df: pd.DataFrame,

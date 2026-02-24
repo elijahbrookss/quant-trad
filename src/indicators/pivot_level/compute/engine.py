@@ -8,7 +8,6 @@ from mplfinance.plotting import make_addplot
 from core.logger import logger as core_logger
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
-from indicators.registry import indicator
 
 log = core_logger.getChild("PivotLevelIndicator")
 
@@ -51,7 +50,6 @@ class Level:
         )
         return touches
 
-@indicator(name="pivot_level", inputs=["ohlc"], outputs=["levels"])
 class PivotLevelIndicator(ComputeIndicator):
     """
     Detects horizontal support and resistance levels by clustering pivot highs/lows,

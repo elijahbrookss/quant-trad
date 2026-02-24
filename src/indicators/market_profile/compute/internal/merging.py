@@ -8,7 +8,7 @@ import logging
 from time import perf_counter
 from typing import List
 
-from ..domain import Profile, ValueArea
+from ..models import Profile, ValueArea
 
 logger = logging.getLogger(__name__)
 _LAST_MERGE_SIGNATURE = {}

@@ -17,24 +17,18 @@ import pandas as pd
 from core.logger import logger
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
-from indicators.registry import indicator
-from indicators.runtime.overlay_cache_registry import overlay_cacheable
-from indicators.runtime.incremental_cache_registry import incremental_cacheable
 from utils.log_context import build_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
-from .domain import Profile, ValueArea
-from ._internal.computation import build_tpo_histogram, extract_value_area
-from ._internal.bin_size import select_bin_size, infer_precision_from_step
-from ._internal.merging import merge_profiles
+from .models import Profile, ValueArea
+from .internal.computation import build_tpo_histogram, extract_value_area
+from .internal.bin_size import select_bin_size, infer_precision_from_step
+from .internal.merging import merge_profiles
 
 if TYPE_CHECKING:
     from indicators.runtime.incremental_cache import IncrementalCache
 
 
-@incremental_cacheable("market_profile")
-@overlay_cacheable("market_profile")
-@indicator(name="market_profile", inputs=["ohlc"], outputs=["profiles"])
 class MarketProfileIndicator(ComputeIndicator):
     """
     Computes daily market profiles using Time Price Opportunity (TPO) methodology.

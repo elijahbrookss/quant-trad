@@ -6,7 +6,6 @@ import logging
 
 from indicators.base import ComputeIndicator
 from indicators.config import DataContext
-from indicators.registry import indicator
 
 log = logging.getLogger("TrendlineIndicator")
 
@@ -102,7 +101,6 @@ def _ransac_line(x: np.ndarray, y: np.ndarray,
 
 # ---------- the indicator ----------
 
-@indicator(name="trendline", inputs=["ohlcv"], outputs=["trendlines"])
 class TrendlineIndicator(ComputeIndicator):
     """
     Minimal, pivot-anchored trendlines:

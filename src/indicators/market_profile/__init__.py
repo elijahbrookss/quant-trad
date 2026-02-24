@@ -2,9 +2,9 @@
 Market Profile Indicator Package
 
 Every indicator needs 3 core components:
-1. indicator.py  - Compute the indicator values
-2. signals.py    - Define signal rules for trade detection
-3. overlays.py   - Visualize signals on charts
+1. compute/      - Compute indicator state and domain models
+2. signals/      - Runtime signal logic
+3. overlays/     - Overlay adapters/projectors
 
 Everything else is internal implementation details.
 """
@@ -14,13 +14,10 @@ Everything else is internal implementation details.
 # ============================================================================
 
 # 1. Indicator - Computation
-from .indicator import MarketProfileIndicator
+from .compute import MarketProfileIndicator, Profile, ValueArea
 
-# Domain types (outputs from indicator)
-from .domain import Profile, ValueArea
-
-# NOTE: Signals moved to signals/rules/market_profile/
-# They are auto-discovered when you import signals package
+# 2. Signals - Runtime signal evaluation logic
+# See src/indicators/market_profile/signals/
 
 # 3. Overlays - Visualization
 from .overlays import market_profile_overlay_adapter
