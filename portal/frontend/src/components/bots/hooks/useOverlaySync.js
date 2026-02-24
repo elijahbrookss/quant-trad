@@ -71,6 +71,7 @@ export const useOverlaySync = ({
 
       for (const overlay of overlayPayloads || []) {
         const { type, payload, color, ind_id } = overlay || {}
+        const resolvedColor = color || overlay?.ui?.color || null
         if (!payload) continue
         const paneViews = getPaneViewsForOverlay(overlay)
         const paneSet = new Set(paneViews || [])
@@ -105,7 +106,7 @@ export const useOverlaySync = ({
             symbol: overlay?.symbol,
           })
         }
-        const norm = adaptPayload(type, payload, color)
+        const norm = adaptPayload(type, payload, resolvedColor)
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
             const price = toFiniteNumber(pl?.price)
@@ -113,7 +114,7 @@ export const useOverlaySync = ({
             priceLines.push({
               ...pl,
               price,
-              color: pl.color ?? color,
+              color: pl.color ?? resolvedColor,
               source: type || pl.title || 'overlay',
             })
           })
@@ -129,7 +130,7 @@ export const useOverlaySync = ({
                 ...point,
                 time: toSec(point.time),
                 text: point.text || point.label || '',
-                textColor: point.textColor || color,
+                textColor: point.textColor || resolvedColor,
                 ind_id,
               }))
               .filter((point) => Number.isFinite(point.time)),
@@ -180,11 +181,11 @@ export const useOverlaySync = ({
         }
         const wantsBubbles = paneSet.has('signal_bubble') || (Array.isArray(norm.bubbles) && norm.bubbles.length > 0)
         if (wantsBubbles && Array.isArray(norm.bubbles) && norm.bubbles.length) {
-          const bubbleColor = color ? toRgba(color, 0.16) : undefined
-          const tinted = color
+          const bubbleColor = resolvedColor ? toRgba(resolvedColor, 0.16) : undefined
+          const tinted = resolvedColor
             ? norm.bubbles.map((bubble) => ({
                 ...bubble,
-                accentColor: color,
+                accentColor: resolvedColor,
                 backgroundColor: bubbleColor || bubble.backgroundColor,
               }))
             : norm.bubbles
