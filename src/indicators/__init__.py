@@ -35,6 +35,7 @@ def _discover_indicators():
     """
     import indicators
     discovered_count = 0
+    failed_count = 0
 
     for importer, modname, ispkg in pkgutil.walk_packages(
         path=indicators.__path__,
@@ -45,11 +46,21 @@ def _discover_indicators():
             try:
                 importlib.import_module(modname)
                 discovered_count += 1
-                logger.debug(f"Discovered indicator module: {modname}")
             except Exception as e:
+                failed_count += 1
                 logger.warning(f"Failed to import indicator module {modname}: {e}")
 
-    logger.info(f"Auto-discovered {discovered_count} indicator modules")
+    if failed_count > 0:
+        logger.warning(
+            "indicator_modules_discovered_with_failures | discovered=%s failed=%s",
+            discovered_count,
+            failed_count,
+        )
+    else:
+        logger.debug(
+            "indicator_modules_discovered | discovered=%s",
+            discovered_count,
+        )
 
 
 # Trigger auto-discovery

@@ -266,7 +266,7 @@ def market_profile_rule_payload(
     retest_tolerance_pct = _resolve_float(
         params_map,
         keys=("market_profile_retest_v2_tolerance_pct", "market_profile_retest_tolerance_pct", "retest_tolerance_pct"),
-        default=0.5,
+        default=0.15,
         min_value=0.0,
     )
     extend_to_end = bool(params_map.get("extend_value_area_to_chart_end", True))
@@ -719,7 +719,9 @@ def _get_runtime_state(
         storage = {}
         if isinstance(snapshot_payload, MutableMapping):
             snapshot_payload["_runtime_state_storage"] = storage
-    temporal_key = f"{runtime_key[0]}|{runtime_key[1]}|{runtime_key[2]}|{int(current_epoch)}"
+    # Runtime signal state must persist across sequential bars within a run.
+    # Key by runtime identity, not per-bar epoch.
+    temporal_key = f"{runtime_key[0]}|{runtime_key[1]}|{runtime_key[2]}"
     state = storage.get(temporal_key)
     if not isinstance(state, dict):
         state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
@@ -1002,9 +1004,9 @@ def _resolve_breakout_v3_candidate(
     if not runtime_views:
         return None, 0
     if not isinstance(previous_candle, Candle):
-        raise RuntimeError(
-            "market_profile_breakout_v3_missing_previous_bar: previous candle is required for candidate evaluation"
-        )
+        # First bar in a walk-forward window has no prior body to compare against.
+        # Candidate evaluation is undefined without previous bar context, so skip.
+        return None, 0
 
     prev_body_low, prev_body_high = _body_bounds(previous_candle)
     curr_body_low, curr_body_high = _body_bounds(candle)
@@ -1360,12 +1362,29 @@ def _market_profile_breakout_v3_payload(
     retest_tolerance_pct = _resolve_float(
         params_map,
         keys=("market_profile_retest_tolerance_pct", "market_profile_retest_v3_tolerance_pct", "retest_tolerance_pct"),
-        default=0.5,
+        default=0.15,
         min_value=0.0,
     )
     lockout_seconds = int(lockout_bars) * int(timeframe_seconds)
 
     emitted: List[Dict[str, Any]] = []
+    diagnostic_counts: Dict[str, int] = {
+        "candidate_lockout_blocked": 0,
+        "candidate_enqueued_pending": 0,
+        "candidate_already_pending": 0,
+        "pending_profile_missing": 0,
+        "pending_waiting_next_bar": 0,
+        "pending_confirm_invalid": 0,
+        "pending_confirm_progress": 0,
+        "pending_duplicate_signature": 0,
+        "breakout_emitted": 0,
+        "retest_waiting_min_bars": 0,
+        "retest_expired_max_lookback": 0,
+        "retest_missing_boundary_price": 0,
+        "retest_condition_rejected": 0,
+        "retest_duplicate_signature": 0,
+        "retest_emitted": 0,
+    }
     last_processed_bar_index = _safe_int(runtime_state.get("v3_last_processed_bar_index"))
     pending: MutableMapping[str, Dict[str, Any]] = runtime_state.setdefault("v3_pending", {})
     last_emit_epoch: MutableMapping[str, int] = runtime_state.setdefault("v3_last_emit_epoch", {})
@@ -1397,21 +1416,27 @@ def _market_profile_breakout_v3_payload(
         pending_key = f"{profile_key}|{variant}"
         previous_emit = _safe_int(last_emit_epoch.get(pending_key))
         if _lockout_elapsed_v3(last_time_epoch=previous_emit, current_epoch=bar_epoch, lockout_seconds=lockout_seconds):
-            pending[pending_key] = {
-                "profile_key": profile_key,
-                "value_area_id": str(chosen_candidate.get("value_area_id") or profile_key),
-                "known_at": chosen_candidate.get("known_at"),
-                "variant": variant,
-                "boundary_type": str(chosen_candidate.get("boundary_type") or ""),
-                "boundary_price": float(chosen_candidate.get("boundary_price") or 0.0),
-                "started_bar_index": int(bar_index),
-                "started_epoch": int(bar_epoch),
-                "streak": 0,
-                "candidate_diagnostics": dict(chosen_candidate.get("candidate_diagnostics") or {}),
-                "penetration": float(chosen_candidate.get("penetration") or 0.0),
-                "chosen_score": float(chosen_candidate.get("chosen_score") or 0.0),
-                "tie_break_notes": str(chosen_candidate.get("tie_break_notes") or ""),
-            }
+            if pending_key not in pending:
+                pending[pending_key] = {
+                    "profile_key": profile_key,
+                    "value_area_id": str(chosen_candidate.get("value_area_id") or profile_key),
+                    "known_at": chosen_candidate.get("known_at"),
+                    "variant": variant,
+                    "boundary_type": str(chosen_candidate.get("boundary_type") or ""),
+                    "boundary_price": float(chosen_candidate.get("boundary_price") or 0.0),
+                    "started_bar_index": int(bar_index),
+                    "started_epoch": int(bar_epoch),
+                    "streak": 0,
+                    "candidate_diagnostics": dict(chosen_candidate.get("candidate_diagnostics") or {}),
+                    "penetration": float(chosen_candidate.get("penetration") or 0.0),
+                    "chosen_score": float(chosen_candidate.get("chosen_score") or 0.0),
+                    "tie_break_notes": str(chosen_candidate.get("tie_break_notes") or ""),
+                }
+                diagnostic_counts["candidate_enqueued_pending"] += 1
+            else:
+                diagnostic_counts["candidate_already_pending"] += 1
+        else:
+            diagnostic_counts["candidate_lockout_blocked"] += 1
 
     body_low, body_high = _body_bounds(candle)
     for pending_key in list(pending.keys()):
@@ -1423,8 +1448,10 @@ def _market_profile_breakout_v3_payload(
         runtime_view = active_views.get(profile_key)
         if runtime_view is None:
             pending.pop(pending_key, None)
+            diagnostic_counts["pending_profile_missing"] += 1
             continue
         if int(entry.get("started_bar_index") or 0) >= bar_index:
+            diagnostic_counts["pending_waiting_next_bar"] += 1
             continue
 
         val = float(runtime_view["val"])
@@ -1455,6 +1482,7 @@ def _market_profile_breakout_v3_payload(
         )
         if not confirm_valid:
             pending.pop(pending_key, None)
+            diagnostic_counts["pending_confirm_invalid"] += 1
             continue
 
         next_streak = int(entry.get("streak") or 0) + 1
@@ -1464,12 +1492,14 @@ def _market_profile_breakout_v3_payload(
         entry["VAL"] = float(val)
         pending[pending_key] = entry
         if next_streak != confirm_bars:
+            diagnostic_counts["pending_confirm_progress"] += 1
             continue
 
         started_bar_index = int(entry.get("started_bar_index") or 0)
         signature = f"breakout_v3|{profile_key}|{variant}|{started_bar_index}"
         if signature in emitted_signatures:
             pending.pop(pending_key, None)
+            diagnostic_counts["pending_duplicate_signature"] += 1
             continue
 
         signal = _build_breakout_v3_confirmed_signal(
@@ -1489,6 +1519,7 @@ def _market_profile_breakout_v3_payload(
         assert_signal_time_is_closed_bar(signal, candle)
         assert_no_execution_fields(signal)
         emitted.append(signal)
+        diagnostic_counts["breakout_emitted"] += 1
         emitted_signatures[signature] = int(bar_epoch)
         last_emit_epoch[pending_key] = int(bar_epoch)
         active_breakouts.append(
@@ -1530,13 +1561,16 @@ def _market_profile_breakout_v3_payload(
         bars_since = int(bar_index - breakout_bar_index)
         if bars_since < retest_min_bars:
             remaining_breakouts.append(dict(breakout))
+            diagnostic_counts["retest_waiting_min_bars"] += 1
             continue
         if bars_since > retest_max_lookback:
+            diagnostic_counts["retest_expired_max_lookback"] += 1
             continue
 
         boundary_price = _safe_float(breakout.get("boundary_price"))
         if boundary_price is None:
             remaining_breakouts.append(dict(breakout))
+            diagnostic_counts["retest_missing_boundary_price"] += 1
             continue
         tolerance = abs(float(boundary_price)) * (float(retest_tolerance_pct) / 100.0)
         body_touches = (body_low - tolerance) <= float(boundary_price) <= (body_high + tolerance)
@@ -1550,12 +1584,14 @@ def _market_profile_breakout_v3_payload(
             close_on_side = False
         if not (body_touches and close_on_side):
             remaining_breakouts.append(dict(breakout))
+            diagnostic_counts["retest_condition_rejected"] += 1
             continue
 
         retest_signature = (
             f"retest_v3|{str(breakout.get('event_signature') or '')}|{int(bar_index)}"
         )
         if retest_signature in retest_signatures:
+            diagnostic_counts["retest_duplicate_signature"] += 1
             continue
         retest_signal = _build_breakout_v3_retest_signal(
             candle=candle,
@@ -1572,7 +1608,23 @@ def _market_profile_breakout_v3_payload(
         assert_signal_time_is_closed_bar(retest_signal, candle)
         assert_no_execution_fields(retest_signal)
         emitted.append(retest_signal)
+        diagnostic_counts["retest_emitted"] += 1
         retest_signatures[retest_signature] = int(bar_epoch)
+        log.info(
+            "event=market_profile_retest_v3_emitted indicator_id=%s symbol=%s profile_key=%s direction=%s boundary_type=%s boundary_price=%.8f tolerance=%.8f body_low=%.8f body_high=%.8f close=%.8f bars_since_breakout=%s trace_id=%s",
+            indicator_id,
+            symbol,
+            str(breakout.get("profile_key") or ""),
+            direction,
+            str(breakout.get("boundary_type") or ""),
+            float(boundary_price),
+            float(tolerance),
+            float(body_low),
+            float(body_high),
+            float(close_price),
+            bars_since,
+            str(retest_signal.get("trace_id") or ""),
+        )
 
     runtime_state["v3_last_processed_bar_index"] = int(bar_index)
     runtime_state["v3_pending"] = pending
@@ -1600,6 +1652,19 @@ def _market_profile_breakout_v3_payload(
             "source_timeframe_seconds": int(timeframe_seconds),
             "lockout_timeframe_seconds": int(timeframe_seconds),
             "timeframe_mismatch_warning": 0,
+            "candidate_lockout_blocked": int(diagnostic_counts["candidate_lockout_blocked"]),
+            "candidate_enqueued_pending": int(diagnostic_counts["candidate_enqueued_pending"]),
+            "candidate_already_pending": int(diagnostic_counts["candidate_already_pending"]),
+            "pending_profile_missing": int(diagnostic_counts["pending_profile_missing"]),
+            "pending_waiting_next_bar": int(diagnostic_counts["pending_waiting_next_bar"]),
+            "pending_confirm_invalid": int(diagnostic_counts["pending_confirm_invalid"]),
+            "pending_confirm_progress": int(diagnostic_counts["pending_confirm_progress"]),
+            "pending_duplicate_signature": int(diagnostic_counts["pending_duplicate_signature"]),
+            "retest_waiting_min_bars": int(diagnostic_counts["retest_waiting_min_bars"]),
+            "retest_expired_max_lookback": int(diagnostic_counts["retest_expired_max_lookback"]),
+            "retest_missing_boundary_price": int(diagnostic_counts["retest_missing_boundary_price"]),
+            "retest_condition_rejected": int(diagnostic_counts["retest_condition_rejected"]),
+            "retest_duplicate_signature": int(diagnostic_counts["retest_duplicate_signature"]),
         },
     }
 

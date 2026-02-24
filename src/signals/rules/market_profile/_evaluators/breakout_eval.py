@@ -141,17 +141,21 @@ def _value_area_breakout_evaluator(context: Mapping[str, Any], value_area: Mappi
 
     profile_for_session: Optional[Mapping[str, Any]] = None
     if session_id:
-        try:
-            profiles = getattr(indicator, "daily_profiles", None) or []
-            for profile in profiles:
-                if not isinstance(profile, Mapping):
-                    continue
-                profile_id = value_area_identifier(profile)
-                if profile_id == session_id:
-                    profile_for_session = profile
-                    break
-        except Exception:  # pragma: no cover - defensive
-            profile_for_session = None
+        get_profiles = getattr(indicator, "get_profiles", None)
+        if not callable(get_profiles):
+            raise RuntimeError("market_profile_indicator_missing_get_profiles")
+        profiles = list(get_profiles() or [])
+        for profile in profiles:
+            if isinstance(profile, Mapping):
+                profile_mapping = profile
+            elif hasattr(profile, "to_dict"):
+                profile_mapping = profile.to_dict()
+            else:
+                continue
+            profile_id = value_area_identifier(profile_mapping)
+            if profile_id == session_id:
+                profile_for_session = profile_mapping
+                break
 
     log.debug(
         "mp_brk | evaluating | session=%s | mode=%s | bars=%d | vah=%.5f | val=%.5f | min_age=%s | confirmation=%d",

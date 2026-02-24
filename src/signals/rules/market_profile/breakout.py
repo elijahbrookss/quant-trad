@@ -64,7 +64,10 @@ def market_profile_breakout_rule(
         return []
 
     # Use profiles (should be List[Profile] from new API)
-    profiles = getattr(indicator_data, "daily_profiles", [])
+    get_profiles = getattr(indicator_data, "get_profiles", None)
+    if not callable(get_profiles):
+        raise RuntimeError("market_profile_indicator_missing_get_profiles")
+    profiles = list(get_profiles() or [])
     if not profiles:
         log.debug("No profiles available")
         return []

@@ -49,8 +49,8 @@ from engines.bot_runtime.core.indicator_state import (
     ensure_builtin_indicator_plugins_registered,
     evaluate_rules_from_state_snapshots,
     plugin_registry,
-    project_overlay_delta,
 )
+from engines.bot_runtime.core.indicator_state.overlay_runtime import project_and_normalize_entries
 from ....indicators.indicator_service.context import IndicatorServiceContext
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
@@ -1914,6 +1914,15 @@ class BotRuntime:
                             "signal_eval_ms": signal_eval_metrics.get("signal_eval_ms"),
                             "overlay_projection_ms": signal_eval_metrics.get("overlay_projection_ms"),
                             "overlay_projection_skipped_count": signal_eval_metrics.get("overlay_projection_skipped_count"),
+                            "overlay_projection_projector_ms": signal_eval_metrics.get("overlay_projection_projector_ms"),
+                            "overlay_projection_delta_ms": signal_eval_metrics.get("overlay_projection_delta_ms"),
+                            "overlay_projection_normalize_ms": signal_eval_metrics.get("overlay_projection_normalize_ms"),
+                            "overlay_projection_fingerprint_ms": signal_eval_metrics.get("overlay_projection_fingerprint_ms"),
+                            "overlay_projection_entries_total": signal_eval_metrics.get("overlay_projection_entries_total"),
+                            "overlay_projection_entries_changed": signal_eval_metrics.get("overlay_projection_entries_changed"),
+                            "overlay_projection_ops_count": signal_eval_metrics.get("overlay_projection_ops_count"),
+                            "overlay_projection_normalize_cache_hits": signal_eval_metrics.get("overlay_projection_normalize_cache_hits"),
+                            "overlay_projection_normalize_cache_misses": signal_eval_metrics.get("overlay_projection_normalize_cache_misses"),
                             "state_revisions_changed_count": signal_eval_metrics.get("state_revisions_changed_count"),
                             "signals_emitted_count": signal_eval_metrics.get("signals_emitted_count"),
                             "overlays_update_ms": signal_eval_metrics.get("overlays_update_ms"),
@@ -1945,6 +1954,15 @@ class BotRuntime:
                             "signal_eval_ms": None,
                             "overlay_projection_ms": None,
                             "overlay_projection_skipped_count": None,
+                            "overlay_projection_projector_ms": None,
+                            "overlay_projection_delta_ms": None,
+                            "overlay_projection_normalize_ms": None,
+                            "overlay_projection_fingerprint_ms": None,
+                            "overlay_projection_entries_total": None,
+                            "overlay_projection_entries_changed": None,
+                            "overlay_projection_ops_count": None,
+                            "overlay_projection_normalize_cache_hits": None,
+                            "overlay_projection_normalize_cache_misses": None,
                             "state_revisions_changed_count": None,
                             "overlays_update_ms": None,
                             "pending_signals_ops_ms": None,
@@ -2405,6 +2423,15 @@ class BotRuntime:
                     "signal_eval_ms": 0.0,
                     "overlay_projection_ms": 0.0,
                     "overlay_projection_skipped_count": 0.0,
+                    "overlay_projection_projector_ms": 0.0,
+                    "overlay_projection_delta_ms": 0.0,
+                    "overlay_projection_normalize_ms": 0.0,
+                    "overlay_projection_fingerprint_ms": 0.0,
+                    "overlay_projection_entries_total": 0.0,
+                    "overlay_projection_entries_changed": 0.0,
+                    "overlay_projection_ops_count": 0.0,
+                    "overlay_projection_normalize_cache_hits": 0.0,
+                    "overlay_projection_normalize_cache_misses": 0.0,
                     "state_revisions_changed_count": 0.0,
                     "indicators_count": 0.0,
                     "overlays_changed_count": 0.0,
@@ -2467,6 +2494,15 @@ class BotRuntime:
 
         projection_started = time.perf_counter()
         overlay_projection_skipped_count = 0
+        overlay_projection_projector_ms = 0.0
+        overlay_projection_delta_ms = 0.0
+        overlay_projection_normalize_ms = 0.0
+        overlay_projection_fingerprint_ms = 0.0
+        overlay_projection_entries_total = 0.0
+        overlay_projection_entries_changed = 0.0
+        overlay_projection_ops_count = 0.0
+        overlay_projection_normalize_cache_hits = 0.0
+        overlay_projection_normalize_cache_misses = 0.0
         for indicator_id, snapshot in snapshots.items():
             runtime = state.indicator_state_runtime.get(indicator_id) or {}
             indicator_type = str(runtime.get("indicator_type") or "")
@@ -2476,31 +2512,12 @@ class BotRuntime:
                 overlay_projection_skipped_count += 1
                 continue
             projection_state = state.indicator_projection_runtime.setdefault(indicator_id, {"seq": 0, "revision": -1, "entries": {}})
-            projection_delta = project_overlay_delta(
-                projection_input=OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state),
-                entry_projector=projector,
-            )
-            if not projection_delta.ops:
-                overlay_projection_skipped_count += 1
-                continue
-            raw_entries = projector(OverlayProjectionInput(snapshot=snapshot, previous_projection_state=projection_state))
-            if not isinstance(raw_entries, Mapping):
-                raise RuntimeError(
-                    f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
-                )
-            normalized_entries: Dict[str, Dict[str, Any]] = {}
             indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
             overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
-            for entry_key, entry_value in raw_entries.items():
-                if not isinstance(entry_value, Mapping):
-                    continue
-                normalized = normalize_overlays(indicator_type, [dict(entry_value)])
-                if not normalized:
-                    raise RuntimeError(
-                        f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} indicator_id={indicator_id} entry_key={entry_key}"
-                    )
-                overlay_entry = dict(normalized[0])
-                overlay_entry.update(
+
+            def _entry_adapter(_entry_key: str, overlay_entry: Dict[str, Any]) -> Dict[str, Any]:
+                adapted = dict(overlay_entry)
+                adapted.update(
                     {
                         "ind_id": indicator_id,
                         "source": "indicator_state",
@@ -2511,11 +2528,51 @@ class BotRuntime:
                     }
                 )
                 if isinstance(overlay_color, str) and overlay_color.strip():
-                    overlay_entry["color"] = overlay_color
-                normalized_entries[str(entry_key)] = overlay_entry
-            projection_state["seq"] = projection_delta.seq
+                    adapted["color"] = overlay_color
+                return adapted
+
+            projection = project_and_normalize_entries(
+                indicator_type=indicator_type,
+                snapshot=snapshot,
+                projection_state=projection_state,
+                entry_projector=projector,
+                invalid_projection_error=(
+                    f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
+                ),
+                normalize_failed_error=lambda entry_key: (
+                    f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} "
+                    f"indicator_id={indicator_id} entry_key={entry_key}"
+                ),
+                entry_adapter=_entry_adapter,
+            )
+            if not projection.delta.ops:
+                projection_state["seq"] = projection.delta.seq
+                projection_state["revision"] = snapshot.revision
+                projection_state["_normalize_cache"] = projection.normalize_cache
+                overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
+                overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
+                overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
+                overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
+                overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
+                overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
+                overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
+                overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
+                overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
+                overlay_projection_skipped_count += 1
+                continue
+            projection_state["seq"] = projection.delta.seq
             projection_state["revision"] = snapshot.revision
-            projection_state["entries"] = normalized_entries
+            projection_state["entries"] = projection.entries
+            projection_state["_normalize_cache"] = projection.normalize_cache
+            overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
+            overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
+            overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
+            overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
+            overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
+            overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
+            overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
+            overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
+            overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
 
         overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
         overlays = self._series_overlay_entries(state)
@@ -2547,6 +2604,15 @@ class BotRuntime:
             "signal_eval_ms": signal_eval_ms,
             "overlay_projection_ms": overlay_projection_ms,
             "overlay_projection_skipped_count": float(overlay_projection_skipped_count),
+            "overlay_projection_projector_ms": overlay_projection_projector_ms,
+            "overlay_projection_delta_ms": overlay_projection_delta_ms,
+            "overlay_projection_normalize_ms": overlay_projection_normalize_ms,
+            "overlay_projection_fingerprint_ms": overlay_projection_fingerprint_ms,
+            "overlay_projection_entries_total": overlay_projection_entries_total,
+            "overlay_projection_entries_changed": overlay_projection_entries_changed,
+            "overlay_projection_ops_count": overlay_projection_ops_count,
+            "overlay_projection_normalize_cache_hits": overlay_projection_normalize_cache_hits,
+            "overlay_projection_normalize_cache_misses": overlay_projection_normalize_cache_misses,
             "state_revisions_changed_count": float(state_revisions_changed_count),
             "indicators_count": float(len(state.indicator_state_runtime)),
             "overlays_changed_count": overlays_changed_count,

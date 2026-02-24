@@ -9,7 +9,6 @@ from indicators.runtime.indicator_overlay_cache import IndicatorOverlayCache, de
 from indicators.runtime.incremental_cache import IncrementalCache, default_incremental_cache
 from ..indicator_factory import IndicatorFactory
 from ..indicator_repository import IndicatorRepository, default_repository
-from indicators.runtime.indicator_signal_runner import IndicatorSignalRunner, default_signal_runner
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,6 @@ class IndicatorServiceContext:
     repository: IndicatorRepository
     resolver: DataProviderResolver
     factory: IndicatorFactory
-    signal_runner: IndicatorSignalRunner
     breakout_cache: IndicatorBreakoutCache
     overlay_cache: IndicatorOverlayCache
     incremental_cache: IncrementalCache
@@ -46,7 +44,6 @@ class IndicatorServiceContext:
             repository=repository,
             resolver=resolver,
             factory=factory,
-            signal_runner=default_signal_runner(),
             breakout_cache=default_breakout_cache(),
             overlay_cache=default_overlay_cache(),
             incremental_cache=default_incremental_cache(),
@@ -72,7 +69,6 @@ class IndicatorServiceContext:
             repository=repository,
             resolver=resolver,
             factory=factory,
-            signal_runner=base.signal_runner,
             breakout_cache=base.breakout_cache,
             overlay_cache=overlay_cache,
             incremental_cache=base.incremental_cache,
@@ -89,4 +85,3 @@ class IndicatorServiceContext:
 
 # Backward-compatible explicit process context for API-only call paths.
 _context = IndicatorServiceContext.for_quantlab_worker(cache_scope_id="portal_api")
-

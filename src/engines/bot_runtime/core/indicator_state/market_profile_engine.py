@@ -62,10 +62,12 @@ class MarketProfileStateEngine(IndicatorStateEngine):
             chart_timeframe_seconds = int(timeframe_to_seconds(chart_timeframe) or 0)
         else:
             chart_timeframe_seconds = 0
+        if not chart_timeframe:
+            raise RuntimeError("indicator_state_init_failed: market_profile requires timeframe")
+        if not indicator_id:
+            raise RuntimeError("indicator_state_init_failed: market_profile requires indicator_id")
         runtime_scope = (
-            f"bot|{strategy_id}|{symbol}|{chart_timeframe}|{indicator_id}"
-            if (strategy_id and chart_timeframe and indicator_id)
-            else ""
+            f"engine|{strategy_id or 'none'}|{symbol}|{chart_timeframe}|{indicator_id}"
         )
         return {
             "revision": 0,

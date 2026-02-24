@@ -402,7 +402,16 @@ class CoinbaseProvider(BaseDataProvider):
             "has_funding": has_funding,
             "expiry_ts": expiry_ts.isoformat() if expiry_ts else None,
         }
-        logger.debug("coinbase_instrument_metadata_mapped | %s", mapped_payload)
+        logger.debug(
+            "coinbase_instrument_metadata_mapped | symbol=%s product_type=%s tick_size=%s contract_size=%s min_order_size=%s has_funding=%s expiry_ts=%s",
+            symbol,
+            product_type,
+            mapped_payload.get("tick_size"),
+            mapped_payload.get("contract_size"),
+            mapped_payload.get("min_order_size"),
+            mapped_payload.get("has_funding"),
+            mapped_payload.get("expiry_ts"),
+        )
 
         if missing_fields:
             raise ValueError(

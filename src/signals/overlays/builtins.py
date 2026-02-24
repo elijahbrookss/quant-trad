@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import Optional
+import pkgutil
 
 from .registry import list_overlay_specs, register_overlay_type
 
@@ -11,47 +12,74 @@ _REGISTERED = False
 logger = logging.getLogger(__name__)
 
 
+def _discover_indicator_overlay_modules() -> None:
+    """Import `indicators.*.overlays` so decorator-based specs self-register."""
+    try:
+        import indicators as indicators_pkg
+    except Exception as exc:
+        logger.warning("overlay_indicator_module_discovery_failed | error=%s", exc)
+        return
+
+    discovered = 0
+    failed = 0
+    for _importer, modname, ispkg in pkgutil.walk_packages(
+        path=indicators_pkg.__path__,
+        prefix=f"{indicators_pkg.__name__}.",
+    ):
+        if ispkg or not modname.endswith(".overlays"):
+            continue
+        try:
+            importlib.import_module(modname)
+            discovered += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("overlay_module_import_failed | module=%s error=%s", modname, exc)
+    logger.debug(
+        "overlay_modules_discovered | discovered=%s failed=%s",
+        discovered,
+        failed,
+    )
+
+
+def _discover_signal_rule_modules() -> None:
+    """Import signals.rules modules so rule-owned overlay decorators register."""
+    try:
+        import signals.rules as rules_pkg
+    except Exception as exc:
+        logger.warning("overlay_signal_rule_discovery_failed | error=%s", exc)
+        return
+
+    discovered = 0
+    failed = 0
+    for _importer, modname, ispkg in pkgutil.walk_packages(
+        path=rules_pkg.__path__,
+        prefix=f"{rules_pkg.__name__}.",
+    ):
+        if ispkg:
+            continue
+        try:
+            importlib.import_module(modname)
+            discovered += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("overlay_signal_rule_import_failed | module=%s error=%s", modname, exc)
+    logger.debug(
+        "overlay_signal_rule_modules_discovered | discovered=%s failed=%s",
+        discovered,
+        failed,
+    )
+
+
 def ensure_builtin_overlays_registered() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
 
-    register_overlay_type(
-        ["market_profile", "market-profile", "mpf"],
-        label="Market Profile",
-        pane_views=("va_box", "touch"),
-        description="Market profile value area boxes and touch markers.",
-        renderers={"lightweight": "va_box", "mpl": "box"},
-        payload_keys=("boxes", "markers", "bubbles"),
-        ui_color="#38bdf8",
-    )
-    register_overlay_type(
-        "trendline",
-        label="Trendline",
-        pane_views=("polyline", "touch"),
-        description="Trendline segments and touch markers.",
-        renderers={"lightweight": "polyline", "mpl": "line"},
-        payload_keys=("polylines", "markers"),
-        ui_color="#a855f7",
-    )
-    register_overlay_type(
-        "vwap",
-        label="VWAP",
-        pane_views=("polyline", "touch"),
-        description="VWAP and deviation bands with touch markers.",
-        renderers={"lightweight": "polyline", "mpl": "line"},
-        payload_keys=("polylines", "markers"),
-        ui_color="#f97316",
-    )
-    register_overlay_type(
-        "pivot_level",
-        label="Pivot Levels",
-        pane_views=("signal_bubble", "touch"),
-        description="Pivot level retest/breakout bubbles and touches.",
-        renderers={"lightweight": "signal_bubble", "mpl": "scatter"},
-        payload_keys=("bubbles", "markers", "price_lines"),
-        ui_color="#facc15",
-    )
+    _discover_indicator_overlay_modules()
+
+    _discover_signal_rule_modules()
+
+    # Non-indicator overlays are registered explicitly here.
     register_overlay_type(
         "strategy_signal",
         label="Strategy Signals",
@@ -101,7 +129,7 @@ def ensure_builtin_overlays_registered() -> None:
         )
 
     _REGISTERED = True
-    logger.info("overlay_registry_initialized | overlay_types=%d", len(list_overlay_specs()))
+    logger.debug("overlay_registry_initialized | overlay_types=%d", len(list_overlay_specs()))
 
 
 __all__ = ["ensure_builtin_overlays_registered"]

@@ -99,6 +99,18 @@ def enqueue_overlay_job(
         partition_key=_series_partition_key(payload),
         max_attempts=2,
     )
+    logger.info(
+        "event=overlay_job_enqueued job_id=%s indicator_id=%s symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s instrument_id=%s",
+        job_id,
+        inst_id,
+        symbol,
+        interval,
+        start,
+        end,
+        datasource,
+        exchange,
+        instrument_id,
+    )
     return job_id
 
 

@@ -881,9 +881,14 @@ class StrategyRegistry:
             # delete removed links
             for removed in (old_ids - new_ids):
                 storage_delete_strategy_instrument(strategy_id, removed)
-        except Exception:
-            # Fail silently on resolution errors; main strategy update should still succeed
-            pass
+        except Exception as exc:
+            logger.exception(
+                "strategy_update_instrument_link_sync_failed | strategy=%s",
+                strategy_id,
+            )
+            raise RuntimeError(
+                f"strategy_update_instrument_link_sync_failed: strategy={strategy_id}"
+            ) from exc
         logger.info("strategy_updated | id=%s", strategy_id)
         return record.to_dict()
 

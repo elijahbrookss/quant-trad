@@ -24,6 +24,9 @@ from portal.backend.service.indicators.indicator_service.api import (
     overlays_for_instance,
 )
 from portal.backend.service.indicators.indicator_service.context import IndicatorServiceContext
+from portal.backend.service.indicators.indicator_service.runtime_contract import (
+    assert_engine_signal_runtime_path,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -70,7 +73,7 @@ def _process_overlay(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
 
 
 def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
-    return generate_signals_for_instance(
+    response = generate_signals_for_instance(
         inst_id=str(payload["inst_id"]),
         start=str(payload["start"]),
         end=str(payload["end"]),
@@ -81,6 +84,12 @@ def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
         config=payload.get("config") if isinstance(payload.get("config"), dict) else None,
         ctx=ctx,
     )
+    assert_engine_signal_runtime_path(
+        response,
+        context="quantlab_worker_signal_runtime_path_mismatch",
+        indicator_id=str(payload["inst_id"]),
+    )
+    return response
 
 
 def main() -> int:
@@ -130,6 +139,19 @@ def main() -> int:
             continue
 
         started = time.monotonic()
+        logger.info(
+            "quantlab_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s",
+            worker_id,
+            job.id,
+            job.job_type,
+            job.payload.get("inst_id"),
+            job.payload.get("symbol"),
+            job.payload.get("interval"),
+            job.payload.get("start"),
+            job.payload.get("end"),
+            job.payload.get("datasource"),
+            job.payload.get("exchange"),
+        )
         try:
             if job.job_type == JOB_TYPE_OVERLAYS:
                 result = _process_overlay(job.payload, ctx=indicator_ctx)
@@ -137,13 +159,15 @@ def main() -> int:
                 result = _process_signals(job.payload, ctx=indicator_ctx)
             else:
                 raise RuntimeError(f"unknown_job_type: {job.job_type}")
+            payload_obj = result.get("payload") if isinstance(result, dict) else None
             complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
             logger.info(
-                "quantlab_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
+                "quantlab_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s payload_keys=%s",
                 worker_id,
                 job.id,
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
+                list(payload_obj.keys()) if isinstance(payload_obj, dict) else [],
             )
         except Exception as exc:
             fail_job(

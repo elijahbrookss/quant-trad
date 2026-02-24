@@ -5,16 +5,74 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from data_providers import DataSource
+from signals.engine.signal_generator import describe_indicator_rules
 
 from .context import IndicatorServiceContext, _context
 
 logger = logging.getLogger(__name__)
+
+
+_RULE_HINTS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "market_profile": {
+        "market_profile_breakout": {
+            "signal_type": "breakout",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long breakout",
+                    "description": "Breakout above the active value area high (VAH) that confirms continuation.",
+                },
+                {
+                    "id": "short",
+                    "label": "Short breakdown",
+                    "description": "Breakdown below the active value area low (VAL) signalling downside momentum.",
+                },
+            ],
+        },
+        "market_profile_retest": {
+            "signal_type": "retest",
+            "directions": [
+                {
+                    "id": "long",
+                    "label": "Long retest",
+                    "description": (
+                        "Breakout above VAH with a successful retest hold or a reclaim of VAL after a breakout,"
+                        " favouring continuation to the upside."
+                    ),
+                },
+                {
+                    "id": "short",
+                    "label": "Short retest",
+                    "description": (
+                        "Breakdown below VAH with a rejection retest or a breakdown of VAL that holds, signalling continuation lower."
+                    ),
+                },
+            ],
+        },
+    },
+    "pivot_level": {
+        "pivot_breakout": {
+            "signal_type": "breakout",
+        },
+        "pivot_retest": {
+            "signal_type": "retest",
+        },
+    },
+}
+
+_RULE_SUNSET: Dict[str, set[str]] = {
+    "market_profile": {
+        "market_profile_breakout_v2",
+        "market_profile_retest_v2",
+        "market_profile_breakout_v3_confirmed",
+    }
+}
 
 
 def build_meta_from_record(
@@ -37,8 +95,9 @@ def load_indicator_record(inst_id: str, *, ctx: IndicatorServiceContext = _conte
 def get_indicator_entry(
     inst_id: str,
     *,
-    fallback_context: Optional[Mapping[str, Any]] = None,
-    persist_backfill: bool = False,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+    build_instance: bool = True,
     ctx: IndicatorServiceContext = _context,
 ):
     """Build indicator entry directly from DB without caching.
@@ -53,7 +112,7 @@ def get_indicator_entry(
     class IndicatorEntry:
         """Temporary container for indicator metadata and instance."""
         meta: Dict[str, Any]
-        instance: Any
+        instance: Optional[Any]
         updated_at: Optional[str] = None
 
     # Load fresh record from DB
@@ -61,30 +120,16 @@ def get_indicator_entry(
     if not record:
         raise KeyError("Indicator not found")
 
-    # Backfill context fields if needed (symbol, start, end, interval)
-    if fallback_context:
-        params = dict(record.get("params") or {})
-        context_keys = ("symbol", "start", "end", "interval")
-        missing = [key for key in context_keys if not params.get(key)]
-
-        if missing:
-            for key in missing:
-                value = fallback_context.get(key)
-                if value is not None and (not isinstance(value, str) or value.strip()):
-                    params[key] = value
-
-            # Update in-memory record (don't persist context fields to DB)
-            record = dict(record)
-            record["params"] = params
-
     # Build meta and instance fresh from DB record
     meta = ctx.factory.build_meta_from_record(record)
 
-    # Allow fallback context to supply runtime provider overrides
-    fb = fallback_context or {}
-    fb_ds = fb.get("datasource")
-    fb_ex = fb.get("exchange")
-    instance = ctx.factory.build_indicator_instance(meta, datasource=fb_ds, exchange=fb_ex)
+    instance = None
+    if build_instance:
+        instance = ctx.factory.build_indicator_instance(
+            meta,
+            datasource=datasource,
+            exchange=exchange,
+        )
 
     return IndicatorEntry(
         meta=meta,
@@ -153,29 +198,82 @@ def attach_signal_catalog(
 ) -> Dict[str, Any]:
     indicator_type = meta.get("type") or meta.get("name")
 
-    logger.debug(
-        "attach_signal_catalog | meta.type=%s | meta.name=%s | resolved_type='%s'",
-        meta.get("type"),
-        meta.get("name"),
-        indicator_type
-    )
-
     if not indicator_type:
-        logger.warning("⚠ attach_signal_catalog: No indicator type in meta | meta_keys=%s", list(meta.keys()))
+        logger.warning("attach_signal_catalog_missing_type | meta_keys=%s", list(meta.keys()))
         return meta
 
-    catalog = ctx.signal_runner.build_signal_catalog(str(indicator_type))
-
-    logger.info(
-        "attach_signal_catalog | indicator_type='%s' | catalog_size=%d | signal_ids=%s",
-        indicator_type,
-        len(catalog) if catalog else 0,
-        [s.get('id') for s in catalog] if catalog else []
-    )
+    catalog = build_signal_catalog(str(indicator_type))
 
     if catalog:
         meta["signal_rules"] = catalog
     return meta
+
+
+def _guess_signal_type(indicator_type: str, rule_id: str) -> str:
+    hints = _RULE_HINTS.get(indicator_type.lower(), {}).get(rule_id.lower(), {})
+    hinted = hints.get("signal_type")
+    if hinted:
+        return str(hinted)
+
+    rule_key = rule_id.lower()
+    if "retest" in rule_key:
+        return "retest"
+    if "breakout" in rule_key or "break" in rule_key:
+        return "breakout"
+    if "touch" in rule_key:
+        return "touch"
+    if "trend" in rule_key:
+        return "trend"
+    return rule_key or "signal"
+
+
+def _default_direction_hints(signal_type: str) -> List[Dict[str, str]]:
+    normalized = (signal_type or "").lower()
+    if normalized in {"breakout", "retest", "touch", "trend"}:
+        return [
+            {
+                "id": "long",
+                "label": "Long",
+                "description": "Setup that supports a long bias.",
+            },
+            {
+                "id": "short",
+                "label": "Short",
+                "description": "Setup that supports a short bias.",
+            },
+        ]
+    return []
+
+
+def build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
+    rule_meta = describe_indicator_rules(indicator_type) or []
+
+    if not rule_meta:
+        logger.warning(
+            "signal_catalog_empty | indicator_type=%s",
+            indicator_type,
+        )
+        return []
+
+    catalog: List[Dict[str, Any]] = []
+    indicator_key = str(indicator_type or "").lower()
+    hints_for_indicator = _RULE_HINTS.get(indicator_key, {})
+
+    for entry in rule_meta:
+        rule_id = str(entry.get("id", "")).strip()
+        if not rule_id:
+            continue
+        if rule_id.lower() in _RULE_SUNSET.get(indicator_key, set()):
+            continue
+        hint = hints_for_indicator.get(rule_id.lower(), {})
+        signal_type = hint.get("signal_type") or _guess_signal_type(indicator_key, rule_id)
+        directions = hint.get("directions") or _default_direction_hints(signal_type)
+        enriched = dict(entry)
+        enriched["signal_type"] = signal_type
+        if directions:
+            enriched["directions"] = directions
+        catalog.append(enriched)
+    return catalog
 
 
 def normalize_color(value: Optional[str]) -> Optional[str]:
@@ -292,6 +390,7 @@ __all__ = [
     "IndicatorServiceContext",
     "attach_signal_catalog",
     "build_indicator_instance",
+    "build_signal_catalog",
     "build_meta_from_record",
     "coerce_float",
     "coerce_int",

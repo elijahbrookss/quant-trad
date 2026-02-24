@@ -26,6 +26,7 @@ def _discover_signal_rules():
         import signals.rules as rules_package
 
         discovered_count = 0
+        failed_count = 0
         for importer, modname, ispkg in pkgutil.walk_packages(
             path=rules_package.__path__,
             prefix=f"{rules_package.__name__}.",
@@ -35,11 +36,21 @@ def _discover_signal_rules():
                 try:
                     importlib.import_module(modname)
                     discovered_count += 1
-                    logger.debug(f"Discovered signal module: {modname}")
                 except Exception as e:
+                    failed_count += 1
                     logger.warning(f"Failed to import signal module {modname}: {e}")
 
-        logger.info(f"Auto-discovered {discovered_count} signal rule modules")
+        if failed_count > 0:
+            logger.warning(
+                "signal_rule_modules_discovered_with_failures | discovered=%s failed=%s",
+                discovered_count,
+                failed_count,
+            )
+        else:
+            logger.debug(
+                "signal_rule_modules_discovered | discovered=%s",
+                discovered_count,
+            )
 
     except ImportError as e:
         logger.warning(f"Could not import signals.rules package: {e}")

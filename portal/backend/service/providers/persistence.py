@@ -17,6 +17,7 @@ class DataPersistenceService:
     def __init__(self, config: PersistenceConfig, *, engine=None):
         self._config = config
         self._engine = engine or (create_engine(config.dsn) if config.dsn else None)
+        self._schema_logged = False
 
         if not self._engine:
             logger.warning("Database engine unavailable; persistence features disabled.")
@@ -191,15 +192,17 @@ class DataPersistenceService:
                 conn.execute(text(ddl_closures))
                 for ddl in ddl_indexes:
                     conn.execute(text(ddl))
-            logger.info(
-                "Schema ensured for tables raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s.",
-                self._config.candles_raw_table,
-                self._config.candle_stats_table,
-                self._config.regime_stats_table,
-                self._config.regime_blocks_table,
-                self._config.derivatives_state_table,
-                self._config.closures_table,
-            )
+            if not self._schema_logged:
+                logger.info(
+                    "schema_ensured | raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s",
+                    self._config.candles_raw_table,
+                    self._config.candle_stats_table,
+                    self._config.regime_stats_table,
+                    self._config.regime_blocks_table,
+                    self._config.derivatives_state_table,
+                    self._config.closures_table,
+                )
+                self._schema_logged = True
         except SQLAlchemyError as e:
             logger.exception(
                 "Failed to ensure schema for raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s: %s",

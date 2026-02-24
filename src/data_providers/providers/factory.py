@@ -40,7 +40,6 @@ class ProviderRegistry:
         self.persistence_factory = factory
         self.persistence = None
         self.cache = {}
-        logger.debug("provider_registry_configured persistence_factory=%s", bool(factory))
 
     def get_persistence(self) -> DataPersistence:
         if self.persistence is None:
@@ -63,36 +62,10 @@ class ProviderRegistry:
         get_started = time.perf_counter() if should_log else 0.0
 
         if cache_key in self.cache:
-            if should_log:
-                get_ms = (time.perf_counter() - get_started) * 1000.0
-                logger.debug(
-                    "cache.get | event=cache.get cache_name=provider_registry cache_scope=process "
-                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
-                    f"{provider}:{resolved_venue or ''}",
-                    get_ms,
-                    os.getpid(),
-                    threading.current_thread().name,
-                )
-                logger.debug(
-                    "cache.hit | event=cache.hit cache_name=provider_registry cache_scope=process "
-                    "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
-                    f"{provider}:{resolved_venue or ''}",
-                    get_ms,
-                    os.getpid(),
-                    threading.current_thread().name,
-                )
             return self.cache[cache_key]
 
         if should_log:
             get_ms = (time.perf_counter() - get_started) * 1000.0
-            logger.debug(
-                "cache.get | event=cache.get cache_name=provider_registry cache_scope=process "
-                "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
-                f"{provider}:{resolved_venue or ''}",
-                get_ms,
-                os.getpid(),
-                threading.current_thread().name,
-            )
             logger.debug(
                 "cache.miss | event=cache.miss cache_name=provider_registry cache_scope=process "
                 "cache_key_summary=%s time_taken_ms=%.4f pid=%s thread_name=%s",
@@ -133,7 +106,7 @@ class ProviderRegistry:
             raise ValueError(f"No provider implementation for {provider}")
 
         self.cache[cache_key] = instance
-        logger.debug("provider_factory_cached provider=%s venue=%s", provider, resolved_venue)
+        logger.debug("provider_factory_cached | provider=%s venue=%s", provider, resolved_venue)
         if should_log:
             build_ms = (time.perf_counter() - build_started) * 1000.0
             logger.debug(

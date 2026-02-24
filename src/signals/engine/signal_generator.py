@@ -60,6 +60,7 @@ class _DecoratedRegistration:
 _DECORATED: MutableMapping[str, _DecoratedRegistration] = {}
 _RESERVED_CONFIG_KEYS = {"rule_payloads", "enabled_rules"}
 _TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
+_MANIFEST_WARNED: Set[str] = set()
 
 
 def _registration_from_plugin(indicator_type: str) -> Optional[Tuple[Sequence[RuleCallable], Optional[OverlayAdapter]]]:
@@ -109,7 +110,9 @@ def _ensure_signal_manifest(indicator_type: str) -> None:
             evaluation_mode="rolling",
         )
     )
-    logger.warning("signal_manifest_auto_registered | indicator_type=%s", key)
+    if key not in _MANIFEST_WARNED:
+        _MANIFEST_WARNED.add(key)
+        logger.warning("signal_manifest_auto_registered | indicator_type=%s", key)
 
 
 def _df_summary(df: "DataFrame") -> Mapping[str, Any]:
@@ -170,11 +173,8 @@ def register_indicator_rules(
         signal_rules=normalized_rules,
         signal_overlay_adapter=overlay_adapter,
     )
-    logger.info(
-        "indicator_signal_components_registered | indicator_type=%s | rules=%s",
-        key,
-        [getattr(r, "__name__", repr(r))[:50] for r in normalized_rules],
-    )
+    # Registration is routine during module import/bootstrap.
+    # Keep startup logs focused on lifecycle boundaries and failures.
 
 
 def _normalise_indicator_type(indicator: Union[str, Any]) -> str:

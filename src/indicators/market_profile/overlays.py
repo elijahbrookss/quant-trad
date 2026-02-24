@@ -46,6 +46,13 @@ def _variant_compact(variant: str) -> str:
     return mapping.get(normalized, normalized.upper() if normalized else "")
 
 
+def _short_indicator_id(value: Any, *, size: int = 4) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text[: max(1, int(size))]
+
+
 def _direction_compact(
     *,
     direction: Any = None,
@@ -453,7 +460,16 @@ def market_profile_overlay_adapter(
                 + (f" {direction_tag}" if direction_tag else "")
             )
             trace_id = str(metadata.get("trace_id") or "").strip()
-            meta_text = f"id={trace_id}" if trace_id else None
+            indicator_short = _short_indicator_id(metadata.get("indicator_id"))
+            if indicator_short:
+                short_label = f"{indicator_short} {short_label}"
+            meta_parts = []
+            if trace_id:
+                meta_parts.append(f"id={trace_id}")
+            if indicator_short:
+                meta_parts.append(f"ind={indicator_short}")
+            meta_parts.append(f"lvl={float(level_price):.2f}")
+            meta_text = " | ".join(meta_parts) if meta_parts else None
             pointer_hint = str(
                 metadata.get("pointer_direction")
                 or metadata.get("breakout_direction")
@@ -485,6 +501,9 @@ def market_profile_overlay_adapter(
                     or metadata.get("direction")
                     or bubble_direction,
                     "bias": bias_label,
+                    "profile_key": str(metadata.get("profile_key") or metadata.get("value_area_id") or ""),
+                    "boundary_type": str(metadata.get("boundary_type") or metadata.get("level_type") or ""),
+                    "boundary_price": finite_float(metadata.get("boundary_price") or metadata.get("level_price")),
                     "diagnostics": _signal_diagnostics(metadata, signal_time=signal_time),
                     "subtype": "bubble",
                 }
@@ -536,7 +555,16 @@ def market_profile_overlay_adapter(
         )
         if direction_tag:
             short_label = f"{short_label} {direction_tag}"
-        meta_text = f"id={trace_id}" if trace_id else None
+        indicator_short = _short_indicator_id(metadata.get("indicator_id"))
+        if indicator_short:
+            short_label = f"{indicator_short} {short_label}"
+        meta_parts = []
+        if trace_id:
+            meta_parts.append(f"id={trace_id}")
+        if indicator_short:
+            meta_parts.append(f"ind={indicator_short}")
+        meta_parts.append(f"lvl={float(level_price):.2f}")
+        meta_text = " | ".join(meta_parts) if meta_parts else None
 
         bias_label = bias_label_from_direction(
             breakout_direction or metadata.get("direction")
@@ -815,6 +843,12 @@ def market_profile_overlay_transformer(
                 int(MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS),
             )
     extend_to_end = bool(params.get("extend_value_area_to_chart_end"))
+    window_start_epoch = to_epoch_seconds(params.get("start"))
+    window_end_epoch = to_epoch_seconds(params.get("end"))
+    effective_window_end = min(
+        int(current_epoch),
+        int(window_end_epoch) if window_end_epoch is not None else int(current_epoch),
+    )
 
     # Extract metadata for logging context
     bot_id = overlay.get("bot_id") or payload.get("bot_id")
@@ -871,16 +905,39 @@ def market_profile_overlay_transformer(
 
     boxes: List[Dict[str, Any]] = []
     debug_profiles: List[Dict[str, Any]] = []
+    clipped_by_window = 0
+    dropped_outside_window = 0
     for profile in merged_profiles:
         start_epoch = int(profile.start.timestamp())
         end_epoch = int(profile.end.timestamp())
         if end_epoch > current_epoch:
             continue
-        box_end = current_epoch if extend_to_end else end_epoch
+        box_start = start_epoch
+        box_end = int(current_epoch) if extend_to_end else end_epoch
+
+        if window_start_epoch is not None and box_end < int(window_start_epoch):
+            dropped_outside_window += 1
+            continue
+        if window_end_epoch is not None and box_start > int(window_end_epoch):
+            dropped_outside_window += 1
+            continue
+
+        if window_start_epoch is not None and box_start < int(window_start_epoch):
+            box_start = int(window_start_epoch)
+            clipped_by_window += 1
+        if window_end_epoch is not None and box_end > int(window_end_epoch):
+            box_end = int(window_end_epoch)
+            clipped_by_window += 1
+        if box_end > effective_window_end:
+            box_end = int(effective_window_end)
+        if box_start > box_end:
+            dropped_outside_window += 1
+            continue
+
         profile_key = profile_identity(profile)
         boxes.append(
             {
-                "x1": start_epoch,
+                "x1": box_start,
                 "x2": box_end,
                 "y1": float(profile.val),
                 "y2": float(profile.vah),
@@ -899,33 +956,185 @@ def market_profile_overlay_transformer(
                     "val": float(profile.val),
                     "start": start_epoch,
                     "end": end_epoch,
+                    "clipped_start": box_start,
                     "box_end": box_end,
                 }
             )
+
+    if window_start_epoch is not None or window_end_epoch is not None:
+        log.debug(
+            "event=market_profile_overlay_window_clip symbol=%s window_start=%s window_end=%s clipped=%s dropped=%s boxes=%s",
+            symbol,
+            window_start_epoch,
+            window_end_epoch,
+            clipped_by_window,
+            dropped_outside_window,
+            len(boxes),
+        )
 
     trimmed = dict(overlay)
     payload_copy = dict(payload)
     payload_copy["boxes"] = boxes
     payload_copy["transform_summary"] = transform_summary
+    window_min = int(window_start_epoch) if window_start_epoch is not None else None
+    window_max = int(effective_window_end)
+
+    def _entry_in_window(epoch: Optional[int]) -> bool:
+        if epoch is None:
+            return True
+        if window_min is not None and epoch < window_min:
+            return False
+        if epoch > window_max:
+            return False
+        return True
+
+    markers = payload_copy.get("markers")
+    if isinstance(markers, list):
+        filtered_markers: List[Dict[str, Any]] = []
+        dropped_markers = 0
+        for marker in markers:
+            if not isinstance(marker, Mapping):
+                continue
+            marker_time = to_epoch_seconds(marker.get("time"))
+            if not _entry_in_window(marker_time):
+                dropped_markers += 1
+                continue
+            filtered_markers.append(dict(marker))
+        payload_copy["markers"] = filtered_markers
+        if dropped_markers > 0:
+            log.debug(
+                "event=market_profile_overlay_marker_window_filter symbol=%s dropped=%s kept=%s window_start=%s window_end=%s",
+                symbol,
+                dropped_markers,
+                len(filtered_markers),
+                window_min,
+                window_max,
+            )
+
     bubbles = payload_copy.get("bubbles")
+    if isinstance(bubbles, list):
+        filtered_bubbles: List[Dict[str, Any]] = []
+        dropped_bubbles = 0
+        dropped_nested_markers = 0
+        for bubble in bubbles:
+            if not isinstance(bubble, Mapping):
+                continue
+            bubble_time = to_epoch_seconds(bubble.get("time"))
+            if not _entry_in_window(bubble_time):
+                dropped_bubbles += 1
+                continue
+            bubble_copy = dict(bubble)
+            nested_markers = bubble_copy.get("_markers")
+            if isinstance(nested_markers, list):
+                kept_nested: List[Dict[str, Any]] = []
+                for nested in nested_markers:
+                    if not isinstance(nested, Mapping):
+                        continue
+                    nested_time = to_epoch_seconds(nested.get("time"))
+                    if not _entry_in_window(nested_time):
+                        dropped_nested_markers += 1
+                        continue
+                    kept_nested.append(dict(nested))
+                bubble_copy["_markers"] = kept_nested
+            filtered_bubbles.append(bubble_copy)
+        payload_copy["bubbles"] = filtered_bubbles
+        if dropped_bubbles > 0 or dropped_nested_markers > 0:
+            log.debug(
+                "event=market_profile_overlay_bubble_window_filter symbol=%s dropped_bubbles=%s dropped_nested_markers=%s kept=%s window_start=%s window_end=%s",
+                symbol,
+                dropped_bubbles,
+                dropped_nested_markers,
+                len(filtered_bubbles),
+                window_min,
+                window_max,
+            )
+        bubbles = filtered_bubbles
+
+    if isinstance(bubbles, list):
+        if not boxes and bubbles:
+            sample_bubbles = []
+            for bubble in bubbles[:5]:
+                if not isinstance(bubble, Mapping):
+                    continue
+                sample_bubbles.append(
+                    {
+                        "time": bubble.get("time"),
+                        "profile_key": bubble.get("profile_key"),
+                        "boundary_type": bubble.get("boundary_type"),
+                        "boundary_price": bubble.get("boundary_price"),
+                        "label": bubble.get("label"),
+                        "meta": bubble.get("meta"),
+                    }
+                )
+            log.info(
+                "event=market_profile_overlay_bubbles_without_boxes symbol=%s bubbles=%s boxes=%s window_start=%s window_end=%s sample=%s",
+                symbol,
+                len(bubbles),
+                len(boxes),
+                window_min,
+                window_max,
+                sample_bubbles,
+            )
     if isinstance(bubbles, list) and boxes:
         box_by_profile: Dict[str, Dict[str, Any]] = {}
+        box_by_boundary: Dict[tuple[str, float], List[Dict[str, Any]]] = {}
         for box in boxes:
             if not isinstance(box, Mapping):
                 continue
             profile_key = str(box.get("profile_key") or "")
             if profile_key:
                 box_by_profile[profile_key] = dict(box)
+            y1 = finite_float(box.get("y1"))
+            y2 = finite_float(box.get("y2"))
+            if y1 is not None:
+                box_by_boundary.setdefault(("VAL", round(float(y1), 8)), []).append(dict(box))
+            if y2 is not None:
+                box_by_boundary.setdefault(("VAH", round(float(y2), 8)), []).append(dict(box))
+
+        reconciliation = {
+            "bubbles_total": 0,
+            "matched_by_profile": 0,
+            "matched_by_boundary_only": 0,
+            "unmatched_profile_key": 0,
+            "missing_profile_key": 0,
+            "missing_boundary": 0,
+            "boundary_mismatch": 0,
+        }
+        reconciliation_samples: List[Dict[str, Any]] = []
+
         for bubble in bubbles:
             if not isinstance(bubble, Mapping):
                 continue
+            reconciliation["bubbles_total"] += 1
             profile_key = str(bubble.get("profile_key") or "")
-            if not profile_key:
-                continue
-            matched_box = box_by_profile.get(profile_key)
             boundary_type = str(bubble.get("boundary_type") or "").upper()
             boundary_price = finite_float(bubble.get("boundary_price"))
+            boundary_key = (
+                boundary_type,
+                round(float(boundary_price), 8),
+            ) if boundary_type in {"VAH", "VAL"} and boundary_price is not None else None
+            boundary_matches = box_by_boundary.get(boundary_key, []) if boundary_key is not None else []
+            matched_box = box_by_profile.get(profile_key) if profile_key else None
+
+            if not profile_key:
+                reconciliation["missing_profile_key"] += 1
+                if boundary_matches:
+                    reconciliation["matched_by_boundary_only"] += 1
+                continue
             if matched_box is None:
+                reconciliation["unmatched_profile_key"] += 1
+                if boundary_matches:
+                    reconciliation["matched_by_boundary_only"] += 1
+                    if len(reconciliation_samples) < 5:
+                        reconciliation_samples.append(
+                            {
+                                "reason": "profile_key_unmatched_boundary_present",
+                                "profile_key": profile_key,
+                                "boundary_type": boundary_type,
+                                "boundary_price": boundary_price,
+                                "label": bubble.get("label"),
+                            }
+                        )
                 log.warning(
                     "event=market_profile_overlay_bubble_profile_unmatched symbol=%s profile_key=%s boundary_type=%s boundary_price=%s",
                     symbol,
@@ -934,14 +1143,28 @@ def market_profile_overlay_transformer(
                     boundary_price,
                 )
                 continue
+            reconciliation["matched_by_profile"] += 1
             expected = None
             if boundary_type == "VAH":
                 expected = finite_float(matched_box.get("y2"))
             elif boundary_type == "VAL":
                 expected = finite_float(matched_box.get("y1"))
             if expected is None or boundary_price is None:
+                reconciliation["missing_boundary"] += 1
                 continue
             if abs(float(expected) - float(boundary_price)) > 1e-9:
+                reconciliation["boundary_mismatch"] += 1
+                if len(reconciliation_samples) < 5:
+                    reconciliation_samples.append(
+                        {
+                            "reason": "boundary_mismatch",
+                            "profile_key": profile_key,
+                            "boundary_type": boundary_type,
+                            "boundary_price": boundary_price,
+                            "box_expected": expected,
+                            "label": bubble.get("label"),
+                        }
+                    )
                 log.warning(
                     "event=market_profile_overlay_bubble_boundary_mismatch symbol=%s profile_key=%s boundary_type=%s boundary_price=%.8f box_expected=%.8f",
                     symbol,
@@ -950,6 +1173,14 @@ def market_profile_overlay_transformer(
                     float(boundary_price),
                     float(expected),
                 )
+        log.info(
+            "event=market_profile_overlay_bubble_box_reconciliation symbol=%s boxes=%s bubbles=%s stats=%s sample=%s",
+            symbol,
+            len(boxes),
+            len(bubbles),
+            reconciliation,
+            reconciliation_samples,
+        )
     if debug_profiles:
         log.debug(
             "event=market_profile_overlay_boxes_resolved symbol=%s current_epoch=%s boxes=%s sample=%s",

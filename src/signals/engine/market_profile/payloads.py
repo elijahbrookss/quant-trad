@@ -159,9 +159,11 @@ def build_value_area_payloads(
     if runtime_symbol is not None:
         setattr(runtime, "symbol", runtime_symbol)
 
-    # Get daily profiles count before merging
-    daily_profiles = getattr(runtime, "daily_profiles", None) or getattr(runtime, "_profiles", None)
-    daily_count = len(daily_profiles) if daily_profiles else 0
+    get_profiles = getattr(runtime, "get_profiles", None)
+    if not callable(get_profiles):
+        raise RuntimeError("market_profile_runtime_missing_get_profiles")
+    daily_profiles = list(get_profiles() or [])
+    daily_count = len(daily_profiles)
 
     signature = params.signature(va_source=va_source)
 
@@ -176,13 +178,12 @@ def build_value_area_payloads(
             min_merge_sessions is not None,
         )
 
-        merged_profiles = None
-        if hasattr(runtime, "get_merged_profiles"):
-            merged_profiles = runtime.get_merged_profiles(
-                threshold=params.merge_threshold, min_sessions=params.min_merge_sessions
-            )
-        elif hasattr(runtime, "merged_profiles"):
-            merged_profiles = runtime.merged_profiles
+        get_merged_profiles = getattr(runtime, "get_merged_profiles", None)
+        if not callable(get_merged_profiles):
+            raise RuntimeError("market_profile_runtime_missing_get_merged_profiles")
+        merged_profiles = get_merged_profiles(
+            threshold=params.merge_threshold, min_sessions=params.min_merge_sessions
+        )
         value_areas = _profiles_to_dicts(merged_profiles)
 
         log.info(
@@ -192,7 +193,7 @@ def build_value_area_payloads(
             len(value_areas),
         )
     else:
-        value_areas = _profiles_to_dicts(getattr(runtime, "daily_profiles", None))
+        value_areas = _profiles_to_dicts(daily_profiles)
         log.info(
             "Market profile no merge | symbol=%s | use_merged=False | daily_profiles=%d",
             runtime_symbol,

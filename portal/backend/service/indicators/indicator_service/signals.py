@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.domain import timeframe_to_seconds
@@ -17,6 +17,8 @@ from signals.base import BaseSignal
 from signals.contract import assert_no_execution_fields, assert_signal_contract
 
 from .context import IndicatorServiceContext, _context
+from .overlay_pipeline import OverlayProjectionContext, project_indicator_overlays
+from .runtime_contract import SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
 from ...market import instrument_service
 from .utils import (
     ensure_color,
@@ -28,66 +30,6 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 _SIGNAL_EXEC_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-
-
-def _to_epoch_seconds(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return None
-    if isinstance(value, datetime):
-        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp())
-    if hasattr(value, "timestamp"):
-        try:
-            return int(value.timestamp())
-        except Exception:
-            return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-    return int(dt.timestamp())
-
-
-def _profile_cache_signature(instance: Any) -> Tuple[Any, ...]:
-    """Return a stable signature of profile state to prevent stale signal cache hits."""
-
-    getter = getattr(instance, "get_profiles", None)
-    if not callable(getter):
-        return ("no_profiles_getter",)
-    try:
-        profiles = list(getter() or [])
-    except Exception:
-        return ("profiles_getter_failed",)
-    if not profiles:
-        return ("profiles_empty", 0)
-
-    first = profiles[0]
-    last = profiles[-1]
-    return (
-        "profiles_v1",
-        len(profiles),
-        _to_epoch_seconds(getattr(first, "start", None)),
-        _to_epoch_seconds(getattr(first, "end", None)),
-        float(getattr(first, "vah", 0.0) or 0.0),
-        float(getattr(first, "val", 0.0) or 0.0),
-        int(getattr(first, "session_count", 1) or 1),
-        _to_epoch_seconds(getattr(last, "start", None)),
-        _to_epoch_seconds(getattr(last, "end", None)),
-        float(getattr(last, "vah", 0.0) or 0.0),
-        float(getattr(last, "val", 0.0) or 0.0),
-        int(getattr(last, "session_count", 1) or 1),
-    )
 
 
 def _derive_bias_from_metadata(metadata: Mapping[str, Any]) -> Optional[str]:
@@ -186,11 +128,9 @@ class IndicatorSignalExecutor:
             entry.meta, sym, signal_start, signal_end, signal_interval, datasource, exchange
         )
         include_overlays = bool((config or {}).get("include_overlays", False))
-        profile_signature = _profile_cache_signature(entry.instance)
         cache_key = self._build_cache_key(
             inst_id=inst_id,
             meta=entry.meta,
-            profile_signature=profile_signature,
             symbol=sym,
             datasource=datasource,
             exchange=exchange,
@@ -202,14 +142,30 @@ class IndicatorSignalExecutor:
         )
         cached_payload = _SIGNAL_EXEC_CACHE.get(cache_key)
         if cached_payload is not None:
+            cached_runtime_path = str(cached_payload.get("runtime_path") or SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT)
+            runtime_invariants = cached_payload.get("runtime_invariants")
+            if isinstance(runtime_invariants, Mapping):
+                self._log_signal_response_invariant(
+                    indicator_id=inst_id,
+                    indicator_type=entry.meta.get("type"),
+                    symbol=sym,
+                    timeframe=signal_interval,
+                    source_timeframe=str(runtime_invariants.get("source_timeframe") or plan_interval),
+                    bars_used=int(runtime_invariants.get("bars_used") or 0),
+                    profiles_count=int(runtime_invariants.get("profiles_count") or 0),
+                    signals_count=int(runtime_invariants.get("signals_count") or 0),
+                    runtime_path=cached_runtime_path,
+                    include_overlays=include_overlays,
+                    cache_hit=True,
+                )
             logger.info(
-                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s profile_signature=%s",
+                "event=indicator_signal_cache_hit indicator_id=%s indicator_type=%s symbol=%s timeframe=%s include_overlays=%s runtime_path=%s",
                 inst_id,
                 entry.meta.get("type"),
                 sym,
                 signal_interval,
                 include_overlays,
-                profile_signature,
+                cached_runtime_path,
             )
             return deepcopy(cached_payload)
         t_fetch_start = perf_counter()
@@ -224,29 +180,18 @@ class IndicatorSignalExecutor:
             sorted(requested_rule_ids) if requested_rule_ids else None,
         )
         logger.info(
-            "event=indicator_runtime_artifacts_prepare_start indicator_id=%s indicator_type=%s symbol=%s",
+            "event=indicator_runtime_engine_prepare_start indicator_id=%s indicator_type=%s symbol=%s",
             inst_id,
             entry.meta.get("type"),
             sym,
         )
-        t_artifacts_start = perf_counter()
-        precomputed_runtime_payload = self._build_precomputed_runtime_payload(
-            inst_id=inst_id,
-            meta=entry.meta,
-            instance=entry.instance,
-            symbol=sym,
-            runtime_scope=f"{signal_start}|{signal_end}|{signal_interval}",
-            source_timeframe=signal_interval,
-            chart_timeframe=interval,
-            profile_source_timeframe=plan_interval,
-        )
-        t_artifacts_ms = (perf_counter() - t_artifacts_start) * 1000.0
+        t_artifacts_ms = 0.0
         logger.info(
-            "event=indicator_runtime_artifacts_prepare_complete indicator_id=%s indicator_type=%s symbol=%s ready=%s duration_ms=%.3f",
+            "event=indicator_runtime_engine_prepare_complete indicator_id=%s indicator_type=%s symbol=%s ready=%s duration_ms=%.3f",
             inst_id,
             entry.meta.get("type"),
             sym,
-            bool(precomputed_runtime_payload),
+            True,
             t_artifacts_ms,
         )
         t_runtime_start = perf_counter()
@@ -256,7 +201,7 @@ class IndicatorSignalExecutor:
             df=df,
             symbol=sym,
             timeframe=signal_interval,
-            prepared_snapshot_payload=precomputed_runtime_payload,
+            runtime_scope=f"{signal_start}|{signal_end}|{signal_interval}",
         )
         t_runtime_ms = (perf_counter() - t_runtime_start) * 1000.0
         cache_ctx = BreakoutCacheContext(
@@ -271,14 +216,42 @@ class IndicatorSignalExecutor:
         t_overlay_start = perf_counter()
         overlays: List[Any] = []
         if include_overlays:
-            overlays = self._ctx.signal_runner.build_overlays(
-                entry.instance, filtered, df, **(config or {})
+            overlays = project_indicator_overlays(
+                OverlayProjectionContext(
+                    indicator_id=inst_id,
+                    meta=entry.meta,
+                    df=df,
+                    symbol=sym,
+                    timeframe=signal_interval,
+                    signals=filtered,
+                )
             )
         t_overlay_ms = (perf_counter() - t_overlay_start) * 1000.0
         payload = ensure_color(dict(entry.meta), ctx=self._ctx)
         # Convert BaseSignal objects to dicts for JSON serialization and strategy evaluation
         payload["signals"] = [sig.to_dict() if hasattr(sig, "to_dict") else sig for sig in filtered]
         payload["overlays"] = overlays
+        profiles_count = self._infer_profiles_count(overlays)
+        payload["runtime_path"] = SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
+        payload["runtime_invariants"] = {
+            "source_timeframe": plan_interval,
+            "bars_used": len(df) if df is not None else 0,
+            "profiles_count": profiles_count,
+            "signals_count": len(filtered),
+        }
+        self._log_signal_response_invariant(
+            indicator_id=inst_id,
+            indicator_type=entry.meta.get("type"),
+            symbol=sym,
+            timeframe=signal_interval,
+            source_timeframe=plan_interval,
+            bars_used=len(df) if df is not None else 0,
+            profiles_count=profiles_count,
+            signals_count=len(filtered),
+            runtime_path=SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+            include_overlays=include_overlays,
+            cache_hit=False,
+        )
         _SIGNAL_EXEC_CACHE[cache_key] = deepcopy(payload)
         t_total_ms = (perf_counter() - t0) * 1000.0
         logger.info(
@@ -308,7 +281,6 @@ class IndicatorSignalExecutor:
         *,
         inst_id: str,
         meta: Mapping[str, Any],
-        profile_signature: Tuple[Any, ...],
         symbol: str,
         datasource: Optional[str],
         exchange: Optional[str],
@@ -340,9 +312,60 @@ class IndicatorSignalExecutor:
             str(plan_end),
             str(plan_interval),
             params_items,
-            profile_signature,
+            SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
             enabled_rules_key,
             bool(include_overlays),
+        )
+
+    @staticmethod
+    def _infer_profiles_count(overlays: Sequence[Any]) -> int:
+        if not isinstance(overlays, Sequence):
+            return 0
+        for overlay in overlays:
+            if not isinstance(overlay, Mapping):
+                continue
+            payload = overlay.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            profiles = payload.get("profiles")
+            if isinstance(profiles, Sequence) and not isinstance(profiles, (str, bytes)):
+                return len(profiles)
+            boxes = payload.get("boxes")
+            if isinstance(boxes, Sequence) and not isinstance(boxes, (str, bytes)):
+                return len(boxes)
+            value_areas = payload.get("value_areas")
+            if isinstance(value_areas, Sequence) and not isinstance(value_areas, (str, bytes)):
+                return len(value_areas)
+        return 0
+
+    @staticmethod
+    def _log_signal_response_invariant(
+        *,
+        indicator_id: str,
+        indicator_type: Any,
+        symbol: str,
+        timeframe: str,
+        source_timeframe: str,
+        bars_used: int,
+        profiles_count: int,
+        signals_count: int,
+        runtime_path: str,
+        include_overlays: bool,
+        cache_hit: bool,
+    ) -> None:
+        logger.info(
+            "event=indicator_signal_response_invariant indicator_id=%s indicator_type=%s symbol=%s timeframe=%s source_timeframe=%s bars_used=%s profiles_count=%s signals_count=%s runtime_path=%s include_overlays=%s cache_hit=%s",
+            indicator_id,
+            indicator_type,
+            symbol,
+            timeframe,
+            source_timeframe,
+            bars_used,
+            profiles_count,
+            signals_count,
+            runtime_path,
+            include_overlays,
+            cache_hit,
         )
 
     def _load_entry(
@@ -357,16 +380,12 @@ class IndicatorSignalExecutor:
     ):
         return get_indicator_entry(
             inst_id,
-            fallback_context={
-                "symbol": symbol,
-                "start": start,
-                "end": end,
-                "interval": interval,
-                "datasource": datasource,
-                "exchange": exchange,
-            },
+            datasource=datasource,
+            exchange=exchange,
+            build_instance=False,
             ctx=self._ctx,
         )
+
 
     def _resolve_symbol(self, entry, symbol: Optional[str]) -> str:
         base_params = entry.meta.get("params", {})
@@ -455,7 +474,7 @@ class IndicatorSignalExecutor:
         df: Any,
         symbol: str,
         timeframe: str,
-        prepared_snapshot_payload: Mapping[str, Any],
+        runtime_scope: str,
     ) -> List[BaseSignal]:
         indicator_type = str(meta.get("type") or "").strip().lower()
         if not indicator_type:
@@ -471,9 +490,22 @@ class IndicatorSignalExecutor:
             raise RuntimeError(
                 f"indicator_signal_runtime_emitter_missing: indicator_id={inst_id} indicator_type={indicator_type}"
             )
+        if getattr(plugin, "engine_factory", None) is None:
+            raise RuntimeError(
+                f"indicator_signal_runtime_engine_missing: indicator_id={inst_id} indicator_type={indicator_type}"
+            )
+
+        engine = plugin.engine_factory(meta)
+        window_context = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "indicator_id": inst_id,
+            "strategy_id": str(meta.get("strategy_id") or ""),
+        }
+        state = engine.initialize(window_context)
 
         logger.info(
-            "event=indicator_signal_runtime_input_source indicator_id=%s indicator_type=%s source=prepared_runtime_artifacts",
+            "event=indicator_signal_runtime_input_source indicator_id=%s indicator_type=%s source=engine_snapshot",
             inst_id,
             indicator_type,
         )
@@ -488,6 +520,7 @@ class IndicatorSignalExecutor:
         bar_count = 0
         diagnostics_sum: Dict[str, float] = {}
         diagnostics_max: Dict[str, float] = {}
+        runtime_state_storage: Dict[str, Any] = {}
         for timestamp, row in df.iterrows():
             bar_count += 1
             candle_time = timestamp.to_pydatetime() if hasattr(timestamp, "to_pydatetime") else timestamp
@@ -503,7 +536,30 @@ class IndicatorSignalExecutor:
                 close=float(row.get("close")),
                 volume=float(row.get("volume")) if row.get("volume") is not None else None,
             )
-            payload = dict(prepared_snapshot_payload)
+            t_apply = perf_counter()
+            engine.apply_bar(state, candle)
+            apply_ms += (perf_counter() - t_apply) * 1000.0
+            t_snapshot = perf_counter()
+            snapshot = engine.snapshot(state)
+            snapshot_ms += (perf_counter() - t_snapshot) * 1000.0
+            raw_payload = snapshot.payload
+            if not isinstance(raw_payload, Mapping):
+                raise RuntimeError(
+                    f"indicator_signal_runtime_snapshot_invalid: indicator_id={inst_id} indicator_type={indicator_type} reason=payload_non_mapping"
+                )
+            payload: MutableMapping[str, Any] = dict(raw_payload)
+            payload.setdefault("_indicator_id", inst_id)
+            scope_value = str(payload.get("_runtime_scope") or "").strip()
+            if not scope_value:
+                raise RuntimeError(
+                    "indicator_signal_runtime_scope_missing: "
+                    f"indicator_id={inst_id} indicator_type={indicator_type} "
+                    f"symbol={symbol} timeframe={timeframe}"
+                )
+            payload.setdefault("symbol", symbol)
+            payload.setdefault("chart_timeframe", timeframe)
+            payload.setdefault("source_timeframe", str(snapshot.source_timeframe or ""))
+            payload["_runtime_state_storage"] = runtime_state_storage
             t_emit = perf_counter()
             result = plugin.signal_emitter(payload, candle, previous_candle)
             emitter_ms += (perf_counter() - t_emit) * 1000.0
@@ -537,7 +593,7 @@ class IndicatorSignalExecutor:
                         default_symbol=symbol,
                         indicator_id=inst_id,
                         timeframe_seconds=timeframe_to_seconds(timeframe) or 0,
-                        runtime_scope=str(prepared_snapshot_payload.get("_runtime_scope") or ""),
+                        runtime_scope=scope_value,
                     )
                     convert_ms += (perf_counter() - t_convert) * 1000.0
                     if converted is not None:
@@ -579,72 +635,22 @@ class IndicatorSignalExecutor:
             diagnostics_sum,
             diagnostics_max,
         )
+        if emitted_raw == 0 and bar_count > 0:
+            logger.info(
+                "event=indicator_signal_runtime_zero_emission indicator_id=%s indicator_type=%s bars=%s candidate_count=%s candidate_chosen=%s candidate_lockout_blocked=%s candidate_already_pending=%s pending_confirm_invalid=%s pending_confirm_progress=%s retest_waiting_min_bars=%s retest_condition_rejected=%s",
+                inst_id,
+                indicator_type,
+                bar_count,
+                int(diagnostics_sum.get("candidate_count", 0.0) or 0),
+                int(diagnostics_sum.get("candidate_chosen", 0.0) or 0),
+                int(diagnostics_sum.get("candidate_lockout_blocked", 0.0) or 0),
+                int(diagnostics_sum.get("candidate_already_pending", 0.0) or 0),
+                int(diagnostics_sum.get("pending_confirm_invalid", 0.0) or 0),
+                int(diagnostics_sum.get("pending_confirm_progress", 0.0) or 0),
+                int(diagnostics_sum.get("retest_waiting_min_bars", 0.0) or 0),
+                int(diagnostics_sum.get("retest_condition_rejected", 0.0) or 0),
+            )
         return emitted
-
-    def _build_precomputed_runtime_payload(
-        self,
-        *,
-        inst_id: str,
-        meta: Mapping[str, Any],
-        instance: Any,
-        symbol: str,
-        runtime_scope: str,
-        source_timeframe: str,
-        chart_timeframe: str,
-        profile_source_timeframe: str,
-    ) -> Dict[str, Any]:
-        builder = getattr(instance, "build_runtime_signal_payload", None)
-        if not callable(builder):
-            raise RuntimeError(
-                "indicator_signal_runtime_payload_builder_missing: "
-                f"indicator_id={inst_id} indicator_type={meta.get('type')}"
-            )
-        try:
-            builder_kwargs = {
-                "indicator_id": inst_id,
-                "params": dict(meta.get("params") or {}),
-                "symbol": symbol,
-                "color": meta.get("color"),
-            }
-            if str(meta.get("type") or "").strip().lower() == "market_profile":
-                builder_kwargs["chart_timeframe"] = str(chart_timeframe or "")
-            payload = builder(**builder_kwargs)
-        except Exception as exc:
-            raise RuntimeError(
-                f"indicator_signal_precomputed_payload_failed: indicator_id={inst_id} indicator_type={meta.get('type')}"
-            ) from exc
-        if not isinstance(payload, Mapping):
-            raise RuntimeError(
-                "indicator_signal_precomputed_payload_invalid: "
-                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=non_mapping"
-            )
-        profiles = payload.get("profiles")
-        if not isinstance(profiles, Sequence):
-            raise RuntimeError(
-                "indicator_signal_precomputed_payload_invalid: "
-                f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profiles"
-            )
-        normalized = dict(payload)
-        normalized["_indicator_id"] = inst_id
-        normalized["symbol"] = symbol
-        normalized["_runtime_scope"] = runtime_scope
-        normalized["source_timeframe"] = str(source_timeframe or "")
-        normalized["chart_timeframe"] = str(chart_timeframe or "")
-        normalized["source_timeframe_seconds"] = timeframe_to_seconds(source_timeframe) or 0
-        normalized["profile_source_timeframe"] = str(profile_source_timeframe or "")
-        if str(meta.get("type") or "").strip().lower() == "market_profile":
-            if not isinstance(normalized.get("profile_params"), Mapping):
-                raise RuntimeError(
-                    "indicator_signal_precomputed_payload_invalid: "
-                    f"indicator_id={inst_id} indicator_type={meta.get('type')} reason=missing_profile_params"
-                )
-        logger.info(
-            "event=indicator_signal_precomputed_payload_ready indicator_id=%s indicator_type=%s profiles=%s",
-            inst_id,
-            meta.get("type"),
-            len(profiles),
-        )
-        return normalized
 
     def _signal_from_runtime_payload(
         self,
@@ -685,11 +691,17 @@ class IndicatorSignalExecutor:
         inferred_bias = _derive_bias_from_metadata(metadata)
         if inferred_bias and not metadata.get("bias"):
             metadata["bias"] = inferred_bias
+        resolved_runtime_scope = str(metadata.get("runtime_scope") or runtime_scope or "").strip()
+        if not resolved_runtime_scope:
+            raise RuntimeError(
+                "indicator_signal_contract_scope_missing: "
+                f"indicator_id={indicator_id} signal_type={signal_type}"
+            )
+        metadata["runtime_scope"] = resolved_runtime_scope
         metadata.setdefault("signal_type", signal_type)
         metadata.setdefault("signal_time", int(ts.timestamp()))
         metadata.setdefault("indicator_id", indicator_id)
         metadata.setdefault("timeframe_seconds", int(timeframe_seconds))
-        metadata.setdefault("runtime_scope", runtime_scope)
         metadata.setdefault("symbol", symbol)
         metadata.setdefault("rule_id", signal_type)
         metadata.setdefault("pattern_id", metadata.get("rule_id") or signal_type)

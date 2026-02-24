@@ -665,11 +665,13 @@ class MarketProfileIndicator(ComputeIndicator):
         merge_threshold = float(profile_params.get("merge_threshold", self.merge_threshold))
         min_merge_sessions = int(profile_params.get("min_merge_sessions", self.min_merge_sessions))
         resolved_chart_timeframe = str(chart_timeframe or "").strip().lower() or "30m"
-        runtime_profiles = self._runtime_profiles_for_chart_timeframe(
-            chart_timeframe=resolved_chart_timeframe,
-            use_merged=use_merged,
-            merge_threshold=merge_threshold,
-            min_merge_sessions=min_merge_sessions,
+        # Signals run on chart timeframe bars, but profile boundaries must stay in
+        # source/session time semantics so overlays and runtime decisions share
+        # the same merged profile identity.
+        runtime_profiles = (
+            self.get_merged_profiles(merge_threshold, min_merge_sessions)
+            if use_merged
+            else self.get_profiles()
         )
         profile_params["profiles_premerged"] = bool(use_merged)
         payload_profiles: List[Dict[str, Any]] = []
@@ -696,7 +698,7 @@ class MarketProfileIndicator(ComputeIndicator):
             "profile_params": profile_params,
             "profile_chart_timeframe": resolved_chart_timeframe,
             "profile_source_timeframe": "30m",
-            "profile_normalization": "snap_to_chart_timeframe",
+            "profile_boundary_semantics": "source_session",
             "overlay_color": str(color).strip() if isinstance(color, str) and color.strip() else None,
         }
 
@@ -837,40 +839,3 @@ class MarketProfileIndicator(ComputeIndicator):
 
         logger.info("Completed daily profile computation. Total profiles: %d", len(profiles))
         return profiles
-
-    # ========================================================================
-    # LEGACY COMPATIBILITY LAYER
-    # These methods provide backwards compatibility with old dict-based API
-    # TODO: Remove once all consumers are updated to use Profile objects
-    # ========================================================================
-
-    @property
-    def daily_profiles(self) -> List[dict]:
-        """
-        Legacy property returning profiles as dictionaries.
-
-        DEPRECATED: Use get_profiles() instead which returns Profile objects.
-        """
-        return [p.to_dict() for p in self._profiles]
-
-    @property
-    def merged_profiles(self) -> List[dict]:
-        """
-        Legacy property returning merged profiles as dictionaries.
-
-        DEPRECATED: Use get_merged_profiles() instead which returns Profile objects.
-        """
-        # Cache merged results
-        if not hasattr(self, '_cached_merged'):
-            self._cached_merged = self.get_merged_profiles()
-        return [p.to_dict() for p in self._cached_merged]
-
-    # -----------------------------------------------------------------------
-    # Legacy compatibility
-    # -----------------------------------------------------------------------
-    def merge_value_areas(self, threshold: float = 0.6, min_merge: Optional[int] = None):
-        """Backward-compatible wrapper that returns merged profiles as dicts."""
-
-        min_sessions = self.min_merge_sessions if min_merge is None else min_merge
-        merged_profiles = self.get_merged_profiles(threshold, min_sessions)
-        return [profile.to_dict() for profile in merged_profiles]

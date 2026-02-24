@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 from ...indicators.indicator_service import generate_signals_for_instance
+from ...indicators.indicator_service.runtime_contract import (
+    SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+    assert_engine_signal_runtime_path,
+)
 from ...indicators.indicator_service import runtime_input_plan_for_instance
 from strategies import evaluator
 
@@ -210,6 +214,15 @@ def generate_indicator_payloads(
                 exchange=exchange,
                 config=per_config,
             )
+            if isinstance(payload, Mapping):
+                assert_engine_signal_runtime_path(
+                    payload,
+                    context=(
+                        "strategy_signal_preview_runtime_path_mismatch: "
+                        f"strategy_id={strategy_id} instrument_id={instrument_id}"
+                    ),
+                    indicator_id=inst_id,
+                )
             payload["runtime_input_plan"] = dict(runtime_input_plan)
             if isinstance(payload, dict):
                 payload["requested_window"] = {"start": start, "end": end}
@@ -241,7 +254,7 @@ def generate_indicator_payloads(
             total_signals += signal_count
             error_hint = payload.get("error") if isinstance(payload, Mapping) else None
             logger.info(
-                "strategy_signal_preview_result | run_id=%s strategy=%s instrument_id=%s indicator=%s signals=%d start=%s end=%s interval=%s error=%s",
+                "strategy_signal_preview_result | run_id=%s strategy=%s instrument_id=%s indicator=%s signals=%d start=%s end=%s interval=%s runtime_path=%s expected_runtime_path=%s error=%s",
                 run_id,
                 strategy_id,
                 instrument_id,
@@ -250,6 +263,8 @@ def generate_indicator_payloads(
                 start,
                 end,
                 interval,
+                payload.get("runtime_path") if isinstance(payload, Mapping) else None,
+                SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
                 error_hint,
             )
             if isinstance(signals_obj, list):
