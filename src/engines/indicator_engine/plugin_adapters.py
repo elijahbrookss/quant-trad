@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping
 
 from engines.bot_runtime.core.domain import Candle
 
-from ..contracts import OverlayProjectionInput
+from .contracts import OverlayProjectionInput
 
 
 def generic_overlay_entries(projection_input: OverlayProjectionInput) -> Mapping[str, Mapping[str, Any]]:

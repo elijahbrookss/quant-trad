@@ -1,3 +1,5 @@
+"""Shared indicator runtime engine contracts and registry."""
+
 from .basic_engines import (
     RollingWindowEngineConfig,
     RollingWindowStateEngine,
@@ -13,7 +15,6 @@ from .contracts import (
     ProjectionDelta,
     SignalEvaluationInput,
 )
-from .market_profile_engine import MarketProfileEngineConfig, MarketProfileStateEngine
 from .overlay_projection import OverlayEntryProjector, project_overlay_delta
 from .plugins import (
     IndicatorPluginManifest,
@@ -31,8 +32,6 @@ __all__ = [
     "OverlayProjectionInput",
     "ProjectionDelta",
     "SignalEvaluationInput",
-    "MarketProfileEngineConfig",
-    "MarketProfileStateEngine",
     "RollingWindowEngineConfig",
     "RollingWindowStateEngine",
     "VWAPStateEngine",

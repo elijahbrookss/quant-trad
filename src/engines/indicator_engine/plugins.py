@@ -1,9 +1,11 @@
-"""Core indicator plugin package."""
+"""Indicator plugin bootstrap for manifest registration."""
+
+from __future__ import annotations
 
 import importlib
 import sys
 
-from .registry import (
+from .plugin_registry import (
     IndicatorPluginManifest,
     IndicatorPluginRegistry,
     indicator_plugin_manifest,
@@ -12,10 +14,10 @@ from .registry import (
 
 
 _BUILTIN_PLUGIN_MODULES = (
-    "engines.bot_runtime.core.indicator_state.plugins.market_profile",
-    "engines.bot_runtime.core.indicator_state.plugins.pivot_level",
-    "engines.bot_runtime.core.indicator_state.plugins.trendline",
-    "engines.bot_runtime.core.indicator_state.plugins.vwap",
+    "indicators.market_profile.plugin",
+    "indicators.pivot_level.plugin",
+    "indicators.trendline.plugin",
+    "indicators.vwap.plugin",
 )
 _BUILTIN_PLUGIN_TYPES = {"market_profile", "pivot_level", "trendline", "vwap"}
 
