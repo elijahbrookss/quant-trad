@@ -32,12 +32,10 @@ the code is wrong.
 
 Agents MUST understand these documents before making architectural or behavioral changes:
 
-- `docs/agents/00_core_principles.md`
-- `docs/agents/01_layer_model.md`
-- `docs/agents/02_temporal_rules.md`
-- `docs/agents/03_artifact_lifecycle.md`
-- `docs/agents/04_execution_and_playback.md`
-- `docs/agents/05_engineering_principles.md`
+- `docs/agents/00_system_contract.md`
+- `docs/agents/01_runtime_contract.md`
+- `docs/agents/02_execution_playback_contract.md`
+- `docs/agents/03_engineering_contract.md`
 
 These define the system contract.
 
