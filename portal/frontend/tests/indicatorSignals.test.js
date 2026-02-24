@@ -17,10 +17,15 @@ function createSignalsAdapter(response) {
       config: {
         pivot_breakout_confirmation_bars: 2,
         enabled_rules: ['pivot_breakout', 'pivot_retest'],
+        include_overlays: true,
       },
     });
     return response;
   };
+}
+
+function createSignalsAdapterWithOverlayObject(response) {
+  return async () => response;
 }
 
 test('runSignalGeneration merges overlays and toggles loading flag', async () => {
@@ -96,8 +101,18 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
 
   assert.equal(success, true);
   assert.equal(errorMsg, null);
-  assert.deepEqual(updateCalls[0], { signalsLoading: true, signalsLoadingFor: 'ind-1' });
-  assert.deepEqual(updateCalls.at(-1), { signalsLoading: false, signalsLoadingFor: null });
+  assert.deepEqual(updateCalls[0], {
+    signalsLoading: true,
+    signalsLoadingFor: 'ind-1',
+    signalsLoadingByIndicator: { 'ind-1': true },
+    signalsLoadingCount: 1,
+  });
+  assert.deepEqual(updateCalls.at(-1), {
+    signalsLoading: false,
+    signalsLoadingFor: null,
+    signalsLoadingByIndicator: null,
+    signalsLoadingCount: 0,
+  });
 
   const overlayPatch = updateCalls.find(call => Object.prototype.hasOwnProperty.call(call, 'overlays'));
   assert.ok(overlayPatch, 'expected overlays patch to be emitted');
@@ -110,6 +125,41 @@ test('runSignalGeneration merges overlays and toggles loading flag', async () =>
   const finalState = getChart();
   assert.equal(finalState.signalResults['ind-1'].length, 1);
   assert.equal(finalState.signalResults['ind-1'][0].type, 'breakout');
+});
+
+test('runSignalGeneration accepts object-wrapped overlays from backend', async () => {
+  const indicator = { id: 'ind-1', params: {} };
+  const chartState = { symbol: 'ES', interval: '1h', signalsConfig: {} };
+
+  let currentState = { overlays: [], signalResults: {} };
+  const updateChart = (chartId, patch) => {
+    assert.equal(chartId, 'chart-1');
+    currentState = { ...currentState, ...patch };
+  };
+
+  const success = await runSignalGeneration({
+    indicator,
+    chartId: 'chart-1',
+    chartState,
+    startISO: START,
+    endISO: END,
+    indColors: {},
+    getChart: () => currentState,
+    updateChart,
+    setError: () => {},
+    signalsAdapter: createSignalsAdapterWithOverlayObject({
+      signals: [],
+      overlays: {
+        entries: [
+          { type: 'pivot_level', payload: { markers: [], price_lines: [] } },
+        ],
+      },
+    }),
+  });
+
+  assert.equal(success, true);
+  assert.equal(currentState.overlays.length, 1);
+  assert.equal(currentState.overlays[0].source, 'signals');
 });
 
 test('runSignalGeneration exits early when chart context missing', async () => {
