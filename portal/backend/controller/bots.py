@@ -194,6 +194,11 @@ async def stop_bot(bot_id: str) -> Dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.get("/{bot_id}/lens/bootstrap")
+async def bot_lens_bootstrap(bot_id: str, run_id: Optional[str] = None) -> Dict[str, Any]:
+    return await telemetry_hub.bootstrap(bot_id=bot_id, run_id=run_id)
+
+
 @router.websocket("/ws/telemetry/ingest")
 async def bot_telemetry_ingest(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -202,15 +207,17 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
             payload = await websocket.receive_json()
         except WebSocketDisconnect:
             break
-        bot_id = str(payload.get("bot_id") or "").strip()
-        if not bot_id:
-            continue
-        await telemetry_hub.broadcast(bot_id=bot_id, payload=payload)
+        await telemetry_hub.ingest(payload)
 
 
 @router.websocket("/ws/{bot_id}")
-async def bot_lens_ws(bot_id: str, websocket: WebSocket) -> None:
-    await telemetry_hub.add_viewer(bot_id=bot_id, ws=websocket)
+async def bot_lens_ws(
+    bot_id: str,
+    websocket: WebSocket,
+    run_id: Optional[str] = None,
+    since_seq: int = 0,
+) -> None:
+    await telemetry_hub.add_viewer(bot_id=bot_id, ws=websocket, run_id=run_id, since_seq=max(0, int(since_seq or 0)))
     try:
         while True:
             await websocket.receive_text()

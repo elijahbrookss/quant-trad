@@ -1,5 +1,5 @@
 import { createLogger } from '../utils/logger.js'
-import { openSse } from './realtime.adapter.js'
+import { openSse, openWebSocket } from './realtime.adapter.js'
 
 const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 const log = createLogger('BotAdapter')
@@ -76,4 +76,22 @@ export function openBotsStream() {
 
 export async function fetchBotSettingsCatalog() {
   return request('/api/bots/settings-catalog')
+}
+
+export async function fetchBotLensBootstrap(botId, { runId } = {}) {
+  const query = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
+  return request(`/api/bots/${encodeURIComponent(botId)}/lens/bootstrap${query}`)
+}
+
+export function openBotLensStream(botId, { runId, sinceSeq = 0 } = {}) {
+  const params = new URLSearchParams()
+  if (runId) params.set('run_id', String(runId))
+  params.set('since_seq', String(Number(sinceSeq) || 0))
+  const qs = params.toString()
+  const path = `/api/bots/ws/${encodeURIComponent(botId)}${qs ? `?${qs}` : ''}`
+  const socket = openWebSocket(path, { base: BASE })
+  if (!socket) {
+    log.warn('bot_lens_stream_init_failed', { bot_id: botId, run_id: runId, since_seq: sinceSeq })
+  }
+  return socket
 }
