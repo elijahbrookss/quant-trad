@@ -3,14 +3,27 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
 const computeStatus = (bot) => {
-  const runtimeStatus = String(bot?.runtime?.status || '').toLowerCase()
-  const persistedStatus = String(bot?.status || '').toLowerCase()
+  const runtimeStatus = String(bot?.runtime?.status || '').trim().toLowerCase()
+  const persistedStatus = String(bot?.status || '').trim().toLowerCase()
   const terminalPersisted = new Set(['idle', 'stopped', 'completed', 'error', 'crashed', 'failed'])
   if (persistedStatus && terminalPersisted.has(persistedStatus) && runtimeStatus && runtimeStatus !== persistedStatus) {
     return persistedStatus
   }
   return (runtimeStatus || persistedStatus || 'idle').toLowerCase()
 }
+
+const ACTIVE_STATUSES = new Set(['running', 'paused', 'starting'])
+const STARTABLE_STATUSES = new Set([
+  'idle',
+  'stopped',
+  'completed',
+  'error',
+  'crashed',
+  'failed',
+  'degraded',
+  'telemetry_degraded',
+])
+const HEARTBEAT_STALE_MS = 60_000
 
 /**
  * Get status color for the card stripe
@@ -19,9 +32,12 @@ const getStatusColor = (status) => {
   const colors = {
     running: 'bg-emerald-500',
     paused: 'bg-amber-500',
+    degraded: 'bg-amber-500',
+    telemetry_degraded: 'bg-amber-500',
     stopped: 'bg-rose-500',
     crashed: 'bg-rose-500',
     error: 'bg-rose-500',
+    failed: 'bg-rose-500',
     completed: 'bg-sky-500',
     starting: 'bg-slate-500',
     initialising: 'bg-slate-500',
@@ -124,18 +140,30 @@ export const BotCard = memo(function BotCard({
   const showProgress = progressPct > 0 || ['running', 'starting', 'paused'].includes(runtimeStatus)
   const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
-  const canStart = ['idle', 'stopped', 'completed', 'error', 'crashed'].includes(runtimeStatus)
-  const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
+  const heartbeatMs = Date.parse(String(bot?.heartbeat_at || ''))
+  const staleHeartbeat = ACTIVE_STATUSES.has(runtimeStatus) && (
+    !Number.isFinite(heartbeatMs) || nowEpochMs - heartbeatMs > HEARTBEAT_STALE_MS
+  )
+  const staleHeartbeatAgeSeconds = staleHeartbeat && Number.isFinite(heartbeatMs)
+    ? Math.max(0, Math.floor((nowEpochMs - heartbeatMs) / 1000))
+    : null
+  const staleHeartbeatTooltip = staleHeartbeat
+    ? staleHeartbeatAgeSeconds === null
+      ? 'No runtime heartbeat detected. Restart will create a new container.'
+      : `Last runtime heartbeat ${formatRuntimeAge(staleHeartbeatAgeSeconds)} ago. Restart will create a new container.`
+    : null
+  const canStart = STARTABLE_STATUSES.has(runtimeStatus) || staleHeartbeat
+  const canStop = ACTIVE_STATUSES.has(runtimeStatus) && !staleHeartbeat
   const isCompleted = runtimeStatus === 'completed'
   const isStopped = runtimeStatus === 'stopped'
-  const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error'
+  const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error' || runtimeStatus === 'failed'
   const isIdle = runtimeStatus === 'idle'
   const showViewError = isCrashed
-  const showLens = ['running', 'starting', 'paused', 'completed', 'stopped', 'error', 'crashed'].includes(runtimeStatus)
+  const showLens = ['running', 'starting', 'paused', 'completed', 'stopped', 'error', 'crashed', 'failed'].includes(runtimeStatus)
   const startLabel =
     runtimeStatus === 'completed'
       ? 'Rerun'
-      : runtimeStatus === 'stopped' || runtimeStatus === 'crashed' || runtimeStatus === 'error'
+      : staleHeartbeat || runtimeStatus === 'stopped' || runtimeStatus === 'crashed' || runtimeStatus === 'error' || runtimeStatus === 'failed' || runtimeStatus === 'degraded' || runtimeStatus === 'telemetry_degraded'
         ? 'Restart'
         : 'Start'
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
@@ -202,6 +230,14 @@ export const BotCard = memo(function BotCard({
                   {modeLabel}
                 </span>
               ) : null}
+              {staleHeartbeat && (
+                <span
+                  className="shrink-0 rounded-full border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
+                  title={staleHeartbeatTooltip || undefined}
+                >
+                  Offline
+                </span>
+              )}
               {warningCount > 0 && (
                 <div
                   className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
@@ -293,15 +329,25 @@ export const BotCard = memo(function BotCard({
             )}
           </div>
 
-          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
-            runtimeStatus === 'running' ? 'border-emerald-500/40 text-emerald-400' :
-            runtimeStatus === 'paused' ? 'border-amber-500/40 text-amber-400' :
-            runtimeStatus === 'error' || runtimeStatus === 'crashed' ? 'border-rose-500/40 text-rose-400' :
-            runtimeStatus === 'completed' ? 'border-sky-500/40 text-sky-400' :
-            'border-slate-600/40 text-slate-500'
-          }`}>
-            {runtimeStatus}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
+              runtimeStatus === 'running' ? 'border-emerald-500/40 text-emerald-400' :
+              runtimeStatus === 'paused' ? 'border-amber-500/40 text-amber-400' :
+              runtimeStatus === 'error' || runtimeStatus === 'crashed' || runtimeStatus === 'failed' ? 'border-rose-500/40 text-rose-400' :
+              runtimeStatus === 'completed' ? 'border-sky-500/40 text-sky-400' :
+              'border-slate-600/40 text-slate-500'
+            }`}>
+              {runtimeStatus}
+            </span>
+            {staleHeartbeat && (
+              <span
+                className="rounded-full border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-200"
+                title={staleHeartbeatTooltip || undefined}
+              >
+                offline
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Action Buttons */}
@@ -441,6 +487,20 @@ function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
   const minutes = Math.floor((elapsedSeconds % 3600) / 60)
   const seconds = elapsedSeconds % 60
 
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  }
+  return `${seconds}s`
+}
+
+function formatRuntimeAge(elapsedSeconds) {
+  const safe = Math.max(0, Number(elapsedSeconds) || 0)
+  const hours = Math.floor(safe / 3600)
+  const minutes = Math.floor((safe % 3600) / 60)
+  const seconds = safe % 60
   if (hours > 0) {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`
   }

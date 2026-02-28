@@ -35,6 +35,10 @@ export async function listBots() {
   return request('/api/bots')
 }
 
+export async function fetchBotRuntimeCapacity() {
+  return request('/api/bots/runtime-capacity')
+}
+
 export async function createBot(payload) {
   log.info('create_bot', payload)
   return request('/api/bots', {

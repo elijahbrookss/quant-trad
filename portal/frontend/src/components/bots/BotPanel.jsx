@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
+  fetchBotRuntimeCapacity,
   createBot,
   startBot as startBotApi,
   stopBot as stopBotApi,
@@ -67,6 +68,7 @@ export function BotPanel() {
   const [pendingDelete, setPendingDelete] = useState(null)
   const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
+  const [runtimeCapacity, setRuntimeCapacity] = useState(null)
   const [nowEpochMs, setNowEpochMs] = useState(() => Date.now())
   const logger = useMemo(() => createLogger('BotPanel'), [])
   const runtimeQueueRef = useRef(new Map())
@@ -171,6 +173,15 @@ export function BotPanel() {
     [flushRuntimeQueue],
   )
 
+  const loadRuntimeCapacity = useCallback(async () => {
+    try {
+      const payload = await fetchBotRuntimeCapacity()
+      setRuntimeCapacity(payload && typeof payload === 'object' ? payload : null)
+    } catch (err) {
+      logger.warn('bot_runtime_capacity_load_failed', { message: err?.message }, err)
+    }
+  }, [logger])
+
   const loadBots = useCallback(
     async (withSpinner = true) => {
       if (withSpinner) setLoading(true)
@@ -180,6 +191,7 @@ export function BotPanel() {
         const data = await listBots()
         logger.info('bots_load_success', { count: Array.isArray(data) ? data.length : 0 })
         mergeBots(data, { replace: true })
+        await loadRuntimeCapacity()
       } catch (err) {
         logger.error('bots_load_failed', { message: err?.message }, err)
         setError(err?.message || 'Unable to load bots')
@@ -187,7 +199,7 @@ export function BotPanel() {
         if (withSpinner) setLoading(false)
       }
     },
-    [mergeBots],
+    [loadRuntimeCapacity, mergeBots],
   )
 
   const loadStrategies = useCallback(async () => {
@@ -210,6 +222,17 @@ export function BotPanel() {
     loadStrategies()
     logger.info('bot_panel_mounted')
   }, [loadStrategies, logger])
+
+  useEffect(() => {
+    loadRuntimeCapacity()
+  }, [loadRuntimeCapacity])
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadRuntimeCapacity()
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [loadRuntimeCapacity])
 
   useEffect(() => {
     logger.info('bot_create_modal_state', { open: createOpen })
@@ -528,10 +551,22 @@ export function BotPanel() {
               <span className="hidden sm:inline">Refresh</span>
             </button>
           </div>
-          <div className="flex items-center gap-2 text-xs tabular-nums">
-            <span className="font-medium text-slate-400">{filteredBots.length}</span>
-            <span className="text-slate-600">of</span>
-            <span className="font-medium text-slate-500">{sortedBots.length}</span>
+          <div className="flex flex-col items-end gap-1 text-xs tabular-nums">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-slate-400">{filteredBots.length}</span>
+              <span className="text-slate-600">of</span>
+              <span className="font-medium text-slate-500">{sortedBots.length}</span>
+            </div>
+            {runtimeCapacity ? (
+              <div className="text-[11px] text-slate-600">
+                <span>
+                  CPU {Number(runtimeCapacity.workers_in_use || 0)}/{Number(runtimeCapacity.host_cpu_cores || 0)}
+                </span>
+                <span className="ml-1 text-slate-700">({Number(runtimeCapacity.in_use_pct || 0)}%)</span>
+                <span className="mx-1.5 text-slate-700">•</span>
+                <span>{Number(runtimeCapacity.running_bots || 0)} running</span>
+              </div>
+            ) : null}
           </div>
         </div>
       </header>
