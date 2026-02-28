@@ -68,6 +68,12 @@ class DockerBotRunner:
         snapshot_interval = bot.get("snapshot_interval_ms")
         if not isinstance(snapshot_interval, int) or snapshot_interval <= 0:
             raise RuntimeError("snapshot_interval_ms is required and must be a positive integer")
+        provider_credential_key = str(os.getenv("PROVIDER_CREDENTIAL_KEY", "") or "").strip()
+        if not provider_credential_key:
+            raise RuntimeError(
+                "PROVIDER_CREDENTIAL_KEY is required for bot runtime containers. "
+                "Set it on the backend service environment before starting bots."
+            )
         name = self._container_name(bot_id)
         self.stop_bot(bot_id=bot_id)
         network = self._resolve_runtime_network()
@@ -82,12 +88,24 @@ class DockerBotRunner:
             "-e",
             f"PG_DSN={os.getenv('PG_DSN','')}",
             "-e",
+            f"PROVIDER_CREDENTIAL_KEY={provider_credential_key}",
+            "-e",
             f"BOT_ID={bot_id}",
             "-e",
             f"SNAPSHOT_INTERVAL_MS={snapshot_interval}",
             "-e",
             f"BACKEND_TELEMETRY_WS_URL={os.getenv('BACKEND_TELEMETRY_WS_URL','ws://backend.quanttrad:8000/api/bots/ws/telemetry/ingest')}",
         ]
+        for key in (
+            "SNAPSHOT_FAST_INTERVAL_MS",
+            "SNAPSHOT_IDLE_INTERVAL_MS",
+            "SNAPSHOT_IDLE_CYCLES",
+            "BOT_WORKER_FULL_SNAPSHOT_INTERVAL_MS",
+            "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
+        ):
+            value = str(os.getenv(key, "") or "").strip()
+            if value:
+                cmd.extend(["-e", f"{key}={value}"])
         bot_env = bot.get("bot_env")
         if isinstance(bot_env, Mapping):
             for key, value in bot_env.items():

@@ -219,10 +219,16 @@ class BotConfigService:
             "BOT_RUNTIME_NETWORK",
             "BACKEND_TELEMETRY_WS_URL",
             "SNAPSHOT_INTERVAL_MS",
+            "SNAPSHOT_FAST_INTERVAL_MS",
+            "SNAPSHOT_IDLE_INTERVAL_MS",
+            "SNAPSHOT_IDLE_CYCLES",
+            "BOT_WORKER_FULL_SNAPSHOT_INTERVAL_MS",
+            "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
             "BOT_WATCHDOG_HEARTBEAT_INTERVAL",
             "BOT_WATCHDOG_STALE_THRESHOLD",
             "BOT_WATCHDOG_MONITOR_INTERVAL",
             "PG_DSN",
+            "PROVIDER_CREDENTIAL_KEY",
         ]
         env_rows: List[Dict[str, Any]] = []
         for key in exposed:
@@ -238,9 +244,29 @@ class BotConfigService:
             )
         return {
             "bot_defaults": {
-                "snapshot_interval_ms": int(os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "1000") or "1000"),
+                "snapshot_interval_ms": int(os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "250") or "250"),
                 "env_templates": [
-                    {"key": "SNAPSHOT_INTERVAL_MS", "default": os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "1000")},
+                    {"key": "SNAPSHOT_INTERVAL_MS", "default": os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "250")},
+                    {
+                        "key": "SNAPSHOT_FAST_INTERVAL_MS",
+                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_FAST_INTERVAL_MS", "250"),
+                    },
+                    {
+                        "key": "SNAPSHOT_IDLE_INTERVAL_MS",
+                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_IDLE_INTERVAL_MS", "1000"),
+                    },
+                    {
+                        "key": "SNAPSHOT_IDLE_CYCLES",
+                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_IDLE_CYCLES", "2"),
+                    },
+                    {
+                        "key": "BOT_WORKER_FULL_SNAPSHOT_INTERVAL_MS",
+                        "default": os.getenv("BOT_DEFAULT_WORKER_FULL_SNAPSHOT_INTERVAL_MS", "1000"),
+                    },
+                    {
+                        "key": "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
+                        "default": os.getenv("BOT_DEFAULT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY", "10"),
+                    },
                     {"key": "BACKEND_TELEMETRY_WS_URL", "default": os.getenv("BACKEND_TELEMETRY_WS_URL", "")},
                 ],
             },
