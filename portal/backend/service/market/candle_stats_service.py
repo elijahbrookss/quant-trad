@@ -315,7 +315,12 @@ def _to_float(value: Any) -> Optional[float]:
     try:
         if pd.isna(value):
             return None
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "candle_stats_to_float_isna_failed | value_type=%s error=%s",
+            type(value).__name__,
+            exc,
+        )
         return None
     try:
         return float(value)

@@ -120,15 +120,23 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         try:
             return value.isoformat()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "async_job_json_safe_isoformat_failed | value_type=%s error=%s",
+                type(value).__name__,
+                exc,
+            )
     if hasattr(value, "item"):
         try:
             # numpy/pandas scalars often unwrap to datetime/date objects;
             # recurse so nested values are normalised too.
             return _json_safe(value.item())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "async_job_json_safe_item_unwrap_failed | value_type=%s error=%s",
+                type(value).__name__,
+                exc,
+            )
     return str(value)
 
 

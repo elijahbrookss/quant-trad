@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, text
 from portal.backend.db.session import db
 from portal.backend.main import app
 from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
-from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
+from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 from portal.backend.service.storage import storage
 
 

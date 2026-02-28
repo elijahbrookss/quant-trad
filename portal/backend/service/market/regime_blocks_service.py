@@ -9,7 +9,7 @@ from sqlalchemy.engine import Engine
 
 from data_providers.config.runtime import PersistenceConfig, runtime_config_from_env
 
-from .stats_queue import REGIME_VERSION
+from .stats_contract import REGIME_VERSION
 
 
 class RegimeBlocksService:

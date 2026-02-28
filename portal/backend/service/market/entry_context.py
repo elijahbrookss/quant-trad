@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from data_providers.config.runtime import PersistenceConfig, runtime_config_from_env
 
-from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
+from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 
 
 _engine: Optional[Engine] = None

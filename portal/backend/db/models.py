@@ -407,7 +407,7 @@ class BotRecord(Base):
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
     wallet_config = Column(JSON, nullable=False, default=dict)
-    snapshot_interval_ms = Column(Integer, nullable=False, default=1000)
+    snapshot_interval_ms = Column(Integer, nullable=False, default=250)
     bot_env = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
