@@ -11,6 +11,11 @@ If implementation conflicts with these docs, the docs are the source of truth.
 3. `02_execution_playback_contract.md`
 4. `03_engineering_contract.md`
 
+## Writing Standard
+
+When authoring component-level architecture docs, follow:
+- `documentation.md`
+
 ## Scope Rule
 
 These files are platform-wide contracts only.
