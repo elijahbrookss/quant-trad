@@ -205,7 +205,7 @@ These areas are tailored to futures-style assumptions and are scheduled for revi
 - no liquidation model
 - no funding accrual model
 
-3. `domain.py`
+3. `core/domain/engine.py` (+ `core/domain/position.py`)
 - `_cap_qty_by_margin(...)` assumes futures-style per-contract margin sizing
 - `_resolve_tp_step(...)` for derivatives assumes discrete contract-style step handling
 

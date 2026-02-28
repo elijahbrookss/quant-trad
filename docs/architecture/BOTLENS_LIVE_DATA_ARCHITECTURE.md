@@ -4,8 +4,8 @@
 
 - `Component`: BotLens live data pipeline (`bootstrap + stream + catchup`)
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 2.1
-- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `portal/backend/service/bots/telemetry_stream.py`, `portal/backend/service/storage/storage.py`
+- `Doc Version`: 2.2
+- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `portal/backend/service/bots/telemetry_stream.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
 
 ## 1) Problem and scope
 
@@ -14,7 +14,8 @@ BotLens must provide low-latency live state with deterministic ordering and dura
 In scope:
 - bootstrap snapshot delivery,
 - sequenced event catchup/stream delivery,
-- gap handling and resync behavior.
+- gap handling and resync behavior,
+- client-side buffered rendering for smooth visual playback.
 
 ### Non-goals
 
@@ -29,7 +30,7 @@ Upstream assumptions:
 ## 2) Architecture at a glance
 
 Boundary:
-- inside: BotLens telemetry ingest, event persistence, bootstrap, websocket fan-out
+- inside: BotLens telemetry ingest, snapshot bootstrap, websocket fan-out
 - outside: bot runtime event producers and UI consumers
 
 ```mermaid
@@ -58,14 +59,19 @@ flowchart LR
 - Inputs: websocket telemetry payloads, bootstrap API calls, websocket subscription requests (`run_id`, `since_seq`).
 - Dependencies: runtime event schema (`schema_version`, `seq`, `known_at`), durable event persistence, monotonic per-run sequencing.
 - Outputs: bootstrap envelopes, streamed `bot_runtime_event` envelopes, persisted runtime event rows.
-- Side effects: writes to `portal_bot_run_events`, websocket network I/O, retry/resync signaling to clients.
+- Side effects: websocket network I/O, retry/resync signaling to clients.
 
 ## 4) Core components and data flow
 
-- `BotTelemetryHub.ingest(...)` validates payloads, derives lifecycle deltas, and persists normalized runtime events.
-- `BotTelemetryHub.bootstrap(...)` reads latest event snapshot view and returns cursor state.
-- `BotTelemetryHub.add_viewer(...)` performs catchup from `after_seq` and then live stream fan-out.
-- Viewers apply strictly ordered events and ignore duplicates by cursor.
+- `BotTelemetryHub.ingest(...)` validates payloads, derives lifecycle deltas, and broadcasts normalized snapshot envelopes.
+- `BotTelemetryHub.bootstrap(...)` reads latest durable run snapshot and returns cursor state.
+- `BotTelemetryHub.add_viewer(...)` sends a latest-snapshot resync when `since_seq` is stale, then live stream fan-out.
+- Viewer canonical cursor applies strictly ordered events and ignores duplicates by cursor.
+- BotLens UI renders from a buffered queue:
+  - canonical stream state advances immediately by `seq`,
+  - rendered chart state drains with a target lag,
+  - renderer enters catch-up mode when `seq` lag or queue depth exceeds thresholds.
+- Storage implementation note: runtime event repository logic is organized under `portal/backend/service/storage/repos/runtime_events.py`; `portal/backend/service/storage/storage.py` remains a compatibility facade.
 
 ## 5) State model
 
@@ -77,7 +83,7 @@ Derived state:
 - trade lifecycle deltas derived from snapshot differences.
 
 Persistence boundaries:
-- persisted: runtime event rows and metadata (`event_id`, `seq`, `schema_version`, `known_at`, payload).
+- persisted: runtime snapshots (`portal_bot_run_snapshots`) and runtime event rows (`portal_bot_run_events`) with separate producers.
 - in-memory only: connected viewers, per-viewer cursor, lifecycle diff cache.
 
 ## 6) Why this architecture
@@ -125,7 +131,22 @@ Mitigations:
   - code: cursor checks in telemetry hub ingest/catchup,
   - logs: gap/schema/viewer-send events with `bot_id`, `run_id`, `seq`,
   - storage: monotonic `seq` rows in `portal_bot_run_events`,
-  - metrics: viewer lag/resync counters.
+  - metrics: viewer lag/resync counters and client render queue/lag.
+
+Client render buffer knobs (frontend `VITE_*` env):
+- `VITE_BOTLENS_TARGET_RENDER_LAG_MS`
+- `VITE_BOTLENS_CATCHUP_RENDER_LAG_MS`
+- `VITE_BOTLENS_CATCHUP_SEQ_BEHIND`
+- `VITE_BOTLENS_CATCHUP_QUEUE_DEPTH`
+- `VITE_BOTLENS_NORMAL_APPLY_INTERVAL_MS`
+- `VITE_BOTLENS_CATCHUP_APPLY_INTERVAL_MS`
+- `VITE_BOTLENS_MAX_CATCHUP_BATCH`
+- `VITE_BOTLENS_METRICS_PUBLISH_MS`
+
+Backend snapshot trim knobs (telemetry hub):
+- `BOTLENS_MAX_CANDLES` (`0` = uncapped, default `0`)
+- `BOTLENS_MAX_TRADES` (`0` = uncapped, default `400`)
+- `BOTLENS_MAX_OVERLAYS` (`0` = uncapped, default `400`)
 
 ## 10) Versioning and compatibility
 

@@ -9,8 +9,8 @@ It is written for someone who has never coded before.
 
 - `Component`: Quant-Trad engine surface (indicator, strategy, runtime, playback)
 - `Owner/Domain`: Platform Architecture
-- `Doc Version`: 1.1
-- `Related Contracts`: `docs/agents/00_system_contract.md`, `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/INDICATOR_AUTHORING_CONTRACT.md`
+- `Doc Version`: 1.2
+- `Related Contracts`: `docs/agents/00_system_contract.md`, `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/BOT_RUNTIME_SERVICE_ARCHITECTURE.md`, `docs/architecture/INDICATOR_AUTHORING_CONTRACT.md`
 
 ## 1) Problem and scope
 
@@ -47,6 +47,29 @@ flowchart LR
     X[Provider Data] --> A
     E --> Y[User Interfaces]
 ```
+
+## Runtime Package Map
+
+Current bot runtime package layout:
+- `src/engines/bot_runtime/runtime/core/`: shared runtime state models/constants/helpers
+- `src/engines/bot_runtime/runtime/components/`: reusable runtime components (series runner, intrabar, buffers, policy, sinks)
+- `src/engines/bot_runtime/runtime/mixins/`: orchestration behavior split by concern (setup, execution loop, events, state/streaming)
+- `src/engines/bot_runtime/runtime/runtime.py`: `BotRuntime` assembly surface
+- `portal/backend/service/bots/bot_runtime/runtime/`: compatibility adapters/re-exports for service-layer callers
+
+## Strategy + Storage Package Map
+
+Current series preparation layout:
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`: `SeriesBuilder` assembly facade
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/lifecycle.py`: builder lifecycle/reset/load concerns
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/live_updates.py`: live refresh + strategy evaluation helpers
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/series_construction.py`: series construction + incremental per-bar evaluation
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/overlays_regime.py`: overlay and regime projection helpers
+- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/models.py`: `StrategySeries` runtime payload model
+
+Current storage layout:
+- `portal/backend/service/storage/repos/`: cohesive repository modules grouped by domain (`bots`, `runs`, `trades`, `runtime_events`, etc.)
+- `portal/backend/service/storage/storage.py`: compatibility facade that re-exports repository APIs for existing imports
 
 ## Mentor Notes (Non-Normative)
 

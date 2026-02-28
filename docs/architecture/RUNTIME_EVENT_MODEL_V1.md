@@ -5,7 +5,7 @@
 - `Component`: Canonical runtime event model
 - `Owner/Domain`: Bot Runtime / Event Contracts
 - `Doc Version`: 1.1
-- `Related Contracts`: `src/engines/bot_runtime/core/runtime_events.py`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `portal/backend/db/models.py`
+- `Related Contracts`: `src/engines/bot_runtime/core/runtime_events.py`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `portal/backend/db/models.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
 
 ## 1) Problem and scope
 
@@ -261,6 +261,8 @@ flowchart TD
 ## Persistence Model
 Single write path in runtime:
 - `BotRuntime._persist_runtime_event(...)`
+- implementation location: `src/engines/bot_runtime/runtime/mixins/runtime_events.py`
+- portal compatibility entrypoint: `portal/backend/service/bots/bot_runtime/runtime/runtime.py`
 
 Storage target:
 - table: `portal_bot_run_events`

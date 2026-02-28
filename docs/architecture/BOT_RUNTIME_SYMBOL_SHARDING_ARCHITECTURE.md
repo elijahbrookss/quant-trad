@@ -4,8 +4,8 @@
 
 - `Component`: Bot runtime symbol sharding and merged telemetry
 - `Owner/Domain`: Bot Runtime / Container Runtime
-- `Doc Version`: 1.1
-- `Related Contracts`: `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `portal/backend/service/bots/container_runtime.py`
+- `Doc Version`: 1.3
+- `Related Contracts`: `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `portal/backend/service/bots/container_runtime.py`, `src/engines/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`, `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/`
 
 ## 1) Problem and scope
 
@@ -18,9 +18,9 @@ In scope:
 
 ### Non-goals
 
-- per-symbol process pinning without worker caps,
 - cross-bot wallet sharing,
-- standalone UI state reconstruction without runtime telemetry.
+- standalone UI state reconstruction without runtime telemetry,
+- automatic live worker rebalancing while a run is active.
 
 Upstream assumptions:
 - strategy instruments are valid and symbol list is resolved,
@@ -39,7 +39,7 @@ See section `## 3) High-level runtime topology` for the diagram.
 - Treat this as a two-layer system: execution workers and one merge/telemetry layer.
 - Worker isolation improves resilience, while shared wallet coordination preserves capital safety.
 - The merged view is a read model; canonical causality still comes from runtime events.
-- Bounded worker counts are an operational control, not a semantic contract change.
+- Worker count is operator-tunable, but runtime still enforces one worker per symbol.
 - This section is explanatory only.
 - If this conflicts with Strict contract, Strict contract wins.
 
@@ -52,7 +52,7 @@ See section `## 3) High-level runtime topology` for the diagram.
 
 ## 4) Core components and data flow
 
-- Symbol sharder assigns symbols to bounded worker processes.
+- Symbol sharder assigns exactly one symbol to each worker process.
 - Workers run series execution and emit per-worker snapshots.
 - Shared wallet gateway validates and reconciles capital usage across workers.
 - Container aggregator merges worker snapshots and publishes one bot-level envelope.
@@ -71,13 +71,12 @@ Persistence boundaries:
 
 ## 6) Why this architecture
 
-- Bounded workers control resource usage while preserving symbol-level isolation.
+- Per-symbol workers maximize isolation and simplify failure blast radius.
 - Shared wallet gateway prevents cross-worker over-allocation.
 - Merged snapshot stream keeps BotLens aligned to one bot-level timeline.
 
 ## 7) Tradeoffs
 
-- Worker sharing for multiple symbols reduces isolation for those symbols.
 - Aggregation adds additional latency compared to direct worker streaming.
 - Shared lock/reservation paths can create contention under high load.
 
@@ -85,7 +84,7 @@ Persistence boundaries:
 
 - Worker crash can degrade assigned symbols.
 - Delayed worker snapshots can temporarily stale merged view.
-- Mis-sized worker cap can under-utilize hardware or increase contention.
+- Mis-sized worker count can fail startup (`BOT_SYMBOL_PROCESS_MAX < symbol_count`) or overcommit CPU.
 
 ## 9) Strict contract
 
@@ -135,9 +134,9 @@ We now run bots with this model:
 
 - `1 bot container = 1 strategy`
 - `up to 10 symbols per strategy`
-- `up to 8 worker processes per bot container`
-- if symbols > 8, some workers handle multiple symbols
-- each worker still uses multi-threaded series execution internally
+- `1 worker process = 1 symbol`
+- each worker uses inline series execution (no internal series pool)
+- runtime startup fails if configured worker ceiling is below symbol count
 
 Key behavior:
 
@@ -173,9 +172,9 @@ We want BotLens to feel like direct observability into the deployed bot, with:
 ```mermaid
 flowchart LR
     A[Bot Container\n1 strategy] --> B[Symbol Sharder]
-    B --> C1[Worker 1\nSymbols: BTC, ETH]
-    B --> C2[Worker 2\nSymbols: SOL]
-    B --> C3[Worker 3\nSymbols: ADA, XRP]
+    B --> C1[Worker 1\nSymbol: BTC]
+    B --> C2[Worker 2\nSymbol: SOL]
+    B --> C3[Worker 3\nSymbol: ADA]
 
     C1 --> D[Shared Wallet Gateway\nEvent-sourced can_apply]
     C2 --> D
@@ -197,21 +196,21 @@ flowchart LR
 Rules:
 
 - hard cap: 10 symbols per strategy
-- process cap: 8 workers
-- assignment is deterministic and balanced
-- if symbols > workers, workers receive multiple symbols
+- assignment is deterministic
+- one symbol per worker process
+- startup guard: `BOT_SYMBOL_PROCESS_MAX` must be `>= symbol_count`
 
 Example:
 
-- 10 symbols, 8 workers
-- 6 workers get 1 symbol
-- 2 workers get 2 symbols
+- 3 symbols => 3 workers
+- 10 symbols => 10 workers
+- if `BOT_SYMBOL_PROCESS_MAX=8` and symbol count is `10`, runtime fails loud at startup
 
 Tradeoff:
 
-- strict “1 process per symbol” is best isolation
-- capped process model reduces CPU/memory pressure
-- shared workers are a practical compromise under the 8-process cap
+- strict one-symbol-per-process gives maximum isolation and clearer failure domains
+- CPU/memory usage scales linearly with symbol count
+- capacity planning is explicit and operator-controlled
 
 ---
 
@@ -319,7 +318,7 @@ This gives a single source for UI updates and removes worker-level churn from th
 ### Benefits
 
 - better symbol isolation
-- bounded process usage
+- deterministic symbol-to-worker ownership
 - shared capital correctness across processes
 - cleaner BotLens user experience
 
@@ -332,7 +331,7 @@ This gives a single source for UI updates and removes worker-level churn from th
 Why this is acceptable:
 
 - correctness and auditability are prioritized over raw throughput,
-- process cap and bounded snapshots keep runtime practical.
+- symbol cap and explicit worker sizing keep runtime practical.
 
 ---
 
@@ -341,8 +340,8 @@ Why this is acceptable:
 Current runtime knobs:
 
 - `BOT_MAX_SYMBOLS_PER_STRATEGY` (default `10`)
-- `BOT_SYMBOL_PROCESS_MAX` (default `8`)
-- `series_runner_pool_workers` (per worker internal thread pool; pool runner is the only supported runtime mode)
+- `BOT_SYMBOL_PROCESS_MAX` (default `max(8, symbol_count)`; must be `>= symbol_count`)
+- `series_runner` (runtime-supported value: `inline`)
 
 These can be tuned as we collect real CPU/memory and latency data.
 

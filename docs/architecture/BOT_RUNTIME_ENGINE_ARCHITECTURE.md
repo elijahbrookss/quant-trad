@@ -4,8 +4,8 @@
 
 - `Component`: Bot runtime execution engine
 - `Owner/Domain`: Bot Runtime
-- `Doc Version`: 1.1
-- `Related Contracts`: `docs/agents/01_runtime_contract.md`, `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `src/engines/bot_runtime/core/domain.py`
+- `Doc Version`: 1.3
+- `Related Contracts`: `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_SERVICE_ARCHITECTURE.md`, `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `src/engines/bot_runtime/core/domain/`, `src/engines/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/runtime/runtime.py`
 
 ## 1) Problem and scope
 
@@ -35,6 +35,11 @@ Boundary:
 
 See section `## 3) Architecture at a glance` for the runtime topology diagram.
 
+Implementation location (current):
+- canonical runtime implementation: `src/engines/bot_runtime/runtime/` (`runtime.py`, `mixins/`, `components/`, `core/`)
+- strategy series orchestration: `portal/backend/service/bots/bot_runtime/strategy/series_builder.py` + `series_builder_parts/`
+- compatibility adapters/re-exports: `portal/backend/service/bots/bot_runtime/runtime/`
+
 ## Mentor Notes (Non-Normative)
 
 - Read this engine as a control loop: validate -> decide -> settle -> emit.
@@ -57,6 +62,13 @@ See section `## 3) Architecture at a glance` for the runtime topology diagram.
 - `LadderRiskEngine` evaluates intent and applies execution rules per symbol series.
 - Wallet gateway validates capital constraints and reservation lifecycle.
 - Runtime emits canonical execution events and snapshot payloads for downstream observability.
+
+Domain package structure (`src/engines/bot_runtime/core/domain/`):
+- `time_utils.py`: timestamp/epoch parsing and numeric coercion helpers.
+- `models.py`: domain dataclasses (`Candle`, `EntryRequest`, `EntryFill`, `Leg`, etc.).
+- `position.py`: `LadderPosition` per-trade lifecycle and bar-application logic.
+- `engine.py`: `LadderRiskEngine` orchestration (entry, sizing, margin caps, TP allocation, stats).
+- `__init__.py`: stable public re-exports for `engines.bot_runtime.core.domain`.
 
 ## 5) State model
 
@@ -148,11 +160,11 @@ In plain terms:
 
 The runtime engine is the source of truth for execution behavior.
 
-Current execution topology is shared multi-process by default:
+Current execution topology is process-isolated by symbol:
 
 - one bot container per strategy,
-- one symbol shard worker process per assigned symbol group,
-- pool-based runner inside each worker process.
+- one worker process per symbol (`process-per-series`),
+- inline series runner inside each worker process (no internal pool runner).
 
 ---
 

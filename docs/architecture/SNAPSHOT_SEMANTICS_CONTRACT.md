@@ -5,7 +5,7 @@
 - `Component`: Snapshot semantics across indicator runtime and bot runtime
 - `Owner/Domain`: Runtime Contracts
 - `Doc Version`: 1.2
-- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `src/engines/indicator_engine/contracts.py`, `portal/backend/service/storage/storage.py`
+- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `src/engines/indicator_engine/contracts.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
 
 ## 1) Problem and scope
 
@@ -67,6 +67,7 @@ flowchart LR
 - Bot runtime produces checkpoint snapshot envelopes with `run_id` and `snapshot_seq`.
 - Telemetry/event pipelines persist normalized runtime events for canonical replay.
 - Bootstrap consumers recover state by cursor and then resume streaming deltas.
+- Storage implementation note: runtime event persistence is implemented in `portal/backend/service/storage/repos/runtime_events.py`; `portal/backend/service/storage/storage.py` is a compatibility facade for legacy imports.
 
 ## 5) State model
 
