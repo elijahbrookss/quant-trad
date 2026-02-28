@@ -22,6 +22,8 @@ def evaluate_rules_from_state_snapshots(
     payloads: Dict[str, Dict[str, Any]] = {}
     for indicator_id, snapshot in signal_input.snapshots.items():
         payload = dict(snapshot.payload)
+        payload["snapshot_schema_version"] = int(getattr(snapshot, "schema_version", 1) or 1)
+        payload["snapshot_revision"] = int(snapshot.revision)
         payload["known_at"] = snapshot.known_at
         payload["formed_at"] = snapshot.formed_at
         payload["source_timeframe"] = snapshot.source_timeframe

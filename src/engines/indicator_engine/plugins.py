@@ -8,8 +8,10 @@ import sys
 from .plugin_registry import (
     IndicatorPluginManifest,
     IndicatorPluginRegistry,
-    indicator_plugin_manifest,
+    SignalCatalogEntry,
+    SignalDirectionSpec,
     plugin_registry,
+    register_plugin,
 )
 
 
@@ -38,7 +40,9 @@ def ensure_builtin_indicator_plugins_registered() -> None:
 __all__ = [
     "IndicatorPluginManifest",
     "IndicatorPluginRegistry",
-    "indicator_plugin_manifest",
+    "SignalCatalogEntry",
+    "SignalDirectionSpec",
+    "register_plugin",
     "plugin_registry",
     "ensure_builtin_indicator_plugins_registered",
 ]

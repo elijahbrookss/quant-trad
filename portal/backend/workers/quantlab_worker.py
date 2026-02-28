@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import indicators  # noqa: F401
 import signals  # noqa: F401
-from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
 from signals.overlays.builtins import ensure_builtin_overlays_registered
 
 from portal.backend.service.async_jobs import (

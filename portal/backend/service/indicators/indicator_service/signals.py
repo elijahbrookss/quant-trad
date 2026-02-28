@@ -10,11 +10,12 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 
 from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.core.domain import timeframe_to_seconds
-from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
-from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine.plugins import plugin_registry
 from indicators.config import DataContext
 from signals.base import BaseSignal
 from signals.contract import assert_no_execution_fields, assert_signal_contract
+from signals.runtime import emit_manifest_signals
 
 from .context import IndicatorServiceContext, _context
 from .overlay_pipeline import OverlayProjectionContext, project_indicator_overlays
@@ -561,7 +562,12 @@ class IndicatorSignalExecutor:
             payload.setdefault("source_timeframe", str(snapshot.source_timeframe or ""))
             payload["_runtime_state_storage"] = runtime_state_storage
             t_emit = perf_counter()
-            result = plugin.signal_emitter(payload, candle, previous_candle)
+            result = emit_manifest_signals(
+                manifest=plugin,
+                snapshot_payload=payload,
+                candle=candle,
+                previous_candle=previous_candle,
+            )
             emitter_ms += (perf_counter() - t_emit) * 1000.0
             if isinstance(result, Mapping):
                 raw_diagnostics = result.get("diagnostics")

@@ -11,9 +11,9 @@ from typing import Any, Deque, Dict, Mapping, Optional
 from collections import deque
 
 from engines.bot_runtime.core.domain import Candle
-from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
-from engines.bot_runtime.core.indicator_state.overlay_runtime import project_and_normalize_entries
-from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine.overlay_runtime import project_and_normalize_entries
+from engines.indicator_engine.plugins import plugin_registry
 from signals.overlays.schema import normalize_overlays
 
 logger = logging.getLogger(__name__)

@@ -4,8 +4,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Sequence
 
-from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
-from engines.bot_runtime.core.indicator_state.plugins import plugin_registry
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine.plugins import plugin_registry
 from signals.base import BaseSignal
 from signals.engine.signal_generator import build_signal_overlays
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, MutableMapping, Protocol, Sequence
 
+INDICATOR_SNAPSHOT_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class IndicatorStateSnapshot:
@@ -14,6 +16,7 @@ class IndicatorStateSnapshot:
     formed_at: datetime
     source_timeframe: str
     payload: Mapping[str, Any]
+    schema_version: int = INDICATOR_SNAPSHOT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)

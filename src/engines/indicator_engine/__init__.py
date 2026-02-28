@@ -8,6 +8,7 @@ from .basic_engines import (
     build_trendline_engine,
 )
 from .contracts import (
+    INDICATOR_SNAPSHOT_SCHEMA_VERSION,
     IndicatorStateDelta,
     IndicatorStateEngine,
     IndicatorStateSnapshot,
@@ -19,13 +20,16 @@ from .overlay_projection import OverlayEntryProjector, project_overlay_delta
 from .plugins import (
     IndicatorPluginManifest,
     IndicatorPluginRegistry,
+    SignalCatalogEntry,
+    SignalDirectionSpec,
     ensure_builtin_indicator_plugins_registered,
-    indicator_plugin_manifest,
     plugin_registry,
+    register_plugin,
 )
 from .signal_evaluator import evaluate_rules_from_state_snapshots
 
 __all__ = [
+    "INDICATOR_SNAPSHOT_SCHEMA_VERSION",
     "IndicatorStateDelta",
     "IndicatorStateEngine",
     "IndicatorStateSnapshot",
@@ -40,7 +44,9 @@ __all__ = [
     "OverlayEntryProjector",
     "IndicatorPluginManifest",
     "IndicatorPluginRegistry",
-    "indicator_plugin_manifest",
+    "SignalCatalogEntry",
+    "SignalDirectionSpec",
+    "register_plugin",
     "plugin_registry",
     "ensure_builtin_indicator_plugins_registered",
     "evaluate_rules_from_state_snapshots",

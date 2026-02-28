@@ -21,7 +21,7 @@ import indicators  # noqa: F401
 # This triggers decorator execution and registration in _REGISTRY
 import signals  # noqa: F401
 from signals.overlays.builtins import ensure_builtin_overlays_registered
-from engines.bot_runtime.core.indicator_state import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
 
 
 def _allowed_origins() -> List[str]:

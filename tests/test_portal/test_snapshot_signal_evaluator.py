@@ -37,3 +37,5 @@ def test_signal_evaluator_consumes_snapshots_only() -> None:
     payload = observed["payloads"]["ind-1"]
     assert payload["profiles"][0]["session"] == "2024-01-01"
     assert payload["source_timeframe"] == "30m"
+    assert payload["snapshot_schema_version"] == 1
+    assert payload["snapshot_revision"] == 2
