@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+import os
+from datetime import datetime
+from typing import Any, Dict, List, Mapping
 
 from .bot_stream import BotStreamManager
 from .config_service import BotConfigService
 from .runtime_control_service import BotRuntimeControlService
+from ..storage.storage import get_latest_bot_run_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,59 @@ def watchdog_status() -> Dict[str, Any]:
     return _runtime_service.watchdog_status()
 
 
+def runtime_capacity() -> Dict[str, Any]:
+    host_cpu_cores = max(1, int(os.cpu_count() or 1))
+    active_statuses = {"running", "starting", "degraded", "telemetry_degraded"}
+    workers_in_use = 0
+    workers_requested = 0
+    running_bots = 0
+
+    for bot in _config_service.list_bots():
+        status = str(bot.get("status") or "").strip().lower()
+        if status not in active_statuses:
+            continue
+        running_bots += 1
+        runtime_payload: Mapping[str, Any] = {}
+        snapshot_row = get_latest_bot_run_snapshot(
+            bot_id=str(bot.get("id") or ""),
+            run_id=None,
+            series_key="bot",
+        )
+        if isinstance(snapshot_row, Mapping):
+            snapshot_payload = snapshot_row.get("snapshot_payload")
+            if isinstance(snapshot_payload, Mapping):
+                chart_payload = snapshot_payload.get("snapshot")
+                if isinstance(chart_payload, Mapping):
+                    maybe_runtime = chart_payload.get("runtime")
+                    if isinstance(maybe_runtime, Mapping):
+                        runtime_payload = maybe_runtime
+        try:
+            active_workers = int(runtime_payload.get("active_workers") or 0)
+        except (TypeError, ValueError):
+            active_workers = 0
+        try:
+            requested_workers = int(runtime_payload.get("worker_count") or 0)
+        except (TypeError, ValueError):
+            requested_workers = 0
+        if active_workers <= 0:
+            active_workers = 1
+        if requested_workers <= 0:
+            requested_workers = active_workers
+        workers_in_use += max(0, active_workers)
+        workers_requested += max(requested_workers, active_workers)
+
+    in_use_pct = min(100.0, round((workers_in_use / host_cpu_cores) * 100.0, 1)) if host_cpu_cores > 0 else 0.0
+    return {
+        "host_cpu_cores": host_cpu_cores,
+        "workers_in_use": workers_in_use,
+        "workers_requested": workers_requested,
+        "running_bots": running_bots,
+        "over_capacity_workers": max(0, workers_in_use - host_cpu_cores),
+        "in_use_pct": in_use_pct,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
 def bot_settings_catalog() -> Dict[str, Any]:
     return _config_service.settings_catalog()
 
@@ -77,6 +133,7 @@ __all__ = [
     "stop_bot",
     "update_bot",
     "bots_stream",
+    "runtime_capacity",
     "bot_settings_catalog",
     "watchdog_status",
 ]

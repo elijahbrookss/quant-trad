@@ -121,6 +121,11 @@ async def bot_watchdog_status() -> Dict[str, Any]:
     return bot_service.watchdog_status()
 
 
+@router.get("/runtime-capacity")
+async def bot_runtime_capacity() -> Dict[str, Any]:
+    return bot_service.runtime_capacity()
+
+
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
     release, channel, initial = bot_service.bots_stream()

@@ -611,7 +611,14 @@ class StrategyRegistry:
                                 direction=_normalise_direction(cond.get("direction")),
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "strategy_rule_condition_skipped | strategy_id=%s rule_id=%s condition=%s error=%s",
+                            entry.get("id"),
+                            rule_id,
+                            cond,
+                            exc,
+                        )
                         continue
                 rule = StrategyRule(
                     id=rule_id,
@@ -868,7 +875,15 @@ class StrategyRegistry:
                 try:
                     rec = instrument_service.resolve_instrument(datasource, exchange, slot.symbol)
                     return rec.get("id") if rec else None
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                        strategy_id,
+                        slot.symbol,
+                        datasource,
+                        exchange,
+                        exc,
+                    )
                     return None
 
             old_ids = {i for i in (_resolve_slot_id(s, old_datasource, old_exchange) for s in old_slots) if i}
@@ -881,7 +896,15 @@ class StrategyRegistry:
                     try:
                         rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
                         inst_id = rec.get("id") if rec else None
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                            strategy_id,
+                            slot.symbol,
+                            record.datasource,
+                            record.exchange,
+                            exc,
+                        )
                         inst_id = None
                 if inst_id:
                     new_ids.add(inst_id)

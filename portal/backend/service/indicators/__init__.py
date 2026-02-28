@@ -1,11 +1,10 @@
-"""Indicator services and utilities."""
+"""Indicator service package.
 
-from .indicator_factory import IndicatorFactory
-from .indicator_repository import IndicatorRepository
-from indicators.runtime.indicator_breakout_cache import IndicatorBreakoutCache
+Prefer explicit imports from concrete modules, for example:
+- ``from portal.backend.service.indicators import indicator_service``
+- ``from portal.backend.service.indicators.indicator_factory import IndicatorFactory``
+"""
 
-__all__ = [
-    "IndicatorBreakoutCache",
-    "IndicatorFactory",
-    "IndicatorRepository",
-]
+from __future__ import annotations
+
+__all__: list[str] = []

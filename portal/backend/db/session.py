@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Dict, Iterator, Optional
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -38,6 +38,51 @@ class Database:
             return value
         raise RuntimeError("PG_DSN is required. No SQLite fallback is supported.")
 
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.getenv(name)
+        if raw in (None, ""):
+            return int(default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _engine_options(self) -> Dict[str, object]:
+        """Build SQLAlchemy engine options with liveness guards enabled by default."""
+
+        pool_recycle = max(-1, self._env_int("PG_POOL_RECYCLE_SECONDS", 900))
+        pool_timeout = max(1, self._env_int("PG_POOL_TIMEOUT_SECONDS", 30))
+        connect_timeout = max(1, self._env_int("PG_CONNECT_TIMEOUT_SECONDS", 5))
+
+        connect_args: Dict[str, object] = {
+            "connect_timeout": connect_timeout,
+            "application_name": str(os.getenv("PG_APPLICATION_NAME", "quant_trad_portal")).strip()
+            or "quant_trad_portal",
+        }
+
+        # TCP keepalive improves resilience to dead sockets/network middleboxes.
+        if self._env_flag("PG_TCP_KEEPALIVE_ENABLED", True):
+            connect_args["keepalives"] = 1
+            connect_args["keepalives_idle"] = max(1, self._env_int("PG_TCP_KEEPALIVE_IDLE_SECONDS", 30))
+            connect_args["keepalives_interval"] = max(
+                1, self._env_int("PG_TCP_KEEPALIVE_INTERVAL_SECONDS", 10)
+            )
+            connect_args["keepalives_count"] = max(1, self._env_int("PG_TCP_KEEPALIVE_COUNT", 3))
+
+        return {
+            "future": True,
+            "pool_pre_ping": self._env_flag("PG_POOL_PRE_PING", True),
+            "pool_recycle": pool_recycle,
+            "pool_timeout": pool_timeout,
+            "connect_args": connect_args,
+        }
+
     def ensure_schema(self) -> bool:
         """Initialise the database engine and create tables if required."""
 
@@ -45,7 +90,7 @@ class Database:
             return True
         try:
             if self._engine is None:
-                self._engine = create_engine(self.dsn, future=True)
+                self._engine = create_engine(self.dsn, **self._engine_options())
             if self._session_factory is None:
                 self._session_factory = sessionmaker(
                     bind=self._engine,
@@ -110,6 +155,11 @@ class Database:
 
     def reset_for_fork(self) -> None:
         """Reset inherited engine/session state when running in a forked process."""
+
+        self.reset_connection_state()
+
+    def reset_connection_state(self) -> None:
+        """Dispose engine/session so future operations reopen fresh DB connections."""
 
         self._reset_engine()
         self._available = False

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 from collections import defaultdict
 from collections.abc import Mapping as AbcMapping
 from datetime import datetime
@@ -12,27 +13,15 @@ from typing import Any, DefaultDict, Dict, Optional
 from fastapi import WebSocket
 
 from ..storage.storage import (
-    get_latest_bot_runtime_event,
+    get_latest_bot_run_snapshot,
     get_latest_bot_runtime_run_id,
-    list_bot_runtime_events,
-    record_bot_runtime_event,
 )
 
 logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 1
 _MAX_SERIES = 12
-_MAX_CANDLES = 800
-_MAX_TRADES = 400
-_MAX_OVERLAYS = 400
 _QTY_EPSILON = 1e-9
-_BOTLENS_EVENT_TYPES = (
-    "state_delta",
-    "trade_opened",
-    "trade_partially_closed",
-    "trade_closed",
-    "trade_updated",
-)
 
 
 def _sanitize_json(value: Any) -> Any:
@@ -52,15 +41,42 @@ def _sanitize_json(value: Any) -> Any:
 def _coerce_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return int(default)
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return float(default)
+
+
+def _resolve_limit(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be an integer >= 0; received {raw!r}") from exc
+    if parsed < 0:
+        raise RuntimeError(f"{name} must be >= 0; received {parsed}")
+    return int(parsed)
+
+
+def _tail_limit(entries: Any, limit: int) -> list[Any]:
+    if not isinstance(entries, list):
+        return []
+    values = list(entries)
+    if limit > 0:
+        return values[-limit:]
+    return values
+
+
+_MAX_CANDLES = _resolve_limit("BOTLENS_MAX_CANDLES", 0)
+_MAX_TRADES = _resolve_limit("BOTLENS_MAX_TRADES", 400)
+_MAX_OVERLAYS = _resolve_limit("BOTLENS_MAX_OVERLAYS", 400)
 
 
 def _resolve_schema_version(value: Any, default: int = _SCHEMA_VERSION) -> int:
@@ -175,8 +191,8 @@ def _trim_chart_snapshot(raw_chart: Any) -> Dict[str, Any]:
             continue
         candles_raw = entry.get("candles")
         overlays_raw = entry.get("overlays")
-        candles = list(candles_raw)[-_MAX_CANDLES:] if isinstance(candles_raw, list) else []
-        overlays = list(overlays_raw)[-_MAX_OVERLAYS:] if isinstance(overlays_raw, list) else []
+        candles = _tail_limit(candles_raw, _MAX_CANDLES)
+        overlays = _tail_limit(overlays_raw, _MAX_OVERLAYS)
         series.append(
             {
                 "strategy_id": entry.get("strategy_id"),
@@ -188,7 +204,7 @@ def _trim_chart_snapshot(raw_chart: Any) -> Dict[str, Any]:
         )
 
     trades_raw = chart.get("trades")
-    trades = list(trades_raw)[-_MAX_TRADES:] if isinstance(trades_raw, list) else []
+    trades = _tail_limit(trades_raw, _MAX_TRADES)
 
     runtime_raw = chart.get("runtime")
     runtime = dict(runtime_raw) if isinstance(runtime_raw, AbcMapping) else {}
@@ -284,7 +300,17 @@ class BotTelemetryHub:
         return lifecycle
 
     async def bootstrap(self, *, bot_id: str, run_id: Optional[str] = None) -> Dict[str, Any]:
-        target_run = str(run_id or "").strip() or await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
+        target_run = str(run_id or "").strip() or None
+        latest_snapshot = await asyncio.to_thread(
+            get_latest_bot_run_snapshot,
+            bot_id=str(bot_id),
+            run_id=target_run,
+            series_key="bot",
+        )
+        if latest_snapshot:
+            target_run = str(latest_snapshot.get("run_id") or "").strip() or target_run
+        if not target_run:
+            target_run = await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
         if not target_run:
             return {
                 "bot_id": str(bot_id),
@@ -294,13 +320,14 @@ class BotTelemetryHub:
                 "snapshot": None,
                 "state": "waiting",
             }
-        latest = await asyncio.to_thread(
-            get_latest_bot_runtime_event,
-            bot_id=str(bot_id),
-            run_id=target_run,
-            event_types=_BOTLENS_EVENT_TYPES,
-        )
-        if not latest:
+        if latest_snapshot is None:
+            latest_snapshot = await asyncio.to_thread(
+                get_latest_bot_run_snapshot,
+                bot_id=str(bot_id),
+                run_id=target_run,
+                series_key="bot",
+            )
+        if latest_snapshot is None:
             return {
                 "bot_id": str(bot_id),
                 "run_id": target_run,
@@ -309,14 +336,15 @@ class BotTelemetryHub:
                 "snapshot": None,
                 "state": "waiting",
             }
-        payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        envelope = self._event_envelope(self._snapshot_row_to_row(latest_snapshot))
+        payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
         return {
             "bot_id": str(bot_id),
             "run_id": target_run,
-            "seq": int(latest.get("seq") or 0),
-            "schema_version": int(latest.get("schema_version") or _SCHEMA_VERSION),
-            "event_time": latest.get("event_time"),
-            "known_at": latest.get("known_at"),
+            "seq": int(envelope.get("seq") or 0),
+            "schema_version": int(envelope.get("schema_version") or _SCHEMA_VERSION),
+            "event_time": envelope.get("event_time"),
+            "known_at": envelope.get("known_at"),
             "snapshot": payload.get("snapshot"),
             "state": "ok",
         }
@@ -335,6 +363,45 @@ class BotTelemetryHub:
             return
 
         snapshot_envelope = payload.get("snapshot") if isinstance(payload.get("snapshot"), AbcMapping) else {}
+        if not snapshot_envelope:
+            async with self._lock:
+                has_viewers = bool(self._viewers.get(bot_id))
+            if not has_viewers:
+                return
+            latest_snapshot = await asyncio.to_thread(
+                get_latest_bot_run_snapshot,
+                bot_id=bot_id,
+                run_id=run_id,
+                series_key="bot",
+            )
+            if isinstance(latest_snapshot, AbcMapping):
+                await self._broadcast_event(self._event_envelope(self._snapshot_row_to_row(dict(latest_snapshot))))
+                return
+            summary = payload.get("summary") if isinstance(payload.get("summary"), AbcMapping) else {}
+            event_time = payload.get("at") or payload.get("known_at")
+            known_at = payload.get("known_at") or event_time
+            row = {
+                "event_id": f"{bot_id}:{run_id}:snapshot:{seq}",
+                "bot_id": bot_id,
+                "run_id": run_id,
+                "seq": seq,
+                "event_type": "state_delta",
+                "critical": False,
+                "schema_version": _SCHEMA_VERSION,
+                "event_time": event_time,
+                "known_at": known_at,
+                "payload": {
+                    "snapshot": {},
+                    "summary": _sanitize_json(dict(summary or {})),
+                    "snapshot_meta": {
+                        "schema_version": _SCHEMA_VERSION,
+                        "known_at": known_at,
+                    },
+                    "trade_lifecycle_events": [],
+                },
+            }
+            await self._broadcast_event(self._event_envelope(row))
+            return
         raw_chart = snapshot_envelope.get("snapshot") if isinstance(snapshot_envelope, AbcMapping) else {}
         snapshot = _trim_chart_snapshot(raw_chart)
         snapshot_at = snapshot_envelope.get("at")
@@ -353,32 +420,30 @@ class BotTelemetryHub:
             event_type = "state_delta"
         critical = event_type in {"trade_opened", "trade_partially_closed", "trade_closed"}
 
-        row = await asyncio.to_thread(
-            record_bot_runtime_event,
-            {
-                "event_id": f"{bot_id}:{run_id}:{seq}",
-                "bot_id": bot_id,
-                "run_id": run_id,
-                "seq": seq,
-                "event_type": event_type,
-                "critical": critical,
-                "schema_version": snapshot_schema_version,
-                "event_time": snapshot_at,
-                "payload": {
-                    "snapshot": snapshot,
-                    "summary": {
-                        "series_count": len(snapshot.get("series") or []),
-                        "trade_count": trade_count,
-                        "warning_count": len(snapshot.get("warnings") or []),
-                    },
-                    "snapshot_meta": {
-                        "schema_version": snapshot_schema_version,
-                        "known_at": snapshot_known_at,
-                    },
-                    "trade_lifecycle_events": lifecycle,
+        row = {
+            "event_id": f"{bot_id}:{run_id}:snapshot:{seq}",
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": event_type,
+            "critical": critical,
+            "schema_version": snapshot_schema_version,
+            "event_time": snapshot_at,
+            "known_at": snapshot_known_at,
+            "payload": {
+                "snapshot": snapshot,
+                "summary": {
+                    "series_count": len(snapshot.get("series") or []),
+                    "trade_count": trade_count,
+                    "warning_count": len(snapshot.get("warnings") or []),
                 },
+                "snapshot_meta": {
+                    "schema_version": snapshot_schema_version,
+                    "known_at": snapshot_known_at,
+                },
+                "trade_lifecycle_events": lifecycle,
             },
-        )
+        }
         await self._broadcast_event(self._event_envelope(row))
 
     async def add_viewer(
@@ -393,6 +458,15 @@ class BotTelemetryHub:
         requested_run = str(run_id or "").strip() or None
         requested_seq = max(0, _coerce_int(since_seq, default=0))
         if requested_run is None:
+            latest_snapshot = await asyncio.to_thread(
+                get_latest_bot_run_snapshot,
+                bot_id=str(bot_id),
+                run_id=None,
+                series_key="bot",
+            )
+            if latest_snapshot is not None:
+                requested_run = str(latest_snapshot.get("run_id") or "").strip() or None
+        if requested_run is None:
             requested_run = await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
 
         async with self._lock:
@@ -404,26 +478,28 @@ class BotTelemetryHub:
         if not requested_run:
             return
 
-        catchup = await asyncio.to_thread(
-            list_bot_runtime_events,
+        latest_for_run = await asyncio.to_thread(
+            get_latest_bot_run_snapshot,
             bot_id=str(bot_id),
             run_id=requested_run,
-            after_seq=requested_seq,
-            limit=2500,
-            event_types=_BOTLENS_EVENT_TYPES,
+            series_key="bot",
         )
-        for row in catchup:
-            envelope = self._event_envelope(row)
-            try:
-                await ws.send_text(json.dumps(envelope))
-            except Exception:
-                await self.remove_viewer(bot_id=bot_id, ws=ws)
-                return
-            async with self._lock:
-                state = self._viewers.get(str(bot_id), {}).get(ws)
-                if state is not None:
-                    state["run_id"] = str(envelope.get("run_id") or state.get("run_id") or "")
-                    state["last_seq"] = int(envelope.get("seq") or state.get("last_seq") or 0)
+        if latest_for_run is None:
+            return
+        envelope = self._event_envelope(self._snapshot_row_to_row(latest_for_run))
+        envelope_seq = int(envelope.get("seq") or 0)
+        if envelope_seq <= requested_seq:
+            return
+        try:
+            await ws.send_text(json.dumps(envelope))
+        except Exception:
+            await self.remove_viewer(bot_id=bot_id, ws=ws)
+            return
+        async with self._lock:
+            state = self._viewers.get(str(bot_id), {}).get(ws)
+            if state is not None:
+                state["run_id"] = str(envelope.get("run_id") or state.get("run_id") or "")
+                state["last_seq"] = int(envelope.get("seq") or state.get("last_seq") or 0)
 
     async def remove_viewer(self, *, bot_id: str, ws: WebSocket) -> None:
         async with self._lock:
@@ -482,6 +558,45 @@ class BotTelemetryHub:
             "event_time": row.get("event_time"),
             "known_at": row.get("known_at"),
             "payload": _sanitize_json(row.get("payload") or {}),
+        }
+
+    @staticmethod
+    def _snapshot_row_to_row(snapshot_row: Dict[str, Any]) -> Dict[str, Any]:
+        snapshot_payload = snapshot_row.get("snapshot_payload")
+        payload = snapshot_payload if isinstance(snapshot_payload, AbcMapping) else {}
+        raw_snapshot = payload.get("snapshot")
+        snapshot = _trim_chart_snapshot(raw_snapshot if isinstance(raw_snapshot, AbcMapping) else {})
+        schema_version = _resolve_schema_version(payload.get("schema_version"))
+        snapshot_seq = _coerce_int(
+            snapshot_row.get("snapshot_seq", payload.get("snapshot_seq")),
+            default=0,
+        )
+        summary = {
+            "series_count": len(snapshot.get("series") or []),
+            "trade_count": len(snapshot.get("trades") or []),
+            "warning_count": len(snapshot.get("warnings") or []),
+        }
+        known_at = payload.get("known_at") or payload.get("at") or snapshot_row.get("updated_at")
+        event_time = payload.get("at") or snapshot_row.get("updated_at")
+        return {
+            "event_id": f"{snapshot_row.get('bot_id')}:{snapshot_row.get('run_id')}:snapshot:{snapshot_seq}",
+            "bot_id": str(snapshot_row.get("bot_id") or ""),
+            "run_id": str(snapshot_row.get("run_id") or ""),
+            "seq": snapshot_seq,
+            "event_type": "state_delta",
+            "critical": False,
+            "schema_version": schema_version,
+            "event_time": event_time,
+            "known_at": known_at,
+            "payload": {
+                "snapshot": snapshot,
+                "summary": summary,
+                "snapshot_meta": {
+                    "schema_version": schema_version,
+                    "known_at": known_at,
+                },
+                "trade_lifecycle_events": [],
+            },
         }
 
 
