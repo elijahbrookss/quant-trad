@@ -29,6 +29,11 @@ class SettlementApplier:
             base_context = build_log_context(trade_id=settlement.get("trade_id"))
             context = ExitSettlementContext(
                 event_type=str(settlement.get("event_type") or "EXIT_FILL"),
+                exit_kind=(
+                    str(settlement.get("exit_kind") or "").strip().upper()
+                    if settlement.get("exit_kind") is not None
+                    else None
+                ),
                 side=str(settlement.get("side") or ""),
                 base_currency=str(settlement.get("base_currency") or ""),
                 quote_currency=str(settlement.get("quote_currency") or ""),
@@ -55,4 +60,6 @@ class SettlementApplier:
                 price=context.price,
                 fee=context.fee,
             ):
-                exit_settlement.apply_exit_fill(context, force=True)
+                applied, metadata = exit_settlement.apply_exit_fill(context, force=True)
+                if applied and isinstance(event, dict) and isinstance(metadata, Mapping):
+                    event["wallet_fill_metadata"] = dict(metadata)

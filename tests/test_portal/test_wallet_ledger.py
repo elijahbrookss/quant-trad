@@ -17,8 +17,8 @@ def test_wallet_buy_and_sell_projection():
         notional=1000,
     )
     state = project_wallet(ledger.events())
-    assert state.balances["ETH"] == pytest.approx(0.5)
-    assert state.balances["USDC"] == pytest.approx(-1.0)
+    assert abs(state.balances["ETH"] - 0.5) <= 1e-9
+    assert abs(state.balances["USDC"] + 1.0) <= 1e-9
 
     ledger.trade_fill(
         side="sell",
@@ -30,8 +30,8 @@ def test_wallet_buy_and_sell_projection():
         notional=420,
     )
     state = project_wallet(ledger.events())
-    assert state.balances["ETH"] == pytest.approx(0.3)
-    assert state.balances["USDC"] == pytest.approx(418.5)
+    assert abs(state.balances["ETH"] - 0.3) <= 1e-9
+    assert abs(state.balances["USDC"] - 418.5) <= 1e-9
 
 
 def test_wallet_can_apply_rejections():

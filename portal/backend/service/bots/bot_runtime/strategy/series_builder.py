@@ -25,6 +25,7 @@ from engines.bot_runtime.core.domain import (
     normalize_epoch,
     timeframe_duration,
 )
+from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, SeriesExecutionProfile
 from portal.backend.service.market.stats_repository import build_stats_snapshot
 from portal.backend.service.market.stats_queue import REGIME_VERSION
 from signals.contract import assert_no_execution_fields, assert_signal_contract
@@ -67,6 +68,7 @@ class StrategySeries:
     bootstrap_completed: bool = False
     bootstrap_indicator_overlays: int = 0
     bootstrap_total_overlays: int = 0
+    execution_profile: Optional[SeriesExecutionProfile] = None
 
 
 class SeriesBuilder:
@@ -105,6 +107,12 @@ class SeriesBuilder:
         except (TypeError, ValueError):
             parsed_indicator_source_lookback = 2
         self._indicator_source_lookback_bars = max(parsed_indicator_source_lookback, 1)
+        runtime_symbols_raw = config.get("runtime_symbols")
+        if isinstance(runtime_symbols_raw, Sequence) and not isinstance(runtime_symbols_raw, (str, bytes)):
+            parsed_symbols = {str(item).strip().upper() for item in runtime_symbols_raw if str(item).strip()}
+            self._runtime_symbols: Optional[Set[str]] = parsed_symbols or None
+        else:
+            self._runtime_symbols = None
         self._regime_snapshot_cache: Dict[str, Dict[str, Any]] = {}
         self._indicator_overlay_runtime_cache: Dict[str, Dict[str, Any]] = {}
         self._indicator_runtime_state: Dict[str, Dict[str, Any]] = {}
@@ -817,12 +825,21 @@ class SeriesBuilder:
 
         for instrument_link in strategy.instrument_links:
             enabled = getattr(instrument_link, "enabled", True)
+            symbol = str(getattr(instrument_link, "symbol", "") or "").strip()
             if enabled is False:
                 context = self._strategy_log_context(
                     strategy,
-                    symbol=instrument_link.symbol,
+                    symbol=symbol,
                 )
                 logger.info(with_log_context("series_instrument_skipped", context))
+                continue
+            if self._runtime_symbols is not None and symbol.upper() not in self._runtime_symbols:
+                context = self._strategy_log_context(
+                    strategy,
+                    symbol=symbol,
+                    allowed_symbols=sorted(self._runtime_symbols),
+                )
+                logger.info(with_log_context("series_instrument_filtered", context))
                 continue
             enabled_links.append(instrument_link)
 
@@ -977,8 +994,39 @@ class SeriesBuilder:
             logger.info(with_log_context("risk_multiplier_applied", context))
 
         # Step 5: Create risk engine and assemble series
-        risk_engine = LadderRiskEngine(atm_template, instrument=instrument)
-        self._attach_execution_adapter(risk_engine, instrument)
+        execution_profile = compile_series_execution_profile(
+            instrument or {},
+            template=atm_template,
+            runtime_requires_derivatives=False,
+        )
+        profile_context = self._strategy_log_context(
+            strategy,
+            symbol=symbol,
+            instrument_type=execution_profile.instrument.instrument_type,
+            accounting_mode=execution_profile.accounting_mode,
+            supports_margin=execution_profile.capabilities.supports_margin,
+            supports_short=execution_profile.capabilities.supports_short,
+            short_requires_borrow=execution_profile.capabilities.short_requires_borrow,
+            qty_step=execution_profile.constraints.qty_step,
+            max_qty=execution_profile.constraints.max_qty,
+            min_notional=execution_profile.constraints.min_notional,
+        )
+        logger.info(with_log_context("series_execution_profile_compiled", profile_context))
+        risk_engine = LadderRiskEngine(
+            atm_template,
+            instrument=instrument,
+            execution_profile=execution_profile,
+        )
+        risk_engine.set_runtime_context(
+            strategy_id=strategy.id,
+            strategy_name=strategy.name,
+            timeframe=timeframe,
+            datasource=datasource,
+            exchange=exchange,
+            symbol=symbol,
+            instrument_id=instrument.get("id") if isinstance(instrument, dict) else None,
+        )
+        self._attach_execution_adapter(risk_engine, execution_profile)
 
         # Convert strategy to dict for backward compatibility with meta field
         series_meta = strategy.to_dict()
@@ -1014,6 +1062,7 @@ class SeriesBuilder:
             instrument=instrument,
             atm_template=atm_template,
             replay_start_index=replay_start_index,
+            execution_profile=execution_profile,
         )
 
     def _build_backtest_candles_with_warmup(
@@ -1352,12 +1401,12 @@ class SeriesBuilder:
             "profile_params_present": profile_params_present,
         }
 
-    def _attach_execution_adapter(self, risk_engine: LadderRiskEngine, instrument: Optional[Dict[str, Any]]) -> None:
-        if not instrument:
-            raise ValueError("Instrument metadata is required to attach execution adapter.")
-        short_requires_borrow = instrument.get("short_requires_borrow")
-        if short_requires_borrow is None:
-            raise ValueError("Instrument metadata missing short_requires_borrow for execution adapter selection.")
+    def _attach_execution_adapter(
+        self,
+        risk_engine: LadderRiskEngine,
+        execution_profile: SeriesExecutionProfile,
+    ) -> None:
+        short_requires_borrow = execution_profile.capabilities.short_requires_borrow
 
         adapter = self._adapter_for_run_type(
             short_requires_borrow=bool(short_requires_borrow),

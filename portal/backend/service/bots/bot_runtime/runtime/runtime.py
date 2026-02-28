@@ -17,7 +17,6 @@ from typing import Any, Callable, Deque, Dict, List, Mapping, MutableMapping, Op
 
 from engines.bot_runtime.core.domain import (
     Candle,
-    DecisionLedgerEvent,
     StrategySignal,
     coerce_float,
     isoformat,
@@ -42,20 +41,31 @@ from utils.log_context import build_log_context, merge_log_context, series_log_c
 from .runtime_policy import RuntimeModePolicy
 from ..strategy.series_builder import SeriesBuilder, StrategySeries
 from .run_context import RunContext
-from engines.bot_runtime.core.wallet import LockedWalletLedger, project_wallet
-from engines.bot_runtime.core.indicator_state import (
+from engines.bot_runtime.core.wallet import project_wallet_from_events
+from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
+from engines.bot_runtime.core.runtime_events import (
+    ExitKind,
+    ReasonCode,
+    RuntimeEvent,
+    RuntimeEventCategory,
+    RuntimeEventName,
+    build_correlation_id,
+    coerce_reason_code,
+    new_runtime_event,
+)
+from engines.indicator_engine import (
     OverlayProjectionInput,
     SignalEvaluationInput,
     ensure_builtin_indicator_plugins_registered,
     evaluate_rules_from_state_snapshots,
     plugin_registry,
 )
-from engines.bot_runtime.core.indicator_state.overlay_runtime import project_and_normalize_entries
+from engines.indicator_engine.overlay_runtime import project_and_normalize_entries
 from ....indicators.indicator_service.context import IndicatorServiceContext
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
-from indicators.runtime.overlay_cache_registry import get_overlay_cache_types
+from signals.runtime import emit_manifest_signals
 from .persistence_buffer import TradePersistenceBuffer
-from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext, ThreadedSeriesRunner
+from .series_runner import PoolSeriesRunner, SeriesRunnerContext
 from .settlement import SettlementApplier
 from .signal_consumption import SignalConsumption, consume_signals
 from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
@@ -169,12 +179,10 @@ class BotRuntime:
         self._policy = RuntimeModePolicy.for_run_type(self.run_type)
         self._live_mode = self._policy.allow_live_refresh
         self._series_runner_type = self._resolve_series_runner_type(self.config.get("series_runner"))
+        self._degrade_series_on_error = bool(self.config.get("degrade_series_on_error", False))
         self._logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
         self._warnings: Deque[Dict[str, Any]] = deque(maxlen=MAX_WARNING_ENTRIES)
         self._decision_events: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOG_ENTRIES)
-        self._signal_event_ids: Dict[Tuple[str, str, Optional[str], Optional[str]], str] = {}
-        self._decision_event_ids: Dict[str, str] = {}
-        self._entry_event_ids: Dict[str, str] = {}
         self._event_sinks: List[RuntimeEventSink] = [
             InMemoryEventSink(self._logs, self._decision_events, self._lock),
         ]
@@ -186,8 +194,10 @@ class BotRuntime:
         self._overlay_dirty = threading.Event()
         self._overlay_aggregator_stop = threading.Event()
         self._overlay_aggregator_thread: Optional[threading.Thread] = None
+        ensure_builtin_indicator_plugins_registered()
+        self._indicator_plugin_registry = plugin_registry()
         overlay_cache = default_overlay_cache()
-        for indicator_type in get_overlay_cache_types():
+        for indicator_type in self._indicator_plugin_registry.list_types():
             overlay_cache.enable_type(indicator_type)
         self._overlay_cache = overlay_cache
         runtime_indicator_ctx = IndicatorServiceContext.for_bot_runtime(
@@ -214,8 +224,6 @@ class BotRuntime:
             indicator_ctx=self._indicator_ctx,
             warning_sink=self._record_runtime_warning,
         )
-        ensure_builtin_indicator_plugins_registered()
-        self._indicator_plugin_registry = plugin_registry()
         self._settlement_applier = SettlementApplier(
             obs_enabled=self._obs_enabled,
             obs_slow_ms=self._obs_slow_ms,
@@ -258,11 +266,11 @@ class BotRuntime:
     @staticmethod
     def _resolve_series_runner_type(value: Optional[object]) -> str:
         if value is None:
-            return "threaded"
+            return "pool"
         normalized = str(value).strip().lower()
-        if normalized in {"inline", "threaded", "pool"}:
+        if normalized == "pool":
             return normalized
-        raise ValueError(f"Unknown series_runner '{value}'. Expected 'inline', 'threaded', or 'pool'.")
+        raise ValueError(f"Unknown series_runner '{value}'. Expected 'pool'.")
 
     def _build_series_runner(self) -> object:
         ctx = SeriesRunnerContext(
@@ -281,12 +289,9 @@ class BotRuntime:
             log_debug=self._log_runner_debug,
             log_info=self._log_runner_info,
             log_error=self._log_runner_error,
+            degrade_series_on_error=self._degrade_series_on_error,
         )
-        if self._series_runner_type == "threaded":
-            return ThreadedSeriesRunner(ctx)
-        if self._series_runner_type == "pool":
-            return PoolSeriesRunner(ctx, max_workers=self._pool_worker_count())
-        return InlineSeriesRunner(ctx)
+        return PoolSeriesRunner(ctx, max_workers=self._pool_worker_count())
 
     def _pool_worker_count(self) -> int:
         configured = self.config.get("series_runner_pool_workers")
@@ -339,6 +344,35 @@ class BotRuntime:
         if extra:
             context = merge_log_context(context, extra)
         logger.exception(with_log_context(message, context))
+        if message == "series_step_degraded":
+            series = state.series if state is not None else None
+            try:
+                if series is not None and self._run_context is not None:
+                    self._emit_runtime_event(
+                        event_name=RuntimeEventName.SYMBOL_DEGRADED,
+                        series=series,
+                        bar_ts=None,
+                        reason_code=ReasonCode.SYMBOL_DEGRADED,
+                        payload={
+                            "message": "Series execution degraded due to runtime error.",
+                            "error": (extra or {}).get("error") if isinstance(extra, Mapping) else None,
+                        },
+                    )
+            except Exception:
+                logger.exception(with_log_context("symbol_degraded_event_emit_failed", context))
+            self._record_runtime_warning(
+                {
+                    "type": "series_degraded",
+                    "message": "Series execution degraded due to runtime error.",
+                    "context": {
+                        "strategy_id": getattr(series, "strategy_id", None),
+                        "symbol": getattr(series, "symbol", None),
+                        "timeframe": getattr(series, "timeframe", None),
+                        "error": (extra or {}).get("error") if isinstance(extra, Mapping) else None,
+                    },
+                }
+            )
+            return
         error_message = None
         if isinstance(extra, Mapping):
             error_message = extra.get("error")
@@ -386,6 +420,8 @@ class BotRuntime:
             self.focus_symbol = payload.get("focus_symbol") or None
         if "series_runner" in payload:
             self._series_runner_type = self._resolve_series_runner_type(payload.get("series_runner"))
+        if "degrade_series_on_error" in payload:
+            self._degrade_series_on_error = bool(payload.get("degrade_series_on_error"))
 
     def _set_error_state(
         self,
@@ -1172,21 +1208,14 @@ class BotRuntime:
             event_ts = event.get("time")
             if raw_subtype and event_ts:
                 event_subtype = str(raw_subtype)
-                impact_pnl = event.get("pnl") if event_subtype in {"target", "stop"} else None
-                trade_net_pnl = event.get("net_pnl") if event_subtype == "close" else None
-                self._record_execution_ledger_event(
-                    series,
-                    event_subtype=event_subtype,
-                    event_ts=event_ts,
-                    trade_id=event.get("trade_id"),
-                    side=event.get("direction"),
-                    qty=event.get("contracts"),
-                    price=event.get("price"),
-                    event_impact_pnl=impact_pnl,
-                    trade_net_pnl=trade_net_pnl,
-                    evidence_details=event,
-                )
-            self._persist_trade_event(series, event)
+                if event_subtype in {"target", "stop", "close"}:
+                    self._emit_exit_filled_event(
+                        series=series,
+                        candle=state.active_candle,
+                        event=event,
+                    )
+                    if event_subtype == "close":
+                        self._persist_trade_close(series, event)
         if engine.active_trade is None or not state.intrabar_active():
             self._finish_intrabar(state)
         else:
@@ -1652,6 +1681,10 @@ class BotRuntime:
         self._paused = False
         self._run_started_at = datetime.now(timezone.utc)
         self._run_context = self._build_run_context()
+        wallet_config = self.config.get("wallet_config") if isinstance(self.config.get("wallet_config"), Mapping) else {}
+        balances = wallet_config.get("balances") if isinstance(wallet_config, Mapping) else {}
+        if isinstance(balances, Mapping):
+            self._emit_wallet_initialized_event(balances)
         logger.info(with_log_context("bot_runtime_run_context_ready", self._runtime_log_context()))
         with self._lock:
             self.state.update(
@@ -1689,6 +1722,11 @@ class BotRuntime:
         except Exception as exc:  # pragma: no cover - defensive logging
             context = self._runtime_log_context(error=str(exc))
             logger.exception(with_log_context("bot_runtime_loop_failed", context))
+            try:
+                if self._run_context is not None:
+                    self._emit_runtime_error_event(location="bot_runtime._run", error=exc)
+            except Exception:
+                logger.exception(with_log_context("bot_runtime_runtime_error_emit_failed", context))
             self._set_error_state(str(exc))
             self._push_update("error")
             self._persist_runtime_state("error")
@@ -1873,25 +1911,7 @@ class BotRuntime:
                             direction=direction,
                         )
                         logger.debug(with_log_context("signal_consumed", context))
-                        signal_event_id = self._record_ledger_event(
-                            event_type="signal",
-                            event_subtype="strategy_signal",
-                            event_ts=_isoformat(candle.time),
-                            reason_code="SIGNAL_STRATEGY_SIGNAL",
-                            series=series,
-                            side=direction,
-                            price=candle.close,
-                            evidence_refs=[
-                                {
-                                    "ref_type": "indicator",
-                                    "ref_id": "strategy_signal",
-                                    "summary": f"direction={direction} price={round(candle.close, 4)}",
-                                }
-                            ],
-                        )
-                        self._signal_event_ids[
-                            self._signal_key(series, "strategy_signal", direction, None)
-                        ] = signal_event_id
+                        self._emit_signal_event(series=series, candle=candle, direction=direction)
                         signal_event_logged = True
                     self._record_step_trace(
                         "step_signal_eval",
@@ -1986,24 +2006,22 @@ class BotRuntime:
                         instrument_id = series.instrument.get("id")
                     if not instrument_id:
                         decision_events_logged += 1
-                        self._log_decision_event(
-                            event="signal_rejected",
+                        self._emit_decision_event(
                             series=series,
                             candle=candle,
-                            signal_type="strategy_signal",
-                            signal_direction=direction,
-                            signal_price=candle.close,
-                            rule_id=None,
                             decision="rejected",
+                            direction=direction,
+                            signal_price=float(candle.close),
                             reason_code="DECISION_REJECTED_INSTRUMENT_MISSING",
-                            reason_detail="Instrument id missing.",
+                            message="Instrument id missing.",
+                            trade_id=None,
                             context={
                                 "signal_type": "strategy_signal",
                                 "signal_direction": direction,
                                 "signal_price": candle.close,
                                 "blocked_instrument_id": None,
+                                "instrument_id": None,
                             },
-                            instrument_id=None,
                         )
                         direction = None
                     else:
@@ -2020,18 +2038,16 @@ class BotRuntime:
                     if new_trade is not None:
                         # Signal was accepted and trade was opened
                         decision_events_logged += 1
-                        self._log_decision_event(
-                            event="signal_accepted",
+                        self._emit_decision_event(
                             series=series,
                             candle=candle,
-                            signal_type="strategy_signal",  # Generic type for now
-                            signal_direction=direction,
-                            signal_price=candle.close,
-                            rule_id=None,  # Not available in current signal queue
                             decision="accepted",
+                            direction=direction,
+                            signal_price=float(candle.close),
                             reason_code="DECISION_ACCEPTED",
+                            message=None,
                             trade_id=new_trade.trade_id,
-                            trade_time=_isoformat(new_trade.entry_time),
+                            context={"trade_time": _isoformat(new_trade.entry_time)},
                         )
                     else:
                         # Signal was rejected (no trade opened)
@@ -2070,20 +2086,17 @@ class BotRuntime:
                         )
 
                         decision_events_logged += 1
-                        self._log_decision_event(
-                            event="signal_rejected",
+                        rejection_context.update(metadata_payload)
+                        self._emit_decision_event(
                             series=series,
                             candle=candle,
-                            signal_type="strategy_signal",
-                            signal_direction=direction,
-                            signal_price=candle.close,
-                            rule_id=None,
                             decision="rejected",
+                            direction=direction,
+                            signal_price=float(candle.close),
                             reason_code=rejection_code or "DECISION_REJECTED",
-                            reason_detail=rejection_reason,
-                            context=rejection_context,
+                            message=rejection_reason,
                             trade_id=resolved_trade_id,
-                            **metadata_payload,
+                            context=rejection_context,
                         )
 
                 if new_trade is not None:
@@ -2106,18 +2119,11 @@ class BotRuntime:
                         trade_time=_isoformat(new_trade.entry_time),
                     )
                     execution_events_logged += 1
-                    self._record_execution_ledger_event(
-                        series,
-                        event_subtype="entry",
-                        event_ts=_isoformat(new_trade.entry_time),
-                        trade_id=new_trade.trade_id,
-                        side=direction,
-                        qty=sum(max(leg.contracts, 0) for leg in new_trade.legs),
-                        price=new_trade.entry_price,
-                        evidence_details={
-                            "stop_price": round(new_trade.stop_price, 4),
-                            "targets": targets,
-                        },
+                    self._emit_entry_filled_event(
+                        series=series,
+                        candle=candle,
+                        trade=new_trade,
+                        direction=str(direction or ""),
                     )
                     self._persist_trade_entry(series, new_trade)
                     self._update_trade_overlay(series)
@@ -2212,22 +2218,15 @@ class BotRuntime:
                     event_ts = event.get("time")
                     if raw_subtype and event_ts:
                         event_subtype = str(raw_subtype)
-                        impact_pnl = event.get("pnl") if event_subtype in {"target", "stop"} else None
-                        trade_net_pnl = event.get("net_pnl") if event_subtype == "close" else None
-                        execution_events_logged += 1
-                        self._record_execution_ledger_event(
-                            series,
-                            event_subtype=event_subtype,
-                            event_ts=event_ts,
-                            trade_id=event.get("trade_id"),
-                            side=event.get("direction"),
-                            qty=event.get("contracts"),
-                            price=event.get("price"),
-                            event_impact_pnl=impact_pnl,
-                            trade_net_pnl=trade_net_pnl,
-                            evidence_details=event,
-                        )
-                    self._persist_trade_event(series, event)
+                        if event_subtype in {"target", "stop", "close"}:
+                            execution_events_logged += 1
+                            self._emit_exit_filled_event(
+                                series=series,
+                                candle=candle,
+                                event=event,
+                            )
+                            if event_subtype == "close":
+                                self._persist_trade_close(series, event)
                 self._update_trade_overlay(series)
                 state.last_evaluated_epoch = max(state.last_evaluated_epoch, next_last_evaluated_epoch)
                 state.last_consumed_epoch = max(state.last_consumed_epoch, next_last_consumed_epoch)
@@ -2462,7 +2461,12 @@ class BotRuntime:
             if plugin is None:
                 raise RuntimeError(f"indicator_plugin_runtime_missing: indicator_id={indicator_id}")
             if getattr(plugin, "signal_emitter", None) is not None:
-                rule_payload = plugin.signal_emitter(payload, candle, previous_candle)
+                rule_payload = emit_manifest_signals(
+                    manifest=plugin,
+                    snapshot_payload=payload,
+                    candle=candle,
+                    previous_candle=previous_candle,
+                )
             else:
                 rule_payload = {"signals": []}
             enriched_payload = dict(payload)
@@ -2921,157 +2925,608 @@ class BotRuntime:
         with self._lock:
             return list(self._warnings)
 
-    def _signal_key(
-        self,
-        series: StrategySeries,
-        signal_type: str,
-        signal_direction: Optional[str],
-        rule_id: Optional[str],
-    ) -> Tuple[str, str, Optional[str], Optional[str]]:
-        return (series.strategy_id, series.symbol, signal_type, signal_direction or rule_id)
+    @staticmethod
+    def _runtime_event_time(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
-    def _record_ledger_event(
+    def _bar_correlation_id(self, series: StrategySeries, bar_ts: Optional[datetime]) -> str:
+        if self._run_context is None:
+            raise ValueError("run context is required before building correlation ids")
+        return build_correlation_id(
+            run_id=self._run_context.run_id,
+            symbol=series.symbol,
+            timeframe=series.timeframe,
+            bar_ts=bar_ts,
+        )
+
+    def _runtime_events_reverse(self) -> List[RuntimeEvent]:
+        if self._run_context is None:
+            return []
+        return list(reversed(self._run_context.runtime_events))
+
+    def _find_signal_event(self, *, series: StrategySeries, correlation_id: str) -> Optional[RuntimeEvent]:
+        for event in self._runtime_events_reverse():
+            if event.event_name != RuntimeEventName.SIGNAL_EMITTED:
+                continue
+            if event.correlation_id != correlation_id:
+                continue
+            if event.strategy_id != series.strategy_id:
+                continue
+            if event.symbol != series.symbol:
+                continue
+            if event.timeframe != series.timeframe:
+                continue
+            return event
+        return None
+
+    def _find_decision_event(
         self,
         *,
-        event_type: str,
-        event_ts: str,
-        reason_code: str,
-        series: Optional[StrategySeries] = None,
-        event_subtype: Optional[str] = None,
-        parent_event_id: Optional[str] = None,
-        trade_id: Optional[str] = None,
-        position_id: Optional[str] = None,
-        side: Optional[str] = None,
-        qty: Optional[float] = None,
-        price: Optional[float] = None,
-        event_impact_pnl: Optional[float] = None,
-        trade_net_pnl: Optional[float] = None,
-        reason_detail: Optional[str] = None,
-        evidence_refs: Optional[List[Dict[str, Any]]] = None,
-        context: Optional[Dict[str, Any]] = None,
-        alternatives_rejected: Optional[List[Dict[str, Any]]] = None,
-    ) -> str:
-        if not reason_code:
-            raise ValueError("reason_code is required for ledger events")
-        instrument_id = None
-        if series is not None and isinstance(series.instrument, Mapping):
-            instrument_id = series.instrument.get("id")
-        event_id = str(uuid.uuid4())
-        created_at = _isoformat(datetime.now(timezone.utc))
-        ledger_event = DecisionLedgerEvent(
-            event_id=event_id,
-            event_ts=event_ts,
-            event_type=event_type,
-            reason_code=reason_code,
-            event_subtype=event_subtype,
-            parent_event_id=parent_event_id,
-            trade_id=trade_id,
-            position_id=position_id,
-            strategy_id=series.strategy_id if series else None,
-            strategy_name=series.name or series.strategy_id if series else None,
-            symbol=series.symbol if series else None,
-            instrument_id=instrument_id,
-            timeframe=getattr(series, "timeframe", None) if series else None,
-            side=side,
-            qty=qty,
-            price=price,
-            event_impact_pnl=event_impact_pnl,
-            trade_net_pnl=trade_net_pnl,
-            reason_detail=reason_detail,
-            evidence_refs=evidence_refs,
-            context=context,
-            alternatives_rejected=alternatives_rejected,
-            created_at=created_at,
-        )
-        payload = ledger_event.serialize()
-        with self._lock:
-            sinks = list(self._event_sinks)
-            if self._run_context is not None:
-                self._run_context.decision_trace.append(payload)
-        for sink in sinks:
-            sink.record_decision(payload)
-        return event_id
+        series: StrategySeries,
+        correlation_id: str,
+        trade_id: Optional[str],
+    ) -> Optional[RuntimeEvent]:
+        for event in self._runtime_events_reverse():
+            if event.event_name != RuntimeEventName.DECISION_ACCEPTED:
+                continue
+            if event.correlation_id != correlation_id:
+                continue
+            if event.strategy_id != series.strategy_id:
+                continue
+            if trade_id and str(event.payload.get("trade_id") or "") != str(trade_id):
+                continue
+            return event
+        return None
 
-    def _log_decision_event(
+    def _find_entry_event(self, *, trade_id: Optional[str]) -> Optional[RuntimeEvent]:
+        if not trade_id:
+            return None
+        for event in self._runtime_events_reverse():
+            if event.event_name != RuntimeEventName.ENTRY_FILLED:
+                continue
+            if str(event.payload.get("trade_id") or "") != str(trade_id):
+                continue
+            return event
+        return None
+
+    def _find_trade_decision_event(self, *, trade_id: Optional[str]) -> Optional[RuntimeEvent]:
+        if not trade_id:
+            return None
+        for event in self._runtime_events_reverse():
+            if event.event_name != RuntimeEventName.DECISION_ACCEPTED:
+                continue
+            if str(event.payload.get("trade_id") or "") != str(trade_id):
+                continue
+            return event
+        return None
+
+    def _decision_trace_entry(self, event: RuntimeEvent) -> Dict[str, Any]:
+        payload = dict(event.payload or {})
+        event_subtype = payload.get("event_subtype")
+        if event.event_name == RuntimeEventName.SIGNAL_EMITTED:
+            event_subtype = "strategy_signal"
+        elif event.event_name == RuntimeEventName.DECISION_ACCEPTED:
+            event_subtype = "signal_accepted"
+        elif event.event_name == RuntimeEventName.DECISION_REJECTED:
+            event_subtype = "signal_rejected"
+        elif event.event_name == RuntimeEventName.ENTRY_FILLED:
+            event_subtype = "entry"
+        elif event.event_name == RuntimeEventName.EXIT_FILLED:
+            event_subtype = str(payload.get("exit_kind") or "close").lower()
+        elif event.event_name == RuntimeEventName.RUNTIME_ERROR:
+            event_subtype = "runtime_error"
+        return {
+            "event_id": event.event_id,
+            "event_ts": _isoformat(event.event_ts),
+            "event_type": event.category.value.lower(),
+            "event_subtype": event_subtype,
+            "reason_code": event.reason_code.value if event.reason_code is not None else None,
+            "parent_event_id": event.parent_id,
+            "trade_id": payload.get("trade_id"),
+            "strategy_id": event.strategy_id,
+            "symbol": event.symbol,
+            "timeframe": event.timeframe,
+            "side": payload.get("direction") or payload.get("side"),
+            "qty": payload.get("qty"),
+            "price": payload.get("price"),
+            "event_impact_pnl": payload.get("event_impact_pnl"),
+            "trade_net_pnl": payload.get("trade_net_pnl"),
+            "reason_detail": payload.get("message"),
+            "context": payload.get("context"),
+        }
+
+    def _persist_runtime_event(self, event: RuntimeEvent) -> None:
+        if self._run_context is None:
+            raise ValueError("run context is required for runtime event persistence")
+        serialized = event.serialize()
+        shared_wallet_proxy = self.config.get("shared_wallet_proxy")
+        seq_override: Optional[int] = None
+        if isinstance(shared_wallet_proxy, Mapping):
+            seq_counter = shared_wallet_proxy.get("runtime_event_seq")
+            proxy_lock = shared_wallet_proxy.get("lock")
+            if seq_counter is not None:
+                if proxy_lock is not None:
+                    proxy_lock.acquire()
+                try:
+                    try:
+                        current_value = int(seq_counter.get())
+                    except Exception:
+                        current_value = int(getattr(seq_counter, "value", 0))
+                    next_value = current_value + 1
+                    try:
+                        seq_counter.set(next_value)
+                    except Exception:
+                        setattr(seq_counter, "value", next_value)
+                    seq_override = int(next_value)
+                finally:
+                    if proxy_lock is not None:
+                        proxy_lock.release()
+        with self._lock:
+            if seq_override is None:
+                self._run_context.runtime_event_seq += 1
+                seq = int(self._run_context.runtime_event_seq)
+            else:
+                seq = int(seq_override)
+                self._run_context.runtime_event_seq = max(int(self._run_context.runtime_event_seq), seq)
+            serialized["seq"] = int(seq)
+            self._run_context.runtime_events.append(event)
+            self._run_context.runtime_event_stream.append(serialized)
+            trace_entry = self._decision_trace_entry(event)
+            self._run_context.decision_trace.append(trace_entry)
+            sinks = list(self._event_sinks)
+        for sink in sinks:
+            sink.record_decision(serialized)
+        if (
+            isinstance(shared_wallet_proxy, Mapping)
+            and event.event_name != RuntimeEventName.WALLET_INITIALIZED
+            and shared_wallet_proxy.get("runtime_events") is not None
+        ):
+            runtime_events_proxy = shared_wallet_proxy.get("runtime_events")
+            proxy_lock = shared_wallet_proxy.get("lock")
+            if proxy_lock is not None:
+                proxy_lock.acquire()
+                try:
+                    runtime_events_proxy.append(serialized)
+                finally:
+                    proxy_lock.release()
+            else:
+                runtime_events_proxy.append(serialized)
+        from ....storage import storage
+
+        storage.record_bot_runtime_event(
+            {
+                "event_id": event.event_id,
+                "bot_id": self.bot_id,
+                "run_id": self._run_context.run_id,
+                "seq": seq,
+                "event_type": event.event_name.value,
+                "critical": event.event_name
+                in {
+                    RuntimeEventName.DECISION_REJECTED,
+                    RuntimeEventName.ENTRY_FILLED,
+                    RuntimeEventName.EXIT_FILLED,
+                    RuntimeEventName.RUNTIME_ERROR,
+                    RuntimeEventName.SYMBOL_DEGRADED,
+                },
+                "schema_version": event.schema_version,
+                "event_time": serialized.get("event_ts"),
+                "payload": serialized,
+            }
+        )
+
+    def _emit_runtime_event(
         self,
-        event: str,
+        *,
+        event_name: RuntimeEventName,
+        series: Optional[StrategySeries],
+        bar_ts: Optional[datetime],
+        payload: Mapping[str, Any],
+        reason_code: Optional[ReasonCode | str] = None,
+        root_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        category: Optional[RuntimeEventCategory] = None,
+        event_ts: Optional[datetime] = None,
+        missing_parent_hint: Optional[str] = None,
+    ) -> RuntimeEvent:
+        if self._run_context is None:
+            raise ValueError("run context is required before emitting runtime events")
+        strategy_id = series.strategy_id if series is not None else "__runtime__"
+        symbol = series.symbol if series is not None else None
+        timeframe = series.timeframe if series is not None else None
+        if series is not None:
+            correlation_id = self._bar_correlation_id(series, bar_ts)
+        else:
+            correlation_id = build_correlation_id(
+                run_id=self._run_context.run_id,
+                symbol=None,
+                timeframe=None,
+                bar_ts=bar_ts,
+            )
+        payload_data = dict(payload or {})
+        try:
+            event = new_runtime_event(
+                run_id=self._run_context.run_id,
+                bot_id=self.bot_id,
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                bar_ts=bar_ts,
+                event_name=event_name,
+                category=category,
+                correlation_id=correlation_id,
+                reason_code=reason_code,
+                root_id=root_id,
+                parent_id=parent_id,
+                event_ts=event_ts,
+                payload=payload_data,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            parent_validation_error = "parent_id is required" in message or "root_id is required" in message
+            if not parent_validation_error:
+                raise
+            fallback_payload = dict(payload_data)
+            fallback_payload["parent_missing"] = True
+            fallback_payload["missing_parent_hint"] = missing_parent_hint or message
+            fallback_reason = coerce_reason_code(reason_code)
+            if event_name not in {
+                RuntimeEventName.RUNTIME_ERROR,
+                RuntimeEventName.SYMBOL_DEGRADED,
+                RuntimeEventName.SYMBOL_RECOVERED,
+            }:
+                fallback_reason = ReasonCode.RUNTIME_PARENT_MISSING
+            event = new_runtime_event(
+                run_id=self._run_context.run_id,
+                bot_id=self.bot_id,
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                bar_ts=bar_ts,
+                event_name=event_name,
+                category=category,
+                correlation_id=correlation_id,
+                reason_code=fallback_reason,
+                root_id=root_id,
+                parent_id=parent_id,
+                event_ts=event_ts,
+                payload=fallback_payload,
+                allow_missing_parent=True,
+            )
+        self._persist_runtime_event(event)
+        return event
+
+    def _emit_wallet_initialized_event(self, balances: Mapping[str, Any]) -> RuntimeEvent:
+        normalized = {
+            str(currency).upper(): float(amount)
+            for currency, amount in dict(balances or {}).items()
+        }
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.WALLET_INITIALIZED,
+            series=None,
+            bar_ts=None,
+            payload={"balances": normalized, "source": "run_start"},
+            category=RuntimeEventCategory.WALLET,
+        )
+
+    def _emit_runtime_error_event(
+        self,
+        *,
+        location: str,
+        error: Exception,
+        series: Optional[StrategySeries] = None,
+        bar_ts: Optional[datetime] = None,
+    ) -> RuntimeEvent:
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.RUNTIME_ERROR,
+            series=series,
+            bar_ts=bar_ts,
+            reason_code=ReasonCode.RUNTIME_EXCEPTION,
+            payload={
+                "exception_type": error.__class__.__name__,
+                "message": str(error),
+                "location": location,
+            },
+            category=RuntimeEventCategory.RUNTIME,
+        )
+
+    def _emit_signal_event(self, *, series: StrategySeries, candle: Candle, direction: str) -> RuntimeEvent:
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.SIGNAL_EMITTED,
+            series=series,
+            bar_ts=candle.time,
+            reason_code=ReasonCode.SIGNAL_STRATEGY_SIGNAL,
+            payload={
+                "signal_type": "strategy_signal",
+                "direction": direction,
+                "signal_price": float(candle.close),
+                "bar": {
+                    "time": _isoformat(candle.time),
+                    "open": float(candle.open),
+                    "high": float(candle.high),
+                    "low": float(candle.low),
+                    "close": float(candle.close),
+                },
+            },
+            event_ts=candle.time,
+        )
+
+    def _emit_decision_event(
+        self,
+        *,
         series: StrategySeries,
         candle: Candle,
-        signal_type: str,
-        signal_direction: Optional[str] = None,
-        signal_price: Optional[float] = None,
-        rule_id: Optional[str] = None,
-        decision: Optional[str] = None,
-        reason_code: str = "",
-        reason_detail: Optional[str] = None,
-        trade_id: Optional[str] = None,
-        trade_time: Optional[str] = None,
-        conditions: Optional[List[Dict[str, Any]]] = None,
-        evidence_refs: Optional[List[Dict[str, Any]]] = None,
-        context: Optional[Dict[str, Any]] = None,
-        alternatives_rejected: Optional[List[Dict[str, Any]]] = None,
-        **metadata: object,
-    ) -> None:
-        """Log a strategy-level decision event for the decision ledger."""
-        if not reason_code:
-            raise ValueError("reason_code is required for decision events")
-        if trade_id is not None and "trade_id" in metadata:
-            metadata = {k: v for k, v in metadata.items() if k != "trade_id"}
-        parent_event_id = self._signal_event_ids.get(
-            self._signal_key(series, signal_type, signal_direction, rule_id),
-        )
-        context_payload = dict(metadata) if metadata else None
-        if conditions:
-            context_payload = dict(context_payload or {})
-            context_payload["conditions"] = conditions
-        derived_evidence: List[Dict[str, Any]] = []
-        if rule_id:
-            derived_evidence.append(
-                {
-                    "ref_type": "indicator",
-                    "ref_id": rule_id,
-                    "summary": "rule_id",
-                }
+        decision: str,
+        direction: Optional[str],
+        signal_price: float,
+        reason_code: str,
+        message: Optional[str],
+        trade_id: Optional[str],
+        context: Optional[Mapping[str, Any]],
+    ) -> RuntimeEvent:
+        correlation_id = self._bar_correlation_id(series, candle.time)
+        signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
+        missing_parent_hint: Optional[str] = None
+        resolved_root_id = signal_event.root_id if signal_event is not None else None
+        resolved_parent_id = signal_event.event_id if signal_event is not None else None
+        if signal_event is None:
+            missing_parent_hint = (
+                "signal event missing for decision emission | "
+                f"strategy={series.strategy_id} symbol={series.symbol} correlation={correlation_id}"
             )
-        if conditions:
-            for cond in conditions:
-                if not isinstance(cond, Mapping):
-                    continue
-                name = cond.get("name") or cond.get("condition")
-                if not name:
-                    continue
-                derived_evidence.append(
-                    {
-                        "ref_type": "indicator",
-                        "ref_id": str(name),
-                        "summary": f"condition_passed={cond.get('passed')}",
-                    }
-                )
-        if reason_code.startswith("DECISION_REJECTED"):
-            derived_evidence.append(
-                {
-                    "ref_type": "risk",
-                    "ref_id": reason_code,
-                    "summary": reason_detail or "decision rejected",
-                }
-            )
-        event_id = self._record_ledger_event(
-            event_type="decision",
-            event_subtype=event,
-            event_ts=_isoformat(candle.time),
-            reason_code=reason_code,
+        event_name = RuntimeEventName.DECISION_ACCEPTED if decision == "accepted" else RuntimeEventName.DECISION_REJECTED
+        payload: Dict[str, Any] = {
+            "decision": decision,
+            "direction": direction,
+            "signal_price": float(signal_price),
+            "trade_id": trade_id,
+            "context": dict(context or {}),
+            "event_subtype": "signal_accepted" if decision == "accepted" else "signal_rejected",
+        }
+        if decision != "accepted":
+            payload["message"] = message or "Decision rejected"
+        return self._emit_runtime_event(
+            event_name=event_name,
             series=series,
-            parent_event_id=parent_event_id,
-            trade_id=trade_id,
-            side=signal_direction,
-            price=signal_price or candle.close,
-            reason_detail=reason_detail,
-            evidence_refs=evidence_refs or (derived_evidence or None),
-            context=context or context_payload,
-            alternatives_rejected=alternatives_rejected,
+            bar_ts=candle.time,
+            reason_code=coerce_reason_code(reason_code),
+            root_id=resolved_root_id,
+            parent_id=resolved_parent_id,
+            payload=payload,
+            event_ts=candle.time,
+            missing_parent_hint=missing_parent_hint,
         )
-        if decision == "accepted" and trade_id:
-            self._decision_event_ids[trade_id] = event_id
+
+    def _emit_entry_filled_event(
+        self,
+        *,
+        series: StrategySeries,
+        candle: Candle,
+        trade: Any,
+        direction: str,
+    ) -> RuntimeEvent:
+        trade_id = str(getattr(trade, "trade_id", "") or "")
+        correlation_id = self._bar_correlation_id(series, candle.time)
+        signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
+        decision_event = self._find_decision_event(series=series, correlation_id=correlation_id, trade_id=trade_id)
+        missing_bits: List[str] = []
+        if signal_event is None:
+            missing_bits.append(f"signal event missing | trade_id={trade_id} correlation={correlation_id}")
+        if decision_event is None:
+            missing_bits.append(f"decision event missing | trade_id={trade_id} correlation={correlation_id}")
+        missing_parent_hint = "; ".join(missing_bits) if missing_bits else None
+        qty = sum(max(getattr(leg, "contracts", 0.0), 0.0) for leg in getattr(trade, "legs", []))
+        price = float(getattr(trade, "entry_price", candle.close) or candle.close)
+        fee_paid = float(getattr(trade, "fees_paid", 0.0) or 0.0)
+        notional = abs(price * float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0) * float(qty))
+        accounting_mode = None
+        if getattr(series, "execution_profile", None) is not None:
+            accounting_mode = series.execution_profile.accounting_mode
+        collateral_reserved = 0.0
+        if accounting_mode == "margin":
+            from engines.bot_runtime.core.wallet import wallet_required_reservation
+
+            _currency, collateral_reserved = wallet_required_reservation(
+                side="buy" if direction == "long" else "sell",
+                base_currency=str(getattr(trade, "base_currency", "") or ""),
+                quote_currency=str(getattr(trade, "quote_currency", "") or ""),
+                qty=float(qty),
+                notional=float(notional),
+                fee=float(fee_paid),
+                short_requires_borrow=bool(getattr(series.risk_engine, "short_requires_borrow", False)),
+                instrument=series.instrument if isinstance(series.instrument, Mapping) else None,
+                execution_profile=getattr(series, "execution_profile", None),
+            )
+        wallet_fill_metadata = (
+            dict(getattr(trade, "wallet_fill_metadata", {}) or {})
+            if isinstance(getattr(trade, "wallet_fill_metadata", None), Mapping)
+            else {}
+        )
+        wallet_delta_payload: Dict[str, Any] = {
+            "collateral_reserved": float(collateral_reserved),
+            "collateral_released": 0.0,
+            "fee_paid": float(fee_paid),
+            "balance_delta": float(-fee_paid) if accounting_mode == "margin" else None,
+        }
+        gateway_wallet_delta = wallet_fill_metadata.get("wallet_delta")
+        if isinstance(gateway_wallet_delta, Mapping):
+            wallet_delta_payload["collateral_reserved"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("collateral_reserved"), float(collateral_reserved)) or 0.0),
+                0.0,
+            )
+            wallet_delta_payload["collateral_released"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("collateral_released"), 0.0) or 0.0),
+                0.0,
+            )
+            wallet_delta_payload["fee_paid"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("fee_paid"), float(fee_paid)) or 0.0),
+                0.0,
+            )
+            if gateway_wallet_delta.get("balance_delta") is not None:
+                wallet_delta_payload["balance_delta"] = float(
+                    _coerce_float(gateway_wallet_delta.get("balance_delta"), 0.0) or 0.0
+                )
+        payload = {
+            "trade_id": trade_id,
+            "side": "buy" if direction == "long" else "sell",
+            "direction": direction,
+            "qty": float(qty),
+            "price": price,
+            "notional": float(notional),
+            "fee_paid": float(fee_paid),
+            "base_currency": str(getattr(trade, "base_currency", "") or ""),
+            "quote_currency": str(getattr(trade, "quote_currency", "") or ""),
+            "accounting_mode": accounting_mode,
+            "wallet_delta": wallet_delta_payload,
+            "event_subtype": "entry",
+        }
+        reservation_id = wallet_fill_metadata.get("reservation_id")
+        reservation_correlation_id = wallet_fill_metadata.get("correlation_id")
+        required_delta = wallet_fill_metadata.get("required_delta")
+        payload["reservation_id"] = str(reservation_id) if reservation_id else None
+        payload["correlation_id"] = str(reservation_correlation_id or f"trade:{trade_id}")
+        if isinstance(required_delta, Mapping):
+            payload["required_delta"] = dict(required_delta)
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.ENTRY_FILLED,
+            series=series,
+            bar_ts=candle.time,
+            reason_code=ReasonCode.EXEC_ENTRY_FILLED,
+            root_id=(
+                signal_event.root_id
+                if signal_event is not None
+                else (decision_event.root_id if decision_event is not None else None)
+            ),
+            parent_id=decision_event.event_id if decision_event is not None else None,
+            payload=payload,
+            event_ts=trade.entry_time if hasattr(trade, "entry_time") else candle.time,
+            missing_parent_hint=missing_parent_hint,
+        )
+
+    def _emit_exit_filled_event(
+        self,
+        *,
+        series: StrategySeries,
+        candle: Candle,
+        event: Mapping[str, Any],
+    ) -> RuntimeEvent:
+        trade_id = str(event.get("trade_id") or "")
+        entry_event = self._find_entry_event(trade_id=trade_id)
+        decision_event = self._find_trade_decision_event(trade_id=trade_id)
+        missing_parent_hint = None
+        if entry_event is None:
+            missing_parent_hint = f"entry event missing for exit fill | trade_id={trade_id}"
+        subtype = str(event.get("type") or "").lower()
+        exit_kind = ExitKind.CLOSE
+        reason = ReasonCode.EXEC_EXIT_CLOSE
+        if subtype == "target":
+            exit_kind = ExitKind.TARGET
+            reason = ReasonCode.EXEC_EXIT_TARGET
+        elif subtype == "stop":
+            exit_kind = ExitKind.STOP
+            reason = ReasonCode.EXEC_EXIT_STOP
+        qty = float(event.get("contracts") or 0.0)
+        price = float(event.get("price") or candle.close)
+        notional = abs(price * float(getattr(series.risk_engine, "contract_size", 1.0) or 1.0) * qty)
+        fee_paid = 0.0
+        if subtype == "close":
+            fee_paid = float(event.get("fees_paid") or 0.0)
+        accounting_mode = None
+        if getattr(series, "execution_profile", None) is not None:
+            accounting_mode = series.execution_profile.accounting_mode
+        realized_pnl = float(event.get("pnl") or 0.0)
+        if subtype == "close":
+            realized_pnl = float(event.get("net_pnl") or 0.0) + fee_paid
+        prior_state = project_wallet_from_events(self._run_context.runtime_events if self._run_context else [])
+        collateral_released = 0.0
+        if accounting_mode == "margin":
+            pos = prior_state.margin_positions.get(trade_id) if prior_state.margin_positions else None
+            if isinstance(pos, Mapping):
+                open_qty = float(pos.get("open_qty") or 0.0)
+                locked = float(pos.get("locked_margin") or 0.0)
+                if open_qty > 0 and locked > 0 and qty > 0:
+                    collateral_released = min(locked * min(qty / open_qty, 1.0), locked)
+        wallet_fill_metadata = dict(event.get("wallet_fill_metadata") or {}) if isinstance(event, Mapping) else {}
+        wallet_delta_payload: Dict[str, Any] = {
+            "collateral_reserved": 0.0,
+            "collateral_released": float(collateral_released),
+            "fee_paid": float(fee_paid),
+            "balance_delta": float(realized_pnl - fee_paid) if accounting_mode == "margin" else None,
+        }
+        gateway_wallet_delta = wallet_fill_metadata.get("wallet_delta")
+        if isinstance(gateway_wallet_delta, Mapping):
+            wallet_delta_payload["collateral_reserved"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("collateral_reserved"), 0.0) or 0.0),
+                0.0,
+            )
+            wallet_delta_payload["collateral_released"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("collateral_released"), float(collateral_released)) or 0.0),
+                0.0,
+            )
+            wallet_delta_payload["fee_paid"] = max(
+                float(_coerce_float(gateway_wallet_delta.get("fee_paid"), float(fee_paid)) or 0.0),
+                0.0,
+            )
+            if gateway_wallet_delta.get("balance_delta") is not None:
+                wallet_delta_payload["balance_delta"] = float(
+                    _coerce_float(gateway_wallet_delta.get("balance_delta"), 0.0) or 0.0
+                )
+        payload = {
+            "trade_id": trade_id,
+            "side": "sell" if str(event.get("direction") or "").lower() == "long" else "buy",
+            "direction": str(event.get("direction") or ""),
+            "qty": qty,
+            "price": price,
+            "notional": float(notional),
+            "fee_paid": float(fee_paid),
+            "realized_pnl": float(realized_pnl),
+            "base_currency": str(getattr(series.risk_engine, "base_currency", "") or ""),
+            "quote_currency": str(event.get("currency") or getattr(series.risk_engine, "quote_currency", "") or ""),
+            "accounting_mode": accounting_mode,
+            "exit_kind": exit_kind.value,
+            "event_impact_pnl": float(event.get("pnl") or 0.0) if subtype in {"target", "stop"} else None,
+            "trade_net_pnl": float(event.get("net_pnl") or 0.0) if subtype == "close" else None,
+            "wallet_delta": wallet_delta_payload,
+            "event_subtype": subtype,
+        }
+        reservation_id = wallet_fill_metadata.get("reservation_id")
+        reservation_correlation_id = wallet_fill_metadata.get("correlation_id")
+        required_delta = wallet_fill_metadata.get("required_delta")
+        payload["reservation_id"] = str(reservation_id) if reservation_id else None
+        payload["correlation_id"] = str(reservation_correlation_id or f"trade:{trade_id}")
+        if isinstance(required_delta, Mapping):
+            payload["required_delta"] = dict(required_delta)
+        event_ts = self._runtime_event_time(event.get("time")) or candle.time
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.EXIT_FILLED,
+            series=series,
+            bar_ts=candle.time,
+            reason_code=reason,
+            root_id=(
+                entry_event.root_id
+                if entry_event is not None
+                else (decision_event.root_id if decision_event is not None else None)
+            ),
+            parent_id=(
+                entry_event.event_id
+                if entry_event is not None
+                else (decision_event.event_id if decision_event is not None else None)
+            ),
+            payload=payload,
+            event_ts=event_ts,
+            missing_parent_hint=missing_parent_hint,
+        )
 
     @staticmethod
     def _normalise_rejection_metadata(
@@ -3093,73 +3548,6 @@ class BotRuntime:
                 resolved_trade_id = str(meta_trade_id)
         return resolved_trade_id, metadata_payload
 
-    def _record_execution_ledger_event(
-        self,
-        series: StrategySeries,
-        *,
-        event_subtype: str,
-        event_ts: str,
-        trade_id: Optional[str],
-        side: Optional[str] = None,
-        qty: Optional[float] = None,
-        price: Optional[float] = None,
-        event_impact_pnl: Optional[float] = None,
-        trade_net_pnl: Optional[float] = None,
-        evidence_details: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if not trade_id:
-            return
-        reason_code_map = {
-            "entry": "EXEC_ENTRY",
-            "open": "EXEC_ENTRY",
-            "fill": "EXEC_ENTRY",
-            "stop": "EXEC_STOP_HIT",
-            "target": "EXEC_TARGET_HIT",
-            "close": "OUTCOME_TRADE_CLOSED",
-            "exit": "OUTCOME_TRADE_CLOSED",
-        }
-        reason_code = reason_code_map.get(event_subtype)
-        if not reason_code:
-            raise ValueError(f"Unknown execution event subtype '{event_subtype}'")
-        evidence_parts: List[str] = []
-        if evidence_details:
-            for key in ("leg", "ticks", "pnl", "gross_pnl", "fees_paid", "net_pnl", "currency", "stop_price"):
-                if key in evidence_details and evidence_details[key] is not None:
-                    evidence_parts.append(f"{key}={evidence_details[key]}")
-            targets = evidence_details.get("targets") if isinstance(evidence_details, Mapping) else None
-            if isinstance(targets, list) and targets:
-                evidence_parts.append(f"targets={len(targets)}")
-            metrics = evidence_details.get("metrics") if isinstance(evidence_details, Mapping) else None
-            if isinstance(metrics, Mapping) and "bars_held" in metrics:
-                evidence_parts.append(f"bars_held={metrics['bars_held']}")
-        summary = " ".join(evidence_parts) if evidence_parts else "execution_event"
-        evidence_refs = [
-            {
-                "ref_type": "execution",
-                "ref_id": event_subtype,
-                "summary": summary,
-            }
-        ]
-        parent_event_id = self._entry_event_ids.get(trade_id) or self._decision_event_ids.get(trade_id)
-        ledger_type = "outcome" if event_subtype in {"close", "exit"} else "execution"
-        event_id = self._record_ledger_event(
-            event_type=ledger_type,
-            event_subtype=event_subtype,
-            event_ts=event_ts,
-            reason_code=reason_code,
-            series=series,
-            parent_event_id=parent_event_id,
-            trade_id=trade_id,
-            side=side,
-            qty=qty,
-            price=price,
-            event_impact_pnl=event_impact_pnl,
-            trade_net_pnl=trade_net_pnl,
-            evidence_refs=evidence_refs,
-        )
-        if event_subtype in {"entry", "open", "fill"}:
-            self._entry_event_ids[trade_id] = event_id
-
     def _build_run_context(self) -> RunContext:
         wallet_config = self.config.get("wallet_config")
         if not isinstance(wallet_config, dict):
@@ -3167,17 +3555,17 @@ class BotRuntime:
         balances = wallet_config.get("balances")
         if not isinstance(balances, dict) or not balances:
             raise ValueError("wallet_config.balances is required to start a bot run")
+        shared_wallet_proxy = self.config.get("shared_wallet_proxy")
         logger.info(with_log_context("bot_runtime_run_context_wallet_init", self._runtime_log_context()))
-        run_context = RunContext(bot_id=self.bot_id)
-        run_context.wallet_ledger = LockedWalletLedger()
-        logger.info(
-            with_log_context(
-                "bot_runtime_run_context_wallet_deposit",
-                self._runtime_log_context(balance_currencies=list(balances.keys())),
-            )
+        configured_run_id = str(self.config.get("run_id") or "").strip()
+        run_context = RunContext(
+            bot_id=self.bot_id,
+            run_id=configured_run_id if configured_run_id else str(uuid.uuid4()),
         )
-        run_context.wallet_ledger.deposit(balances)
-        logger.info(with_log_context("bot_runtime_run_context_wallet_deposit_done", self._runtime_log_context()))
+        if not isinstance(shared_wallet_proxy, Mapping):
+            raise ValueError("shared_wallet_proxy is required for bot runtime")
+        run_context.wallet_gateway = SharedWalletGateway(shared_wallet_proxy)
+        logger.info(with_log_context("bot_runtime_run_context_wallet_shared", self._runtime_log_context()))
         logger.info(
             with_log_context(
                 "bot_runtime_run_context_attach_wallet_start",
@@ -3185,7 +3573,13 @@ class BotRuntime:
             )
         )
         for series in self._series:
-            series.risk_engine.attach_wallet(run_context.wallet_ledger)
+            series.risk_engine.set_runtime_context(
+                bot_id=self.bot_id,
+                bot_mode=self.run_type,
+                run_id=run_context.run_id,
+            )
+            if run_context.wallet_gateway is not None:
+                series.risk_engine.attach_wallet_gateway(run_context.wallet_gateway)
         logger.info(with_log_context("bot_runtime_run_context_attach_wallet_done", self._runtime_log_context()))
         return run_context
 
@@ -3213,7 +3607,27 @@ class BotRuntime:
             raise ValueError("Run context is required to build artifact payload")
         self._run_context.status = status
         self._run_context.ended_at = _isoformat(datetime.now(timezone.utc))
-        wallet_state = project_wallet(self._run_context.wallet_ledger.events())
+        runtime_events = list(self._run_context.runtime_events)
+        runtime_event_stream = list(self._run_context.runtime_event_stream)
+        wallet_state = project_wallet_from_events(runtime_events)
+        wallet_ledger_view: List[Dict[str, Any]] = []
+        for event in runtime_event_stream:
+            name = str(event.get("event_name") or "")
+            if name not in {
+                RuntimeEventName.WALLET_INITIALIZED.value,
+                RuntimeEventName.WALLET_DEPOSITED.value,
+                RuntimeEventName.ENTRY_FILLED.value,
+                RuntimeEventName.EXIT_FILLED.value,
+            }:
+                continue
+            wallet_ledger_view.append(
+                {
+                    "event_id": event.get("event_id"),
+                    "event_name": name,
+                    "event_ts": event.get("event_ts"),
+                    "payload": dict(event.get("payload") or {}),
+                }
+            )
         return {
             "run_id": self._run_context.run_id,
             "bot_id": self.bot_id,
@@ -3221,8 +3635,19 @@ class BotRuntime:
             "ended_at": self._run_context.ended_at,
             "status": status,
             "wallet_start": dict(self.config.get("wallet_config") or {}),
-            "wallet_end": {"balances": wallet_state.balances},
-            "wallet_ledger": [event.__dict__ for event in self._run_context.wallet_ledger.events()],
+            "runtime_event_stream": runtime_event_stream,
+            "wallet_end": {
+                "balances": wallet_state.balances,
+                "locked_margin": getattr(wallet_state, "locked_margin", {}) or {},
+                "free_collateral": getattr(wallet_state, "free_collateral", {}) or {},
+            },
+            "wallet_state": {
+                "balances": wallet_state.balances,
+                "locked_margin": getattr(wallet_state, "locked_margin", {}) or {},
+                "free_collateral": getattr(wallet_state, "free_collateral", {}) or {},
+                "margin_positions": getattr(wallet_state, "margin_positions", {}) or {},
+            },
+            "wallet_ledger": wallet_ledger_view,
             "decision_trace": list(self._run_context.decision_trace),
         }
 
@@ -3236,7 +3661,7 @@ class BotRuntime:
         return entries
 
     def decision_events(self, limit: int = 200) -> List[Dict[str, Any]]:
-        """Return up to *limit* recent decision ledger events."""
+        """Return up to *limit* recent canonical runtime events."""
 
         with self._lock:
             entries = list(self._decision_events)
@@ -3282,50 +3707,31 @@ class BotRuntime:
             }
         )
 
-    def _persist_trade_event(self, series: StrategySeries, event: Dict[str, Any]) -> None:
+    def _persist_trade_close(self, series: StrategySeries, event: Mapping[str, Any]) -> None:
         trade_id = event.get("trade_id")
         if not trade_id:
             return
         run_id = self._run_context.run_id if self._run_context else None
-        payload = {
-            "id": event.get("id"),
-            "trade_id": trade_id,
-            "run_id": run_id,
-            "bot_id": self.bot_id,
-            "strategy_id": getattr(series, "strategy_id", None),
-            "symbol": getattr(series, "symbol", None),
-            "event_type": event.get("type"),
-            "leg": event.get("leg"),
-            "contracts": event.get("contracts"),
-            "price": event.get("price"),
-            "ticks": event.get("ticks"),
-            "pnl": event.get("pnl"),
-            "quote_currency": event.get("currency"),
-            "event_time": event.get("event_time") or event.get("time"),
-        }
-        event_type = event.get("type")
-        self._persistence_buffer.record_trade_event(payload, event_type=event_type)
-        if event_type == "close":
-            self._persistence_buffer.record_trade_entry(
-                {
-                    "trade_id": trade_id,
-                    "run_id": run_id,
-                    "bot_id": self.bot_id,
-                    "strategy_id": getattr(series, "strategy_id", None),
-                    "symbol": getattr(series, "symbol", None),
-                    "direction": event.get("direction"),
-                    "status": "closed",
-                    "exit_time": event.get("time"),
-                    "gross_pnl": event.get("gross_pnl"),
-                    "fees_paid": event.get("fees_paid"),
-                    "net_pnl": event.get("net_pnl"),
-                    "quote_currency": event.get("currency"),
-                    "metrics": event.get("metrics"),
-                    "instrument_id": (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None,
-                    "timeframe": series.timeframe,
-                    "timeframe_seconds": _timeframe_to_seconds(series.timeframe),
-                }
-            )
+        self._persistence_buffer.record_trade_entry(
+            {
+                "trade_id": trade_id,
+                "run_id": run_id,
+                "bot_id": self.bot_id,
+                "strategy_id": getattr(series, "strategy_id", None),
+                "symbol": getattr(series, "symbol", None),
+                "direction": event.get("direction"),
+                "status": "closed",
+                "exit_time": event.get("time"),
+                "gross_pnl": event.get("gross_pnl"),
+                "fees_paid": event.get("fees_paid"),
+                "net_pnl": event.get("net_pnl"),
+                "quote_currency": event.get("currency"),
+                "metrics": event.get("metrics"),
+                "instrument_id": (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None,
+                "timeframe": series.timeframe,
+                "timeframe_seconds": _timeframe_to_seconds(series.timeframe),
+            }
+        )
 
     def _persist_runtime_state(self, status: str) -> None:
         """Send completion metadata back to the service layer for persistence."""

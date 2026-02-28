@@ -189,7 +189,9 @@ class FuturesMarginCalculator:
 def extract_margin_rates(instrument: Mapping[str, Any]) -> Optional[MarginRates]:
     """Extract margin rates from instrument metadata.
 
-    Looks for Coinbase-style future_product_details with intraday/overnight margin rates.
+    Canonical lookup order:
+    1) instrument.margin_rates
+    2) instrument.metadata.instrument_fields.margin_rates
 
     Args:
         instrument: Instrument configuration dict
@@ -197,16 +199,35 @@ def extract_margin_rates(instrument: Mapping[str, Any]) -> Optional[MarginRates]
     Returns:
         MarginRates if available, None if not present
     """
-    margin_rates = instrument.get("margin_rates")
-    if isinstance(margin_rates, Mapping):
-        intraday = margin_rates.get("intraday")
-        overnight = margin_rates.get("overnight")
-    else:
-        intraday = None
-        overnight = None
+    def _extract_from_margin_rates_map(rates_map: Optional[Mapping[str, Any]]) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+        if not isinstance(rates_map, Mapping):
+            return {}, {}
+        intraday_map = rates_map.get("intraday")
+        overnight_map = rates_map.get("overnight")
+        return (
+            intraday_map if isinstance(intraday_map, Mapping) else {},
+            overnight_map if isinstance(overnight_map, Mapping) else {},
+        )
 
-    intraday = intraday if isinstance(intraday, Mapping) else {}
-    overnight = overnight if isinstance(overnight, Mapping) else {}
+    intraday: Mapping[str, Any] = {}
+    overnight: Mapping[str, Any] = {}
+
+    # Canonical path (preferred)
+    intraday, overnight = _extract_from_margin_rates_map(
+        instrument.get("margin_rates") if isinstance(instrument.get("margin_rates"), Mapping) else None
+    )
+
+    # Canonical metadata fallback.
+    if not intraday and not overnight:
+        metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
+        instrument_fields = (
+            metadata.get("instrument_fields")
+            if isinstance(metadata.get("instrument_fields"), Mapping)
+            else {}
+        )
+        intraday, overnight = _extract_from_margin_rates_map(
+            instrument_fields.get("margin_rates") if isinstance(instrument_fields.get("margin_rates"), Mapping) else None
+        )
 
     def parse_rate(value: Any) -> Optional[float]:
         if value is None:
@@ -243,6 +264,14 @@ def resolve_instrument_type(instrument: Mapping[str, Any]) -> InstrumentType:
         InstrumentType enum value
     """
     raw_type = str(instrument.get("instrument_type") or "").lower().strip()
+    if not raw_type:
+        metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
+        instrument_fields = (
+            metadata.get("instrument_fields")
+            if isinstance(metadata.get("instrument_fields"), Mapping)
+            else {}
+        )
+        raw_type = str(instrument_fields.get("instrument_type") or "").lower().strip()
     if raw_type == "spot":
         return InstrumentType.SPOT
     if raw_type == "future":
@@ -284,6 +313,7 @@ def calculate_max_qty_by_margin(
     contract_size: float,
     direction: str,
     instrument: Mapping[str, Any],
+    execution_profile: Optional[Any] = None,
     fee_rate: float = 0.0,
     safety_multiplier: float = 1.05,
     margin_session: Optional[MarginSessionType] = None,
@@ -312,6 +342,7 @@ def calculate_max_qty_by_margin(
         contract_size: Contract size multiplier
         direction: "long" or "short"
         instrument: Instrument configuration
+        execution_profile: Optional compiled series execution profile
         fee_rate: Taker fee rate as decimal (worst case). Use taker rate for conservative sizing.
         safety_multiplier: Safety buffer on total required (default 5%)
         margin_session: Session type for margin rate selection (intraday vs overnight)
@@ -334,12 +365,17 @@ def calculate_max_qty_by_margin(
     # Round-trip fees: entry + exit (worst case taker on both)
     fee_per_contract = notional_per_contract * fee_rate * 2
 
-    # Get the calculator type to determine margin approach
-    calculator, calc_type = create_margin_calculator(instrument, safety_multiplier=1.0)
+    # Resolve margin model from compiled profile when available.
+    calculator = getattr(execution_profile, "margin_calculator", None) if execution_profile is not None else None
+    calc_type = getattr(execution_profile, "margin_calc_type", None) if execution_profile is not None else None
+    if calculator is None or calc_type not in {"margin", "full_notional"}:
+        calculator, calc_type = create_margin_calculator(instrument, safety_multiplier=1.0)
 
     if calc_type == "margin":
         # Futures/derivatives: use exchange margin rate
-        rates = extract_margin_rates(instrument)
+        rates = getattr(execution_profile, "margin_rates", None) if execution_profile is not None else None
+        if rates is None:
+            rates = extract_margin_rates(instrument)
         if rates is None:
             raise ValueError("Margin calculator created but no rates found")
 
@@ -420,8 +456,8 @@ def create_margin_calculator(
     """Create appropriate margin calculator for an instrument.
 
     This is the main factory function. It:
-    1. Determines instrument type
-    2. Extracts margin rates if available
+    1. Requires an explicit instrument type
+    2. Extracts canonical margin rates when needed
     3. Returns appropriate calculator or raises on misconfiguration
 
     Args:
@@ -462,15 +498,12 @@ def create_margin_calculator(
 
         return FuturesMarginCalculator(margin_rates, safety_multiplier=safety_multiplier), "margin"
 
-    # UNKNOWN type: Check if margin rates exist to infer type
-    if margin_rates is not None:
-        # Has margin rates - treat as futures-style
-        return FuturesMarginCalculator(margin_rates, safety_multiplier=safety_multiplier), "margin"
-
-    # No type, no margin rates - fall back to spot-style (full notional)
-    # This is for backwards compatibility with existing spot instruments
-    # that may not have instrument_type set
-    return SpotMarginCalculator(), "full_notional"
+    # UNKNOWN type: fail loud instead of inferring execution semantics.
+    raise ValueError(
+        "Instrument type is missing or unsupported. "
+        "Expected one of: spot, future, swap. "
+        f"Instrument: {instrument.get('symbol', 'unknown')}"
+    )
 
 
 __all__ = [

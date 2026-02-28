@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, TYPE_CHECKING
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
-from .margin import InstrumentType, resolve_instrument_type
+from .wallet import wallet_required_reservation
 
 if TYPE_CHECKING:
     from .domain import LadderRiskEngine
@@ -48,6 +48,7 @@ class EntrySettlementService:
         engine = self._engine
         if not (engine.execution_adapter and engine._wallet_gateway):
             return True
+        correlation_id = f"trade:{context.trade_id}"
         allowed, reason, payload = engine._wallet_gateway.can_apply(
             side=context.side,
             base_currency=context.base_currency,
@@ -59,14 +60,17 @@ class EntrySettlementService:
             fee=context.fee_paid,
             short_requires_borrow=bool(engine.short_requires_borrow),
             instrument=engine.instrument,
+            execution_profile=engine.execution_profile,
+            reserve=True,
+            correlation_id=correlation_id,
+            trade_id=context.trade_id,
         )
         if not allowed:
             engine._wallet_gateway.reject(reason, payload)
             engine.last_rejection_reason = reason
             engine.last_rejection_detail = payload
             context = merge_log_context(
-                build_log_context(
-                    symbol=engine.instrument.get("symbol"),
+                engine.runtime_log_context(
                     reason=reason,
                     qty=context.filled_qty,
                     price=round(context.entry_price, 4),
@@ -99,11 +103,26 @@ class EntrySettlementService:
             )
             logger.warning(with_log_context("wallet_entry_rejected", context))
             return False
-        accounting_mode = None
-        inst_type = resolve_instrument_type(engine.instrument)
-        if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
+        accounting_mode = engine.execution_profile.accounting_mode if engine.execution_profile is not None else None
+        margin_locked = None
+        if accounting_mode == "margin":
             accounting_mode = "margin"
-        engine._wallet_gateway.apply_fill(
+            margin_locked = payload.get("reserved_amount") if isinstance(payload, dict) else None
+            if margin_locked in (None, 0, 0.0):
+                _, computed_margin_locked = wallet_required_reservation(
+                    side=context.side,
+                    base_currency=context.base_currency,
+                    quote_currency=context.quote_currency,
+                    qty=context.filled_qty,
+                    notional=context.notional,
+                    fee=context.fee_paid,
+                    short_requires_borrow=bool(engine.short_requires_borrow),
+                    instrument=engine.instrument,
+                    execution_profile=engine.execution_profile,
+                )
+                margin_locked = computed_margin_locked
+        reservation_id = payload.get("reservation_id") if isinstance(payload, dict) else None
+        fill_metadata = engine._wallet_gateway.apply_fill(
             event_type="ENTRY_FILL",
             side=context.side,
             base_currency=context.base_currency,
@@ -117,7 +136,12 @@ class EntrySettlementService:
             position_direction=context.direction,
             accounting_mode=accounting_mode,
             realized_pnl=0.0,
+            reservation_id=str(reservation_id) if reservation_id else None,
+            margin_locked=float(margin_locked or 0.0) if accounting_mode == "margin" else None,
+            correlation_id=correlation_id,
         )
+        if isinstance(fill_metadata, dict):
+            engine.remember_wallet_fill_metadata(context.trade_id, fill_metadata)
         return True
 
 

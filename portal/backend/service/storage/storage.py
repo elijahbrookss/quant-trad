@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from sqlalchemy import delete, select, text, func
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,6 +14,7 @@ from ...db import (
     ATMTemplateRecord,
     BotRecord,
     BotRunRecord,
+    BotRunEventRecord,
     BotRunStepRecord,
     BotRunSnapshotRecord,
     BotTradeEventRecord,
@@ -1432,18 +1433,174 @@ def record_bot_run_step(payload: Dict[str, Any]) -> None:
 def record_bot_run_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not db.available:
         raise RuntimeError("database is required for bot snapshots")
+    run_id = str(payload.get("run_id") or "").strip()
+    bot_id = str(payload.get("bot_id") or "").strip()
+    series_key = str(payload.get("series_key") or "").strip()
+    snapshot_seq = int(payload.get("snapshot_seq") or 0)
+    if not run_id or not bot_id or not series_key:
+        raise ValueError("run_id, bot_id and series_key are required for bot snapshot persistence")
+    if snapshot_seq <= 0:
+        raise ValueError("snapshot_seq must be a positive integer")
+
+    raw_snapshot_payload = payload.get("snapshot_payload")
+    if not isinstance(raw_snapshot_payload, dict):
+        raise ValueError("snapshot_payload must be a mapping")
+    snapshot_payload = dict(raw_snapshot_payload)
+    raw_snapshot_schema_version = snapshot_payload.get("schema_version")
+    schema_version = int(raw_snapshot_schema_version) if raw_snapshot_schema_version is not None else 1
+    if schema_version <= 0:
+        raise ValueError("snapshot_payload.schema_version must be >= 1")
+    snapshot_payload["schema_version"] = schema_version
+    snapshot_payload.setdefault("run_id", run_id)
+    snapshot_payload.setdefault("series_key", series_key)
+    snapshot_payload.setdefault("snapshot_seq", snapshot_seq)
+    snapshot_payload.setdefault("known_at", _utcnow().isoformat() + "Z")
+
     with db.session() as session:
+        latest_seq = (
+            session.execute(
+                select(func.max(BotRunSnapshotRecord.snapshot_seq))
+                .where(BotRunSnapshotRecord.run_id == run_id)
+                .where(BotRunSnapshotRecord.bot_id == bot_id)
+                .where(BotRunSnapshotRecord.series_key == series_key)
+            )
+            .scalar()
+        )
+        if latest_seq is not None and snapshot_seq <= int(latest_seq):
+            raise ValueError(
+                f"snapshot_seq must be monotonic per run/series (incoming={snapshot_seq}, latest={int(latest_seq)})"
+            )
         row = BotRunSnapshotRecord(
-            run_id=str(payload.get("run_id") or ""),
-            bot_id=str(payload.get("bot_id") or ""),
-            series_key=str(payload.get("series_key") or ""),
-            snapshot_seq=int(payload.get("snapshot_seq") or 0),
-            snapshot_payload=dict(payload.get("snapshot_payload") or {}),
+            run_id=run_id,
+            bot_id=bot_id,
+            series_key=series_key,
+            snapshot_seq=snapshot_seq,
+            snapshot_payload=snapshot_payload,
             updated_at=_utcnow(),
         )
         session.add(row)
         session.flush()
         return row.to_dict()
+
+
+def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not db.available:
+        raise RuntimeError("database is required for bot runtime event persistence")
+    event_id = str(payload.get("event_id") or "").strip()
+    bot_id = str(payload.get("bot_id") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    if not event_id or not bot_id or not run_id:
+        raise ValueError("event_id, bot_id and run_id are required for runtime event persistence")
+    seq = int(payload.get("seq") or 0)
+    if seq <= 0:
+        raise ValueError("seq must be a positive integer")
+    raw_event_schema_version = payload.get("schema_version")
+    schema_version = int(raw_event_schema_version) if raw_event_schema_version is not None else 1
+    if schema_version <= 0:
+        raise ValueError("schema_version must be >= 1 for runtime event persistence")
+    with db.session() as session:
+        existing = (
+            session.execute(
+                select(BotRunEventRecord)
+                .where(BotRunEventRecord.event_id == event_id)
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            return existing.to_dict()
+        latest_seq = (
+            session.execute(
+                select(func.max(BotRunEventRecord.seq))
+                .where(BotRunEventRecord.bot_id == bot_id)
+                .where(BotRunEventRecord.run_id == run_id)
+            )
+            .scalar()
+        )
+        if latest_seq is not None and seq <= int(latest_seq):
+            raise ValueError(f"seq must be monotonic per bot/run (incoming={seq}, latest={int(latest_seq)})")
+        row = BotRunEventRecord(
+            event_id=event_id,
+            bot_id=bot_id,
+            run_id=run_id,
+            seq=seq,
+            event_type=str(payload.get("event_type") or "state_delta"),
+            critical=bool(payload.get("critical", False)),
+            schema_version=schema_version,
+            payload=dict(payload.get("payload") or {}),
+            event_time=_parse_optional_timestamp(payload.get("event_time")),
+            known_at=_utcnow(),
+            created_at=_utcnow(),
+        )
+        session.add(row)
+        session.flush()
+        return row.to_dict()
+
+
+def list_bot_runtime_events(
+    *,
+    bot_id: str,
+    run_id: str,
+    after_seq: int = 0,
+    limit: int = 1000,
+    event_types: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not db.available:
+        return []
+    max_rows = max(1, min(int(limit or 1000), 5000))
+    filter_event_types = [str(value).strip() for value in (event_types or []) if str(value).strip()]
+    with db.session() as session:
+        query = (
+            select(BotRunEventRecord)
+            .where(BotRunEventRecord.bot_id == str(bot_id))
+            .where(BotRunEventRecord.run_id == str(run_id))
+            .where(BotRunEventRecord.seq > int(after_seq or 0))
+        )
+        if filter_event_types:
+            query = query.where(BotRunEventRecord.event_type.in_(filter_event_types))
+        query = query.order_by(BotRunEventRecord.seq.asc(), BotRunEventRecord.id.asc()).limit(max_rows)
+        rows = session.execute(query).scalars().all()
+        return [row.to_dict() for row in rows]
+
+
+def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
+    if not db.available:
+        return None
+    with db.session() as session:
+        row = (
+            session.execute(
+                select(BotRunEventRecord.run_id)
+                .where(BotRunEventRecord.bot_id == str(bot_id))
+                .order_by(BotRunEventRecord.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        return str(row) if row else None
+
+
+def get_latest_bot_runtime_event(
+    *,
+    bot_id: str,
+    run_id: Optional[str] = None,
+    event_types: Optional[Sequence[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not db.available:
+        return None
+    filter_event_types = [str(value).strip() for value in (event_types or []) if str(value).strip()]
+    with db.session() as session:
+        query = select(BotRunEventRecord).where(BotRunEventRecord.bot_id == str(bot_id))
+        if run_id:
+            query = query.where(BotRunEventRecord.run_id == str(run_id))
+            query = query.order_by(BotRunEventRecord.seq.desc(), BotRunEventRecord.id.desc())
+        else:
+            query = query.order_by(BotRunEventRecord.id.desc())
+        if filter_event_types:
+            query = query.where(BotRunEventRecord.event_type.in_(filter_event_types))
+        row = session.execute(query.limit(1)).scalars().first()
+        return row.to_dict() if row else None
 
 
 def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetry_degraded: bool = False) -> None:

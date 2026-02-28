@@ -374,6 +374,9 @@ class InstrumentRecord(Base):
             "tick_value": instrument_fields.get("tick_value"),
             "contract_size": instrument_fields.get("contract_size"),
             "min_order_size": instrument_fields.get("min_order_size"),
+            "qty_step": instrument_fields.get("qty_step"),
+            "max_qty": instrument_fields.get("max_qty"),
+            "min_notional": instrument_fields.get("min_notional"),
             "base_currency": instrument_fields.get("base_currency"),
             "quote_currency": instrument_fields.get("quote_currency"),
             "maker_fee_rate": instrument_fields.get("maker_fee_rate"),
@@ -650,6 +653,45 @@ class BotRunSnapshotRecord(Base):
             "snapshot_payload": dict(self.snapshot_payload or {}),
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+class BotRunEventRecord(Base):
+    """Durable runtime event log for BotLens snapshot+stream delivery."""
+
+    __tablename__ = "portal_bot_run_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_portal_bot_run_events_event_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(128), nullable=False)
+    bot_id = Column(String(64), nullable=False)
+    run_id = Column(String(64), nullable=False)
+    seq = Column(Integer, nullable=False)
+    event_type = Column(String(64), nullable=False, default="state_delta")
+    critical = Column(Boolean, nullable=False, default=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    payload = Column(JSONB, nullable=False, default=dict)
+    event_time = Column(DateTime, nullable=True)
+    known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "event_id": self.event_id,
+            "bot_id": self.bot_id,
+            "run_id": self.run_id,
+            "seq": int(self.seq or 0),
+            "event_type": self.event_type,
+            "critical": bool(self.critical),
+            "schema_version": int(self.schema_version or 1),
+            "payload": dict(self.payload or {}),
+            "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
+            "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
 
 class AsyncJobRecord(Base):
     """Database-backed async job used by API and worker processes."""

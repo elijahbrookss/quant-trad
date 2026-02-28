@@ -108,6 +108,13 @@ class Database:
         self._engine = None
         self._session_factory = None
 
+    def reset_for_fork(self) -> None:
+        """Reset inherited engine/session state when running in a forked process."""
+
+        self._reset_engine()
+        self._available = False
+        self._error = None
+
     def _assert_schema_contract(self) -> None:
         """Assert tables/columns match ORM contract; create missing tables once."""
         if not self._engine:
@@ -141,11 +148,13 @@ class Database:
         require_table("portal_bots")
         require_table("portal_async_jobs")
         require_table("portal_bot_run_snapshots")
+        require_table("portal_bot_run_events")
         assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
         assert_columns("portal_async_jobs")
         assert_columns("portal_bot_run_snapshots")
+        assert_columns("portal_bot_run_events")
 
     @property
     def available(self) -> bool:

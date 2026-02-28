@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
+import threading
 from typing import Optional
 
 from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, PendingEntry
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
-from engines.bot_runtime.core.wallet import WalletLedger
+from engines.bot_runtime.core.runtime_events import RuntimeEventName, build_correlation_id, new_runtime_event
+from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
 
 
 def _build_spot_engine(
@@ -183,9 +185,29 @@ def test_submit_entry_limit_maker_creates_pending_entry():
 
 def test_submit_entry_margin_capped_uses_request_qty():
     engine = _build_future_engine()
-    ledger = WalletLedger()
-    ledger.deposit({"USD": 500})
-    engine.attach_wallet(ledger)
+    proxy = {
+        "runtime_events": [
+            new_runtime_event(
+                run_id="run-test",
+                bot_id="bot-test",
+                strategy_id="__runtime__",
+                symbol=None,
+                timeframe=None,
+                bar_ts=None,
+                event_name=RuntimeEventName.WALLET_INITIALIZED,
+                correlation_id=build_correlation_id(
+                    run_id="run-test",
+                    symbol=None,
+                    timeframe=None,
+                    bar_ts=None,
+                ),
+                payload={"balances": {"USD": 500.0}, "source": "test"},
+            ).serialize()
+        ],
+        "reservations": {},
+        "lock": threading.RLock(),
+    }
+    engine.attach_wallet_gateway(SharedWalletGateway(proxy))
     candle = _build_candle(close=110000.0, atr=100.0)
 
     request = engine.build_entry_request(candle, "long")

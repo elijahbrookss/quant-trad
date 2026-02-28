@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Protocol
 import concurrent.futures
@@ -37,7 +37,10 @@ class SeriesRunnerContext:
     thread_name: Callable[[SeriesState, int], str]
     log_debug: Callable[[str, Optional[SeriesState], Optional[dict]], None]
     log_info: Callable[[str, Optional[SeriesState], Optional[dict]], None]
-    log_error: Callable[[str, Optional[SeriesState], Optional[dict]], None]
+    log_error: Callable[[str, Optional[SeriesState], Optional[dict]], None] = field(
+        default=lambda *_args, **_kwargs: None
+    )
+    degrade_series_on_error: bool = False
 
 
 class SeriesRunner(Protocol):
@@ -218,6 +221,15 @@ def _safe_step(ctx: SeriesRunnerContext, state: SeriesState) -> bool:
     try:
         ctx.step_series_state(state)
     except Exception as exc:
+        if ctx.degrade_series_on_error:
+            state.done = True
+            state.next_step_at = None
+            ctx.log_error(
+                "series_step_degraded",
+                state,
+                {"error": str(exc), "exception": repr(exc)},
+            )
+            return True
         ctx.log_error(
             "series_step_failed",
             state,

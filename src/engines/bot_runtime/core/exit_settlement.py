@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Dict, Protocol, Tuple
 
 from utils.log_context import build_log_context, merge_log_context, with_log_context
 
@@ -16,6 +16,7 @@ class ExitSettlementContext:
     """Context payload for exit settlement."""
 
     event_type: str
+    exit_kind: str | None
     side: str
     base_currency: str
     quote_currency: str
@@ -35,7 +36,7 @@ class ExitSettlementContext:
 class ExitSettlement(Protocol):
     """Protocol for exit settlement implementations."""
 
-    def apply_exit_fill(self, context: ExitSettlementContext, *, force: bool) -> bool:
+    def apply_exit_fill(self, context: ExitSettlementContext, *, force: bool) -> Tuple[bool, Dict[str, Any]]:
         ...
 
 
@@ -45,9 +46,10 @@ class ExitSettlementService:
     def __init__(self, wallet_gateway) -> None:
         self._wallet_gateway = wallet_gateway
 
-    def apply_exit_fill(self, context: ExitSettlementContext, *, force: bool) -> bool:
+    def apply_exit_fill(self, context: ExitSettlementContext, *, force: bool) -> Tuple[bool, Dict[str, Any]]:
         if not self._wallet_gateway:
-            return True
+            return True, {}
+        correlation_id = f"trade:{context.trade_id}"
         allowed, reason, payload = self._wallet_gateway.can_apply(
             side=context.side,
             base_currency=context.base_currency,
@@ -59,6 +61,9 @@ class ExitSettlementService:
             fee=context.fee,
             short_requires_borrow=context.allow_short_borrow,
             instrument=context.instrument,
+            reserve=False,
+            correlation_id=correlation_id,
+            trade_id=context.trade_id,
         )
         if not allowed:
             self._wallet_gateway.reject(reason, payload, trade_id=context.trade_id, leg_id=context.leg_id)
@@ -95,8 +100,9 @@ class ExitSettlementService:
                 logger.warning(with_log_context("wallet_exit_forced_despite_insufficient_balance", context_log))
             else:
                 logger.warning(with_log_context("wallet_exit_rejected", context_log))
-                return False
-        self._wallet_gateway.apply_fill(
+                return False, {}
+        reservation_id = payload.get("reservation_id") if isinstance(payload, dict) else None
+        fill_metadata = self._wallet_gateway.apply_fill(
             event_type=context.event_type,
             side=context.side,
             base_currency=context.base_currency,
@@ -111,8 +117,11 @@ class ExitSettlementService:
             position_direction=context.position_direction,
             accounting_mode=context.accounting_mode,
             realized_pnl=context.realized_pnl,
+            reservation_id=str(reservation_id) if reservation_id else None,
+            correlation_id=correlation_id,
+            exit_kind=context.exit_kind,
         )
-        return True
+        return True, dict(fill_metadata or {})
 
 
 __all__ = ["ExitSettlement", "ExitSettlementContext", "ExitSettlementService"]

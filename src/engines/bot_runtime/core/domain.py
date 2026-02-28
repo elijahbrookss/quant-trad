@@ -23,10 +23,11 @@ from .events import ExitEvent, ExitSettlementPayload
 from .exit_settlement import ExitSettlement, ExitSettlementService
 from .fees import FeeResolver, FeeSchedule
 from utils.log_context import build_log_context, merge_log_context, with_log_context
-from .amount_constraints import normalize_qty_with_constraints, resolve_amount_constraints
+from .amount_constraints import normalize_qty_with_constraints
 from .margin import calculate_max_qty_by_margin, resolve_instrument_type, InstrumentType
+from .execution_profile import SeriesExecutionProfile, compile_series_execution_profile
 from .wallet import WalletLedger, trace_wallet_balance
-from .wallet_gateway import LedgerWalletGateway, WalletGateway
+from .wallet_gateway import WalletGateway
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +439,7 @@ class LadderPosition:
     quote_currency: str = "USD"
     short_requires_borrow: bool = False
     instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
+    execution_profile: Optional[SeriesExecutionProfile] = None
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
     trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -459,6 +461,7 @@ class LadderPosition:
     trailing_active: bool = False
     trailing_atr_multiple: float = 0.0
     pre_entry_context: Optional[Dict[str, Optional[float]]] = None
+    wallet_fill_metadata: Dict[str, Any] = field(default_factory=dict)
     stop_adjustments: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -514,6 +517,8 @@ class LadderPosition:
             fee=fill.fee,
             short_requires_borrow=bool(self.short_requires_borrow),
             instrument=self.instrument,
+            execution_profile=self.execution_profile,
+            reserve=False,
         )
 
     def _exit_settlement(self) -> ExitSettlement:
@@ -536,6 +541,8 @@ class LadderPosition:
         return bool(self.execution_adapter and self.wallet_gateway)
 
     def _accounting_mode(self) -> Optional[str]:
+        if self.execution_profile is not None:
+            return self.execution_profile.accounting_mode
         inst_type = resolve_instrument_type(self.instrument or {})
         if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
             return "margin"
@@ -653,6 +660,7 @@ class LadderPosition:
 
             settlement_payload: ExitSettlementPayload = {
                 "event_type": "EXIT_FILL",
+                "exit_kind": "TARGET",
                 "side": side,
                 "base_currency": self.base_currency or "",
                 "quote_currency": self.quote_currency_code or "",
@@ -854,6 +862,7 @@ class LadderPosition:
                     self._apply_fee(exit_price, exit_qty)
                 settlement_payload: ExitSettlementPayload = {
                     "event_type": "EXIT_FILL",
+                    "exit_kind": "STOP",
                     "side": side,
                     "base_currency": self.base_currency or "",
                     "quote_currency": self.quote_currency_code or "",
@@ -1023,10 +1032,28 @@ class LadderRiskEngine:
         self,
         config: Optional[Dict[str, object]] = None,
         instrument: Optional[Dict[str, Any]] = None,
+        execution_profile: Optional[SeriesExecutionProfile] = None,
     ):
         provided_template = config or {}
         self.template = merge_templates(provided_template)
         self.instrument = instrument or {}
+        self.execution_profile = execution_profile or compile_series_execution_profile(
+            self.instrument,
+            template=self.template,
+            runtime_requires_derivatives=False,
+        )
+        self._runtime_log_context = build_log_context(
+            strategy_id=self.template.get("strategy_id"),
+            strategy_name=self.template.get("strategy_name"),
+            timeframe=self.template.get("timeframe"),
+            symbol=self.instrument.get("symbol"),
+            datasource=self.instrument.get("datasource"),
+            exchange=self.instrument.get("exchange"),
+            instrument_id=self.instrument.get("id"),
+            instrument_type=(
+                self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None
+            ),
+        )
 
         # Always validate - same for all modes (backtest, sim_trade, paper, live)
         self._validate_template(self.template)
@@ -1035,7 +1062,12 @@ class LadderRiskEngine:
         # Resolve tick_size (required)
         config_tick = coerce_float(provided_template.get("tick_size"))
         instrument_tick = coerce_float(self.instrument.get("tick_size"))
-        tick_size = coalesce_numeric(config_tick, instrument_tick, default=0.0)
+        profile_tick = (
+            self.execution_profile.constraints.tick_size
+            if self.execution_profile is not None
+            else None
+        )
+        tick_size = coalesce_numeric(config_tick, instrument_tick, profile_tick, default=0.0)
         if tick_size == 0:
             raise ValueError("tick_size required from either template or instrument configuration")
         self.tick_size = tick_size
@@ -1060,14 +1092,30 @@ class LadderRiskEngine:
         # Resolve contract_size (config > instrument > 1.0)
         config_contract = coerce_float(self.template.get("contract_size"))
         instrument_contract = coerce_float(self.instrument.get("contract_size"))
-        self.contract_size = coalesce_numeric(config_contract, instrument_contract, default=0.0)
+        profile_contract = (
+            self.execution_profile.constraints.contract_size
+            if self.execution_profile is not None
+            else None
+        )
+        self.contract_size = coalesce_numeric(config_contract, instrument_contract, profile_contract, default=0.0)
         if self.contract_size in (None, 0):
             raise ValueError("contract_size required from either template or instrument configuration")
         # Resolve tick_value (config > instrument > calculated from tick_size * contract_size)
         config_tick_value = coerce_float(self.template.get("tick_value"))
         instrument_tick_value = coerce_float(self.instrument.get("tick_value"))
         calculated_tick_value = self.tick_size * self.contract_size
-        self.tick_value = coalesce_numeric(config_tick_value, instrument_tick_value, calculated_tick_value, default=0.0)
+        profile_tick_value = (
+            self.execution_profile.constraints.tick_value
+            if self.execution_profile is not None
+            else None
+        )
+        self.tick_value = coalesce_numeric(
+            config_tick_value,
+            instrument_tick_value,
+            profile_tick_value,
+            calculated_tick_value,
+            default=0.0,
+        )
         if self.tick_value in (None, 0):
             raise ValueError("tick_value required from either template or instrument configuration")
 
@@ -1078,25 +1126,15 @@ class LadderRiskEngine:
             or self.template.get("stop_ticks")
             or self.stop_ticks
         )
-        self.global_risk_multiplier = coerce_float(risk_config.get("global_risk_multiplier"), 1.0) or 1.0
-        self.instrument_risk_multiplier = coerce_float(self.instrument.get("risk_multiplier"), 1.0) or 1.0
-        try:
-            self.amount_constraints = resolve_amount_constraints(self.instrument)
-        except ValueError as exc:
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
-                reason="AMOUNT_CONSTRAINT_CONFLICT",
-                error=str(exc),
-            )
-            logger.error(with_log_context("ladder_risk_configuration_failed", context))
-            raise
+        self.global_risk_multiplier = float(self.execution_profile.risk.global_risk_multiplier)
+        self.instrument_risk_multiplier = float(self.execution_profile.risk.instrument_risk_multiplier)
+        self.amount_constraints = self.execution_profile.constraints.amount_constraints
         self.min_qty = self.amount_constraints.min_qty
         self.max_qty = self.amount_constraints.max_qty
         self.qty_step = self.amount_constraints.qty_step
         self.min_notional = self.amount_constraints.min_notional
         self.amount_precision = self.amount_constraints.precision
-        constraints_context = build_log_context(
-            symbol=self.instrument.get("symbol"),
+        constraints_context = self.runtime_log_context(
             min_qty=self.min_qty,
             max_qty=self.max_qty,
             qty_step=self.qty_step,
@@ -1111,13 +1149,19 @@ class LadderRiskEngine:
         self.last_rejection_detail: Optional[Dict[str, Any]] = None
         self._wallet_ledger: Optional[WalletLedger] = None
         self._wallet_gateway: Optional[WalletGateway] = None
-        self.can_short = bool(self.instrument.get("can_short"))
-        self.short_requires_borrow = bool(self.instrument.get("short_requires_borrow"))
+        self._wallet_fill_metadata_by_trade: Dict[str, Dict[str, Any]] = {}
+        self.can_short = bool(self.execution_profile.capabilities.supports_short)
+        self.short_requires_borrow = bool(self.execution_profile.capabilities.short_requires_borrow)
 
         self.orders = self._orders_from_template()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         # Resolve quote currency
-        quote_value = self.template.get("quote_currency") or self.instrument.get("quote_currency") or "USD"
+        quote_value = (
+            self.template.get("quote_currency")
+            or self.instrument.get("quote_currency")
+            or self.execution_profile.instrument.quote_currency
+            or "USD"
+        )
         self.quote_currency = str(quote_value).upper()
 
         # Resolve fee rates (config > instrument > 0.0, allow_zero since 0% fees are valid)
@@ -1142,18 +1186,43 @@ class LadderRiskEngine:
         self.entry_execution = EntryExecutionCoordinator(self)
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
-        configured_context = build_log_context(
-            symbol=self.instrument.get("symbol"),
+        configured_context = self.runtime_log_context(
             targets=",".join(str(order.get("ticks") or order.get("r_multiple") or "?") for order in self.orders),
             stop_ticks=self.stop_ticks,
             tick_size=self.tick_size,
             execution_mode=self.execution_mode,
+            instrument_type=self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None,
+            accounting_mode=self.execution_profile.accounting_mode if self.execution_profile is not None else None,
+            supports_margin=self.execution_profile.capabilities.supports_margin if self.execution_profile is not None else None,
+            supports_short=self.execution_profile.capabilities.supports_short if self.execution_profile is not None else None,
         )
         logger.info(with_log_context("ladder_risk_configured", configured_context))
 
+    def set_runtime_context(self, **fields: Optional[object]) -> None:
+        """Merge additional context fields into engine log context."""
+        self._runtime_log_context = merge_log_context(self._runtime_log_context, build_log_context(**fields))
+
+    def runtime_log_context(self, **fields: Optional[object]) -> Dict[str, object]:
+        """Build context for runtime-domain logs with stable engine fields."""
+        base = build_log_context(
+            symbol=self.instrument.get("symbol"),
+            datasource=self.instrument.get("datasource"),
+            exchange=self.instrument.get("exchange"),
+            instrument_id=self.instrument.get("id"),
+            instrument_type=(
+                self.execution_profile.instrument.instrument_type if self.execution_profile is not None else None
+            ),
+        )
+        return merge_log_context(self._runtime_log_context, base, build_log_context(**fields))
+
     def attach_wallet(self, ledger: WalletLedger) -> None:
-        self._wallet_ledger = ledger
-        self._wallet_gateway = LedgerWalletGateway(ledger)
+        raise RuntimeError(
+            "attach_wallet is not supported. Use attach_wallet_gateway with SharedWalletGateway runtime wiring."
+        )
+
+    def attach_wallet_gateway(self, gateway: WalletGateway) -> None:
+        self._wallet_gateway = gateway
+        self._wallet_ledger = getattr(gateway, "ledger", None)
 
     def attach_execution_adapter(self, adapter: ExecutionAdapter) -> None:
         """Inject a run-type specific execution adapter (backtest/paper/live)."""
@@ -1166,6 +1235,21 @@ class LadderRiskEngine:
     def attach_exit_settlement(self, settlement: ExitSettlement) -> None:
         """Inject a custom exit settlement adapter (paper/live)."""
         self.exit_settlement = settlement
+
+    def remember_wallet_fill_metadata(self, trade_id: str, payload: Mapping[str, Any]) -> None:
+        key = str(trade_id or "").strip()
+        if not key:
+            return
+        self._wallet_fill_metadata_by_trade[key] = dict(payload or {})
+
+    def pop_wallet_fill_metadata(self, trade_id: str) -> Dict[str, Any]:
+        key = str(trade_id or "").strip()
+        if not key:
+            return {}
+        value = self._wallet_fill_metadata_by_trade.pop(key, None)
+        if isinstance(value, Mapping):
+            return dict(value)
+        return {}
 
     def _validate_template(self, template: Dict[str, Any]) -> None:
         """Validate that required fields are present in template - same for all modes."""
@@ -1335,8 +1419,7 @@ class LadderRiskEngine:
         )
 
         if margin_info and margin_info.get("reason") == "margin_calculation_failed":
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            context = self.runtime_log_context(
                 reason="MARGIN_CALCULATION_FAILED",
                 error=margin_info.get("error"),
             )
@@ -1367,8 +1450,7 @@ class LadderRiskEngine:
 
         if capped_qty <= 0:
             rejection_detail = margin_info or {"risk_qty": risk_based_qty}
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            context = self.runtime_log_context(
                 reason="QTY_CAPPED_TO_ZERO",
                 risk_qty=risk_based_qty,
                 capped_qty=capped_qty,
@@ -1422,10 +1504,7 @@ class LadderRiskEngine:
             rejection_reason = normalization.rejected_reason or "QTY_CONSTRAINT_FAILED"
             rejection_detail = normalization.to_log_dict()
             context = merge_log_context(
-                build_log_context(
-                    symbol=self.instrument.get("symbol"),
-                    reason=rejection_reason,
-                ),
+                self.runtime_log_context(reason=rejection_reason),
                 build_log_context(**rejection_detail),
             )
             logger.warning(with_log_context("entry_rejected", context))
@@ -1618,8 +1697,8 @@ class LadderRiskEngine:
 
         notional = abs(avg_fill_price * self.contract_size * filled_qty_total)
         if self.min_notional not in (None, 0) and notional < float(self.min_notional):
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            self.pop_wallet_fill_metadata(str(pending.trade_id))
+            context = self.runtime_log_context(
                 reason="MIN_NOTIONAL_NOT_MET",
                 notional=round(notional, 4),
                 min_notional=self.min_notional,
@@ -1676,14 +1755,14 @@ class LadderRiskEngine:
             side=pending.intent.side,
         )
         if not legs:
+            self.pop_wallet_fill_metadata(str(pending.trade_id))
             rounded_qty = (
                 self._floor_to_step(pending.requested_qty, self.qty_step)
                 if self.qty_step not in (None, 0)
                 else pending.requested_qty
             )
             rejection_reason = "QTY_ROUNDS_TO_ZERO" if rounded_qty <= 0 else "TP_LEGS_EMPTY"
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            context = self.runtime_log_context(
                 reason=rejection_reason,
                 requested_qty=pending.requested_qty,
                 rounded_qty=rounded_qty,
@@ -1745,8 +1824,10 @@ class LadderRiskEngine:
             trade_id=pending.trade_id,
             pre_entry_context=getattr(candle, "lookback_15", None),
             use_wallet_execution=use_wallet_execution,
+            execution_profile=self.execution_profile,
         )
         position.apply_entry_fee(fees_paid_total)
+        position.wallet_fill_metadata = self.pop_wallet_fill_metadata(str(pending.trade_id))
 
         events.append(
             {
@@ -1895,6 +1976,7 @@ class LadderRiskEngine:
         trade_id: str,
         pre_entry_context: Optional[Dict[str, Optional[float]]],
         use_wallet_execution: bool,
+        execution_profile: Optional[SeriesExecutionProfile],
     ) -> LadderPosition:
         self.trailing_config = (
             self.template.get("trailing_stop") if isinstance(self.template.get("trailing_stop"), dict) else {}
@@ -1925,6 +2007,7 @@ class LadderRiskEngine:
             quote_currency=self.quote_currency,
             short_requires_borrow=bool(self.short_requires_borrow),
             instrument=self.instrument if use_wallet_execution else None,
+            execution_profile=execution_profile if use_wallet_execution else None,
             atr_at_entry=atr_at_entry,
             r_multiple_at_entry=r_multiple_at_entry,
             r_value=r_value,
@@ -2015,8 +2098,7 @@ class LadderRiskEngine:
         # Apply global and instrument risk multipliers
         contracts = contracts * self.global_risk_multiplier * self.instrument_risk_multiplier
 
-        sizing_context = build_log_context(
-            symbol=self.instrument.get("symbol"),
+        sizing_context = self.runtime_log_context(
             base_risk=self.base_risk_per_trade,
             r_value_per_contract=r_value_per_contract,
             raw_qty=contracts,
@@ -2046,16 +2128,14 @@ class LadderRiskEngine:
         if not self._wallet_gateway:
             return risk_qty, False, None
 
-        inst_type = resolve_instrument_type(self.instrument)
-
-        # Only apply margin cap for futures/swaps
-        if inst_type not in (InstrumentType.FUTURE, InstrumentType.SWAP):
+        # Margin cap applies only to margin-accounting profiles.
+        if self.execution_profile is None or not self.execution_profile.is_margin_accounting():
             return risk_qty, False, None
 
         # Get available collateral from wallet (for backtest, same as cash balance)
         wallet_state = self._wallet_gateway.project()
         quote = self.quote_currency.upper()
-        available_collateral = wallet_state.balances.get(quote, 0.0)
+        available_collateral = wallet_state.free_collateral.get(quote, wallet_state.balances.get(quote, 0.0))
 
         if available_collateral <= 0:
             balance_trace = None
@@ -2085,6 +2165,7 @@ class LadderRiskEngine:
                 contract_size=self.contract_size,
                 direction=direction,
                 instrument=self.instrument,
+                execution_profile=self.execution_profile,
                 fee_rate=self.taker_fee or 0.0,  # Use taker (worst case) for conservative sizing
                 safety_multiplier=1.05,
                 qty_step=self.qty_step,
@@ -2126,8 +2207,7 @@ class LadderRiskEngine:
         final_qty = min(risk_qty, max_qty) if was_capped else risk_qty
 
         if was_capped:
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            context = self.runtime_log_context(
                 risk_qty=round(risk_qty, 6),
                 max_qty_by_margin=round(max_qty, 6),
                 final_qty=round(final_qty, 6),
@@ -2142,10 +2222,12 @@ class LadderRiskEngine:
     def _resolve_base_quote(self) -> Tuple[str, str]:
         base = self.instrument.get("base_currency")
         quote = self.instrument.get("quote_currency")
+        if self.execution_profile is not None:
+            base = base or self.execution_profile.instrument.base_currency
+            quote = quote or self.execution_profile.instrument.quote_currency
         symbol = str(self.instrument.get("symbol") or "")
         if not base or not quote:
-            context = build_log_context(
-                symbol=symbol,
+            context = self.runtime_log_context(
                 base_currency=base,
                 quote_currency=quote,
                 instrument=self.instrument,
@@ -2156,11 +2238,8 @@ class LadderRiskEngine:
 
     def _resolve_tp_step(self) -> Optional[float]:
         step = self.qty_step
-        source = self.amount_constraints.step_source
-        inst_type = resolve_instrument_type(self.instrument)
-
-        if inst_type in (InstrumentType.FUTURE, InstrumentType.SWAP):
-            if source in {"base_increment", "provider_product", "metadata", "metadata_info"} and step not in (None, 0):
+        if self.execution_profile is not None and self.execution_profile.is_derivatives():
+            if step not in (None, 0):
                 if step >= 1 and abs(step - round(step)) <= 1e-9:
                     return float(step)
                 return None
@@ -2307,8 +2386,7 @@ class LadderRiskEngine:
             drop_reason = "NONE"
             drop_explain = "no legs dropped"
 
-        context = build_log_context(
-            symbol=self.instrument.get("symbol"),
+        context = self.runtime_log_context(
             order_intent_id=order_intent_id,
             side=side,
             qty_raw=qty_raw_value,
@@ -2360,8 +2438,7 @@ class LadderRiskEngine:
         if direction == "short" and not self.can_short:
             self.last_rejection_reason = "CAN_SHORT_DISABLED"
             self.last_rejection_detail = {"symbol": self.instrument.get("symbol"), "direction": direction}
-            context = build_log_context(
-                symbol=self.instrument.get("symbol"),
+            context = self.runtime_log_context(
                 reason="CAN_SHORT_DISABLED",
                 direction=direction,
             )

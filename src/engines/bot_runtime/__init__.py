@@ -33,9 +33,15 @@ from .core import (
     WalletLedger,
     WalletState,
     project_wallet,
+    project_wallet_from_events,
     wallet_can_apply,
-    LedgerWalletGateway,
+    BaseWalletGateway,
     WalletGateway,
+    RuntimeEvent,
+    RuntimeEventCategory,
+    RuntimeEventName,
+    ReasonCode,
+    ExitKind,
 )
 
 __all__ = [
@@ -73,7 +79,13 @@ __all__ = [
     "WalletLedger",
     "WalletState",
     "project_wallet",
+    "project_wallet_from_events",
     "wallet_can_apply",
-    "LedgerWalletGateway",
+    "BaseWalletGateway",
     "WalletGateway",
+    "RuntimeEvent",
+    "RuntimeEventCategory",
+    "RuntimeEventName",
+    "ReasonCode",
+    "ExitKind",
 ]

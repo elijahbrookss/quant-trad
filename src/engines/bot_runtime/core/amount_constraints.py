@@ -115,59 +115,34 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
     """Resolve amount/quantity constraints with explicit source precedence.
 
     Priority order for step size:
-    1) metadata.info.base_increment
-    2) instrument.qty_step / instrument.step_size
-    3) metadata.qty_step (CCXT)
-    4) metadata.info.qty_step (raw exchange)
-    5) metadata.precision.amount (derived)
+    1) instrument.qty_step / instrument.step_size / instrument.min_order_size
+    2) instrument.precision.amount (derived)
 
     If multiple step sources are present and disagree, this raises ValueError.
     """
-    min_qty = _coerce_float(
-        instrument.get("min_qty")
-        or instrument.get("min_order_size")
-        or instrument.get("min_quantity")
-    )
-    max_qty = _coerce_float(
-        instrument.get("max_qty")
-        or instrument.get("max_order_size")
-        or instrument.get("max_quantity")
-    )
-    min_notional = _coerce_float(instrument.get("min_notional") or instrument.get("min_cost"))
-
     metadata = instrument.get("metadata") if isinstance(instrument.get("metadata"), Mapping) else {}
-    info = metadata.get("info") if isinstance(metadata.get("info"), Mapping) else {}
-    provider_metadata = (
-        metadata.get("provider_metadata") if isinstance(metadata.get("provider_metadata"), Mapping) else {}
+    instrument_fields = (
+        metadata.get("instrument_fields") if isinstance(metadata.get("instrument_fields"), Mapping) else {}
     )
-    provider_product = (
-        provider_metadata.get("product") if isinstance(provider_metadata.get("product"), Mapping) else {}
-    )
-    limits = metadata.get("limits") if isinstance(metadata.get("limits"), Mapping) else {}
-    amount_limits = limits.get("amount") if isinstance(limits.get("amount"), Mapping) else {}
-    cost_limits = limits.get("cost") if isinstance(limits.get("cost"), Mapping) else {}
-    precision = metadata.get("precision") if isinstance(metadata.get("precision"), Mapping) else {}
 
-    if min_qty in (None, 0):
-        min_qty = _coerce_float(amount_limits.get("min"))
-    if max_qty in (None, 0):
-        max_qty = _coerce_float(amount_limits.get("max"))
-    if min_notional in (None, 0):
-        min_notional = _coerce_float(cost_limits.get("min"))
+    def _canonical(key: str) -> Optional[object]:
+        value = instrument.get(key)
+        if value is None:
+            value = instrument_fields.get(key)
+        return value
 
-    base_increment = _coerce_float(info.get("base_increment"))
-    provider_base_increment = _coerce_float(provider_product.get("base_increment"))
-    instrument_step = _coerce_float(instrument.get("qty_step") or instrument.get("step_size"))
-    metadata_step = _coerce_float(metadata.get("qty_step"))
-    info_step = _coerce_float(info.get("qty_step"))
+    min_qty = _coerce_float(_canonical("min_qty") or _canonical("min_order_size") or _canonical("min_quantity"))
+    max_qty = _coerce_float(_canonical("max_qty") or _canonical("max_order_size") or _canonical("max_quantity"))
+    min_notional = _coerce_float(_canonical("min_notional") or _canonical("min_cost"))
+    instrument_step = _coerce_float(_canonical("qty_step") or _canonical("step_size") or _canonical("min_order_size"))
+
+    precision = _canonical("precision")
+    if not isinstance(precision, Mapping):
+        precision = {}
     precision_step = _step_from_precision(precision.get("amount"))
 
     step_sources = {
-        "base_increment": base_increment,
-        "provider_product": provider_base_increment,
         "instrument": instrument_step,
-        "metadata": metadata_step,
-        "metadata_info": info_step,
         "precision": precision_step,
     }
 
@@ -183,11 +158,7 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
                 )
 
     step_priority = [
-        ("base_increment", base_increment),
-        ("provider_product", provider_base_increment),
         ("instrument", instrument_step),
-        ("metadata", metadata_step),
-        ("metadata_info", info_step),
         ("precision", precision_step),
     ]
     qty_step = None
@@ -212,16 +183,16 @@ def resolve_amount_constraints(instrument: Mapping[str, Any]) -> AmountConstrain
         precision_source = "qty_step" if resolved_precision is not None else precision_source
 
     min_qty_source = "instrument" if _coerce_float(
-        instrument.get("min_qty")
-        or instrument.get("min_order_size")
-        or instrument.get("min_quantity")
-    ) not in (None, 0) else ("metadata_limits" if _coerce_float(amount_limits.get("min")) not in (None, 0) else None)
+        _canonical("min_qty")
+        or _canonical("min_order_size")
+        or _canonical("min_quantity")
+    ) not in (None, 0) else None
 
     max_qty_source = "instrument" if _coerce_float(
-        instrument.get("max_qty")
-        or instrument.get("max_order_size")
-        or instrument.get("max_quantity")
-    ) not in (None, 0) else ("metadata_limits" if _coerce_float(amount_limits.get("max")) not in (None, 0) else None)
+        _canonical("max_qty")
+        or _canonical("max_order_size")
+        or _canonical("max_quantity")
+    ) not in (None, 0) else None
 
     return AmountConstraints(
         min_qty=min_qty,
