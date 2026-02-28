@@ -171,6 +171,9 @@ def create_instrument(**payload: object) -> Dict[str, Any]:
         ("tick_value", _coerce_float),
         ("contract_size", _coerce_float),
         ("min_order_size", _coerce_float),
+        ("qty_step", _coerce_float),
+        ("max_qty", _coerce_float),
+        ("min_notional", _coerce_float),
         ("maker_fee_rate", _coerce_float),
         ("taker_fee_rate", _coerce_float),
     ):
@@ -233,6 +236,9 @@ def update_instrument(instrument_id: str, **payload: object) -> Dict[str, Any]:
         "tick_value",
         "contract_size",
         "min_order_size",
+        "qty_step",
+        "max_qty",
+        "min_notional",
         "maker_fee_rate",
         "taker_fee_rate",
     ):

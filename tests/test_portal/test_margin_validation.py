@@ -46,23 +46,21 @@ COINBASE_FUTURE_INSTRUMENT = {
     "contract_size": 0.01,
     "tick_size": 5,
     "tick_value": 0.05,
+    "margin_rates": {
+        "intraday": {
+            "long_margin_rate": "0.1000185",
+            "short_margin_rate": "0.1000008",
+        },
+        "overnight": {
+            "long_margin_rate": "0.245625",
+            "short_margin_rate": "0.306375",
+        },
+    },
     "can_short": True,
     "short_requires_borrow": False,
     "quote_currency": "USD",
     "metadata": {
         "base_currency": "BTC",
-        "info": {
-            "future_product_details": {
-                "intraday_margin_rate": {
-                    "long_margin_rate": "0.1000185",
-                    "short_margin_rate": "0.1000008",
-                },
-                "overnight_margin_rate": {
-                    "long_margin_rate": "0.245625",
-                    "short_margin_rate": "0.306375",
-                },
-            }
-        },
     },
 }
 
@@ -255,6 +253,18 @@ class TestCreateMarginCalculator:
             create_margin_calculator(MISCONFIGURED_FUTURE)
         assert "no margin rates found" in str(exc_info.value)
         assert "future" in str(exc_info.value)
+
+    def test_unknown_instrument_type_raises_error(self):
+        """Missing/unknown instrument type must fail loud."""
+        with pytest.raises(ValueError) as exc_info:
+            create_margin_calculator(
+                {
+                    "symbol": "UNKNOWN-TYPE",
+                    "contract_size": 1.0,
+                    "tick_size": 0.01,
+                }
+            )
+        assert "missing or unsupported" in str(exc_info.value)
 
 
 class TestWalletValidationWithMargin:
@@ -483,23 +493,21 @@ class TestWalletValidationWithMargin:
             "contract_size": 1.0,
             "tick_size": 1.0,
             "tick_value": 1.0,
+            "margin_rates": {
+                "intraday": {
+                    "long_margin_rate": "0.246636",
+                    "short_margin_rate": "0.246636",
+                },
+                "overnight": {
+                    "long_margin_rate": "0.246636",
+                    "short_margin_rate": "0.246636",
+                },
+            },
             "can_short": True,
             "short_requires_borrow": False,
             "quote_currency": "USD",
             "metadata": {
                 "base_currency": "BTC",
-                "info": {
-                    "future_product_details": {
-                        "intraday_margin_rate": {
-                            "long_margin_rate": "0.246636",
-                            "short_margin_rate": "0.246636",
-                        },
-                        "overnight_margin_rate": {
-                            "long_margin_rate": "0.246636",
-                            "short_margin_rate": "0.246636",
-                        },
-                    }
-                },
             },
         }
         notional = 1935.26

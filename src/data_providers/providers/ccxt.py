@@ -83,6 +83,8 @@ class CCXTProvider(BaseDataProvider):
 
         precision = market.get("precision") or {}
         limits = market.get("limits") or {}
+        amount_limits = limits.get("amount") if isinstance(limits.get("amount"), dict) else {}
+        cost_limits = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
         price_limits = limits.get("price") or {}
         info = market.get("info") if isinstance(market.get("info"), dict) else {}
         details = info.get("future_product_details") if isinstance(info.get("future_product_details"), dict) else {}
@@ -128,6 +130,40 @@ class CCXTProvider(BaseDataProvider):
         if contract_size is None and instrument_type == InstrumentType.SPOT:
             contract_size = 1.0
 
+        qty_step = (
+            market.get("amountStep")
+            or info.get("base_increment")
+            or details.get("base_increment")
+            or amount_limits.get("min")
+            or _step_from_precision(precision.get("amount"))
+        )
+        if qty_step is not None:
+            try:
+                qty_step = float(qty_step)
+            except (TypeError, ValueError):
+                qty_step = None
+
+        min_order_size = amount_limits.get("min")
+        if min_order_size is not None:
+            try:
+                min_order_size = float(min_order_size)
+            except (TypeError, ValueError):
+                min_order_size = None
+
+        max_qty = amount_limits.get("max")
+        if max_qty is not None:
+            try:
+                max_qty = float(max_qty)
+            except (TypeError, ValueError):
+                max_qty = None
+
+        min_notional = market.get("minNotional") or info.get("min_notional") or cost_limits.get("min")
+        if min_notional is not None:
+            try:
+                min_notional = float(min_notional)
+            except (TypeError, ValueError):
+                min_notional = None
+
         can_short = None
         if isinstance(market.get("short"), bool):
             can_short = bool(market.get("short"))
@@ -158,6 +194,10 @@ class CCXTProvider(BaseDataProvider):
             tick_size=tick_size,
             contract_size=contract_size,
             tick_value=tick_value,
+            min_order_size=min_order_size,
+            qty_step=qty_step,
+            max_qty=max_qty,
+            min_notional=min_notional,
             can_short=can_short,
             short_requires_borrow=short_requires_borrow,
             has_funding=has_funding,

@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
+from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from strategies import evaluator
 from . import persistence
 from .filters import (
@@ -22,6 +23,7 @@ from .evaluation_orchestrator import StrategyEvaluationDependencies, StrategyEva
 
 
 logger = logging.getLogger(__name__)
+_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 
 
 def _utcnow() -> datetime:
@@ -687,6 +689,19 @@ class StrategyRegistry:
                         "instrument_id": inst_id,
                         **instrument_rec,
                     }
+                symbol = slot.symbol
+                try:
+                    compile_runtime_profile_or_error(
+                        instrument_rec,
+                        allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
+                    )
+                except ValueError as exc:
+                    record.instrument_messages.append(
+                        {
+                            "symbol": symbol,
+                            "message": str(exc),
+                        }
+                    )
             if error:
                 record.instrument_messages.append(
                     {

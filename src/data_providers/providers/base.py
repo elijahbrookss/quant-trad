@@ -40,6 +40,9 @@ class InstrumentMetadata:
     contract_size: Optional[float]
     tick_value: Optional[float]
     min_order_size: Optional[float]
+    qty_step: Optional[float]
+    max_qty: Optional[float]
+    min_notional: Optional[float]
     maker_fee_rate: Optional[float]
     taker_fee_rate: Optional[float]
     margin_rates: Optional[dict]
@@ -58,6 +61,9 @@ class InstrumentMetadata:
             "contract_size": self.contract_size,
             "tick_value": self.tick_value,
             "min_order_size": self.min_order_size,
+            "qty_step": self.qty_step,
+            "max_qty": self.max_qty,
+            "min_notional": self.min_notional,
             "maker_fee_rate": self.maker_fee_rate,
             "taker_fee_rate": self.taker_fee_rate,
             "margin_rates": dict(self.margin_rates or {}),
@@ -119,6 +125,9 @@ class BaseDataProvider(ProviderInterface):
         contract_size: Optional[float] = None,
         tick_value: Optional[float] = None,
         min_order_size: Optional[float] = None,
+        qty_step: Optional[float] = None,
+        max_qty: Optional[float] = None,
+        min_notional: Optional[float] = None,
         maker_fee_rate: Optional[float] = None,
         taker_fee_rate: Optional[float] = None,
         margin_rates: Optional[dict] = None,
@@ -167,6 +176,9 @@ class BaseDataProvider(ProviderInterface):
             cs,
             tv,
             float(min_order_size) if min_order_size is not None else None,
+            float(qty_step) if qty_step is not None else None,
+            float(max_qty) if max_qty is not None else None,
+            float(min_notional) if min_notional is not None else None,
             float(maker_fee_rate) if maker_fee_rate is not None else None,
             float(taker_fee_rate) if taker_fee_rate is not None else None,
             dict(margin_rates or {}),
