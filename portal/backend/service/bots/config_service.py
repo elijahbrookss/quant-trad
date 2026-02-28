@@ -11,6 +11,7 @@ from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
 
 MIN_STARTING_WALLET = 10.0
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
+_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 
 
 class BotConfigService:
@@ -296,3 +297,59 @@ class BotConfigService:
                 raise ValueError(
                     f"Spot-only bot cannot run on derivatives instrument {symbol or link.instrument_id}."
                 )
+
+    @staticmethod
+    def _normalize_runtime_instrument_type(value: Optional[object]) -> str:
+        text = str(value or "").strip().lower()
+        if text == "futures":
+            return "future"
+        if text == "perps":
+            return "perp"
+        return text
+
+    def validate_runtime_readiness(self, bot: Mapping[str, object]) -> None:
+        """Validate bot runtime prerequisites for v1 derivatives execution."""
+
+        from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
+        from .bot_runtime.strategy import StrategyLoader
+        from ..market import instrument_service
+
+        strategy_id = str(bot.get("strategy_id") or "").strip()
+        if not strategy_id:
+            raise ValueError("Bots require a strategy_id.")
+
+        strategy = StrategyLoader.fetch_strategy(strategy_id)
+        errors: List[str] = []
+
+        if not strategy.instrument_links:
+            raise ValueError("Strategy has no instruments attached. Add at least one instrument before bot start.")
+
+        for link in strategy.instrument_links:
+            snapshot = dict(link.instrument_snapshot or {})
+            symbol = str(snapshot.get("symbol") or link.symbol or link.instrument_id or "").strip()
+            resolved = (
+                instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol)
+                if symbol
+                else None
+            )
+            instrument = dict(resolved or snapshot or {})
+            if not instrument:
+                errors.append(
+                    f"{symbol or link.instrument_id}: instrument metadata missing. Refresh instrument metadata in Strategy."
+                )
+                continue
+            try:
+                compile_runtime_profile_or_error(
+                    instrument,
+                    allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
+                )
+            except ValueError as exc:
+                message = str(exc)
+                prefix = f"{symbol}:".lower() if symbol else ""
+                if prefix and message.lower().startswith(prefix):
+                    errors.append(message)
+                else:
+                    errors.append(f"{symbol or link.instrument_id}: {message}")
+
+        if errors:
+            raise ValueError("Bot startup preflight failed: " + " | ".join(errors))

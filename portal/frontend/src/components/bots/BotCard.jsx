@@ -2,7 +2,15 @@ import { Play, Square, Trash2, RotateCw, TriangleAlert, X, Eye } from 'lucide-re
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
 
-const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+const computeStatus = (bot) => {
+  const runtimeStatus = String(bot?.runtime?.status || '').toLowerCase()
+  const persistedStatus = String(bot?.status || '').toLowerCase()
+  const terminalPersisted = new Set(['idle', 'stopped', 'completed', 'error', 'crashed', 'failed'])
+  if (persistedStatus && terminalPersisted.has(persistedStatus) && runtimeStatus && runtimeStatus !== persistedStatus) {
+    return persistedStatus
+  }
+  return (runtimeStatus || persistedStatus || 'idle').toLowerCase()
+}
 
 /**
  * Get status color for the card stripe

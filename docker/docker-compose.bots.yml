@@ -5,6 +5,7 @@ services:
     build:
       context: ..
       dockerfile: portal/backend/Dockerfile
+    image: quanttrad-backend:dev
     env_file:
       - ../secrets.env
     environment:

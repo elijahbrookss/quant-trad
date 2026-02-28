@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Mapping, Protocol
 
 logger = logging.getLogger(__name__)
+DEFAULT_BOT_RUNTIME_NETWORK = "quant-trad_quanttrad"
 
 
 class BotRunner(Protocol):
@@ -26,13 +27,39 @@ class DockerBotRunner:
         image = os.getenv("BOT_RUNTIME_IMAGE", "").strip()
         if not image:
             raise RuntimeError("BOT_RUNTIME_IMAGE is required for docker bot runner")
-        network = os.getenv("BOT_RUNTIME_NETWORK", "quanttrad").strip()
+        network = os.getenv("BOT_RUNTIME_NETWORK", DEFAULT_BOT_RUNTIME_NETWORK).strip()
         if not network:
             raise RuntimeError("BOT_RUNTIME_NETWORK is required for docker bot runner")
         return cls(image=image, network=network)
 
     def _container_name(self, bot_id: str) -> str:
         return f"{self.project}-{bot_id}"
+
+    @staticmethod
+    def _run_docker(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "docker_cli_missing: docker binary not found in backend runtime. "
+                "Install docker CLI in the backend image and mount /var/run/docker.sock."
+            ) from exc
+
+    def _network_exists(self, network_name: str) -> bool:
+        proc = self._run_docker(["docker", "network", "inspect", network_name])
+        return proc.returncode == 0
+
+    def _resolve_runtime_network(self) -> str:
+        if self._network_exists(self.network):
+            return self.network
+
+        raise RuntimeError(
+            "BOT_RUNTIME_NETWORK not found. "
+            f"requested={self.network} "
+            "Expected shared compose network from docker/docker-compose.yml is "
+            f"{DEFAULT_BOT_RUNTIME_NETWORK}. "
+            "Set BOT_RUNTIME_NETWORK explicitly to the exact docker network name in use."
+        )
 
     def start_bot(self, *, bot: Mapping[str, object]) -> str:
         bot_id = str(bot.get("id") or "").strip()
@@ -43,6 +70,7 @@ class DockerBotRunner:
             raise RuntimeError("snapshot_interval_ms is required and must be a positive integer")
         name = self._container_name(bot_id)
         self.stop_bot(bot_id=bot_id)
+        network = self._resolve_runtime_network()
         cmd = [
             "docker",
             "run",
@@ -50,7 +78,7 @@ class DockerBotRunner:
             "--name",
             name,
             "--network",
-            self.network,
+            network,
             "-e",
             f"PG_DSN={os.getenv('PG_DSN','')}",
             "-e",
@@ -75,8 +103,8 @@ class DockerBotRunner:
                 "portal.backend.service.bots.container_runtime",
             ]
         )
-        logger.info("docker_bot_runner_start | bot_id=%s | image=%s", bot_id, self.image)
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        logger.info("docker_bot_runner_start | bot_id=%s | image=%s | network=%s", bot_id, self.image, network)
+        proc = self._run_docker(cmd)
         if proc.returncode != 0:
             raise RuntimeError(f"docker start failed: {proc.stderr.strip() or proc.stdout.strip()}")
         container_id = (proc.stdout or "").strip()
@@ -87,6 +115,6 @@ class DockerBotRunner:
     def stop_bot(self, *, bot_id: str) -> None:
         name = self._container_name(bot_id)
         cmd = ["docker", "rm", "-f", name]
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        proc = self._run_docker(cmd)
         if proc.returncode != 0 and "No such container" not in (proc.stderr or ""):
             raise RuntimeError(f"docker stop failed: {proc.stderr.strip()}")

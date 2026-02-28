@@ -17,7 +17,15 @@ import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
 
-const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+const computeStatus = (bot) => {
+  const runtimeStatus = String(bot?.runtime?.status || '').toLowerCase()
+  const persistedStatus = String(bot?.status || '').toLowerCase()
+  const terminalPersisted = new Set(['idle', 'stopped', 'completed', 'error', 'crashed', 'failed'])
+  if (persistedStatus && terminalPersisted.has(persistedStatus) && runtimeStatus && runtimeStatus !== persistedStatus) {
+    return persistedStatus
+  }
+  return (runtimeStatus || persistedStatus || 'idle').toLowerCase()
+}
 
 const parseEnvText = (text) => {
   const next = {}
@@ -312,6 +320,25 @@ export function BotPanel() {
     } catch (err) {
       logger.error('bot_start_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to start bot')
+      setBots((prev) =>
+        prev.map((bot) =>
+          bot.id === botId
+            ? {
+                ...bot,
+                status: 'error',
+                last_run_artifact: {
+                  ...(bot.last_run_artifact || {}),
+                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
+                },
+                runtime: {
+                  ...(bot.runtime || {}),
+                  status: 'error',
+                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
+                },
+              }
+            : bot,
+        ),
+      )
     } finally {
       setPendingStart(null)
     }

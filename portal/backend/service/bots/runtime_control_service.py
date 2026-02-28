@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, Mapping
 
 from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
+from .runner import BotRunner
 from .runner import DockerBotRunner
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,19 @@ class BotRuntimeControlService:
     def _broadcast(self, event: str, payload: Mapping[str, Any]) -> None:
         self._stream_manager.broadcast(event, payload)
 
+    @staticmethod
+    def _runner_target() -> str:
+        return str(os.getenv("BOT_RUNTIME_TARGET", "docker") or "docker").strip().lower()
+
+    def _resolve_runner(self) -> BotRunner:
+        target = self._runner_target()
+        if target == "docker":
+            return DockerBotRunner.from_env()
+        raise RuntimeError(
+            f"Unsupported bot runtime target: {target}. "
+            "Set BOT_RUNTIME_TARGET=docker."
+        )
+
     def start_bot(self, bot_id: str) -> Dict[str, object]:
         bots = {bot["id"]: bot for bot in self._config.list_bots()}
         if bot_id not in bots:
@@ -37,13 +52,42 @@ class BotRuntimeControlService:
         self._config.validate_backtest_window(bot)
         self._config.validate_strategy_existence(bot)
         self._config.validate_instrument_policy(bot)
+        self._config.validate_runtime_readiness(bot)
 
-        runner = DockerBotRunner.from_env()
-        container_id = runner.start_bot(bot=bot)
+        runner = self._resolve_runner()
+        from ..storage.storage import upsert_bot
+
+        try:
+            container_id = runner.start_bot(bot=bot)
+        except Exception as exc:
+            now = self._now_iso()
+            error_payload = {
+                "message": str(exc),
+                "phase": "container_start",
+                "at": now,
+            }
+            bot["status"] = "error"
+            bot["runner_id"] = None
+            bot["last_run_artifact"] = {"error": error_payload}
+            upsert_bot(bot)
+            self._broadcast(
+                "bot",
+                {
+                    "bot": {
+                        **bot,
+                        "runtime": {
+                            "status": "error",
+                            "error": error_payload,
+                        },
+                    }
+                },
+            )
+            logger.error("bot_container_start_failed | bot_id=%s | error=%s", bot_id, exc)
+            raise
+
         bot["status"] = "running"
         bot["runner_id"] = container_id
         bot["last_run_at"] = self._now_iso()
-        from ..storage.storage import upsert_bot
 
         upsert_bot(bot)
         logger.info("bot_container_started | bot_id=%s | container_id=%s", bot_id, container_id)
@@ -51,7 +95,7 @@ class BotRuntimeControlService:
         return bot
 
     def stop_bot(self, bot_id: str) -> Dict[str, object]:
-        runner = DockerBotRunner.from_env()
+        runner = self._resolve_runner()
         runner.stop_bot(bot_id=bot_id)
         get_watchdog().unregister_bot(bot_id)
 
