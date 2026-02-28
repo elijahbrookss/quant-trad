@@ -231,7 +231,7 @@ class BaseWalletGateway:
                 value = int(event.get("seq") or 0)
                 if value > 0:
                     return value
-            except Exception:
+            except (TypeError, ValueError):
                 pass
         return int(max(fallback, 0))
 
@@ -262,17 +262,17 @@ class BaseWalletGateway:
             hold_total = 0.0
             try:
                 hold_total += max(float(required_delta.get("collateral_reserved") or 0.0), 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 pass
             try:
                 hold_total += max(float(required_delta.get("fee_estimate") or 0.0), 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 pass
             if hold_total > 0.0:
                 return hold_total
         try:
             amount = float(payload.get("amount") or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             amount = 0.0
         return max(amount, 0.0)
 
