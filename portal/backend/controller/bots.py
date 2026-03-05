@@ -9,11 +9,12 @@ from collections.abc import Mapping as AbcMapping
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..service.bots import bot_service
+from ..service.bots.ledger_service import list_run_ledger_events
 from ..service.bots.telemetry_stream import telemetry_hub
 
 router = APIRouter()
@@ -202,6 +203,26 @@ async def stop_bot(bot_id: str) -> Dict[str, Any]:
 @router.get("/{bot_id}/lens/bootstrap")
 async def bot_lens_bootstrap(bot_id: str, run_id: Optional[str] = None) -> Dict[str, Any]:
     return await telemetry_hub.bootstrap(bot_id=bot_id, run_id=run_id)
+
+
+@router.get("/{bot_id}/runs/{run_id}/events")
+async def bot_run_ledger_events(
+    bot_id: str,
+    run_id: str,
+    after_seq: int = 0,
+    limit: int = 500,
+    event_name: Optional[List[str]] = Query(default=None),
+) -> Dict[str, Any]:
+    try:
+        return list_run_ledger_events(
+            bot_id=str(bot_id),
+            run_id=str(run_id),
+            after_seq=max(0, int(after_seq or 0)),
+            limit=max(1, int(limit or 500)),
+            event_names=event_name or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.websocket("/ws/telemetry/ingest")
