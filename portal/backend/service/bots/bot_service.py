@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Mapping
 from .bot_stream import BotStreamManager
 from .config_service import BotConfigService
 from .runtime_control_service import BotRuntimeControlService
-from ..storage.storage import get_latest_bot_run_snapshot
+from ..storage.storage import get_latest_bot_run_view_state
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +80,17 @@ def runtime_capacity() -> Dict[str, Any]:
             continue
         running_bots += 1
         runtime_payload: Mapping[str, Any] = {}
-        snapshot_row = get_latest_bot_run_snapshot(
+        view_row = get_latest_bot_run_view_state(
             bot_id=str(bot.get("id") or ""),
             run_id=None,
             series_key="bot",
         )
-        if isinstance(snapshot_row, Mapping):
-            snapshot_payload = snapshot_row.get("snapshot_payload")
-            if isinstance(snapshot_payload, Mapping):
-                chart_payload = snapshot_payload.get("snapshot")
-                if isinstance(chart_payload, Mapping):
-                    maybe_runtime = chart_payload.get("runtime")
-                    if isinstance(maybe_runtime, Mapping):
-                        runtime_payload = maybe_runtime
+        if isinstance(view_row, Mapping):
+            payload = view_row.get("payload")
+            if isinstance(payload, Mapping):
+                maybe_runtime = payload.get("runtime")
+                if isinstance(maybe_runtime, Mapping):
+                    runtime_payload = maybe_runtime
         try:
             active_workers = int(runtime_payload.get("active_workers") or 0)
         except (TypeError, ValueError):
