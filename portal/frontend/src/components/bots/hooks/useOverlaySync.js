@@ -382,7 +382,7 @@ export const useOverlaySync = ({
         if (!candidateTimes.length) return null
         const min = Math.min(...candidateTimes)
         const max = Math.max(...candidateTimes)
-        return `${min}-${max}-${lastSeriesTime}`
+        return `${min}-${max}-${scopedTradeSegments.length}`
       })()
 
       const extents = (() => {

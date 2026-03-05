@@ -87,6 +87,24 @@ export async function fetchBotLensBootstrap(botId, { runId } = {}) {
   return request(`/api/bots/${encodeURIComponent(botId)}/lens/bootstrap${query}`)
 }
 
+export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
+  const params = new URLSearchParams()
+  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
+  params.set('limit', String(Math.max(1, Number(limit) || 500)))
+  if (Array.isArray(eventNames)) {
+    eventNames.forEach((name) => {
+      if (name === undefined || name === null) return
+      const normalized = String(name).trim()
+      if (!normalized) return
+      params.append('event_name', normalized)
+    })
+  }
+  const query = params.toString()
+  return request(
+    `/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`,
+  )
+}
+
 export function openBotLensStream(botId, { runId, sinceSeq = 0 } = {}) {
   const params = new URLSearchParams()
   if (runId) params.set('run_id', String(runId))

@@ -4,6 +4,7 @@ import { BOTLENS_DEBUG } from '../chartDataUtils.js'
 
 export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) => {
   const layersRef = useRef(new Map())
+  const lastSignatureRef = useRef('')
 
   const ensureApi = useCallback(() => {
     if (markersApiRef.current) return markersApiRef.current
@@ -46,7 +47,21 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
       merged.push(...(layer.markers || []))
     })
     merged.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-    api.setMarkers(merged)
+    const signature = merged
+      .map((marker) => {
+        const time = Number.isFinite(marker?.time) ? Number(marker.time) : ''
+        const position = marker?.position || ''
+        const shape = marker?.shape || ''
+        const color = marker?.color || ''
+        const text = marker?.text || ''
+        const id = marker?.id || marker?.trade_id || ''
+        return `${time}|${position}|${shape}|${color}|${text}|${id}`
+      })
+      .join('||')
+    if (signature !== lastSignatureRef.current) {
+      api.setMarkers(merged)
+      lastSignatureRef.current = signature
+    }
     if (markerCacheRef) {
       markerCacheRef.current = merged
     }
@@ -55,7 +70,13 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
     }
   }, [ensureApi, markerCacheRef])
 
-  useEffect(() => () => markersApiRef && (markersApiRef.current = null), [markersApiRef])
+  useEffect(
+    () => () => {
+      if (markersApiRef) markersApiRef.current = null
+      lastSignatureRef.current = ''
+    },
+    [markersApiRef],
+  )
 
   return { setLayer, clearLayer, flush, ensureApi }
 }

@@ -98,6 +98,9 @@ export const useBotLensChartCore = ({
       width: el.clientWidth,
       height: el.clientHeight || 360,
     })
+    // PaneViewManager must be created BEFORE candle/level series so all overlay
+    // custom series are lower in z-order and candles render on top of them.
+    const paneMgr = new PaneViewManager(chart)
     const series = chart.addSeries(CandlestickSeries, seriesOptions)
     const levelSeries = chart.addSeries(LineSeries, {
       color: 'rgba(0,0,0,0)',
@@ -110,7 +113,7 @@ export const useBotLensChartCore = ({
     chartRef.current = chart
     seriesRef.current = series
     levelSeriesRef.current = levelSeries
-    paneMgrRef.current = new PaneViewManager(chart)
+    paneMgrRef.current = paneMgr
 
     registerChart?.(chartId, {
       get chart() {

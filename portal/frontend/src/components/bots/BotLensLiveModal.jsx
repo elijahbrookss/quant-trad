@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import { LocateFixed, Maximize2, Minimize2, X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { OverlayToggleBar } from './OverlayToggleBar.jsx'
+import { ActiveTradeChip } from './ActiveTradeChip.jsx'
 import DecisionTrace from './DecisionTrace/index.jsx'
 import { useOverlayControls } from './hooks/useOverlayControls.js'
 import { createLogger } from '../../utils/logger.js'
-import { fetchBotLensBootstrap, openBotLensStream } from '../../adapters/bot.adapter.js'
+import { fetchBotLensBootstrap, fetchBotRunLedgerEvents, openBotLensStream } from '../../adapters/bot.adapter.js'
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -46,14 +47,18 @@ function readPositiveInt(name, fallback) {
   return Math.max(1, Math.floor(value))
 }
 
-const TARGET_RENDER_LAG_MS = readPositiveNumber('VITE_BOTLENS_TARGET_RENDER_LAG_MS', 420)
+const TARGET_RENDER_LAG_MS = readPositiveNumber('VITE_BOTLENS_TARGET_RENDER_LAG_MS', 120)
 const CATCHUP_RENDER_LAG_MS = readPositiveNumber('VITE_BOTLENS_CATCHUP_RENDER_LAG_MS', 1200)
 const CATCHUP_SEQ_BEHIND = readPositiveInt('VITE_BOTLENS_CATCHUP_SEQ_BEHIND', 6)
 const CATCHUP_QUEUE_DEPTH = readPositiveInt('VITE_BOTLENS_CATCHUP_QUEUE_DEPTH', 8)
-const NORMAL_APPLY_INTERVAL_MS = readPositiveNumber('VITE_BOTLENS_NORMAL_APPLY_INTERVAL_MS', 100)
+const NORMAL_APPLY_INTERVAL_MS = readPositiveNumber('VITE_BOTLENS_NORMAL_APPLY_INTERVAL_MS', 33)
 const CATCHUP_APPLY_INTERVAL_MS = readPositiveNumber('VITE_BOTLENS_CATCHUP_APPLY_INTERVAL_MS', 12)
 const MAX_CATCHUP_BATCH = readPositiveInt('VITE_BOTLENS_MAX_CATCHUP_BATCH', 2)
 const METRICS_PUBLISH_MS = readPositiveNumber('VITE_BOTLENS_METRICS_PUBLISH_MS', 120)
+const SNAP_TO_LATEST_CANDLE_LAG = readPositiveInt('VITE_BOTLENS_SNAP_CANDLES_BEHIND', 30)
+const LEDGER_POLL_INTERVAL_MS = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_MS', 800)
+const LEDGER_POLL_LIMIT = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_LIMIT', 500)
+const LEDGER_MAX_EVENTS = readPositiveInt('VITE_BOTLENS_LEDGER_MAX_EVENTS', 3000)
 
 function primarySeries(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null
@@ -76,6 +81,98 @@ function primaryCandles(snapshot) {
   const primary = primarySeries(snapshot)
   const candles = primary?.candles
   return Array.isArray(candles) ? candles : null
+}
+
+function primaryCandleCount(snapshot) {
+  const candles = primaryCandles(snapshot)
+  return Array.isArray(candles) ? candles.length : 0
+}
+
+function overlayIdentity(overlay, index) {
+  if (!overlay || typeof overlay !== 'object') return `index:${index}`
+  const keys = ['id', 'overlay_id', 'name', 'key', 'slug', 'indicator_id', 'type']
+  for (const key of keys) {
+    const value = String(overlay?.[key] || '').trim()
+    if (value) return `${key}:${value}`
+  }
+  return `index:${index}`
+}
+
+function seriesIdentity(series, index) {
+  if (!series || typeof series !== 'object') return `series_index:${index}`
+  const strategyId = String(series?.strategy_id || '').trim()
+  const symbol = String(series?.symbol || '').trim()
+  const timeframe = String(series?.timeframe || '').trim()
+  if (strategyId || symbol || timeframe) return `${strategyId}|${symbol}|${timeframe}`
+  return `series_index:${index}`
+}
+
+function mergeSeriesOverlays(baseSeriesEntry, incomingSeriesEntry) {
+  const incomingOverlays = Array.isArray(incomingSeriesEntry?.overlays) ? incomingSeriesEntry.overlays : []
+  const overlayDelta = incomingSeriesEntry?.overlay_delta && typeof incomingSeriesEntry.overlay_delta === 'object'
+    ? incomingSeriesEntry.overlay_delta
+    : null
+  const mode = String(overlayDelta?.mode || 'replace').toLowerCase()
+  if (mode !== 'delta') return incomingOverlays
+
+  const previousOverlays = Array.isArray(baseSeriesEntry?.overlays) ? baseSeriesEntry.overlays : []
+  const mergedById = new Map()
+  const overlayOrder = []
+  previousOverlays.forEach((overlay, index) => {
+    const id = overlayIdentity(overlay, index)
+    if (!mergedById.has(id)) overlayOrder.push(id)
+    mergedById.set(id, overlay)
+  })
+  incomingOverlays.forEach((overlay, index) => {
+    const id = overlayIdentity(overlay, index)
+    if (!mergedById.has(id)) overlayOrder.push(id)
+    mergedById.set(id, overlay)
+  })
+
+  const removedIds = new Set(
+    Array.isArray(overlayDelta?.removed) ? overlayDelta.removed.map((value) => String(value)) : [],
+  )
+  const merged = []
+  overlayOrder.forEach((id) => {
+    if (removedIds.has(String(id))) return
+    const overlay = mergedById.get(id)
+    if (overlay) merged.push(overlay)
+  })
+  return merged
+}
+
+function mergeSnapshotFromStreamDelta(baseSnapshot, incomingSnapshot) {
+  if (!incomingSnapshot || typeof incomingSnapshot !== 'object') return null
+  const incomingSeries = Array.isArray(incomingSnapshot?.series) ? incomingSnapshot.series : []
+  if (!incomingSeries.length || !baseSnapshot || typeof baseSnapshot !== 'object') return incomingSnapshot
+
+  const baseSeries = Array.isArray(baseSnapshot?.series) ? baseSnapshot.series : []
+  const baseById = new Map()
+  baseSeries.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object') return
+    baseById.set(seriesIdentity(entry, index), entry)
+  })
+
+  const mergedSeries = incomingSeries.map((entry, index) => {
+    if (!entry || typeof entry !== 'object') return entry
+    const baseEntry = baseById.get(seriesIdentity(entry, index))
+    const overlays = mergeSeriesOverlays(baseEntry, entry)
+    const next = { ...entry, overlays }
+    if ('overlay_delta' in next) {
+      delete next.overlay_delta
+    }
+    return next
+  })
+  return { ...incomingSnapshot, series: mergedSeries }
+}
+
+function candleLag(renderedSnapshot, canonicalSnapshot) {
+  if (!renderedSnapshot || !canonicalSnapshot) return 0
+  if (primarySeriesKey(renderedSnapshot) !== primarySeriesKey(canonicalSnapshot)) return 0
+  const renderedCount = primaryCandleCount(renderedSnapshot)
+  const canonicalCount = primaryCandleCount(canonicalSnapshot)
+  if (!Number.isFinite(renderedCount) || !Number.isFinite(canonicalCount)) return 0
+  return Math.max(0, canonicalCount - renderedCount)
 }
 
 function snapshotWithPrimaryCandles(snapshot, candles) {
@@ -113,7 +210,15 @@ function buildSnapshotFrames({ baseSnapshot, targetSnapshot, envelope }) {
   if (!baseSnapshot || !targetSnapshot) {
     return [finalFrame]
   }
+  if (envelope.critical) {
+    return [finalFrame]
+  }
   if (primarySeriesKey(baseSnapshot) !== primarySeriesKey(targetSnapshot)) {
+    return [finalFrame]
+  }
+  const baseTrades = Array.isArray(baseSnapshot?.trades) ? baseSnapshot.trades : []
+  const targetTrades = Array.isArray(targetSnapshot?.trades) ? targetSnapshot.trades : []
+  if (baseTrades.length !== targetTrades.length) {
     return [finalFrame]
   }
   const base = primaryCandles(baseSnapshot)
@@ -148,6 +253,102 @@ function nowMs() {
   return Date.now()
 }
 
+function eventSeq(event) {
+  const value = Number(event?.seq || 0)
+  if (Number.isFinite(value) && value > 0) return value
+  return 0
+}
+
+function ledgerEventKey(event) {
+  if (!event || typeof event !== 'object') return ''
+  const eventId = String(event.event_id || '').trim()
+  if (eventId) return `id:${eventId}`
+  const seq = eventSeq(event)
+  if (seq > 0) return `seq:${seq}`
+  const eventName = String(event.event_name || '').trim()
+  const createdAt = String(event.created_at || event.event_ts || '').trim()
+  const tradeId = String(event.trade_id || '').trim()
+  const symbol = String(event.symbol || '').trim()
+  return `${createdAt}|${eventName}|${tradeId}|${symbol}`
+}
+
+function mergeLedgerEvents(existing, incoming) {
+  const merged = new Map()
+  const seed = Array.isArray(existing) ? existing : []
+  const delta = Array.isArray(incoming) ? incoming : []
+  seed.forEach((event) => {
+    const key = ledgerEventKey(event)
+    if (!key) return
+    merged.set(key, event)
+  })
+  delta.forEach((event) => {
+    const key = ledgerEventKey(event)
+    if (!key) return
+    merged.set(key, event)
+  })
+  const ordered = Array.from(merged.values()).sort((left, right) => {
+    const seqGap = eventSeq(left) - eventSeq(right)
+    if (seqGap !== 0) return seqGap
+    const leftTs = String(left?.event_ts || left?.created_at || '')
+    const rightTs = String(right?.event_ts || right?.created_at || '')
+    return leftTs.localeCompare(rightTs)
+  })
+  if (ordered.length <= LEDGER_MAX_EVENTS) return ordered
+  return ordered.slice(-LEDGER_MAX_EVENTS)
+}
+
+function normalizeSymbolKey(value) {
+  return String(value || '').trim().toUpperCase()
+}
+
+function selectedSeriesKeyFor(entry, index) {
+  if (!entry || typeof entry !== 'object') return `series-${index}`
+  const strategyId = String(entry.strategy_id || '').trim()
+  const symbol = normalizeSymbolKey(entry.symbol)
+  const timeframe = String(entry.timeframe || '').trim().toUpperCase()
+  return `${strategyId}|${symbol}|${timeframe}|${index}`
+}
+
+function isOpenTrade(trade) {
+  if (!trade || typeof trade !== 'object') return false
+  if (trade.closed_at) return false
+  const status = String(trade.status || '').toLowerCase()
+  if (status === 'closed' || status === 'completed' || status === 'complete') return false
+  const legs = Array.isArray(trade.legs) ? trade.legs : []
+  if (!legs.length) return true
+  return legs.some((leg) => {
+    if (!leg || typeof leg !== 'object') return false
+    if (!leg.exit_time) return true
+    const legStatus = String(leg.status || '').toLowerCase()
+    return legStatus === 'open'
+  })
+}
+
+function tradeMatchesSeries(trade, seriesEntry) {
+  if (!seriesEntry || typeof seriesEntry !== 'object') return true
+  const targetSymbol = normalizeSymbolKey(seriesEntry.symbol)
+  if (!targetSymbol) return true
+  const tradeSymbol = normalizeSymbolKey(trade?.symbol)
+  if (!tradeSymbol) return true
+  return tradeSymbol === targetSymbol
+}
+
+function buildTradeChip(trade) {
+  if (!trade || typeof trade !== 'object') return null
+  const direction = String(trade.direction || '').toLowerCase() === 'short' ? 'short' : 'long'
+  const quantityRaw = Number(
+    trade?.entry_order?.contracts ?? trade?.entry_order?.quantity ?? trade?.qty ?? trade?.quantity ?? trade?.contracts,
+  )
+  const quantityLabel = Number.isFinite(quantityRaw) && quantityRaw > 0 ? String(Number(quantityRaw.toFixed(4))) : null
+  return {
+    symbol: String(trade.symbol || '—'),
+    direction,
+    directionLabel: direction.toUpperCase(),
+    sizeLabel: quantityLabel || `${Math.max((trade.legs || []).length, 1)}x`,
+    entry: trade.entry_price,
+  }
+}
+
 export function BotLensLiveModal({ bot, open, onClose }) {
   const logger = useMemo(() => createLogger('BotLensLiveModal'), [])
   const [snapshot, setSnapshot] = useState(null)
@@ -156,12 +357,24 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const [error, setError] = useState(null)
   const [cursor, setCursor] = useState({ runId: null, seq: 0 })
   const [renderCursor, setRenderCursor] = useState({ runId: null, seq: 0 })
+  const [ledgerEvents, setLedgerEvents] = useState([])
+  const [ledgerState, setLedgerState] = useState({
+    runId: null,
+    nextAfterSeq: 0,
+    status: 'idle',
+    error: null,
+  })
   const [staleMode, setStaleMode] = useState(false)
   const [overlayPanelCollapsed, setOverlayPanelCollapsed] = useState(false)
+  const [followLive, setFollowLive] = useState(true)
+  const [fullScreen, setFullScreen] = useState(false)
+  const [selectedSeriesKey, setSelectedSeriesKey] = useState(null)
+  const [hoveredTradeId, setHoveredTradeId] = useState(null)
   const [renderMetrics, setRenderMetrics] = useState({
     mode: 'smooth',
     queueDepth: 0,
     seqBehind: 0,
+    candlesBehind: 0,
     lagMs: 0,
     appliedRate: 0,
   })
@@ -178,6 +391,9 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const lastMetricsPublishRef = useRef(0)
   const appliedSincePublishRef = useRef(0)
   const renderedSnapshotRef = useRef(null)
+  const canonicalFrameRef = useRef({ runId: null, seq: 0, snapshot: null })
+  const lastSnapCursorRef = useRef({ runId: null, seq: 0 })
+  const ledgerSyncTokenRef = useRef(0)
 
   useEffect(() => {
     cursorRef.current = cursor
@@ -192,6 +408,17 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   }, [streamState])
 
   useEffect(() => {
+    if (!open) {
+      setFullScreen(false)
+      setHoveredTradeId(null)
+    }
+  }, [open])
+
+  useEffect(() => {
+    setFollowLive(true)
+  }, [bot?.id])
+
+  useEffect(() => {
     if (!open) return undefined
     let cancelled = false
 
@@ -201,6 +428,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       const rendered = renderCursorRef.current
       const sameRun = canonical?.runId && rendered?.runId && canonical.runId === rendered.runId
       const seqBehind = sameRun ? Math.max(0, Number(canonical.seq || 0) - Number(rendered.seq || 0)) : queueDepth
+      const candlesBehind = candleLag(renderedSnapshotRef.current, canonicalFrameRef.current?.snapshot || null)
       const oldest = queueDepth ? pendingFramesRef.current[0] : null
       const lagMs = oldest ? Math.max(0, ts - Number(oldest.receivedAt || ts)) : 0
       const elapsed = Math.max(1, ts - Number(lastMetricsPublishRef.current || ts))
@@ -211,6 +439,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         mode,
         queueDepth,
         seqBehind,
+        candlesBehind,
         lagMs,
         appliedRate,
       })
@@ -223,6 +452,34 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       const rendered = renderCursorRef.current
       const sameRun = canonical?.runId && rendered?.runId && canonical.runId === rendered.runId
       const seqBehind = sameRun ? Math.max(0, Number(canonical.seq || 0) - Number(rendered.seq || 0)) : queue.length
+      const canonicalFrame = canonicalFrameRef.current
+      const renderedSnapshot = renderedSnapshotRef.current
+      const candlesBehind = candleLag(renderedSnapshot, canonicalFrame?.snapshot || null)
+      const shouldSnapToLatest =
+        candlesBehind > SNAP_TO_LATEST_CANDLE_LAG &&
+        canonicalFrame?.snapshot &&
+        canonical?.runId &&
+        canonicalFrame.runId === canonical.runId
+      if (shouldSnapToLatest) {
+        queue.length = 0
+        setSnapshot(canonicalFrame.snapshot)
+        renderedSnapshotRef.current = canonicalFrame.snapshot
+        const snappedCursor = { runId: canonicalFrame.runId, seq: Number(canonicalFrame.seq || 0) }
+        renderCursorRef.current = snappedCursor
+        setRenderCursor(snappedCursor)
+        lastApplyAtRef.current = ts
+        appliedSincePublishRef.current += 1
+        const lastSnap = lastSnapCursorRef.current
+        if (lastSnap.runId !== snappedCursor.runId || Number(lastSnap.seq || 0) !== snappedCursor.seq) {
+          logger.info('botlens_render_snap_to_latest', {
+            bot_id: bot?.id || null,
+            run_id: snappedCursor.runId,
+            seq: snappedCursor.seq,
+            candles_behind: candlesBehind,
+          })
+          lastSnapCursorRef.current = snappedCursor
+        }
+      }
       const oldest = queue.length ? queue[0] : null
       const oldestLagMs = oldest ? Math.max(0, ts - Number(oldest.receivedAt || ts)) : 0
       const catchupMode =
@@ -269,8 +526,10 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       lastApplyAtRef.current = 0
       lastMetricsPublishRef.current = 0
       appliedSincePublishRef.current = 0
+      canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+      lastSnapCursorRef.current = { runId: null, seq: 0 }
     }
-  }, [open])
+  }, [bot?.id, logger, open])
 
   const closeSocket = useCallback(() => {
     const socket = socketRef.current
@@ -320,19 +579,18 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             if (next.seq <= prev.seq) return
             if (next.seq !== prev.seq + 1) {
               pendingFramesRef.current = []
-              renderedSnapshotRef.current = null
-              setStaleMode(true)
-              setStreamState('resyncing')
-              setStatusMessage(
-                `Gap detected (expected ${prev.seq + 1}, got ${next.seq}). Keeping stale view and resyncing...`,
-              )
-              syncTokenRef.current += 1
-              closeSocket()
-              return
+              setStatusMessage(`Stream catch-up: skipped ${Math.max(0, next.seq - prev.seq - 1)} frames.`)
+              logger.warn('botlens_stream_seq_gap', {
+                bot_id: botId,
+                run_id: next.runId,
+                expected_seq: prev.seq + 1,
+                actual_seq: next.seq,
+              })
             }
           } else if (prev.runId && next.runId !== prev.runId) {
             pendingFramesRef.current = []
             renderedSnapshotRef.current = null
+            canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
             setStaleMode(true)
             setStreamState('resyncing')
             setStatusMessage(`Run changed (${prev.runId} -> ${next.runId}). Auto-attaching to latest run...`)
@@ -346,9 +604,11 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           const baseSnapshot = queue.length > 0
             ? queue[queue.length - 1]?.snapshot || null
             : renderedSnapshotRef.current
+          const mergedSnapshot = mergeSnapshotFromStreamDelta(baseSnapshot, next.snapshot)
+          if (!mergedSnapshot) return
           const frames = buildSnapshotFrames({
             baseSnapshot,
-            targetSnapshot: next.snapshot,
+            targetSnapshot: mergedSnapshot,
             envelope: {
               runId: next.runId,
               seq: next.seq,
@@ -357,6 +617,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
               receivedAt,
             },
           })
+          canonicalFrameRef.current = { runId: next.runId, seq: next.seq, snapshot: mergedSnapshot }
           pendingFramesRef.current.push(...frames)
           cursorRef.current = { runId: next.runId, seq: next.seq }
           setCursor({ runId: next.runId, seq: next.seq })
@@ -420,6 +681,8 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           lastApplyAtRef.current = nowMs()
           setSnapshot(snap)
           renderedSnapshotRef.current = snap
+          canonicalFrameRef.current = { runId, seq, snapshot: snap }
+          lastSnapCursorRef.current = { runId: null, seq: 0 }
           cursorRef.current = { runId, seq }
           renderCursorRef.current = { runId, seq }
           setCursor({ runId, seq })
@@ -428,6 +691,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             mode: 'smooth',
             queueDepth: 0,
             seqBehind: 0,
+            candlesBehind: 0,
             lagMs: 0,
             appliedRate: 0,
           })
@@ -466,16 +730,149 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     }
   }, [bot?.id, connectSocket, closeSocket, logger, open])
 
+  const activeRunId = cursor.runId || renderCursor.runId || null
+
+  useEffect(() => {
+    if (!open || !bot?.id) {
+      setLedgerEvents([])
+      setLedgerState({
+        runId: null,
+        nextAfterSeq: 0,
+        status: 'idle',
+        error: null,
+      })
+      return undefined
+    }
+    if (!activeRunId) {
+      setLedgerEvents([])
+      setLedgerState({
+        runId: null,
+        nextAfterSeq: 0,
+        status: 'waiting',
+        error: null,
+      })
+      return undefined
+    }
+
+    let cancelled = false
+    const token = ++ledgerSyncTokenRef.current
+    let nextAfterSeq = 0
+    setLedgerEvents([])
+    setLedgerState({
+      runId: activeRunId,
+      nextAfterSeq: 0,
+      status: 'syncing',
+      error: null,
+    })
+
+    const pollLedger = async () => {
+      while (!cancelled && token === ledgerSyncTokenRef.current) {
+        try {
+          const response = await fetchBotRunLedgerEvents(bot.id, activeRunId, {
+            afterSeq: nextAfterSeq,
+            limit: LEDGER_POLL_LIMIT,
+          })
+          if (cancelled || token !== ledgerSyncTokenRef.current) return
+          const incoming = Array.isArray(response?.events) ? response.events : []
+          const cursorCandidate = Number(response?.next_after_seq || nextAfterSeq)
+          if (Number.isFinite(cursorCandidate) && cursorCandidate > nextAfterSeq) {
+            nextAfterSeq = cursorCandidate
+          } else {
+            const maxSeq = incoming.reduce((acc, event) => Math.max(acc, eventSeq(event)), nextAfterSeq)
+            nextAfterSeq = maxSeq
+          }
+          if (incoming.length > 0) {
+            setLedgerEvents((current) => mergeLedgerEvents(current, incoming))
+          }
+          setLedgerState({
+            runId: activeRunId,
+            nextAfterSeq,
+            status: 'open',
+            error: null,
+          })
+          const isCatchupBatch = incoming.length >= LEDGER_POLL_LIMIT
+          await delay(isCatchupBatch ? 80 : LEDGER_POLL_INTERVAL_MS)
+        } catch (err) {
+          if (cancelled || token !== ledgerSyncTokenRef.current) return
+          const message = err?.message || 'Ledger query failed'
+          setLedgerState({
+            runId: activeRunId,
+            nextAfterSeq,
+            status: 'error',
+            error: message,
+          })
+          logger.warn('botlens_db_ledger_poll_failed', {
+            bot_id: bot.id,
+            run_id: activeRunId,
+            after_seq: nextAfterSeq,
+          }, err)
+          await delay(Math.max(1200, LEDGER_POLL_INTERVAL_MS))
+        }
+      }
+    }
+
+    pollLedger()
+    return () => {
+      cancelled = true
+    }
+  }, [activeRunId, bot?.id, logger, open])
+
   const series = useMemo(() => (Array.isArray(snapshot?.series) ? snapshot.series : []), [snapshot])
-  const primary = useMemo(() => series[0] || {}, [series])
-  const candles = useMemo(() => (Array.isArray(primary?.candles) ? primary.candles : []), [primary])
-  const overlays = useMemo(() => (Array.isArray(primary?.overlays) ? primary.overlays : []), [primary])
-  const trades = useMemo(() => (Array.isArray(snapshot?.trades) ? snapshot.trades : []), [snapshot])
-  const logs = useMemo(() => (Array.isArray(snapshot?.logs) ? snapshot.logs : []), [snapshot])
-  const decisionEvents = useMemo(
-    () => (Array.isArray(snapshot?.decisions) ? snapshot.decisions : []),
-    [snapshot],
+  const seriesSelectorOptions = useMemo(
+    () =>
+      series.map((entry, index) => ({
+        key: selectedSeriesKeyFor(entry, index),
+        symbol: String(entry?.symbol || '—'),
+        timeframe: String(entry?.timeframe || '—'),
+      })),
+    [series],
   )
+  useEffect(() => {
+    setSelectedSeriesKey((current) => {
+      if (!seriesSelectorOptions.length) return null
+      if (current && seriesSelectorOptions.some((entry) => entry.key === current)) return current
+      return seriesSelectorOptions[0].key
+    })
+  }, [seriesSelectorOptions])
+  const selectedSeries = useMemo(() => {
+    if (!series.length) return {}
+    const selectedIndex = series.findIndex((entry, index) => selectedSeriesKeyFor(entry, index) === selectedSeriesKey)
+    return selectedIndex >= 0 ? series[selectedIndex] : series[0]
+  }, [selectedSeriesKey, series])
+  const candles = useMemo(() => (Array.isArray(selectedSeries?.candles) ? selectedSeries.candles : []), [selectedSeries])
+  const overlays = useMemo(() => (Array.isArray(selectedSeries?.overlays) ? selectedSeries.overlays : []), [selectedSeries])
+  const trades = useMemo(() => (Array.isArray(snapshot?.trades) ? snapshot.trades : []), [snapshot])
+  const chartTrades = useMemo(() => trades.filter((trade) => tradeMatchesSeries(trade, selectedSeries)), [selectedSeries, trades])
+  const allActiveTrades = useMemo(() => trades.filter((trade) => isOpenTrade(trade)), [trades])
+  const seriesPriceContext = useMemo(() => {
+    const map = new Map()
+    series.forEach((entry) => {
+      const symbol = normalizeSymbolKey(entry?.symbol)
+      if (!symbol) return
+      const seriesCandles = Array.isArray(entry?.candles) ? entry.candles : []
+      const last = seriesCandles.length ? seriesCandles[seriesCandles.length - 1] : null
+      const epoch = Number(last?.time)
+      const isoBarTime = Number.isFinite(epoch) ? new Date(epoch * 1000).toISOString() : null
+      map.set(symbol, {
+        currentPrice: Number(last?.close),
+        latestBarTime: isoBarTime,
+      })
+    })
+    return map
+  }, [series])
+  const tradeCards = useMemo(
+    () =>
+      allActiveTrades
+        .map((trade, index) => ({
+          id: String(trade?.trade_id || `${trade?.entry_time || ''}|${trade?.symbol || ''}|${index}`),
+          trade,
+          chip: buildTradeChip(trade),
+        }))
+        .filter((entry) => entry.chip),
+    [allActiveTrades],
+  )
+  const logs = useMemo(() => (Array.isArray(snapshot?.logs) ? snapshot.logs : []), [snapshot])
+  const decisionEvents = useMemo(() => (Array.isArray(ledgerEvents) ? ledgerEvents : []), [ledgerEvents])
   const runtime = snapshot?.runtime || bot?.runtime || {}
   const stats = runtime?.stats || {}
   const status = runtime?.status || bot?.status || 'idle'
@@ -494,13 +891,28 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       }
     })
   }, [series])
+  const selectedSeriesLabel = `${selectedSeries?.symbol || '—'} ${selectedSeries?.timeframe || ''}`.trim()
+
+  useEffect(() => {
+    if (!hoveredTradeId) return
+    const stillVisible = tradeCards.some((entry) => entry.id && entry.id === hoveredTradeId)
+    if (!stillVisible) setHoveredTradeId(null)
+  }, [hoveredTradeId, tradeCards])
 
   if (!open || !bot) return null
 
+  const modalShellClassName = fullScreen
+    ? 'h-screen w-full max-w-none overflow-hidden border-0 bg-slate-950 shadow-2xl'
+    : 'h-[86vh] w-full max-w-6xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl'
+  const modalBodyHeightClass = fullScreen ? 'h-[calc(100vh-58px)]' : 'h-[calc(86vh-58px)]'
+
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-4" onClick={onClose}>
+    <div
+      className={`fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 ${fullScreen ? 'p-0' : 'p-4'}`}
+      onClick={onClose}
+    >
       <div
-        className="h-[86vh] w-full max-w-6xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl"
+        className={modalShellClassName}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
@@ -510,17 +922,42 @@ export function BotLensLiveModal({ bot, open, onClose }) {
               bot_id={bot.id} · run={renderCursor.runId || cursor.runId || '—'} · seq(render/canon)={renderCursor.seq || 0}/{cursor.seq || 0} · stream={streamState}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-700 text-slate-400 hover:text-slate-200"
-            aria-label="Close"
-          >
-            <X className="size-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setFollowLive((prev) => !prev)}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+                followLive
+                  ? 'border-emerald-600/70 bg-emerald-500/15 text-emerald-200'
+                  : 'border-slate-700 text-slate-300 hover:border-slate-600 hover:text-slate-100'
+              }`}
+              aria-pressed={followLive}
+              title="Keep chart pinned to the latest bar while streaming"
+            >
+              <LocateFixed className="size-3.5" />
+              Follow Live
+            </button>
+            <button
+              type="button"
+              onClick={() => setFullScreen((prev) => !prev)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-700 text-slate-300 transition-colors hover:border-slate-600 hover:text-slate-100"
+              aria-label={fullScreen ? 'Exit full screen' : 'Enter full screen'}
+              title={fullScreen ? 'Exit full screen' : 'Full screen'}
+            >
+              {fullScreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-700 text-slate-400 hover:text-slate-200"
+              aria-label="Close"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
 
-        <div className="h-[calc(86vh-58px)] overflow-auto p-4">
+        <div className={`${modalBodyHeightClass} overflow-auto p-4`}>
           {statusMessage ? (
             <div
               className={`mb-3 rounded border px-3 py-2 text-sm ${
@@ -534,6 +971,11 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             </div>
           ) : null}
           {error ? <div className="mb-3 rounded border border-rose-800/60 bg-rose-950/30 px-3 py-2 text-sm text-rose-200">{error}</div> : null}
+          {ledgerState?.error ? (
+            <div className="mb-3 rounded border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+              DB ledger unavailable: {ledgerState.error}
+            </div>
+          ) : null}
           {!snapshot ? (
             <div className="rounded border border-slate-800 bg-slate-900/40 px-4 py-8 text-sm text-slate-400">
               Waiting for runtime snapshot data...
@@ -574,6 +1016,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
                 <div className="rounded border border-slate-800 bg-slate-900/40 p-2">
                   <p className="text-[10px] uppercase text-slate-500">Ledger / Logs</p>
                   <p className="text-sm font-semibold text-slate-200">{decisionEvents.length} / {logs.length}</p>
+                  <p className="text-[10px] text-slate-500">db={ledgerState.status || 'idle'} · after_seq={ledgerState.nextAfterSeq || 0}</p>
                 </div>
                 <div className="rounded border border-slate-800 bg-slate-900/40 p-2">
                   <p className="text-[10px] uppercase text-slate-500">Render Queue</p>
@@ -586,10 +1029,38 @@ export function BotLensLiveModal({ bot, open, onClose }) {
                 <div className="rounded border border-slate-800 bg-slate-900/40 p-2">
                   <p className="text-[10px] uppercase text-slate-500">Render Mode</p>
                   <p className="text-sm font-semibold text-slate-200">
-                    {renderMetrics.mode} · {renderMetrics.seqBehind} behind · {formatNumber(renderMetrics.appliedRate, 1)}/s
+                    {renderMetrics.mode} · {renderMetrics.seqBehind} seq · {renderMetrics.candlesBehind} candles · {formatNumber(renderMetrics.appliedRate, 1)}/s
                   </p>
                 </div>
               </div>
+              {seriesSelectorOptions.length ? (
+                <div className="mb-3 rounded border border-slate-800 bg-slate-900/40 p-2.5">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">Symbols</p>
+                    <p className="text-xs text-slate-400">Viewing: {selectedSeriesLabel || '—'}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {seriesSelectorOptions.map((entry) => {
+                      const selected = entry.key === selectedSeriesKey
+                      return (
+                        <button
+                          key={entry.key}
+                          type="button"
+                          onClick={() => setSelectedSeriesKey(entry.key)}
+                          className={`rounded-md border px-2.5 py-1 text-xs font-medium uppercase tracking-wide transition-colors ${
+                            selected
+                              ? 'border-sky-500/60 bg-sky-500/20 text-sky-100'
+                              : 'border-slate-700 bg-slate-900/40 text-slate-300 hover:border-slate-600 hover:text-slate-100'
+                          }`}
+                          aria-pressed={selected}
+                        >
+                          {entry.symbol} · {entry.timeframe}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ) : null}
               <div className="mb-3">
                 <OverlayToggleBar
                   overlays={overlayOptions}
@@ -602,13 +1073,51 @@ export function BotLensLiveModal({ bot, open, onClose }) {
               <BotLensChart
                 chartId={`botlens-live-${bot.id}`}
                 candles={candles}
-                trades={trades}
+                trades={chartTrades}
                 overlays={visibleOverlays}
                 mode={bot.mode}
                 playbackSpeed={Number(bot.playback_speed || 0)}
-                timeframe={primary?.timeframe || null}
+                timeframe={selectedSeries?.timeframe || null}
                 overlayVisibility={visibility}
+                followLive={followLive}
               />
+              <div className="mt-3 rounded border border-slate-800 bg-slate-900/50 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Live Trades</p>
+                  <p className="text-xs text-slate-500">{tradeCards.length} open</p>
+                </div>
+                {tradeCards.length ? (
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {tradeCards.map((entry) => {
+                      const symbolKey = normalizeSymbolKey(entry.trade?.symbol)
+                      const selectedSymbolKey = normalizeSymbolKey(selectedSeries?.symbol)
+                      const context = symbolKey ? seriesPriceContext.get(symbolKey) : null
+                      const matchingSeries = seriesSelectorOptions.find(
+                        (option) => normalizeSymbolKey(option.symbol) === symbolKey,
+                      )
+                      return (
+                        <ActiveTradeChip
+                          key={entry.id || `${entry.trade?.entry_time || 'trade'}|${entry.trade?.symbol || 'symbol'}`}
+                          chip={entry.chip}
+                          trade={entry.trade}
+                          currentPrice={context?.currentPrice}
+                          latestBarTime={context?.latestBarTime}
+                          visible={!hoveredTradeId || hoveredTradeId === entry.id}
+                          onHover={(hovering) => setHoveredTradeId(hovering ? entry.id : null)}
+                          isActiveSymbol={selectedSymbolKey ? symbolKey === selectedSymbolKey : true}
+                          onClick={() => {
+                            if (matchingSeries?.key) setSelectedSeriesKey(matchingSeries.key)
+                          }}
+                        />
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded border border-dashed border-slate-800 px-3 py-4 text-sm text-slate-500">
+                    No active trades right now.
+                  </div>
+                )}
+              </div>
               {seriesStats.length ? (
                 <div className="mt-4 rounded border border-slate-800 bg-slate-900/50 p-3">
                   <div className="mb-2 flex items-center justify-between">
