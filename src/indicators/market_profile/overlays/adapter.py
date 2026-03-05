@@ -1171,7 +1171,7 @@ def market_profile_overlay_transformer(
                     float(boundary_price),
                     float(expected),
                 )
-        log.info(
+        log.debug(
             "event=market_profile_overlay_bubble_box_reconciliation symbol=%s boxes=%s bubbles=%s stats=%s sample=%s",
             symbol,
             len(boxes),

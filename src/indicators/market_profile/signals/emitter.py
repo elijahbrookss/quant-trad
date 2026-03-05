@@ -700,6 +700,148 @@ def _resolve_float(
     return max(min_value, float(default))
 
 
+def _normalize_runtime_mapping(runtime_state: MutableMapping[str, Any], key: str) -> MutableMapping[str, Any]:
+    value = runtime_state.get(key)
+    if isinstance(value, MutableMapping):
+        return value
+    normalized: Dict[str, Any] = {}
+    runtime_state[key] = normalized
+    return normalized
+
+
+def _normalize_runtime_list(runtime_state: MutableMapping[str, Any], key: str) -> List[Dict[str, Any]]:
+    value = runtime_state.get(key)
+    if isinstance(value, list):
+        return value
+    normalized: List[Dict[str, Any]] = []
+    runtime_state[key] = normalized
+    return normalized
+
+
+def _prune_epoch_mapping(mapping: MutableMapping[str, Any], *, min_epoch: int) -> int:
+    removed = 0
+    for key in list(mapping.keys()):
+        epoch = _safe_int(mapping.get(key))
+        if epoch is None or epoch < int(min_epoch):
+            mapping.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _cap_mapping_by_epoch(mapping: MutableMapping[str, Any], *, max_entries: int) -> int:
+    if max_entries <= 0:
+        removed = len(mapping)
+        mapping.clear()
+        return removed
+    extra = len(mapping) - int(max_entries)
+    if extra <= 0:
+        return 0
+    ordered_keys = sorted(
+        list(mapping.keys()),
+        key=lambda key: (
+            int(_safe_int(mapping.get(key)) or -1),
+            str(key),
+        ),
+    )
+    for key in ordered_keys[:extra]:
+        mapping.pop(key, None)
+    return int(extra)
+
+
+def _prune_pending_entries(pending: MutableMapping[str, Any], *, min_epoch: int) -> int:
+    removed = 0
+    for key in list(pending.keys()):
+        entry = pending.get(key)
+        if not isinstance(entry, Mapping):
+            pending.pop(key, None)
+            removed += 1
+            continue
+        started_epoch = _safe_int(entry.get("started_epoch"))
+        if started_epoch is not None and started_epoch < int(min_epoch):
+            pending.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _cap_pending_entries(pending: MutableMapping[str, Any], *, max_entries: int) -> int:
+    if max_entries <= 0:
+        removed = len(pending)
+        pending.clear()
+        return removed
+    extra = len(pending) - int(max_entries)
+    if extra <= 0:
+        return 0
+    ordered_keys = sorted(
+        list(pending.keys()),
+        key=lambda key: (
+            int(_safe_int((pending.get(key) or {}).get("started_epoch")) or -1)
+            if isinstance(pending.get(key), Mapping)
+            else -1,
+            str(key),
+        ),
+    )
+    for key in ordered_keys[:extra]:
+        pending.pop(key, None)
+    return int(extra)
+
+
+def _prune_active_breakouts(
+    active_breakouts: List[Dict[str, Any]], *, min_epoch: int
+) -> int:
+    kept: List[Dict[str, Any]] = []
+    removed = 0
+    for entry in active_breakouts:
+        if not isinstance(entry, Mapping):
+            removed += 1
+            continue
+        breakout_epoch = _safe_int(entry.get("breakout_epoch"))
+        if breakout_epoch is not None and breakout_epoch < int(min_epoch):
+            removed += 1
+            continue
+        kept.append(dict(entry))
+    if removed > 0 or len(kept) != len(active_breakouts):
+        active_breakouts[:] = kept
+    return removed
+
+
+def _cap_active_breakouts(active_breakouts: List[Dict[str, Any]], *, max_entries: int) -> int:
+    if max_entries <= 0:
+        removed = len(active_breakouts)
+        active_breakouts.clear()
+        return removed
+    extra = len(active_breakouts) - int(max_entries)
+    if extra <= 0:
+        return 0
+    del active_breakouts[:extra]
+    return int(extra)
+
+
+def _apply_v3_runtime_state_bounds(
+    *,
+    pending: MutableMapping[str, Any],
+    last_emit_epoch: MutableMapping[str, Any],
+    emitted_signatures: MutableMapping[str, Any],
+    active_breakouts: List[Dict[str, Any]],
+    retest_signatures: MutableMapping[str, Any],
+    min_epoch: int,
+    pending_max_entries: int,
+    active_breakouts_max_entries: int,
+    history_max_entries: int,
+) -> Dict[str, int]:
+    return {
+        "state_pruned_pending": int(_prune_pending_entries(pending, min_epoch=min_epoch)),
+        "state_pruned_last_emit_epoch": int(_prune_epoch_mapping(last_emit_epoch, min_epoch=min_epoch)),
+        "state_pruned_emitted_signatures": int(_prune_epoch_mapping(emitted_signatures, min_epoch=min_epoch)),
+        "state_pruned_active_breakouts": int(_prune_active_breakouts(active_breakouts, min_epoch=min_epoch)),
+        "state_pruned_retest_signatures": int(_prune_epoch_mapping(retest_signatures, min_epoch=min_epoch)),
+        "state_capped_pending": int(_cap_pending_entries(pending, max_entries=pending_max_entries)),
+        "state_capped_last_emit_epoch": int(_cap_mapping_by_epoch(last_emit_epoch, max_entries=history_max_entries)),
+        "state_capped_emitted_signatures": int(_cap_mapping_by_epoch(emitted_signatures, max_entries=history_max_entries)),
+        "state_capped_active_breakouts": int(_cap_active_breakouts(active_breakouts, max_entries=active_breakouts_max_entries)),
+        "state_capped_retest_signatures": int(_cap_mapping_by_epoch(retest_signatures, max_entries=history_max_entries)),
+    }
+
+
 def _get_runtime_state(
     *, snapshot_payload: Mapping[str, Any], runtime_key: tuple[str, str, str], current_epoch: int
 ) -> Dict[str, Any]:
@@ -720,6 +862,8 @@ def _get_runtime_state(
         state = {"bar_index": 0, "last_epoch": None, "profile_states": {}, "active_breakouts": []}
         storage[temporal_key] = state
     return state
+
+
 def _build_runtime_view(profile: Any) -> Dict[str, Any]:
     end_epoch = _to_epoch(getattr(profile, "end", None))
     if end_epoch is None:
@@ -1375,11 +1519,37 @@ def _market_profile_breakout_v3_payload(
         "retest_emitted": 0,
     }
     last_processed_bar_index = _safe_int(runtime_state.get("v3_last_processed_bar_index"))
-    pending: MutableMapping[str, Dict[str, Any]] = runtime_state.setdefault("v3_pending", {})
-    last_emit_epoch: MutableMapping[str, int] = runtime_state.setdefault("v3_last_emit_epoch", {})
-    emitted_signatures: MutableMapping[str, int] = runtime_state.setdefault("v3_emitted_signatures", {})
-    active_breakouts: List[Dict[str, Any]] = runtime_state.setdefault("v3_active_breakouts", [])
-    retest_signatures: MutableMapping[str, int] = runtime_state.setdefault("v3_retest_signatures", {})
+    pending = _normalize_runtime_mapping(runtime_state, "v3_pending")
+    last_emit_epoch = _normalize_runtime_mapping(runtime_state, "v3_last_emit_epoch")
+    emitted_signatures = _normalize_runtime_mapping(runtime_state, "v3_emitted_signatures")
+    active_breakouts = _normalize_runtime_list(runtime_state, "v3_active_breakouts")
+    retest_signatures = _normalize_runtime_mapping(runtime_state, "v3_retest_signatures")
+
+    state_ttl_bars = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_state_ttl_bars",),
+        default=max(128, retest_max_lookback + confirm_bars + lockout_bars + 8),
+        min_value=1,
+    )
+    pending_max_entries = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_pending_max_entries",),
+        default=max(64, int(len(runtime_views) * 4)),
+        min_value=1,
+    )
+    active_breakouts_max_entries = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_active_breakouts_max_entries",),
+        default=max(64, int(retest_max_lookback * 2)),
+        min_value=1,
+    )
+    history_max_entries = _resolve_int(
+        params_map,
+        keys=("market_profile_breakout_v3_history_max_entries",),
+        default=max(256, int(active_breakouts_max_entries * 4)),
+        min_value=1,
+    )
+    min_state_epoch = int(bar_epoch) - int(state_ttl_bars * int(timeframe_seconds))
 
     if last_processed_bar_index is not None and bar_index <= last_processed_bar_index:
         pending.clear()
@@ -1387,6 +1557,20 @@ def _market_profile_breakout_v3_payload(
         emitted_signatures.clear()
         active_breakouts.clear()
         retest_signatures.clear()
+
+    state_bounds = _apply_v3_runtime_state_bounds(
+        pending=pending,
+        last_emit_epoch=last_emit_epoch,
+        emitted_signatures=emitted_signatures,
+        active_breakouts=active_breakouts,
+        retest_signatures=retest_signatures,
+        min_epoch=min_state_epoch,
+        pending_max_entries=pending_max_entries,
+        active_breakouts_max_entries=active_breakouts_max_entries,
+        history_max_entries=history_max_entries,
+    )
+    for key, value in state_bounds.items():
+        diagnostic_counts[key] = int(diagnostic_counts.get(key, 0)) + int(value)
 
     active_views: Dict[str, Dict[str, Any]] = {str(item["profile_key"]): item for item in runtime_views}
 
@@ -1615,11 +1799,26 @@ def _market_profile_breakout_v3_payload(
             str(retest_signal.get("trace_id") or ""),
         )
 
+    active_breakouts = remaining_breakouts
+    state_bounds_after = _apply_v3_runtime_state_bounds(
+        pending=pending,
+        last_emit_epoch=last_emit_epoch,
+        emitted_signatures=emitted_signatures,
+        active_breakouts=active_breakouts,
+        retest_signatures=retest_signatures,
+        min_epoch=min_state_epoch,
+        pending_max_entries=pending_max_entries,
+        active_breakouts_max_entries=active_breakouts_max_entries,
+        history_max_entries=history_max_entries,
+    )
+    for key, value in state_bounds_after.items():
+        diagnostic_counts[key] = int(diagnostic_counts.get(key, 0)) + int(value)
+
     runtime_state["v3_last_processed_bar_index"] = int(bar_index)
     runtime_state["v3_pending"] = pending
     runtime_state["v3_last_emit_epoch"] = last_emit_epoch
     runtime_state["v3_emitted_signatures"] = emitted_signatures
-    runtime_state["v3_active_breakouts"] = remaining_breakouts
+    runtime_state["v3_active_breakouts"] = active_breakouts
     runtime_state["v3_retest_signatures"] = retest_signatures
     return {
         "signals": emitted,
@@ -1641,6 +1840,10 @@ def _market_profile_breakout_v3_payload(
             "source_timeframe_seconds": int(timeframe_seconds),
             "lockout_timeframe_seconds": int(timeframe_seconds),
             "timeframe_mismatch_warning": 0,
+            "state_ttl_bars": int(state_ttl_bars),
+            "state_pending_max_entries": int(pending_max_entries),
+            "state_active_breakouts_max_entries": int(active_breakouts_max_entries),
+            "state_history_max_entries": int(history_max_entries),
             "candidate_lockout_blocked": int(diagnostic_counts["candidate_lockout_blocked"]),
             "candidate_enqueued_pending": int(diagnostic_counts["candidate_enqueued_pending"]),
             "candidate_already_pending": int(diagnostic_counts["candidate_already_pending"]),
@@ -1654,5 +1857,15 @@ def _market_profile_breakout_v3_payload(
             "retest_missing_boundary_price": int(diagnostic_counts["retest_missing_boundary_price"]),
             "retest_condition_rejected": int(diagnostic_counts["retest_condition_rejected"]),
             "retest_duplicate_signature": int(diagnostic_counts["retest_duplicate_signature"]),
+            "state_pruned_pending": int(diagnostic_counts.get("state_pruned_pending") or 0),
+            "state_pruned_last_emit_epoch": int(diagnostic_counts.get("state_pruned_last_emit_epoch") or 0),
+            "state_pruned_emitted_signatures": int(diagnostic_counts.get("state_pruned_emitted_signatures") or 0),
+            "state_pruned_active_breakouts": int(diagnostic_counts.get("state_pruned_active_breakouts") or 0),
+            "state_pruned_retest_signatures": int(diagnostic_counts.get("state_pruned_retest_signatures") or 0),
+            "state_capped_pending": int(diagnostic_counts.get("state_capped_pending") or 0),
+            "state_capped_last_emit_epoch": int(diagnostic_counts.get("state_capped_last_emit_epoch") or 0),
+            "state_capped_emitted_signatures": int(diagnostic_counts.get("state_capped_emitted_signatures") or 0),
+            "state_capped_active_breakouts": int(diagnostic_counts.get("state_capped_active_breakouts") or 0),
+            "state_capped_retest_signatures": int(diagnostic_counts.get("state_capped_retest_signatures") or 0),
         },
     }
