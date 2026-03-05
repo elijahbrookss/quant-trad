@@ -630,27 +630,36 @@ class BotRunStepRecord(Base):
 
 
 
-class BotRunSnapshotRecord(Base):
-    """Durable runtime snapshots for BotLens and recovery."""
+class BotRunViewStateRecord(Base):
+    """Materialized BotLens view state for run/bootstrap reads."""
 
-    __tablename__ = "portal_bot_run_snapshots"
+    __tablename__ = "portal_bot_run_view_state"
+    __table_args__ = (
+        UniqueConstraint("bot_id", "run_id", "series_key", name="uq_portal_bot_run_view_state_scope"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(64), nullable=False)
     bot_id = Column(String(64), nullable=False)
     series_key = Column(String(255), nullable=False)
-    snapshot_seq = Column(Integer, nullable=False)
-    snapshot_payload = Column(JSONB, nullable=False, default=dict)
+    seq = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    payload = Column(JSONB, nullable=False, default=dict)
+    event_time = Column(DateTime, nullable=True)
+    known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "id": self.id,
+            "id": int(self.id or 0),
             "run_id": self.run_id,
             "bot_id": self.bot_id,
             "series_key": self.series_key,
-            "snapshot_seq": int(self.snapshot_seq or 0),
-            "snapshot_payload": dict(self.snapshot_payload or {}),
+            "seq": int(self.seq or 0),
+            "schema_version": int(self.schema_version or 1),
+            "payload": dict(self.payload or {}),
+            "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
+            "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
 

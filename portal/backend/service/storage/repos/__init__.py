@@ -32,14 +32,14 @@ from .instruments import (
 from .presets import delete_symbol_preset, list_symbol_presets, upsert_symbol_preset
 from .runs import get_bot_run, list_bot_runs, upsert_bot_run
 from .runtime_events import (
-    get_latest_bot_run_snapshot,
+    get_latest_bot_run_view_state,
     get_latest_bot_runtime_event,
     get_latest_bot_runtime_run_id,
-    list_bot_run_snapshots,
     list_bot_runtime_events,
-    record_bot_run_snapshot,
     record_bot_run_step,
+    record_bot_run_steps_batch,
     record_bot_runtime_event,
+    upsert_bot_run_view_state,
     update_bot_runtime_status,
 )
 from .strategies import (
@@ -91,10 +91,9 @@ __all__ = [
     "get_bot_run",
     "get_indicator",
     "get_instrument",
-    "get_latest_bot_run_snapshot",
+    "get_latest_bot_run_view_state",
     "get_latest_bot_runtime_event",
     "get_latest_bot_runtime_run_id",
-    "list_bot_run_snapshots",
     "list_bot_runs",
     "list_bot_runtime_events",
     "list_bot_trade_events_for_trades",
@@ -110,9 +109,10 @@ __all__ = [
     "load_instruments",
     "load_strategies",
     "mark_bot_crashed",
-    "record_bot_run_snapshot",
     "record_bot_run_step",
+    "record_bot_run_steps_batch",
     "record_bot_runtime_event",
+    "upsert_bot_run_view_state",
     "record_bot_trade",
     "record_bot_trade_event",
     "strategies_for_indicator",

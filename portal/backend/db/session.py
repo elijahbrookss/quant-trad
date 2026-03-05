@@ -197,14 +197,14 @@ class Database:
         require_table("portal_bot_trades")
         require_table("portal_bots")
         require_table("portal_async_jobs")
-        require_table("portal_bot_run_snapshots")
         require_table("portal_bot_run_events")
+        require_table("portal_bot_run_view_state")
         assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
         assert_columns("portal_async_jobs")
-        assert_columns("portal_bot_run_snapshots")
         assert_columns("portal_bot_run_events")
+        assert_columns("portal_bot_run_view_state")
 
     @property
     def available(self) -> bool:
