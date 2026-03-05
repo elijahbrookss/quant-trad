@@ -65,7 +65,12 @@ export const useOverlayControls = ({ overlays = [], extraOptions = [] } = {}) =>
 
   useEffect(() => {
     if (!overlayOptions.length) {
-      setVisibility({})
+      setVisibility((prev) => {
+        if (!prev || Object.keys(prev).length === 0) {
+          return prev
+        }
+        return {}
+      })
       return
     }
     setVisibility((prev) => {
