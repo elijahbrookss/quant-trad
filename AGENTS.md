@@ -87,6 +87,7 @@ QuantLab → Strategy → Bot → Trades → Playback
 ### Debugging Guidance
 - If the root cause isn’t clear, add targeted, temporary logs to observe state transitions—do not ship workarounds that mask the issue.
 - Prefer stabilizing dependencies (refs, memoized callbacks) before adding logs; throttle diagnostics and remove them once the fix is in.
+- For container log inspection in this environment, prefer `docker logs --tail <N>`; `--since` is not reliable here.
 
 ### Required Correlation Fields (when applicable)
 Include these whenever they exist:
@@ -171,3 +172,14 @@ Refactor with logs, tests, or concrete pressure.
 
 Quant-Trad is designed to be explainable first.
 Performance, polish, and optimization come second.
+
+---
+
+## Docs Sync Workflow
+
+- After updating files in this repo, run `make sync-docs`.
+- `make up` and `make build` also trigger `sync-docs` automatically.
+- Configure destination per machine using:
+  - `SYNC_DOCS_DEST`
+  - or `OBSIDIAN_SYNC_DOCS_DEST`
+  - optional local override file: `.sync-docs.mk`
