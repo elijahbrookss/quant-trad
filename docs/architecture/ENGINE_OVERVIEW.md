@@ -10,7 +10,7 @@ It is written for someone who has never coded before.
 - `Component`: Quant-Trad engine surface (indicator, strategy, runtime, playback)
 - `Owner/Domain`: Platform Architecture
 - `Doc Version`: 1.2
-- `Related Contracts`: `docs/agents/00_system_contract.md`, `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/BOT_RUNTIME_SERVICE_ARCHITECTURE.md`, `docs/architecture/INDICATOR_AUTHORING_CONTRACT.md`
+- `Related Contracts`: `docs/agents/00_system_contract.md`, `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/BOT_RUNTIME_SERVICE_ARCHITECTURE.md`, `docs/architecture/INDICATOR_AUTHORING_CONTRACT.md`, `docs/architecture/REGIME_CLASSIFICATION_SYSTEM.md`
 
 ## 1) Problem and scope
 
