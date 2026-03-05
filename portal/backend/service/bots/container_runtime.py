@@ -6,6 +6,7 @@ import logging
 import multiprocessing as mp
 import os
 import queue
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -17,11 +18,9 @@ from portal.backend.db.session import db
 from portal.backend.service.bots.bot_runtime import BotRuntime
 from portal.backend.service.bots.bot_runtime.strategy.strategy_loader import StrategyLoader
 from portal.backend.service.storage.storage import (
-    get_latest_bot_run_snapshot,
     list_bot_runtime_events,
     load_bots,
     record_bot_run_step,
-    record_bot_run_snapshot,
     update_bot_runtime_status,
 )
 
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 _TERMINAL_STATUSES = {"completed", "stopped", "error", "failed", "crashed"}
 _MAX_SYMBOLS_PER_STRATEGY = 10
 _MAX_SYMBOL_WORKERS = 8
-_SNAPSHOT_SCHEMA_VERSION = 1
+_VIEW_STATE_SCHEMA_VERSION = 1
 
 
 def _utc_now_iso() -> str:
@@ -54,6 +53,23 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _runtime_bar_marker(runtime_payload: Mapping[str, Any]) -> str:
+    last_bar = runtime_payload.get("last_bar")
+    if not isinstance(last_bar, Mapping):
+        return ""
+    marker = last_bar.get("end") or last_bar.get("time")
+    if marker is None:
+        return ""
+    return str(marker).strip()
+
+
+def _runtime_trade_count(runtime_payload: Mapping[str, Any]) -> int:
+    stats = runtime_payload.get("stats")
+    if not isinstance(stats, Mapping):
+        return -1
+    return _coerce_int(stats.get("total_trades"), -1)
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
@@ -70,7 +86,129 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _emit_telemetry(url: str, payload: Mapping[str, Any]) -> bool:
+def _tail_window(entries: Any, max_items: int) -> List[Any]:
+    if not isinstance(entries, list):
+        return []
+    if int(max_items) <= 0:
+        return list(entries)
+    if len(entries) <= int(max_items):
+        return list(entries)
+    return list(entries[-int(max_items) :])
+
+
+def _compact_overlay_geometry(value: Any, *, max_points: int) -> Any:
+    if isinstance(value, Mapping):
+        compact: Dict[str, Any] = {}
+        for key, entry in value.items():
+            compact[str(key)] = _compact_overlay_geometry(entry, max_points=max_points)
+        return compact
+    if isinstance(value, list):
+        if int(max_points) <= 0:
+            subset = list(value)
+        elif len(value) <= int(max_points):
+            subset = list(value)
+        else:
+            subset = list(value[-int(max_points) :])
+        return [_compact_overlay_geometry(entry, max_points=max_points) for entry in subset]
+    return value
+
+
+def _compact_overlay_window(overlays: Any, *, max_overlays: int, max_points: int) -> List[Dict[str, Any]]:
+    if not isinstance(overlays, list):
+        return []
+    if int(max_overlays) <= 0:
+        subset = list(overlays)
+    elif len(overlays) <= int(max_overlays):
+        subset = list(overlays)
+    else:
+        subset = list(overlays[-int(max_overlays) :])
+    compacted: List[Dict[str, Any]] = []
+    for overlay in subset:
+        if not isinstance(overlay, Mapping):
+            continue
+        compacted.append(dict(_compact_overlay_geometry(overlay, max_points=max_points)))
+    return compacted
+
+
+def _compact_trades_window(trades: Any, *, max_closed: int) -> List[Dict[str, Any]]:
+    if not isinstance(trades, list):
+        return []
+    if int(max_closed) <= 0:
+        return [dict(entry) for entry in trades if isinstance(entry, Mapping)]
+
+    keep_mask: List[bool] = [False] * len(trades)
+    closed_indices: List[int] = []
+    for index, trade in enumerate(trades):
+        if not isinstance(trade, Mapping):
+            continue
+        closed_at = trade.get("closed_at")
+        if closed_at:
+            closed_indices.append(index)
+            continue
+        keep_mask[index] = True
+    for index in closed_indices[-int(max_closed) :]:
+        keep_mask[index] = True
+
+    compacted: List[Dict[str, Any]] = []
+    for index, keep in enumerate(keep_mask):
+        if not keep:
+            continue
+        trade = trades[index]
+        if isinstance(trade, Mapping):
+            compacted.append(dict(trade))
+    return compacted
+
+
+def _compact_view_state_payload(
+    chart_snapshot: Mapping[str, Any],
+    *,
+    max_series: int,
+    max_candles: int,
+    max_overlays: int,
+    max_overlay_points: int,
+    max_closed_trades: int,
+    max_logs: int,
+    max_decisions: int,
+    max_warnings: int,
+) -> Dict[str, Any]:
+    raw_series = chart_snapshot.get("series")
+    compact_series: List[Dict[str, Any]] = []
+    if isinstance(raw_series, list):
+        for entry in raw_series[: max(int(max_series), 0) or None]:
+            if not isinstance(entry, Mapping):
+                continue
+            compact_series.append(
+                {
+                    "strategy_id": entry.get("strategy_id"),
+                    "symbol": entry.get("symbol"),
+                    "timeframe": entry.get("timeframe"),
+                    "datasource": entry.get("datasource"),
+                    "exchange": entry.get("exchange"),
+                    "instrument": entry.get("instrument"),
+                    "candles": _tail_window(entry.get("candles"), max_candles),
+                    "overlays": _compact_overlay_window(
+                        entry.get("overlays"),
+                        max_overlays=max_overlays,
+                        max_points=max_overlay_points,
+                    ),
+                    "stats": dict(entry.get("stats") or {}) if isinstance(entry.get("stats"), Mapping) else {},
+                }
+            )
+
+    runtime_payload = chart_snapshot.get("runtime")
+    compact_runtime = dict(runtime_payload) if isinstance(runtime_payload, Mapping) else {}
+
+    return {
+        "series": compact_series,
+        "trades": _compact_trades_window(chart_snapshot.get("trades"), max_closed=max_closed_trades),
+        "logs": _tail_window(chart_snapshot.get("logs"), max_logs),
+        "decisions": _tail_window(chart_snapshot.get("decisions"), max_decisions),
+        "warnings": _tail_window(chart_snapshot.get("warnings"), max_warnings),
+        "runtime": compact_runtime,
+    }
+
+
+def _emit_telemetry_ephemeral_message(url: str, message: str) -> bool:
     if not url:
         return False
     try:
@@ -81,7 +219,7 @@ def _emit_telemetry(url: str, payload: Mapping[str, Any]) -> bool:
 
     async def _send() -> None:
         async with websockets.connect(url, open_timeout=2, close_timeout=1) as ws:
-            await ws.send(json.dumps(_json_safe(payload)))
+            await ws.send(message)
 
     try:
         asyncio.run(_send())
@@ -89,6 +227,56 @@ def _emit_telemetry(url: str, payload: Mapping[str, Any]) -> bool:
         logger.warning("bot_telemetry_send_failed | error=%s", exc)
         return False
     return True
+
+
+class _TelemetryEmitter:
+    def __init__(self, url: str) -> None:
+        self.url = str(url or "").strip()
+        self._sync_connect = None
+        self._sync_ws = None
+        if not self.url:
+            return
+        try:
+            from websockets.sync.client import connect as sync_connect  # type: ignore
+
+            self._sync_connect = sync_connect
+        except Exception:
+            self._sync_connect = None
+
+    def _send_sync_message(self, message: str) -> bool:
+        if self._sync_connect is None:
+            return False
+        for attempt in range(2):
+            try:
+                if self._sync_ws is None:
+                    self._sync_ws = self._sync_connect(self.url, open_timeout=2, close_timeout=1)
+                self._sync_ws.send(message)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("bot_telemetry_send_failed | mode=sync | attempt=%s | error=%s", attempt + 1, exc)
+                self.close()
+        return False
+
+    def send_message(self, message: str) -> bool:
+        if not self.url:
+            return False
+        if self._sync_connect is not None:
+            return self._send_sync_message(message)
+        return _emit_telemetry_ephemeral_message(self.url, message)
+
+    def send(self, payload: Mapping[str, Any]) -> bool:
+        message = json.dumps(_json_safe(payload))
+        return self.send_message(message)
+
+    def close(self) -> None:
+        ws = self._sync_ws
+        self._sync_ws = None
+        if ws is None:
+            return
+        try:
+            ws.close()
+        except Exception:
+            pass
 
 
 def _normalise_balances(raw_balances: Mapping[str, Any]) -> Dict[str, float]:
@@ -264,8 +452,8 @@ def _merge_runtime_payloads(
     return runtime
 
 
-def _merge_chart_snapshots(
-    latest_worker_snapshots: Mapping[str, Mapping[str, Any]],
+def _merge_worker_view_state(
+    latest_worker_view_state: Mapping[str, Mapping[str, Any]],
     *,
     worker_count: int,
     active_workers: int,
@@ -278,8 +466,8 @@ def _merge_chart_snapshots(
     warnings: List[Any] = []
     runtime_payloads: List[Mapping[str, Any]] = []
 
-    for envelope in latest_worker_snapshots.values():
-        chart = envelope.get("snapshot")
+    for envelope in latest_worker_view_state.values():
+        chart = envelope.get("view_state")
         if not isinstance(chart, Mapping):
             continue
         raw_series = chart.get("series")
@@ -429,53 +617,130 @@ def _series_worker(
         )
     runtime: BotRuntime
     runtime_error: Dict[str, str] = {}
-    full_snapshot_interval_ms = max(
-        50,
-        _coerce_int(os.getenv("BOT_WORKER_FULL_SNAPSHOT_INTERVAL_MS"), 1000),
-    )
-    last_snapshot_emit_mono = 0.0
+    stream_max_series = max(1, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_SERIES"), 12))
+    stream_max_candles = max(50, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_CANDLES"), 320))
+    stream_max_overlays = max(50, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_OVERLAYS"), 400))
+    stream_max_overlay_points = max(20, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_OVERLAY_POINTS"), 160))
+    stream_max_closed_trades = max(20, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_CLOSED_TRADES"), 240))
+    stream_max_logs = max(50, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_LOGS"), 300))
+    stream_max_decisions = max(100, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_DECISIONS"), 600))
+    stream_max_warnings = max(20, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_WARNINGS"), 120))
+    emit_state_lock = threading.RLock()
+    emit_wakeup = threading.Event()
+    emit_stop = threading.Event()
+    pending_emit_generation = 0
+    emitted_generation = 0
+    latest_status = "running"
+    latest_bar_marker = ""
+    latest_trade_count = -1
 
-    def _emit_snapshot() -> str:
+    def _emit_view_state() -> str:
+        nonlocal latest_status
         chart_snapshot = runtime.chart_payload()
-        runtime_snapshot = chart_snapshot.get("runtime") if isinstance(chart_snapshot, Mapping) else {}
+        compact_snapshot = _compact_view_state_payload(
+            chart_snapshot if isinstance(chart_snapshot, Mapping) else {},
+            max_series=stream_max_series,
+            max_candles=stream_max_candles,
+            max_overlays=stream_max_overlays,
+            max_overlay_points=stream_max_overlay_points,
+            max_closed_trades=stream_max_closed_trades,
+            max_logs=stream_max_logs,
+            max_decisions=stream_max_decisions,
+            max_warnings=stream_max_warnings,
+        )
+        runtime_snapshot = compact_snapshot.get("runtime") if isinstance(compact_snapshot, Mapping) else {}
         status_value = str((runtime_snapshot or {}).get("status") or "").lower() or "running"
+        with emit_state_lock:
+            latest_status = status_value
         event_queue.put(
             {
-                "kind": "snapshot",
+                "kind": "view_state",
                 "worker_id": worker_id,
                 "symbols": list(symbols),
                 "status": status_value,
-                "snapshot": chart_snapshot,
+                "view_state": compact_snapshot,
                 "at": _utc_now_iso(),
             }
         )
         return status_value
 
     def _state_callback(payload: Dict[str, Any]) -> None:
-        nonlocal last_snapshot_emit_mono
+        nonlocal pending_emit_generation, latest_status, latest_bar_marker, latest_trade_count
         if not isinstance(payload, Mapping):
             return
         runtime_payload = payload.get("runtime")
         if not isinstance(runtime_payload, Mapping):
             return
         status_value = str(runtime_payload.get("status") or "").strip().lower()
-        now_mono = time.monotonic()
-        due = (
-            last_snapshot_emit_mono <= 0.0
-            or (now_mono - last_snapshot_emit_mono) * 1000.0 >= float(full_snapshot_interval_ms)
-        )
-        if due or status_value in _TERMINAL_STATUSES:
-            _emit_snapshot()
-            last_snapshot_emit_mono = now_mono
+        bar_marker = _runtime_bar_marker(runtime_payload)
+        trade_count = _runtime_trade_count(runtime_payload)
+        should_emit = False
+        with emit_state_lock:
+            if status_value:
+                latest_status = status_value
+            if bar_marker and bar_marker != latest_bar_marker:
+                latest_bar_marker = bar_marker
+                should_emit = True
+            if trade_count >= 0 and trade_count != latest_trade_count:
+                latest_trade_count = trade_count
+                should_emit = True
+            if status_value in _TERMINAL_STATUSES:
+                should_emit = True
+            if should_emit:
+                pending_emit_generation += 1
+        if should_emit:
+            emit_wakeup.set()
+
+    def _view_state_emitter_loop() -> None:
+        nonlocal emitted_generation
+        while not emit_stop.is_set():
+            emit_wakeup.wait(timeout=0.05)
+            emit_wakeup.clear()
+            with emit_state_lock:
+                pending_generation = int(pending_emit_generation)
+            if pending_generation <= emitted_generation:
+                continue
+            try:
+                _emit_view_state()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "bot_symbol_worker_view_state_emit_failed | run_id=%s | bot_id=%s | worker_id=%s | error=%s",
+                    run_id,
+                    bot_id,
+                    worker_id,
+                    exc,
+                )
+            with emit_state_lock:
+                emitted_generation = int(pending_emit_generation)
 
     runtime = BotRuntime(bot_id=bot_id, config=child_config, state_callback=_state_callback)
     runtime.reset_if_finished()
+    emitter_thread = threading.Thread(
+        target=_view_state_emitter_loop,
+        name=f"bot-view-emitter-{worker_id}",
+        daemon=True,
+    )
+    emitter_thread.start()
     try:
         runtime.start()
     except Exception as exc:  # noqa: BLE001
         runtime_error["message"] = str(exc)
         runtime_error["exception"] = repr(exc)
-    status = _emit_snapshot()
+    finally:
+        emit_stop.set()
+        emit_wakeup.set()
+        emitter_thread.join(timeout=1.0)
+    try:
+        status = _emit_view_state()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "bot_symbol_worker_final_view_state_emit_failed | run_id=%s | bot_id=%s | worker_id=%s | error=%s",
+            run_id,
+            bot_id,
+            worker_id,
+            exc,
+        )
+        status = "error" if runtime_error else "stopped"
     if runtime_error:
         event_queue.put(
             {
@@ -522,12 +787,6 @@ def main() -> int:
     idle_cycle_threshold = max(1, _coerce_int(os.getenv("SNAPSHOT_IDLE_CYCLES"), 2))
 
     telemetry_url = str(os.getenv("BACKEND_TELEMETRY_WS_URL") or "").strip()
-    telemetry_include_snapshot = str(os.getenv("BOT_TELEMETRY_INCLUDE_SNAPSHOT") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
     if bot is None:
@@ -536,8 +795,6 @@ def main() -> int:
     run_id = str(uuid.uuid4())
     if list_bot_runtime_events(bot_id=bot_id, run_id=run_id, after_seq=0, limit=1):
         raise RuntimeError(f"run_id collision in runtime events for bot {bot_id}: {run_id}")
-    if get_latest_bot_run_snapshot(bot_id=bot_id, run_id=run_id, series_key="bot") is not None:
-        raise RuntimeError(f"run_id collision in runtime snapshots for bot {bot_id}: {run_id}")
     logger.info("bot_runtime_run_started | bot_id=%s | run_id=%s", bot_id, run_id)
     update_bot_runtime_status(bot_id=bot_id, run_id=run_id, status="running")
     strategy_id = str(bot.get("strategy_id") or "").strip()
@@ -577,7 +834,7 @@ def main() -> int:
     child_queues: Dict[str, "mp.Queue[Dict[str, Any]]"] = {}
     children: Dict[str, mp.Process] = {}
     worker_symbols: Dict[str, List[str]] = {}
-    latest_snapshots: Dict[str, Dict[str, Any]] = {}
+    latest_view_state: Dict[str, Dict[str, Any]] = {}
     degraded_symbols: set[str] = set()
 
     for index, symbols in enumerate(symbol_shards):
@@ -602,11 +859,13 @@ def main() -> int:
         proc.start()
         children[worker_id] = proc
 
-    seq = 0
+    cycle_seq = 0
+    view_seq = 0
+    telemetry_sender = _TelemetryEmitter(telemetry_url)
     telemetry_degraded = False
-    idle_cycles_without_snapshot_events = 0
+    idle_cycles_without_view_events = 0
     try:
-        while children or latest_snapshots:
+        while children or latest_view_state:
             loop_started_at = datetime.now(timezone.utc)
             loop_started = time.monotonic()
             queue_drain_ms = 0.0
@@ -615,10 +874,12 @@ def main() -> int:
             snapshot_write_ms = 0.0
             telemetry_emit_ms = 0.0
             status_write_ms = 0.0
+            payload_bytes = 0
             sleep_for = 0.0
             target_interval_ms = idle_snapshot_interval_ms
             cadence_mode = "idle"
-            snapshot_events_in_cycle = 0
+            view_state_events_in_cycle = 0
+            view_state_build_ms = 0.0
             queue_drain_started = time.monotonic()
             for worker_id, event_queue in list(child_queues.items()):
                 while True:
@@ -627,9 +888,10 @@ def main() -> int:
                     except queue.Empty:
                         break
                     kind = str(event.get("kind") or "").strip().lower()
-                    if kind == "snapshot":
-                        snapshot_events_in_cycle += 1
-                        latest_snapshots[worker_id] = dict(event)
+                    if kind == "view_state":
+                        view_state_events_in_cycle += 1
+                        latest_view_state[worker_id] = dict(event)
+                        break
                     elif kind == "worker_error":
                         symbols = event.get("symbols")
                         if isinstance(symbols, list):
@@ -665,44 +927,38 @@ def main() -> int:
                 child_queues.pop(worker_id, None)
             worker_reconcile_ms = max((time.monotonic() - worker_reconcile_started) * 1000.0, 0.0)
 
-            seq += 1
+            cycle_seq += 1
             now_iso = _utc_now_iso()
             merge_started = time.monotonic()
-            merged_chart = _merge_chart_snapshots(
-                latest_snapshots,
+            merged_chart = _merge_worker_view_state(
+                latest_view_state,
                 worker_count=len(symbol_shards),
                 active_workers=len(children),
                 degraded_symbols=sorted(degraded_symbols),
             )
             merge_ms = max((time.monotonic() - merge_started) * 1000.0, 0.0)
-            snapshot = {
-                "kind": "snapshot",
-                "schema_version": _SNAPSHOT_SCHEMA_VERSION,
-                "run_id": run_id,
-                "snapshot_seq": seq,
-                "series_key": "bot",
-                "status": str((merged_chart.get("runtime") or {}).get("status") or ""),
-                "snapshot": merged_chart,
-                "known_at": now_iso,
-                "at": now_iso,
-            }
-            snapshot_write_started = time.monotonic()
-            record_bot_run_snapshot(
-                {
+            view_state_envelope: Dict[str, Any] | None = None
+            if view_state_events_in_cycle > 0 or view_seq == 0 or not children:
+                view_state_started = time.monotonic()
+                view_seq += 1
+                view_state_envelope = {
+                    "kind": "view_state",
+                    "schema_version": _VIEW_STATE_SCHEMA_VERSION,
                     "run_id": run_id,
-                    "bot_id": bot_id,
+                    "seq": view_seq,
                     "series_key": "bot",
-                    "snapshot_seq": seq,
-                    "snapshot_payload": snapshot,
+                    "status": str((merged_chart.get("runtime") or {}).get("status") or ""),
+                    "payload": merged_chart,
+                    "known_at": now_iso,
+                    "at": now_iso,
                 }
-            )
-            snapshot_write_ms = max((time.monotonic() - snapshot_write_started) * 1000.0, 0.0)
+                view_state_build_ms = max((time.monotonic() - view_state_started) * 1000.0, 0.0)
             telemetry_payload = {
                 "run_id": run_id,
                 "bot_id": bot_id,
                 "series_key": "bot",
-                "snapshot_seq": seq,
-                "status": str(snapshot.get("status") or ""),
+                "seq": cycle_seq,
+                "status": str((merged_chart.get("runtime") or {}).get("status") or ""),
                 "at": now_iso,
                 "known_at": now_iso,
                 "summary": {
@@ -711,10 +967,17 @@ def main() -> int:
                     "warning_count": len(merged_chart.get("warnings") or []),
                 },
             }
-            if telemetry_include_snapshot:
-                telemetry_payload["snapshot"] = snapshot
+            if isinstance(view_state_envelope, Mapping):
+                telemetry_payload["view_state"] = dict(view_state_envelope)
+            telemetry_message = json.dumps(_json_safe(telemetry_payload))
+            payload_bytes = len(telemetry_message.encode("utf-8"))
+            summary_payload = telemetry_payload.get("summary")
+            if isinstance(summary_payload, MutableMapping):
+                summary_payload["payload_bytes"] = payload_bytes
+                telemetry_message = json.dumps(_json_safe(telemetry_payload))
+                payload_bytes = len(telemetry_message.encode("utf-8"))
             telemetry_started = time.monotonic()
-            sent = _emit_telemetry(telemetry_url, telemetry_payload)
+            sent = telemetry_sender.send_message(telemetry_message)
             telemetry_emit_ms = max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
             if not sent:
                 telemetry_degraded = True
@@ -728,23 +991,23 @@ def main() -> int:
             )
             status_write_ms = max((time.monotonic() - status_write_started) * 1000.0, 0.0)
             if children:
-                if snapshot_events_in_cycle > 0:
-                    idle_cycles_without_snapshot_events = 0
+                if view_state_events_in_cycle > 0:
+                    idle_cycles_without_view_events = 0
                     target_interval_ms = fast_snapshot_interval_ms
                     cadence_mode = "hot"
                 else:
-                    idle_cycles_without_snapshot_events += 1
-                    if idle_cycles_without_snapshot_events >= idle_cycle_threshold:
+                    idle_cycles_without_view_events += 1
+                    if idle_cycles_without_view_events >= idle_cycle_threshold:
                         target_interval_ms = idle_snapshot_interval_ms
                         cadence_mode = "idle"
                     else:
                         target_interval_ms = fast_snapshot_interval_ms
                         cadence_mode = "warmup"
                 elapsed = time.monotonic() - loop_started
-                sleep_for = max((target_interval_ms / 1000.0) - elapsed, 0.05)
+                sleep_for = max((target_interval_ms / 1000.0) - elapsed, 0.005)
             else:
                 sleep_for = 0.0
-                idle_cycles_without_snapshot_events = 0
+                idle_cycles_without_view_events = 0
                 cadence_mode = "stopped"
             loop_ended_at = datetime.now(timezone.utc)
             loop_total_ms = max((time.monotonic() - loop_started) * 1000.0, 0.0)
@@ -758,7 +1021,8 @@ def main() -> int:
                     "duration_ms": loop_total_ms,
                     "ok": True,
                     "context": {
-                        "snapshot_seq": seq,
+                        "snapshot_seq": cycle_seq,
+                        "view_seq": view_seq,
                         "worker_count": len(symbol_shards),
                         "active_workers": len(children),
                         "degraded_symbols_count": len(degraded_symbols),
@@ -767,21 +1031,23 @@ def main() -> int:
                         "fast_snapshot_interval_ms": fast_snapshot_interval_ms,
                         "idle_snapshot_interval_ms": idle_snapshot_interval_ms,
                         "idle_cycle_threshold": idle_cycle_threshold,
-                        "idle_cycles_without_snapshot_events": idle_cycles_without_snapshot_events,
-                        "snapshot_events_in_cycle": snapshot_events_in_cycle,
+                        "idle_cycles_without_snapshot_events": idle_cycles_without_view_events,
+                        "snapshot_events_in_cycle": view_state_events_in_cycle,
                         "cadence_mode": cadence_mode,
                         "queue_drain_ms": queue_drain_ms,
                         "worker_reconcile_ms": worker_reconcile_ms,
                         "merge_ms": merge_ms,
                         "snapshot_write_ms": snapshot_write_ms,
+                        "view_state_build_ms": view_state_build_ms,
                         "telemetry_emit_ms": telemetry_emit_ms,
+                        "payload_bytes": payload_bytes,
                         "status_write_ms": status_write_ms,
                         "sleep_ms": sleep_for * 1000.0,
                     },
                 }
             )
             if not children:
-                latest_snapshots.clear()
+                latest_view_state.clear()
                 break
 
             sleep_started_at = datetime.now(timezone.utc)
@@ -797,14 +1063,15 @@ def main() -> int:
                         "duration_ms": max(sleep_for * 1000.0, 0.0),
                         "ok": True,
                         "context": {
-                            "snapshot_seq": seq,
+                            "snapshot_seq": cycle_seq,
+                            "view_seq": view_seq,
                             "snapshot_interval_ms": snapshot_interval_ms,
                             "target_interval_ms": target_interval_ms,
                             "fast_snapshot_interval_ms": fast_snapshot_interval_ms,
                             "idle_snapshot_interval_ms": idle_snapshot_interval_ms,
                             "idle_cycle_threshold": idle_cycle_threshold,
-                            "idle_cycles_without_snapshot_events": idle_cycles_without_snapshot_events,
-                            "snapshot_events_in_cycle": snapshot_events_in_cycle,
+                            "idle_cycles_without_snapshot_events": idle_cycles_without_view_events,
+                            "snapshot_events_in_cycle": view_state_events_in_cycle,
                             "cadence_mode": cadence_mode,
                             "active_workers": len(children),
                             "worker_count": len(symbol_shards),
@@ -816,13 +1083,14 @@ def main() -> int:
                     "bot_runtime_container_sleep_step_trace_failed | bot_id=%s | run_id=%s | seq=%s",
                     bot_id,
                     run_id,
-                    seq,
+                    cycle_seq,
                 )
             time.sleep(sleep_for)
     except Exception:
         update_bot_runtime_status(bot_id=bot_id, run_id=run_id, status="failed", telemetry_degraded=telemetry_degraded)
         raise
     finally:
+        telemetry_sender.close()
         for proc in children.values():
             if proc.is_alive():
                 proc.terminate()

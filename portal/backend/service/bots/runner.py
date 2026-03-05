@@ -100,8 +100,19 @@ class DockerBotRunner:
             "SNAPSHOT_FAST_INTERVAL_MS",
             "SNAPSHOT_IDLE_INTERVAL_MS",
             "SNAPSHOT_IDLE_CYCLES",
-            "BOT_WORKER_FULL_SNAPSHOT_INTERVAL_MS",
             "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
+            "BOTLENS_STREAM_MAX_SERIES",
+            "BOTLENS_STREAM_MAX_CANDLES",
+            "BOTLENS_STREAM_MAX_OVERLAYS",
+            "BOTLENS_STREAM_MAX_OVERLAY_POINTS",
+            "BOTLENS_STREAM_MAX_CLOSED_TRADES",
+            "BOTLENS_STREAM_MAX_LOGS",
+            "BOTLENS_STREAM_MAX_DECISIONS",
+            "BOTLENS_STREAM_MAX_WARNINGS",
+            "BOT_RUNTIME_STEP_TRACE_QUEUE_MAX",
+            "BOT_RUNTIME_STEP_TRACE_BATCH_SIZE",
+            "BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS",
+            "BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY",
         ):
             value = str(os.getenv(key, "") or "").strip()
             if value:
