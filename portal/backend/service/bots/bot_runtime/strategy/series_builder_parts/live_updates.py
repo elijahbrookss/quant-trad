@@ -535,8 +535,17 @@ class SeriesBuilderLiveUpdatesMixin:
                 reason = "No matching signals"
 
         direction = None
+        terminal_signal: Optional[Mapping[str, Any]] = None
         if trigger_signals:
-            direction = evaluator._infer_signal_direction(trigger_signals[-1])
+            terminal_candidates = [
+                signal for signal in trigger_signals if isinstance(signal, Mapping)
+            ]
+            if terminal_candidates:
+                terminal_candidates.sort(
+                    key=lambda signal: evaluator._extract_signal_epoch(signal) or 0
+                )
+                terminal_signal = terminal_candidates[-1]
+                direction = evaluator._infer_signal_direction(terminal_signal)
 
         return {
             "rule_id": rule_payload.get("id"),
@@ -544,6 +553,7 @@ class SeriesBuilderLiveUpdatesMixin:
             "action": rule_payload.get("action"),
             "matched": matched,
             "conditions": condition_results,
+            "signal": terminal_signal if matched else None,
             "signals": trigger_signals if matched else [],
             "direction": direction,
             "reason": reason,

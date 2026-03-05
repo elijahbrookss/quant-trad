@@ -492,8 +492,7 @@ class SeriesBuilderOverlaysRegimeMixin:
                 ),
             )
         )
-        # Emit a clear trace when overlays are produced so operators can correlate with frontend counts.
-        logger.info(
+        logger.debug(
             with_log_context(
                 "bot_regime_overlay_emitted",
                 self._runtime_log_context(

@@ -323,6 +323,7 @@ class SeriesBuilderConstructionMixin:
 
         # Convert strategy to dict for backward compatibility with meta field
         series_meta = strategy.to_dict()
+        series_meta.setdefault("rules", deepcopy(getattr(strategy, "rules", {}) or {}))
         if instrument:
             series_meta["instrument"] = instrument
         series_meta["atm_template"] = atm_template
