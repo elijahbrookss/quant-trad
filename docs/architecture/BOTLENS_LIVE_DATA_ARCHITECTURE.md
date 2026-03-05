@@ -1,11 +1,11 @@
-# BotLens Live Data Architecture (Snapshot + Stream) — v2
+# BotLens Live Data Architecture (Snapshot + Stream + DB Ledger) — v2
 
 ## Documentation Header
 
-- `Component`: BotLens live data pipeline (`bootstrap + stream + catchup`)
+- `Component`: BotLens live data pipeline (`bootstrap + stream + catchup + db_ledger`)
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 2.2
-- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `portal/backend/service/bots/telemetry_stream.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
+- `Doc Version`: 2.4
+- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `portal/backend/controller/bots.py`, `portal/backend/service/bots/telemetry_stream.py`, `portal/backend/service/bots/ledger_service.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
 
 ## 1) Problem and scope
 
@@ -14,6 +14,7 @@ BotLens must provide low-latency live state with deterministic ordering and dura
 In scope:
 - bootstrap snapshot delivery,
 - sequenced event catchup/stream delivery,
+- read-only decision/runtime ledger retrieval from DB by run,
 - gap handling and resync behavior,
 - client-side buffered rendering for smooth visual playback.
 
@@ -36,13 +37,20 @@ Boundary:
 ```mermaid
 flowchart LR
     subgraph INSIDE["BotLens Telemetry Boundary (Inside)"]
-        A[Telemetry Ingest] --> B[Runtime Event Store]
-        B --> C[Bootstrap API]
-        B --> D[WebSocket Catchup + Stream]
+        A[Telemetry Ingest WebSocket] --> B[Ingest Queue]
+        B --> C[Live Lane Worker]
+        B --> D[Durable Lane Queue]
+        C --> E[Replay Ring + Viewer Fan-out]
+        D --> F[Async View-State Persist Worker]
+        F --> G[(portal_bot_run_view_state)]
+        G --> H[Bootstrap API]
+        E --> I[WebSocket Catchup + Stream]
+        J[DB Ledger API]
     end
-    E[Bot Runtime Producers] --> A
-    C --> F[BotLens UI]
-    D --> F
+    K[Bot Runtime Producers] --> A
+    H --> L[BotLens UI]
+    I --> L
+    J --> L
 ```
 
 ## Mentor Notes (Non-Normative)
@@ -56,21 +64,25 @@ flowchart LR
 
 ## 3) Inputs, outputs, and side effects
 
-- Inputs: websocket telemetry payloads, bootstrap API calls, websocket subscription requests (`run_id`, `since_seq`).
+- Inputs: websocket telemetry payloads, bootstrap API calls, websocket subscription requests (`run_id`, `since_seq`), DB ledger API calls (`after_seq`, `limit`, `event_name`).
 - Dependencies: runtime event schema (`schema_version`, `seq`, `known_at`), durable event persistence, monotonic per-run sequencing.
-- Outputs: bootstrap envelopes, streamed `bot_runtime_event` envelopes, persisted runtime event rows.
+- Outputs: bootstrap envelopes, streamed `bot_runtime_event` envelopes, DB ledger event pages, persisted runtime event rows.
 - Side effects: websocket network I/O, retry/resync signaling to clients.
 
 ## 4) Core components and data flow
 
-- `BotTelemetryHub.ingest(...)` validates payloads, derives lifecycle deltas, and broadcasts normalized snapshot envelopes.
+- `BotTelemetryHub.ingest(...)` is now a queue handoff only (fast path).
+- Ingest worker validates payloads, trims windows, derives trade lifecycle events, and publishes live envelopes.
+- Durable worker persists latest `view_state` checkpoints asynchronously via upsert.
 - `BotTelemetryHub.bootstrap(...)` reads latest durable run snapshot and returns cursor state.
 - `BotTelemetryHub.add_viewer(...)` sends a latest-snapshot resync when `since_seq` is stale, then live stream fan-out.
+- `GET /api/bots/{bot_id}/runs/{run_id}/events` reads `portal_bot_run_events` and projects runtime-event rows into ledger events for BotLens.
 - Viewer canonical cursor applies strictly ordered events and ignores duplicates by cursor.
 - BotLens UI renders from a buffered queue:
   - canonical stream state advances immediately by `seq`,
   - rendered chart state drains with a target lag,
   - renderer enters catch-up mode when `seq` lag or queue depth exceeds thresholds.
+- BotLens decision ledger uses DB API only; it does not read `snapshot.decisions`.
 - Storage implementation note: runtime event repository logic is organized under `portal/backend/service/storage/repos/runtime_events.py`; `portal/backend/service/storage/storage.py` remains a compatibility facade.
 
 ## 5) State model
@@ -83,13 +95,14 @@ Derived state:
 - trade lifecycle deltas derived from snapshot differences.
 
 Persistence boundaries:
-- persisted: runtime snapshots (`portal_bot_run_snapshots`) and runtime event rows (`portal_bot_run_events`) with separate producers.
-- in-memory only: connected viewers, per-viewer cursor, lifecycle diff cache.
+- persisted: latest `view_state` checkpoints (`portal_bot_run_view_state`) and runtime event rows (`portal_bot_run_events`) with separate producers.
+- in-memory only: connected viewers, per-viewer cursor, replay ring, ingest queue, durable queue, lifecycle diff cache.
 
 ## 6) Why this architecture
 
 - A hybrid snapshot + stream model provides low-latency UX and deterministic recovery.
-- Event persistence before fan-out keeps auditability and resumability aligned.
+- Live fan-out before persistence keeps stream latency stable under DB pressure.
+- Async durable lane still preserves checkpoint durability for bootstrap/recovery.
 - Cursor-based catchup avoids full-history replay on reconnect.
 
 ## 7) Tradeoffs
@@ -113,6 +126,7 @@ Mitigations:
 
 - Ordering: `seq` is canonical order; timestamps are not ordering keys.
 - Delivery semantics: at-least-once; idempotency by ignoring `seq <= last_applied_seq`.
+- Decision ledger source: DB API (`/api/bots/{bot_id}/runs/{run_id}/events`) is authoritative for ledger rows; `snapshot.decisions` is not used by BotLens ledger rendering.
 - Degrade state machine:
   - `RUNNING`: applying stream deltas.
   - `RESYNCING`: gap detected, pause delta apply, request fresh snapshot.
@@ -142,11 +156,18 @@ Client render buffer knobs (frontend `VITE_*` env):
 - `VITE_BOTLENS_CATCHUP_APPLY_INTERVAL_MS`
 - `VITE_BOTLENS_MAX_CATCHUP_BATCH`
 - `VITE_BOTLENS_METRICS_PUBLISH_MS`
+- `VITE_BOTLENS_LEDGER_POLL_MS`
+- `VITE_BOTLENS_LEDGER_POLL_LIMIT`
+- `VITE_BOTLENS_LEDGER_MAX_EVENTS`
 
 Backend snapshot trim knobs (telemetry hub):
-- `BOTLENS_MAX_CANDLES` (`0` = uncapped, default `0`)
+- `BOTLENS_MAX_CANDLES` (`0` = uncapped, default `320`)
 - `BOTLENS_MAX_TRADES` (`0` = uncapped, default `400`)
 - `BOTLENS_MAX_OVERLAYS` (`0` = uncapped, default `400`)
+- `BOTLENS_MAX_OVERLAY_POINTS` (`0` = uncapped, default `160`)
+- `BOTLENS_INGEST_QUEUE_MAX` (default `4096`)
+- `BOTLENS_PERSIST_QUEUE_MAX` (default `4096`)
+- `BOTLENS_PERSIST_BATCH_MAX` (default `256`)
 
 ## 10) Versioning and compatibility
 
@@ -199,7 +220,7 @@ Each event includes:
 
 ## 6.1 Critical Events (Never Dropped)
 
-Must be persisted before broadcast.
+Must be emitted to live lane and persisted to durable lane.
 
 Examples:
 
@@ -212,7 +233,7 @@ Examples:
 
 Guarantee:
 
-- Persist-then-broadcast
+- Broadcast immediately (live lane), persist asynchronously (durable lane)
 - Never coalesced
 - Never dropped
 
@@ -309,7 +330,7 @@ Events from different run_ids must never mix in the same live view.
 - Immutable rows
 - Indexed by bot_id, run_id, seq
 - No silent rewrites
-- Critical events persisted before broadcast
+- Durable lane persists checkpoints asynchronously; live lane is not blocked on DB writes
 
 ## 10.2 Retention Policy
 
