@@ -45,6 +45,7 @@ from ..components import (
     SeriesRunnerContext,
     SettlementApplier,
     SignalConsumption,
+    StepTracePersistenceBuffer,
     TradePersistenceBuffer,
 )
 from ..core import (
@@ -200,6 +201,7 @@ class RuntimeSetupPrepareMixin:
             self.config,
             self._runtime_log_context,
         )
+        self._step_trace_buffer = StepTracePersistenceBuffer.from_config(self.config)
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
             build_candles=self._build_candles,
@@ -229,6 +231,11 @@ class RuntimeSetupPrepareMixin:
             or self.config.get("BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"),
             default=10,
         )
+        self._runtime_regime_overlay_rebuild: bool = self._coerce_bool(
+            self.config.get("runtime_regime_overlay_rebuild")
+            or self.config.get("BOT_RUNTIME_REGIME_OVERLAY_REBUILD"),
+            default=False,
+        )
 
     def _ensure_series_builder(self):
         if self._series_builder is None:
@@ -256,6 +263,21 @@ class RuntimeSetupPrepareMixin:
         except (TypeError, ValueError):
             return max(int(default), 1)
         return max(parsed, 1)
+
+    @staticmethod
+    def _coerce_bool(value: Optional[object], *, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
 
     def _mark_logs_mutated(self) -> None:
         with self._lock:
@@ -434,6 +456,13 @@ class RuntimeSetupPrepareMixin:
                 or payload.get("BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"),
                 default=self._push_payload_bytes_sample_every,
             )
+        if "runtime_regime_overlay_rebuild" in payload or "BOT_RUNTIME_REGIME_OVERLAY_REBUILD" in payload:
+            self._runtime_regime_overlay_rebuild = self._coerce_bool(
+                payload.get("runtime_regime_overlay_rebuild")
+                if "runtime_regime_overlay_rebuild" in payload
+                else payload.get("BOT_RUNTIME_REGIME_OVERLAY_REBUILD"),
+                default=self._runtime_regime_overlay_rebuild,
+            )
 
     def _set_error_state(
         self,
@@ -605,6 +634,10 @@ class RuntimeSetupPrepareMixin:
                 bar_index=start_index,
                 total_bars=len(series.candles),
                 last_consumed_epoch=max(int(getattr(series, "last_consumed_epoch", 0) or 0), 0),
+            )
+            state.regime_overlays_static = self._build_runtime_regime_overlays(
+                series=series,
+                candles=series.candles,
             )
             key = self._strategy_key(series)
             self._series_states.append(state)
@@ -825,15 +858,40 @@ class RuntimeSetupPrepareMixin:
         )
 
     def _series_overlay_entries(self, state: SeriesExecutionState) -> List[Dict[str, Any]]:
+        started = time.perf_counter()
         overlays: List[Dict[str, Any]] = []
+        indicator_entries = 0
+        indicator_started = time.perf_counter()
         for projection_state in state.indicator_projection_runtime.values():
             entries = projection_state.get("entries")
             if not isinstance(entries, Mapping):
                 continue
-            overlays.extend(dict(value) for value in entries.values() if isinstance(value, Mapping))
-        visible_count = min(max(int(state.bar_index) + 1, 1), len(state.series.candles))
-        visible_candles = state.series.candles[:visible_count]
-        overlays.extend(self._build_runtime_regime_overlays(series=state.series, candles=visible_candles))
+            normalized_entries = [dict(value) for value in entries.values() if isinstance(value, Mapping)]
+            overlays.extend(normalized_entries)
+            indicator_entries += len(normalized_entries)
+        indicator_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
+
+        regime_started = time.perf_counter()
+        if self._runtime_regime_overlay_rebuild:
+            visible_count = min(max(int(state.bar_index) + 1, 1), len(state.series.candles))
+            visible_candles = state.series.candles[:visible_count]
+            regime_overlays = self._build_runtime_regime_overlays(series=state.series, candles=visible_candles)
+            regime_mode = "rebuild"
+        else:
+            regime_overlays = list(state.regime_overlays_static or [])
+            regime_mode = "static"
+        regime_ms = max((time.perf_counter() - regime_started) * 1000.0, 0.0)
+        overlays.extend(regime_overlays)
+        total_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+        state.overlay_runtime_metrics = {
+            "series_overlay_entries_ms": total_ms,
+            "series_overlay_indicator_entries_ms": indicator_ms,
+            "series_overlay_regime_build_ms": regime_ms,
+            "series_overlay_indicator_entries_count": float(indicator_entries),
+            "series_overlay_regime_entries_count": float(len(regime_overlays)),
+            "series_overlay_total_entries_count": float(len(overlays)),
+            "series_overlay_regime_mode_rebuild": 1.0 if regime_mode == "rebuild" else 0.0,
+        }
         return overlays
 
     def _bootstrap_indicator_overlays_for_state(self, state: SeriesExecutionState) -> None:
@@ -1336,6 +1394,7 @@ class RuntimeSetupPrepareMixin:
         finalize_total_ms = max((time.perf_counter() - finalize_started_perf) * 1000.0, 0.0)
         known_ms = (update_state_ms or 0.0) + (push_update_ms or 0.0)
         finalize_residual_ms = max(finalize_total_ms - known_ms, 0.0)
+        step_trace_metrics = self._step_trace_metrics()
         return {
             "finalize_residual_ms": finalize_residual_ms,
             "persist_ms": persist_ms,
@@ -1346,6 +1405,11 @@ class RuntimeSetupPrepareMixin:
             "stream_emit_ms": push_metrics.get("stream_emit_ms"),
             "subscribers_count": push_metrics.get("subscribers_count"),
             "overlay_points_changed": push_metrics.get("overlay_points"),
+            "step_trace_queue_depth": step_trace_metrics.get("step_trace_queue_depth"),
+            "step_trace_dropped_count": step_trace_metrics.get("step_trace_dropped_count"),
+            "step_trace_persist_lag_ms": step_trace_metrics.get("step_trace_persist_lag_ms"),
+            "step_trace_persist_batch_ms": step_trace_metrics.get("step_trace_persist_batch_ms"),
+            "step_trace_persist_error_count": step_trace_metrics.get("step_trace_persist_error_count"),
         }
 
     def _primary_state_candle(self) -> Optional[Candle]:

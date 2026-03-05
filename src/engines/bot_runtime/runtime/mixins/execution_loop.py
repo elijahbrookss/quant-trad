@@ -164,6 +164,7 @@ class RuntimeExecutionLoopMixin:
             self._push_update("error")
             self._persist_runtime_state("error")
             self._flush_persistence_buffer("runtime_loop_failed")
+            self._flush_step_trace_buffer("runtime_loop_failed", shutdown=True)
 
     def _execute_loop(self) -> None:
         self._require_prepared("execute_loop")
@@ -228,6 +229,7 @@ class RuntimeExecutionLoopMixin:
         if status in {"completed", "stopped"}:
             self._persist_run_artifact(status)
         self._flush_persistence_buffer("runtime_loop_complete")
+        self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
@@ -263,11 +265,20 @@ class RuntimeExecutionLoopMixin:
         overlay_points_changed: Optional[float] = None
         signals_emitted_count: Optional[float] = None
         subscribers_count: Optional[float] = None
+        series_overlay_entries_ms: Optional[float] = None
+        series_overlay_indicator_entries_ms: Optional[float] = None
+        series_overlay_regime_build_ms: Optional[float] = None
+        series_overlay_indicator_entries_count: Optional[float] = None
+        series_overlay_regime_entries_count: Optional[float] = None
+        series_overlay_total_entries_count: Optional[float] = None
+        series_overlay_regime_mode_rebuild: Optional[float] = None
         trades_touched_count: float = 0.0
         decision_events_logged = 0
         execution_events_logged = 0
         trade_events_processed = 0
         entry_created = False
+        trade_lock_wait_ms: float = 0.0
+        trade_lock_hold_ms: float = 0.0
         sample_enabled = self._obs_enabled and should_sample(self._obs_step_sample_rate)
         base_context = self._series_log_context(
             series,
@@ -335,6 +346,15 @@ class RuntimeExecutionLoopMixin:
                     overlays_changed_count = signal_eval_metrics.get("overlays_changed_count")
                     overlay_points_changed = signal_eval_metrics.get("overlay_points_changed")
                     signals_emitted_count = signal_eval_metrics.get("signals_emitted_count")
+                    series_overlay_entries_ms = signal_eval_metrics.get("series_overlay_entries_ms")
+                    series_overlay_indicator_entries_ms = signal_eval_metrics.get("series_overlay_indicator_entries_ms")
+                    series_overlay_regime_build_ms = signal_eval_metrics.get("series_overlay_regime_build_ms")
+                    series_overlay_indicator_entries_count = signal_eval_metrics.get(
+                        "series_overlay_indicator_entries_count"
+                    )
+                    series_overlay_regime_entries_count = signal_eval_metrics.get("series_overlay_regime_entries_count")
+                    series_overlay_total_entries_count = signal_eval_metrics.get("series_overlay_total_entries_count")
+                    series_overlay_regime_mode_rebuild = signal_eval_metrics.get("series_overlay_regime_mode_rebuild")
                     step_context["signals_pending"] = signals_pending
                     self._record_signal_consumption(state, epoch, consumed_signals, direction)
 
@@ -387,6 +407,23 @@ class RuntimeExecutionLoopMixin:
                             "indicators_count": signal_eval_metrics.get("indicators_count"),
                             "overlays_changed_count": signal_eval_metrics.get("overlays_changed_count"),
                             "overlay_points_changed": signal_eval_metrics.get("overlay_points_changed"),
+                            "series_overlay_entries_ms": signal_eval_metrics.get("series_overlay_entries_ms"),
+                            "series_overlay_indicator_entries_ms": signal_eval_metrics.get(
+                                "series_overlay_indicator_entries_ms"
+                            ),
+                            "series_overlay_regime_build_ms": signal_eval_metrics.get("series_overlay_regime_build_ms"),
+                            "series_overlay_indicator_entries_count": signal_eval_metrics.get(
+                                "series_overlay_indicator_entries_count"
+                            ),
+                            "series_overlay_regime_entries_count": signal_eval_metrics.get(
+                                "series_overlay_regime_entries_count"
+                            ),
+                            "series_overlay_total_entries_count": signal_eval_metrics.get(
+                                "series_overlay_total_entries_count"
+                            ),
+                            "series_overlay_regime_mode_rebuild": signal_eval_metrics.get(
+                                "series_overlay_regime_mode_rebuild"
+                            ),
                         },
                     )
                 except Exception as exc:
@@ -427,6 +464,13 @@ class RuntimeExecutionLoopMixin:
                             "indicators_count": None,
                             "overlays_changed_count": None,
                             "overlay_points_changed": None,
+                            "series_overlay_entries_ms": None,
+                            "series_overlay_indicator_entries_ms": None,
+                            "series_overlay_regime_build_ms": None,
+                            "series_overlay_indicator_entries_count": None,
+                            "series_overlay_regime_entries_count": None,
+                            "series_overlay_total_entries_count": None,
+                            "series_overlay_regime_mode_rebuild": None,
                         },
                     )
                     raise
@@ -463,13 +507,17 @@ class RuntimeExecutionLoopMixin:
                         )
                         direction = None
                     else:
+                        trade_lock_wait_started = time.perf_counter()
                         with self._trade_lock:
+                            trade_lock_wait_ms = max((time.perf_counter() - trade_lock_wait_started) * 1000.0, 0.0)
+                            trade_lock_hold_started = time.perf_counter()
                             blocking_trade = self._active_trade_for_instrument(
                                 instrument_id,
                                 skip_series=series,
                             )
                             if blocking_trade is None:
                                 new_trade = series.risk_engine.maybe_enter(candle, direction)
+                            trade_lock_hold_ms = max((time.perf_counter() - trade_lock_hold_started) * 1000.0, 0.0)
 
                 # Log decision event
                 if direction is not None:
@@ -578,6 +626,8 @@ class RuntimeExecutionLoopMixin:
                         "bar_time": bar_time,
                         "decision_events_logged": decision_events_logged,
                         "entry_created": entry_created,
+                        "trade_lock_wait_ms": trade_lock_wait_ms,
+                        "trade_lock_hold_ms": trade_lock_hold_ms,
                     },
                 )
             except Exception as exc:
@@ -595,6 +645,8 @@ class RuntimeExecutionLoopMixin:
                         "bar_time": bar_time,
                         "decision_events_logged": decision_events_logged,
                         "entry_created": entry_created,
+                        "trade_lock_wait_ms": trade_lock_wait_ms,
+                        "trade_lock_hold_ms": trade_lock_hold_ms,
                     },
                 )
                 raise
@@ -774,6 +826,11 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": finalize_metrics.get("delta_serialize_ms"),
                             "stream_emit_ms": finalize_metrics.get("stream_emit_ms"),
                             "subscribers_count": finalize_metrics.get("subscribers_count"),
+                            "step_trace_queue_depth": finalize_metrics.get("step_trace_queue_depth"),
+                            "step_trace_dropped_count": finalize_metrics.get("step_trace_dropped_count"),
+                            "step_trace_persist_lag_ms": finalize_metrics.get("step_trace_persist_lag_ms"),
+                            "step_trace_persist_batch_ms": finalize_metrics.get("step_trace_persist_batch_ms"),
+                            "step_trace_persist_error_count": finalize_metrics.get("step_trace_persist_error_count"),
                         },
                     )
                 except Exception as exc:
@@ -798,6 +855,11 @@ class RuntimeExecutionLoopMixin:
                             "delta_serialize_ms": None,
                             "stream_emit_ms": None,
                             "subscribers_count": None,
+                            "step_trace_queue_depth": None,
+                            "step_trace_dropped_count": None,
+                            "step_trace_persist_lag_ms": None,
+                            "step_trace_persist_batch_ms": None,
+                            "step_trace_persist_error_count": None,
                         },
                     )
                     raise
@@ -807,12 +869,15 @@ class RuntimeExecutionLoopMixin:
             step_context["execution_events_logged"] = execution_events_logged
             step_context["decision_events_logged"] = decision_events_logged
             step_context["entry_created"] = entry_created
+            step_context["trade_lock_wait_ms"] = trade_lock_wait_ms
+            step_context["trade_lock_hold_ms"] = trade_lock_hold_ms
             step_context["candle_update_ms"] = candle_update_ms
             step_context["overlays_update_ms"] = overlays_update_ms
             step_context["pending_signals_ops_ms"] = pending_signals_ops_ms
             step_context["execution_ms"] = execution_ms
             step_context["stats_update_ms"] = stats_update_ms
             step_context["persistence_ms"] = persistence_ms
+            step_context["step_trace_enqueue_ms"] = persistence_ms
             step_context["db_commit_ms"] = db_commit_ms
             step_context["delta_build_ms"] = delta_build_ms
             step_context["delta_serialize_ms"] = delta_serialize_ms
@@ -821,8 +886,21 @@ class RuntimeExecutionLoopMixin:
             step_context["overlays_changed_count"] = overlays_changed_count
             step_context["overlay_points_changed"] = overlay_points_changed
             step_context["signals_emitted_count"] = signals_emitted_count
+            step_context["series_overlay_entries_ms"] = series_overlay_entries_ms
+            step_context["series_overlay_indicator_entries_ms"] = series_overlay_indicator_entries_ms
+            step_context["series_overlay_regime_build_ms"] = series_overlay_regime_build_ms
+            step_context["series_overlay_indicator_entries_count"] = series_overlay_indicator_entries_count
+            step_context["series_overlay_regime_entries_count"] = series_overlay_regime_entries_count
+            step_context["series_overlay_total_entries_count"] = series_overlay_total_entries_count
+            step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
+            if not state.intrabar_active():
+                step_context["step_trace_queue_depth"] = finalize_metrics.get("step_trace_queue_depth")
+                step_context["step_trace_dropped_count"] = finalize_metrics.get("step_trace_dropped_count")
+                step_context["step_trace_persist_lag_ms"] = finalize_metrics.get("step_trace_persist_lag_ms")
+                step_context["step_trace_persist_batch_ms"] = finalize_metrics.get("step_trace_persist_batch_ms")
+                step_context["step_trace_persist_error_count"] = finalize_metrics.get("step_trace_persist_error_count")
             step_context["execution_decision_flow_ms"] = decision_flow_ms
             step_context["execution_prime_ms"] = execution_prime_ms
             step_context["execution_settlement_ms"] = settlement_ms
@@ -842,12 +920,15 @@ class RuntimeExecutionLoopMixin:
             step_context["execution_events_logged"] = execution_events_logged
             step_context["trade_events_processed"] = trade_events_processed
             step_context["entry_created"] = entry_created
+            step_context["trade_lock_wait_ms"] = trade_lock_wait_ms
+            step_context["trade_lock_hold_ms"] = trade_lock_hold_ms
             step_context["candle_update_ms"] = candle_update_ms
             step_context["overlays_update_ms"] = overlays_update_ms
             step_context["pending_signals_ops_ms"] = pending_signals_ops_ms
             step_context["execution_ms"] = execution_ms
             step_context["stats_update_ms"] = stats_update_ms
             step_context["persistence_ms"] = persistence_ms
+            step_context["step_trace_enqueue_ms"] = persistence_ms
             step_context["db_commit_ms"] = db_commit_ms
             step_context["delta_build_ms"] = delta_build_ms
             step_context["delta_serialize_ms"] = delta_serialize_ms
@@ -856,8 +937,16 @@ class RuntimeExecutionLoopMixin:
             step_context["overlays_changed_count"] = overlays_changed_count
             step_context["overlay_points_changed"] = overlay_points_changed
             step_context["signals_emitted_count"] = signals_emitted_count
+            step_context["series_overlay_entries_ms"] = series_overlay_entries_ms
+            step_context["series_overlay_indicator_entries_ms"] = series_overlay_indicator_entries_ms
+            step_context["series_overlay_regime_build_ms"] = series_overlay_regime_build_ms
+            step_context["series_overlay_indicator_entries_count"] = series_overlay_indicator_entries_count
+            step_context["series_overlay_regime_entries_count"] = series_overlay_regime_entries_count
+            step_context["series_overlay_total_entries_count"] = series_overlay_total_entries_count
+            step_context["series_overlay_regime_mode_rebuild"] = series_overlay_regime_mode_rebuild
             step_context["trades_touched_count"] = trades_touched_count
             step_context["subscribers_count"] = subscribers_count
+            step_context.update(self._step_trace_metrics())
             self._record_step_trace(
                 "step_series_state",
                 started_at=step_started,
@@ -910,6 +999,13 @@ class RuntimeExecutionLoopMixin:
                     "overlay_projection_ops_count": 0.0,
                     "overlay_projection_normalize_cache_hits": 0.0,
                     "overlay_projection_normalize_cache_misses": 0.0,
+                    "series_overlay_entries_ms": 0.0,
+                    "series_overlay_indicator_entries_ms": 0.0,
+                    "series_overlay_regime_build_ms": 0.0,
+                    "series_overlay_indicator_entries_count": 0.0,
+                    "series_overlay_regime_entries_count": 0.0,
+                    "series_overlay_total_entries_count": 0.0,
+                    "series_overlay_regime_mode_rebuild": 0.0,
                     "state_revisions_changed_count": 0.0,
                     "indicators_count": 0.0,
                     "overlays_changed_count": 0.0,
@@ -936,6 +1032,15 @@ class RuntimeExecutionLoopMixin:
             snapshot = engine.snapshot(engine_state)
 
             payload = dict(snapshot.payload)
+            runtime_state_storage = runtime.get("signal_runtime_storage")
+            if not isinstance(runtime_state_storage, MutableMapping):
+                runtime_state_storage = {}
+            runtime["signal_runtime_storage"] = runtime_state_storage
+            payload.setdefault("_indicator_id", indicator_id)
+            payload.setdefault("symbol", series.symbol)
+            payload.setdefault("chart_timeframe", series.timeframe)
+            payload.setdefault("source_timeframe", str(snapshot.source_timeframe or series.timeframe or ""))
+            payload["_runtime_state_storage"] = runtime_state_storage
             plugin = runtime.get("plugin")
             if plugin is None:
                 raise RuntimeError(f"indicator_plugin_runtime_missing: indicator_id={indicator_id}")
@@ -948,6 +1053,9 @@ class RuntimeExecutionLoopMixin:
                 )
             else:
                 rule_payload = {"signals": []}
+            updated_runtime_state_storage = payload.get("_runtime_state_storage")
+            if isinstance(updated_runtime_state_storage, MutableMapping):
+                runtime["signal_runtime_storage"] = updated_runtime_state_storage
             enriched_payload = dict(payload)
             enriched_payload.update(dict(rule_payload or {}))
             snapshots[indicator_id] = type(snapshot)(
@@ -1059,6 +1167,25 @@ class RuntimeExecutionLoopMixin:
 
         overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
         overlays = self._series_overlay_entries(state)
+        overlay_runtime_metrics = state.overlay_runtime_metrics if isinstance(state.overlay_runtime_metrics, Mapping) else {}
+        series_overlay_entries_ms = float(overlay_runtime_metrics.get("series_overlay_entries_ms") or 0.0)
+        series_overlay_indicator_entries_ms = float(
+            overlay_runtime_metrics.get("series_overlay_indicator_entries_ms") or 0.0
+        )
+        series_overlay_regime_build_ms = float(overlay_runtime_metrics.get("series_overlay_regime_build_ms") or 0.0)
+        series_overlay_indicator_entries_count = float(
+            overlay_runtime_metrics.get("series_overlay_indicator_entries_count") or 0.0
+        )
+        series_overlay_regime_entries_count = float(
+            overlay_runtime_metrics.get("series_overlay_regime_entries_count") or 0.0
+        )
+        series_overlay_total_entries_count = float(
+            overlay_runtime_metrics.get("series_overlay_total_entries_count") or 0.0
+        )
+        series_overlay_regime_mode_rebuild = float(
+            overlay_runtime_metrics.get("series_overlay_regime_mode_rebuild") or 0.0
+        )
+        overlays_update_ms = overlay_projection_ms + series_overlay_entries_ms
         overlays_changed_count, overlay_points_changed = self._overlay_change_metrics(series.overlays or [], overlays)
         series.overlays = overlays
 
@@ -1082,7 +1209,7 @@ class RuntimeExecutionLoopMixin:
             "pending_signals_consume_ms": pending_consume_ms,
             "pending_signals_ops_ms": pending_ops_ms,
             "signals_emitted_count": float(len(evaluated)),
-            "overlays_update_ms": overlay_projection_ms,
+            "overlays_update_ms": overlays_update_ms,
             "indicator_state_update_ms": indicator_state_update_ms,
             "signal_eval_ms": signal_eval_ms,
             "overlay_projection_ms": overlay_projection_ms,
@@ -1096,6 +1223,13 @@ class RuntimeExecutionLoopMixin:
             "overlay_projection_ops_count": overlay_projection_ops_count,
             "overlay_projection_normalize_cache_hits": overlay_projection_normalize_cache_hits,
             "overlay_projection_normalize_cache_misses": overlay_projection_normalize_cache_misses,
+            "series_overlay_entries_ms": series_overlay_entries_ms,
+            "series_overlay_indicator_entries_ms": series_overlay_indicator_entries_ms,
+            "series_overlay_regime_build_ms": series_overlay_regime_build_ms,
+            "series_overlay_indicator_entries_count": series_overlay_indicator_entries_count,
+            "series_overlay_regime_entries_count": series_overlay_regime_entries_count,
+            "series_overlay_total_entries_count": series_overlay_total_entries_count,
+            "series_overlay_regime_mode_rebuild": series_overlay_regime_mode_rebuild,
             "state_revisions_changed_count": float(state_revisions_changed_count),
             "indicators_count": float(len(state.indicator_state_runtime)),
             "overlays_changed_count": overlays_changed_count,

@@ -42,6 +42,8 @@ class SeriesExecutionState:
     )
     indicator_state_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     indicator_projection_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    regime_overlays_static: List[Dict[str, Any]] = field(default_factory=list)
+    overlay_runtime_metrics: Dict[str, float] = field(default_factory=dict)
 
     def intrabar_active(self) -> bool:
         return bool(self.intrabar_candles) and self.intrabar_index < len(self.intrabar_candles)
