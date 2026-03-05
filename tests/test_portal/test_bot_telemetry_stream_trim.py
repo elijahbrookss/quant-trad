@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 
@@ -15,6 +16,8 @@ storage_mod = types.ModuleType("portal.backend.service.storage.storage")
 storage_mod.get_latest_bot_run_view_state = lambda *args, **kwargs: None
 storage_mod.get_latest_bot_runtime_run_id = lambda *args, **kwargs: None
 storage_mod.upsert_bot_run_view_state = lambda *args, **kwargs: {}
+storage_mod.get_bot_run = lambda *args, **kwargs: {"bot_id": "bot-1"}
+storage_mod.list_bot_runtime_events = lambda *args, **kwargs: []
 sys.modules["portal.backend.service.storage"] = storage_pkg
 sys.modules["portal.backend.service.storage.storage"] = storage_mod
 
@@ -151,3 +154,63 @@ def test_build_overlay_delta_snapshot_emits_changed_and_removed_overlays():
     assert "id:b" in series["overlay_delta"]["removed"]
     changed_ids = {item.get("id") for item in series["overlays"]}
     assert changed_ids == {"a", "c"}
+
+
+def test_process_ingest_marks_resync_required_after_seq_gap():
+    hub = stream.BotTelemetryHub()
+    sent: list[dict] = []
+
+    async def _append(event):
+        sent.append(dict(event))
+
+    async def _broadcast(event):
+        sent.append(dict(event))
+
+    hub._append_recent_event = _append  # type: ignore[method-assign]
+    hub._broadcast_event = _broadcast  # type: ignore[method-assign]
+
+    payload_1 = {
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "seq": 1,
+        "view_state": {
+            "seq": 1,
+            "schema_version": 1,
+            "payload": {
+                "series": [{"strategy_id": "s", "symbol": "BTC", "timeframe": "1m", "overlays": [{"id": "a"}]}],
+                "trades": [],
+                "logs": [],
+                "decisions": [],
+                "warnings": [],
+                "runtime": {"status": "running"},
+            },
+            "at": "2026-01-01T00:00:00Z",
+        },
+    }
+    payload_3 = {
+        "bot_id": "bot-1",
+        "run_id": "run-1",
+        "seq": 3,
+        "view_state": {
+            "seq": 3,
+            "schema_version": 1,
+            "payload": {
+                "series": [{"strategy_id": "s", "symbol": "BTC", "timeframe": "1m", "overlays": [{"id": "b"}]}],
+                "trades": [],
+                "logs": [],
+                "decisions": [],
+                "warnings": [],
+                "runtime": {"status": "running"},
+            },
+            "at": "2026-01-01T00:00:01Z",
+        },
+    }
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(hub._process_ingest({"payload": payload_1}))
+    loop.run_until_complete(hub._process_ingest({"payload": payload_3}))
+
+    final = sent[-1]
+    meta = final["payload"]["snapshot_meta"]
+    assert meta["seq_gap_from_previous"] == 1
+    assert meta["resync_required"] is True

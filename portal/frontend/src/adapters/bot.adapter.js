@@ -82,10 +82,16 @@ export async function fetchBotSettingsCatalog() {
   return request('/api/bots/settings-catalog')
 }
 
-export async function fetchBotLensBootstrap(botId, { runId } = {}) {
-  const query = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
-  return request(`/api/bots/${encodeURIComponent(botId)}/lens/bootstrap${query}`)
+
+export async function fetchBotActiveRun(botId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
 }
+
+export async function fetchBotLensSeriesCatalog(runId) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
+}
+
+
 
 export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
   const params = new URLSearchParams()
@@ -105,15 +111,25 @@ export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limi
   )
 }
 
-export function openBotLensStream(botId, { runId, sinceSeq = 0 } = {}) {
+
+export async function fetchBotLensSeriesWindow(runId, seriesKey, { to = 'now', limit = 320 } = {}) {
   const params = new URLSearchParams()
-  if (runId) params.set('run_id', String(runId))
-  params.set('since_seq', String(Number(sinceSeq) || 0))
-  const qs = params.toString()
-  const path = `/api/bots/ws/${encodeURIComponent(botId)}${qs ? `?${qs}` : ''}`
-  const socket = openWebSocket(path, { base: BASE })
-  if (!socket) {
-    log.warn('bot_lens_stream_init_failed', { bot_id: botId, run_id: runId, since_seq: sinceSeq })
-  }
-  return socket
+  if (to) params.set('to', String(to))
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/window?${params.toString()}`)
 }
+
+export async function fetchBotLensSeriesHistory(runId, seriesKey, { beforeTs, limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  if (beforeTs) params.set('before_ts', String(beforeTs))
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/history?${params.toString()}`)
+}
+
+export function openBotLensSeriesLiveStream(runId, seriesKey, { afterSeq = 0 } = {}) {
+  const params = new URLSearchParams()
+  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
+  const path = `/api/bots/ws/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/live?${params.toString()}`
+  return openWebSocket(path, { base: BASE })
+}
+
