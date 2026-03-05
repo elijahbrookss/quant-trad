@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext
     from .settlement import SettlementApplier
     from .signal_consumption import SignalConsumption, consume_signals
+    from .step_trace_buffer import StepTracePersistenceBuffer
 
 __all__ = [
     "ChartStateBuilder",
@@ -25,6 +26,7 @@ __all__ = [
     "PoolSeriesRunner",
     "SeriesRunnerContext",
     "SettlementApplier",
+    "StepTracePersistenceBuffer",
     "SignalConsumption",
     "consume_signals",
 ]
@@ -65,6 +67,10 @@ def __getattr__(name: str):
         from .settlement import SettlementApplier
 
         return SettlementApplier
+    if name == "StepTracePersistenceBuffer":
+        from .step_trace_buffer import StepTracePersistenceBuffer
+
+        return StepTracePersistenceBuffer
     if name in {"SignalConsumption", "consume_signals"}:
         from .signal_consumption import SignalConsumption, consume_signals
 

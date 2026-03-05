@@ -153,6 +153,32 @@ class RuntimeStateStreamingMixin:
                 context={"reason": reason},
             )
 
+    def _flush_step_trace_buffer(self, reason: str, *, shutdown: bool = False) -> None:
+        try:
+            self._step_trace_buffer.flush(reason=reason, shutdown=shutdown, timeout_s=5.0)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            context = self._runtime_log_context(reason=reason, shutdown=shutdown, error=str(exc))
+            logger.warning(with_log_context("bot_runtime_step_trace_flush_failed", context))
+
+    def _step_trace_metrics(self) -> Dict[str, float]:
+        try:
+            metrics = self._step_trace_buffer.metrics_snapshot()
+            return {
+                "step_trace_queue_depth": float(metrics.get("queue_depth") or 0.0),
+                "step_trace_dropped_count": float(metrics.get("dropped_count") or 0.0),
+                "step_trace_persist_lag_ms": float(metrics.get("persist_lag_ms") or 0.0),
+                "step_trace_persist_batch_ms": float(metrics.get("persist_batch_ms") or 0.0),
+                "step_trace_persist_error_count": float(metrics.get("persist_error_count") or 0.0),
+            }
+        except Exception:
+            return {
+                "step_trace_queue_depth": 0.0,
+                "step_trace_dropped_count": 0.0,
+                "step_trace_persist_lag_ms": 0.0,
+                "step_trace_persist_batch_ms": 0.0,
+                "step_trace_persist_error_count": 0.0,
+            }
+
     def _record_step_trace(
         self,
         step_name: str,
@@ -171,10 +197,9 @@ class RuntimeStateStreamingMixin:
             return None
         duration_ms = max((ended_at - started_at).total_seconds() * 1000.0, 0.0)
         try:
-            from portal.backend.service.storage import storage
-
-            persist_started = time.perf_counter()
-            storage.record_bot_run_step(
+            payload_context = dict(context or {})
+            payload_context.update(self._step_trace_metrics())
+            enqueue_ms = self._step_trace_buffer.record(
                 {
                     "run_id": run_id,
                     "bot_id": self.bot_id,
@@ -187,10 +212,10 @@ class RuntimeStateStreamingMixin:
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "error": error,
-                    "context": dict(context or {}),
+                    "context": payload_context,
                 }
             )
-            return max((time.perf_counter() - persist_started) * 1000.0, 0.0)
+            return enqueue_ms
         except Exception as exc:  # pragma: no cover - defensive logging
             step_context = self._runtime_log_context(step=step_name, run_id=run_id, error=str(exc))
             logger.warning(with_log_context("bot_runtime_step_trace_persist_failed", step_context))
@@ -311,7 +336,7 @@ class RuntimeStateStreamingMixin:
                         "overlays": len(series_overlays) if isinstance(series_overlays, list) else 0,
                     }
                 )
-        logger.info(
+        logger.debug(
             with_log_context(
                 "bot_overlay_snapshot_sent",
                 self._runtime_log_context(
@@ -997,7 +1022,7 @@ class RuntimeStateStreamingMixin:
                     if isinstance(visible_overlays, list):
                         overlay_summary = self._overlay_summary(visible_overlays)
                         overlay_delta = self._build_overlay_delta(cache, visible_overlays)
-                        logger.info(
+                        logger.debug(
                             with_log_context(
                                 "bot_overlay_emit_attempt",
                                 self._series_log_context(
@@ -1015,7 +1040,7 @@ class RuntimeStateStreamingMixin:
                         )
                         if isinstance(overlay_delta, Mapping):
                             series_delta["overlay_delta"] = dict(overlay_delta)
-                            logger.info(
+                            logger.debug(
                                 with_log_context(
                                     "bot_overlay_delta_sent",
                                     self._series_log_context(
