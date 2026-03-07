@@ -1,6 +1,7 @@
 # test_market_profile_indicator.py
 
 import pytest
+pytest.importorskip("pandas")
 import pandas as pd
 from indicators.market_profile import MarketProfileIndicator
 from indicators.config import DataContext

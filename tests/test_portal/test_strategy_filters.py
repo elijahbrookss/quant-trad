@@ -1,3 +1,5 @@
+import pytest
+pytest.importorskip("pandas")
 """Tests for strategy filter evaluation helpers."""
 
 from datetime import datetime

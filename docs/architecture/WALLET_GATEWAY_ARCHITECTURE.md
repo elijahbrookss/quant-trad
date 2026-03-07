@@ -1,3 +1,15 @@
+---
+component: wallet-gateway-architecture
+subsystem: portal-runtime
+layer: engine
+doc_type: architecture
+status: active
+tags:
+  - wallet
+  - runtime
+code_paths:
+  - src/engines/bot_runtime/core/wallet_gateway.py
+---
 # Wallet Gateway Architecture
 
 ## Documentation Header

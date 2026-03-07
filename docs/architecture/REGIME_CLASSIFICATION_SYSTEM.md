@@ -1,3 +1,15 @@
+---
+component: regime-classification-system
+subsystem: signals
+layer: domain
+doc_type: architecture
+status: active
+tags:
+  - regime
+  - classification
+code_paths:
+  - portal/backend/service/bots/bot_runtime/strategy/regime_overlay.py
+---
 # Regime Classification System
 
 ## Purpose

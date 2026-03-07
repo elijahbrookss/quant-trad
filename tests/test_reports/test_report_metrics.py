@@ -1,3 +1,5 @@
+import pytest
+pytest.importorskip("sqlalchemy")
 import math
 from datetime import date
 

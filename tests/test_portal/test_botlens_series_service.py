@@ -1,4 +1,6 @@
 from __future__ import annotations
+import pytest
+pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots import botlens_series_service as svc
 

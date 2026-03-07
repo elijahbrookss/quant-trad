@@ -8,30 +8,37 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping
 
 from .bot_state_projection import project_bot_state, project_bot_states
-from .bot_stream import BotStreamManager
-from .bot_watchdog import get_watchdog
-from .config_service import BotConfigService
-from .runtime_control_service import BotRuntimeControlService
-from ..storage.storage import get_latest_bot_run_view_state, list_bot_runs
+from .runtime_composition import get_runtime_composition
 
 logger = logging.getLogger(__name__)
 
-_stream_manager = BotStreamManager()
-_config_service = BotConfigService()
-_runtime_service = BotRuntimeControlService(_config_service, _stream_manager)
+
+_WATCHDOG_CALLBACK_SET = False
+
+
+def _composition():
+    return get_runtime_composition()
+
+
+def _ensure_watchdog_callback() -> None:
+    global _WATCHDOG_CALLBACK_SET
+    if _WATCHDOG_CALLBACK_SET:
+        return
+    _composition().watchdog.set_orphan_callback(_handle_watchdog_orphan)
+    _WATCHDOG_CALLBACK_SET = True
 
 
 def _broadcast_bot_stream(event: str, payload: Dict[str, Any]) -> None:
-    _stream_manager.broadcast(event, payload)
+    _composition().stream_manager.broadcast(event, payload)
 
 
 def list_bots() -> List[Dict[str, object]]:
-    return project_bot_states(_config_service.list_bots())
+    return project_bot_states(_composition().config_service.list_bots())
 
 
 def _broadcast_projected_bot(bot_id: str, *, inspect_container: bool = True) -> None:
     try:
-        bot = _config_service.get_bot(bot_id)
+        bot = _composition().config_service.get_bot(bot_id)
     except KeyError:
         logger.warning("bot_stream_projection_missing | bot_id=%s", bot_id)
         return
@@ -49,7 +56,7 @@ def publish_runtime_update(bot_id: str, runtime: Mapping[str, Any]) -> None:
 
 
 def create_bot(name: str, **payload: object) -> Dict[str, object]:
-    bot = _config_service.create_bot(name, **payload)
+    bot = _composition().config_service.create_bot(name, **payload)
     logger.info("[BotService] bot created", extra={"bot_id": bot.get("id"), "run_type": bot.get("run_type")})
     projected = project_bot_state(bot)
     _broadcast_bot_stream("bot", {"bot": projected})
@@ -57,7 +64,7 @@ def create_bot(name: str, **payload: object) -> Dict[str, object]:
 
 
 def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
-    bot = _config_service.update_bot(bot_id, **payload)
+    bot = _composition().config_service.update_bot(bot_id, **payload)
     logger.info("[BotService] bot updated", extra={"bot_id": bot_id})
     projected = project_bot_state(bot)
     _broadcast_bot_stream("bot", {"bot": projected})
@@ -65,27 +72,28 @@ def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
 
 
 def delete_bot_record(bot_id: str) -> None:
-    _config_service.delete_bot_record(bot_id)
+    _composition().config_service.delete_bot_record(bot_id)
     logger.info("[BotService] bot deleted", extra={"bot_id": bot_id})
     _broadcast_bot_stream("bot_deleted", {"bot_id": bot_id})
 
 
 def start_bot(bot_id: str) -> Dict[str, object]:
-    return _runtime_service.start_bot(bot_id)
+    _ensure_watchdog_callback()
+    return _composition().runtime_control_service.start_bot(bot_id)
 
 
 def stop_bot(bot_id: str) -> Dict[str, object]:
-    return _runtime_service.stop_bot(bot_id)
+    return _composition().runtime_control_service.stop_bot(bot_id)
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
-    return project_bot_state(_config_service.get_bot(bot_id))
+    return project_bot_state(_composition().config_service.get_bot(bot_id))
 
 
 def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
     current = get_bot(bot_id)
     active_run_id = str(current.get("active_run_id") or "").strip() or None
-    rows = list_bot_runs(bot_id=bot_id)
+    rows = _composition().storage.list_bot_runs(bot_id=bot_id)
 
     def _sort_key(run: Mapping[str, Any]) -> tuple[str, str]:
         return (
@@ -100,7 +108,7 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
         run_id = str(run.get("run_id") or "").strip()
         if not run_id:
             continue
-        view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key="bot")
+        view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key="bot")
         view_payload = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
         runtime_payload = dict(view_payload.get("runtime") or {}) if isinstance(view_payload.get("runtime"), Mapping) else {}
         summary = dict(run.get("summary") or {})
@@ -126,11 +134,11 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
 
 
 def bots_stream():
-    return _runtime_service.bots_stream()
+    return _composition().runtime_control_service.bots_stream()
 
 
 def watchdog_status() -> Dict[str, Any]:
-    return _runtime_service.watchdog_status()
+    return _composition().runtime_control_service.watchdog_status()
 
 
 def runtime_capacity() -> Dict[str, Any]:
@@ -140,13 +148,13 @@ def runtime_capacity() -> Dict[str, Any]:
     workers_requested = 0
     running_bots = 0
 
-    for bot in _config_service.list_bots():
+    for bot in _composition().config_service.list_bots():
         status = str(bot.get("status") or "").strip().lower()
         if status not in active_statuses:
             continue
         running_bots += 1
         runtime_payload: Mapping[str, Any] = {}
-        view_row = get_latest_bot_run_view_state(
+        view_row = _composition().storage.get_latest_bot_run_view_state(
             bot_id=str(bot.get("id") or ""),
             run_id=None,
             series_key="bot",
@@ -185,14 +193,11 @@ def runtime_capacity() -> Dict[str, Any]:
 
 
 def bot_settings_catalog() -> Dict[str, Any]:
-    return _config_service.settings_catalog()
+    return _composition().config_service.settings_catalog()
 
 
 def _handle_watchdog_orphan(bot_id: str, _bot: Dict[str, Any]) -> None:
     _broadcast_projected_bot(bot_id)
-
-
-get_watchdog().set_orphan_callback(_handle_watchdog_orphan)
 
 
 __all__ = [

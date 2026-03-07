@@ -1,3 +1,16 @@
+---
+component: bot-runtime-engine
+subsystem: portal-runtime
+layer: engine
+doc_type: architecture
+status: active
+tags:
+  - runtime
+  - engine
+code_paths:
+  - portal/backend/service/bots/bot_runtime
+  - src/engines/bot_runtime
+---
 # Bot Runtime Engine Architecture
 
 ## Documentation Header
