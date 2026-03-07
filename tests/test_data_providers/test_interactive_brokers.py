@@ -81,7 +81,7 @@ def test_factory_returns_ib_provider(monkeypatch):
     """The provider factory should instantiate and cache the IB implementation."""
 
     _patch_ib_dependencies(monkeypatch)
-    monkeypatch.setattr(provider_factory, "_PROVIDER_CACHE", {})
+    provider_factory.reset_provider_cache()
 
     provider = provider_factory.get_provider(DataSource.IBKR.value, exchange="SMART")
     assert isinstance(provider, ib_module.InteractiveBrokersProvider)
@@ -105,3 +105,10 @@ def test_ib_provider_fetches_history(monkeypatch):
     assert list(frame.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
     assert not frame.empty
     assert frame["timestamp"].dt.tz is not None
+
+
+def test_factory_legacy_cache_alias_points_to_registry_cache():
+    """Legacy cache alias should remain a live view of the registry cache."""
+
+    provider_factory.reset_provider_cache()
+    assert provider_factory._PROVIDER_CACHE is provider_factory._REGISTRY.cache
