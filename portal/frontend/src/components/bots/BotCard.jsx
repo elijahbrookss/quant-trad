@@ -1,29 +1,7 @@
 import { Play, Square, Trash2, RotateCw, TriangleAlert, X, Eye } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { describeBotLifecycle, getBotControls, getBotRunId, getBotStatus } from './botStatusModel.js'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
-
-const computeStatus = (bot) => {
-  const runtimeStatus = String(bot?.runtime?.status || '').trim().toLowerCase()
-  const persistedStatus = String(bot?.status || '').trim().toLowerCase()
-  const terminalPersisted = new Set(['idle', 'stopped', 'completed', 'error', 'crashed', 'failed'])
-  if (persistedStatus && terminalPersisted.has(persistedStatus) && runtimeStatus && runtimeStatus !== persistedStatus) {
-    return persistedStatus
-  }
-  return (runtimeStatus || persistedStatus || 'idle').toLowerCase()
-}
-
-const ACTIVE_STATUSES = new Set(['running', 'paused', 'starting'])
-const STARTABLE_STATUSES = new Set([
-  'idle',
-  'stopped',
-  'completed',
-  'error',
-  'crashed',
-  'failed',
-  'degraded',
-  'telemetry_degraded',
-])
-const HEARTBEAT_STALE_MS = 60_000
 
 /**
  * Get status color for the card stripe
@@ -84,8 +62,6 @@ const getBaseCurrency = (symbol, strategyLookup, strategyId) => {
 export const BotCard = memo(function BotCard({
   bot,
   strategyLookup,
-  describeRange,
-  statusBadge,
   nowEpochMs,
   onStart,
   onStop,
@@ -128,7 +104,10 @@ export const BotCard = memo(function BotCard({
     [warningCount],
   )
 
-  const runtimeStatus = computeStatus(bot)
+  const runtimeStatus = getBotStatus(bot)
+  const lifecycle = describeBotLifecycle(bot)
+  const controls = getBotControls(bot)
+  const liveRunId = getBotRunId(bot)
   const statusColor = getStatusColor(runtimeStatus)
   const progressValue =
     typeof bot.runtime?.progress === 'number'
@@ -137,35 +116,15 @@ export const BotCard = memo(function BotCard({
         ? 1
         : 0
   const progressPct = Math.min(100, Math.max(0, progressValue * 100))
-  const showProgress = progressPct > 0 || ['running', 'starting', 'paused'].includes(runtimeStatus)
+  const showProgress = progressPct > 0 || ['running', 'starting', 'paused', 'degraded', 'telemetry_degraded'].includes(runtimeStatus)
   const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
-  const heartbeatMs = Date.parse(String(bot?.heartbeat_at || ''))
-  const staleHeartbeat = ACTIVE_STATUSES.has(runtimeStatus) && (
-    !Number.isFinite(heartbeatMs) || nowEpochMs - heartbeatMs > HEARTBEAT_STALE_MS
-  )
-  const staleHeartbeatAgeSeconds = staleHeartbeat && Number.isFinite(heartbeatMs)
-    ? Math.max(0, Math.floor((nowEpochMs - heartbeatMs) / 1000))
-    : null
-  const staleHeartbeatTooltip = staleHeartbeat
-    ? staleHeartbeatAgeSeconds === null
-      ? 'No runtime heartbeat detected. Restart will create a new container.'
-      : `Last runtime heartbeat ${formatRuntimeAge(staleHeartbeatAgeSeconds)} ago. Restart will create a new container.`
-    : null
-  const canStart = STARTABLE_STATUSES.has(runtimeStatus) || staleHeartbeat
-  const canStop = ACTIVE_STATUSES.has(runtimeStatus) && !staleHeartbeat
-  const isCompleted = runtimeStatus === 'completed'
-  const isStopped = runtimeStatus === 'stopped'
+  const canStart = controls.canStart
+  const canStop = controls.canStop
   const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error' || runtimeStatus === 'failed'
-  const isIdle = runtimeStatus === 'idle'
   const showViewError = isCrashed
-  const showLens = ['running', 'starting', 'paused', 'completed', 'stopped', 'error', 'crashed', 'failed'].includes(runtimeStatus)
-  const startLabel =
-    runtimeStatus === 'completed'
-      ? 'Rerun'
-      : staleHeartbeat || runtimeStatus === 'stopped' || runtimeStatus === 'crashed' || runtimeStatus === 'error' || runtimeStatus === 'failed' || runtimeStatus === 'degraded' || runtimeStatus === 'telemetry_degraded'
-        ? 'Restart'
-        : 'Start'
+  const showLens = controls.canOpenLens
+  const startLabel = controls.startLabel
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
   const completedDuration = buildCompletedDuration(bot)
   const runType = (bot.run_type || 'backtest').toLowerCase()
@@ -212,6 +171,13 @@ export const BotCard = memo(function BotCard({
   const errorPayload = bot?.runtime?.error || bot?.last_run_artifact?.error || null
   const errorMessage = typeof errorPayload === 'string' ? errorPayload : errorPayload?.message || 'Bot crashed'
   const errorMeta = typeof errorPayload === 'object' && errorPayload ? errorPayload : {}
+  const lifecycleToneClass = {
+    emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100',
+    sky: 'border-sky-500/30 bg-sky-500/10 text-sky-100',
+    amber: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+    rose: 'border-rose-500/30 bg-rose-500/10 text-rose-100',
+    slate: 'border-slate-700/70 bg-slate-900/60 text-slate-100',
+  }[lifecycle.tone] || 'border-slate-700/70 bg-slate-900/60 text-slate-100'
 
   return (
     <article className="group relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950/80 via-slate-950/60 to-slate-900/80 shadow-[0_12px_40px_rgba(2,6,23,0.35)] transition-all duration-200 hover:border-slate-700">
@@ -230,14 +196,33 @@ export const BotCard = memo(function BotCard({
                   {modeLabel}
                 </span>
               ) : null}
-              {staleHeartbeat && (
-                <span
-                  className="shrink-0 rounded-full border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
-                  title={staleHeartbeatTooltip || undefined}
-                >
-                  Offline
+              <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] ${lifecycleToneClass}`}>
+                <span className="relative flex h-2.5 w-2.5 items-center justify-center">
+                  {['live', 'starting_container', 'booting_runtime', 'awaiting_snapshot'].includes(lifecycle.phase) ? (
+                    <span className={`absolute inline-flex h-full w-full rounded-full opacity-70 ${
+                      lifecycle.tone === 'emerald'
+                        ? 'animate-ping bg-emerald-400/70'
+                        : lifecycle.tone === 'sky'
+                          ? 'animate-pulse bg-sky-400/70'
+                          : lifecycle.tone === 'amber'
+                            ? 'animate-pulse bg-amber-400/70'
+                            : 'bg-slate-500/70'
+                    }`} />
+                  ) : null}
+                  <span className={`relative inline-flex h-2 w-2 rounded-full ${
+                    lifecycle.tone === 'emerald'
+                      ? 'bg-emerald-300'
+                      : lifecycle.tone === 'sky'
+                        ? 'bg-sky-300'
+                        : lifecycle.tone === 'amber'
+                          ? 'bg-amber-300'
+                          : lifecycle.tone === 'rose'
+                            ? 'bg-rose-300'
+                            : 'bg-slate-400'
+                  }`} />
                 </span>
-              )}
+                {lifecycle.label}
+              </span>
               {warningCount > 0 && (
                 <div
                   className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
@@ -258,6 +243,9 @@ export const BotCard = memo(function BotCard({
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
               {assignedName || "—"}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-slate-400">
+              {lifecycle.detail}
             </p>
           </div>
 
@@ -287,6 +275,22 @@ export const BotCard = memo(function BotCard({
               <span className="tabular-nums text-slate-400">{runDurationLabel}</span>
             </>
           )}
+        </div>
+
+        <div className={`rounded-2xl border px-3.5 py-3 ${lifecycleToneClass}`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.28em] opacity-80">Lifecycle</p>
+              <p className="mt-1 text-sm font-medium">{lifecycle.label}</p>
+              <p className="mt-1 text-xs opacity-80">{lifecycle.detail}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.2em] opacity-80">
+              {liveRunId ? <span className="rounded-full border border-white/10 px-2 py-1">Run {liveRunId.slice(0, 8)}</span> : null}
+              {bot?.runtime?.seq ? <span className="rounded-full border border-white/10 px-2 py-1">Seq {Number(bot.runtime.seq)}</span> : null}
+              <span className="rounded-full border border-white/10 px-2 py-1">Container {lifecycle.containerStatus}</span>
+              <span className="rounded-full border border-white/10 px-2 py-1">Heartbeat {lifecycle.heartbeatState}</span>
+            </div>
+          </div>
         </div>
 
         {/* Progress bar */}
@@ -339,14 +343,9 @@ export const BotCard = memo(function BotCard({
             }`}>
               {runtimeStatus}
             </span>
-            {staleHeartbeat && (
-              <span
-                className="rounded-full border border-amber-500/50 bg-amber-950/50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-200"
-                title={staleHeartbeatTooltip || undefined}
-              >
-                offline
-              </span>
-            )}
+            <span className="rounded-full border border-slate-700/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+              {lifecycle.phase.replaceAll('_', ' ')}
+            </span>
           </div>
         </div>
 
@@ -382,9 +381,11 @@ export const BotCard = memo(function BotCard({
               onClick={() => onDelete(bot.id)}
               icon={<Trash2 className="size-3" />}
               busy={pendingDelete === bot.id}
+              disabled={!controls.canDelete}
               variant="danger"
               size="sm"
               iconOnly
+              label={controls.canDelete ? 'Delete bot' : 'Stop the bot before deleting'}
             />
           </div>
         </div>
@@ -479,7 +480,7 @@ export const BotCard = memo(function BotCard({
 
 function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
   if (!bot?.runtime?.started_at) return null
-  if (!['running', 'paused', 'starting'].includes(status)) return null
+  if (!['running', 'paused', 'starting', 'degraded', 'telemetry_degraded'].includes(status)) return null
   const startMs = Date.parse(bot.runtime.started_at)
   if (!Number.isFinite(startMs)) return null
   const elapsedSeconds = Math.max(0, Math.floor((nowEpochMs - startMs) / 1000))
@@ -487,20 +488,6 @@ function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
   const minutes = Math.floor((elapsedSeconds % 3600) / 60)
   const seconds = elapsedSeconds % 60
 
-  if (hours > 0) {
-    return `${hours}h ${String(minutes).padStart(2, '0')}m`
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
-  }
-  return `${seconds}s`
-}
-
-function formatRuntimeAge(elapsedSeconds) {
-  const safe = Math.max(0, Number(elapsedSeconds) || 0)
-  const hours = Math.floor(safe / 3600)
-  const minutes = Math.floor((safe % 3600) / 60)
-  const seconds = safe % 60
   if (hours > 0) {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`
   }
@@ -557,7 +544,7 @@ function describeBotMeta(bot, strategyLookup, key) {
   return null
 }
 
-function ActionButton({ onClick, icon, label, busy, variant = 'ghost', size = 'md', iconOnly = false }) {
+function ActionButton({ onClick, icon, label, busy, disabled = false, variant = 'ghost', size = 'md', iconOnly = false }) {
   const variantClass = {
     primary:
       'border-slate-700 bg-slate-800/80 text-slate-200 hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50',
@@ -577,47 +564,13 @@ function ActionButton({ onClick, icon, label, busy, variant = 'ghost', size = 'm
       type="button"
       onClick={onClick}
       className={`inline-flex items-center gap-1 rounded-md border font-medium transition-colors ${variantClass} ${sizeClass} disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={busy}
+      disabled={busy || disabled}
       title={iconOnly ? label : undefined}
     >
       {icon}
       {!iconOnly && <span>{label}</span>}
     </button>
   )
-}
-
-function buildStats(bot) {
-  const source = bot?.runtime?.stats || bot?.last_stats || {}
-  const entries = [
-    { key: 'net_pnl', label: 'NET PNL', value: source.net_pnl },
-    { key: 'total_trades', label: 'TOTAL TRADES', value: source.total_trades },
-    { key: 'wins', label: 'WINS', value: source.wins },
-    { key: 'losses', label: 'LOSSES', value: source.losses },
-    { key: 'win_rate', label: 'WIN RATE', value: source.win_rate },
-  ]
-
-  return entries
-    .map((entry) => {
-      if (entry.value === undefined || entry.value === null) return null
-      if (entry.key === 'net_pnl') {
-        const numeric = Number(entry.value)
-        const tone = Number.isFinite(numeric)
-          ? numeric > 0
-            ? 'positive'
-            : numeric < 0
-              ? 'negative'
-              : 'neutral'
-          : 'neutral'
-        return {
-          ...entry,
-          tone,
-          value: Number.isFinite(numeric) ? numeric.toFixed(2) : entry.value,
-        }
-      }
-
-      return { ...entry, value: entry.value }
-    })
-    .filter(Boolean)
 }
 
 function WarningContextChips({ context }) {
@@ -643,21 +596,6 @@ function formatWarningLabel(label) {
     .filter(Boolean)
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ')
-}
-
-function buildWalletEntries(bot) {
-  const balances = bot?.wallet_config?.balances
-  if (!balances || typeof balances !== 'object') return []
-  return Object.entries(balances)
-    .map(([currency, amount]) => {
-      const numeric = Number(amount)
-      const value = Number.isFinite(numeric)
-        ? numeric.toLocaleString(undefined, { maximumFractionDigits: 8 })
-        : amount
-      const label = currency ? currency.toUpperCase() : 'BAL'
-      return { label, value }
-    })
-    .filter((entry) => entry.value !== undefined && entry.value !== null)
 }
 
 export function sortBots(bots) {

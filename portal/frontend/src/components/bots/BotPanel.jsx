@@ -14,19 +14,10 @@ import { BotCreateModal } from './create/BotCreateModal.jsx'
 import { BotLensLiveModal } from './BotLensLiveModal.jsx'
 import { buildDefaultForm } from './create/botCreateFormDefaults.js'
 import { useBotCreateForm } from './create/useBotCreateForm.js'
+import { getBotStatus } from './botStatusModel.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
 import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
-
-const computeStatus = (bot) => {
-  const runtimeStatus = String(bot?.runtime?.status || '').toLowerCase()
-  const persistedStatus = String(bot?.status || '').toLowerCase()
-  const terminalPersisted = new Set(['idle', 'stopped', 'completed', 'error', 'crashed', 'failed'])
-  if (persistedStatus && terminalPersisted.has(persistedStatus) && runtimeStatus && runtimeStatus !== persistedStatus) {
-    return persistedStatus
-  }
-  return (runtimeStatus || persistedStatus || 'idle').toLowerCase()
-}
 
 const parseEnvText = (text) => {
   const next = {}
@@ -60,7 +51,7 @@ export function BotPanel() {
   } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
-  const [lensBot, setLensBot] = useState(null)
+  const [lensBotId, setLensBotId] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -135,7 +126,7 @@ export function BotPanel() {
       if (!payload?.id) return
       mergeBots([payload])
     },
-    [logger, mergeBots],
+    [mergeBots],
   )
 
   const removeBot = useCallback((botId) => {
@@ -152,8 +143,52 @@ export function BotPanel() {
         const bot = nextState[index]
         const mergedRuntime = { ...(bot.runtime || {}), ...runtime }
         if (shallowEqualRuntime(mergedRuntime, bot.runtime)) return
+        const nextStatus = String(runtime?.status || '').trim().toLowerCase()
+        const nextLifecycle = { ...(bot.lifecycle || {}) }
+        const nextControls = { ...(bot.controls || {}) }
+        if (nextStatus) {
+          nextLifecycle.status = nextStatus
+          if (nextStatus === 'running') {
+            nextLifecycle.phase = Number(runtime?.seq || 0) > 0 ? 'live' : 'awaiting_snapshot'
+            nextLifecycle.reason = Number(runtime?.seq || 0) > 0 ? 'live_runtime' : 'awaiting_first_snapshot'
+            nextLifecycle.live = Number(runtime?.seq || 0) > 0
+            nextControls.can_start = false
+            nextControls.can_stop = true
+          } else if (nextStatus === 'starting') {
+            nextLifecycle.phase = 'starting_container'
+            nextLifecycle.reason = 'container_start_pending'
+            nextLifecycle.live = false
+            nextControls.can_start = false
+            nextControls.can_stop = true
+          } else if (['completed', 'stopped'].includes(nextStatus)) {
+            nextLifecycle.phase = nextStatus === 'completed' ? 'completed' : 'stopped'
+            nextLifecycle.reason = nextStatus === 'completed' ? 'run_completed' : 'run_stopped'
+            nextLifecycle.live = false
+            nextControls.can_start = true
+            nextControls.can_stop = false
+          } else if (['degraded', 'telemetry_degraded'].includes(nextStatus)) {
+            nextLifecycle.phase = 'degraded'
+            nextLifecycle.reason = 'runtime_degraded'
+            nextLifecycle.live = true
+            nextControls.can_start = true
+            nextControls.can_stop = true
+          } else if (['error', 'failed', 'crashed'].includes(nextStatus)) {
+            nextLifecycle.phase = 'failed'
+            nextLifecycle.reason = 'runtime_failed'
+            nextLifecycle.live = false
+            nextControls.can_start = true
+            nextControls.can_stop = false
+          }
+        }
         if (nextState === prev) nextState = [...prev]
-        nextState[index] = { ...bot, runtime: mergedRuntime }
+        nextState[index] = {
+          ...bot,
+          status: nextStatus || bot.status,
+          active_run_id: runtime?.run_id || bot.active_run_id,
+          controls: nextControls,
+          lifecycle: nextLifecycle,
+          runtime: mergedRuntime,
+        }
       })
       runtimeQueueRef.current.clear()
       return nextState
@@ -199,7 +234,7 @@ export function BotPanel() {
         if (withSpinner) setLoading(false)
       }
     },
-    [loadRuntimeCapacity, mergeBots],
+    [loadRuntimeCapacity, logger, mergeBots],
   )
 
   const loadStrategies = useCallback(async () => {
@@ -296,9 +331,8 @@ export function BotPanel() {
       backtest_end: endISO,
     })
     try {
-      const { wallet_balances, ...rest } = form
       const payloadBody = {
-        ...rest,
+        ...form,
         snapshot_interval_ms: Number(form.snapshot_interval_ms || 1000),
         bot_env: form.bot_env || {},
         mode: normalizedMode,
@@ -306,6 +340,7 @@ export function BotPanel() {
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
         wallet_config: walletConfig,
       }
+      delete payloadBody.wallet_balances
       const payload = await createBot(payloadBody)
       logger.info('bot_create_success', { bot_id: payload?.id })
       upsertBot(payload)
@@ -331,6 +366,20 @@ export function BotPanel() {
         bot.id === botId
           ? {
               ...bot,
+              status: 'starting',
+              controls: {
+                ...(bot.controls || {}),
+                can_start: false,
+                can_stop: true,
+                start_label: 'Starting',
+              },
+              lifecycle: {
+                ...(bot.lifecycle || {}),
+                status: 'starting',
+                phase: 'starting_container',
+                reason: 'container_start_pending',
+                live: false,
+              },
               runtime: { ...(bot.runtime || {}), status: 'starting' },
             }
           : bot,
@@ -349,6 +398,19 @@ export function BotPanel() {
             ? {
                 ...bot,
                 status: 'error',
+                controls: {
+                  ...(bot.controls || {}),
+                  can_start: true,
+                  can_stop: false,
+                  start_label: 'Restart',
+                },
+                lifecycle: {
+                  ...(bot.lifecycle || {}),
+                  status: 'error',
+                  phase: 'failed',
+                  reason: 'runtime_failed',
+                  live: false,
+                },
                 last_run_artifact: {
                   ...(bot.last_run_artifact || {}),
                   error: { message: err?.message || 'Container start failed', phase: 'container_start' },
@@ -370,6 +432,20 @@ export function BotPanel() {
   const handleStop = async (botId) => {
     setError(null)
     logger.info('bot_stop_requested', { bot_id: botId })
+    setBots((prev) =>
+      prev.map((bot) =>
+        bot.id === botId
+          ? {
+              ...bot,
+              controls: {
+                ...(bot.controls || {}),
+                can_start: false,
+                can_stop: false,
+              },
+            }
+          : bot,
+      ),
+    )
     try {
       const payload = await stopBotApi(botId)
       upsertBot(payload)
@@ -390,6 +466,7 @@ export function BotPanel() {
     setPendingDelete(botId)
     try {
       await deleteBotApi(botId)
+      if (lensBotId === botId) setLensBotId(null)
       setBots((prev) => prev.filter((bot) => bot.id !== botId))
     } catch (err) {
       logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
@@ -398,25 +475,6 @@ export function BotPanel() {
       setPendingDelete(null)
     }
   }
-
-  const statusBadge = useCallback((status) => {
-    const config = {
-      running: { color: 'bg-emerald-500/10 text-emerald-300 border-emerald-800/50', dot: 'bg-emerald-400' },
-      paused: { color: 'bg-amber-500/10 text-amber-300 border-amber-800/50', dot: 'bg-amber-400' },
-      stopped: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
-      crashed: { color: 'bg-rose-500/10 text-rose-300 border-rose-800/50', dot: 'bg-rose-400' },
-      completed: { color: 'bg-sky-500/10 text-sky-300 border-sky-800/50', dot: 'bg-sky-400' },
-      starting: { color: 'bg-slate-700/30 text-slate-400 border-slate-700/50', dot: 'bg-slate-500' },
-      idle: { color: 'bg-slate-800/40 text-slate-500 border-slate-800', dot: 'bg-slate-600' },
-    }
-    const { color, dot } = config[status] || config.idle
-    return (
-      <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[10px] font-medium uppercase tracking-wider ${color}`}>
-        <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-        {status || 'idle'}
-      </span>
-    )
-  }, [])
 
   const formatDate = (value) => {
     if (!value) return '—'
@@ -427,18 +485,23 @@ export function BotPanel() {
     }
   }
 
-  const describeRange = (bot) => {
+  const describeRange = useCallback((bot) => {
     if ((bot?.run_type || '').toLowerCase() === 'backtest') {
       return `${formatDate(bot?.backtest_start)} → ${formatDate(bot?.backtest_end)}`
     }
     return 'Sim trade (live)'
-  }
+  }, [])
 
     const sortedBots = useMemo(() => sortBots(bots), [bots])
 
   const sortedStrategies = useMemo(() => {
     return [...strategies].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   }, [strategies])
+
+  const lensBot = useMemo(
+    () => bots.find((bot) => bot.id === lensBotId) || null,
+    [bots, lensBotId],
+  )
 
   const strategyLookup = useMemo(() => {
     const map = new Map()
@@ -457,7 +520,7 @@ export function BotPanel() {
       const assignedNames = bot.strategy_id ? (strategyLookup.get(bot.strategy_id)?.name || bot.strategy_id) : ''
       const haystack = [
         bot.name,
-        computeStatus(bot),
+        getBotStatus(bot),
         describeRange(bot),
         assignedNames,
         bot.timeframe,
@@ -469,24 +532,7 @@ export function BotPanel() {
         .toLowerCase()
       return haystack.includes(query)
     })
-  }, [search, sortedBots, strategyLookup])
-
-  const describeBotMeta = useCallback(
-    (botItem, field) => {
-      if (!botItem) return ''
-      const values = new Set()
-      if (botItem.strategy_id) {
-        const strategy = strategyLookup.get(botItem.strategy_id)
-        const value = strategy?.[field]
-        if (value) values.add(value)
-      }
-      if (values.size) {
-        return Array.from(values).join(', ')
-      }
-      return botItem?.[field] || ''
-    },
-    [strategyLookup],
-  )
+  }, [describeRange, search, sortedBots, strategyLookup])
 
   return (
     <section className="space-y-5">
@@ -597,13 +643,11 @@ export function BotPanel() {
                 key={bot.id}
                 bot={bot}
                 strategyLookup={strategyLookup}
-                describeRange={describeRange}
-                statusBadge={statusBadge}
                 nowEpochMs={nowEpochMs}
                 onStart={handleStart}
                 onStop={handleStop}
                 onDelete={handleDelete}
-                onOpen={setLensBot}
+                onOpen={(selectedBot) => setLensBotId(selectedBot?.id || null)}
                 pendingStart={pendingStart}
                 pendingDelete={pendingDelete}
               />
@@ -611,7 +655,7 @@ export function BotPanel() {
           )}
         </div>
 
-        <BotLensLiveModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} />
+        <BotLensLiveModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBotId(null)} />
         <BotCreateModal
           open={createOpen}
           onClose={closeCreateModal}
