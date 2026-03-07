@@ -87,6 +87,12 @@ export async function fetchBotActiveRun(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
 }
 
+export async function fetchBotRuns(botId, { limit = 25 } = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(Math.max(1, Number(limit) || 25)))
+  return request(`/api/bots/${encodeURIComponent(botId)}/runs?${params.toString()}`)
+}
+
 export async function fetchBotLensSeriesCatalog(runId) {
   return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
 }
@@ -132,4 +138,3 @@ export function openBotLensSeriesLiveStream(runId, seriesKey, { afterSeq = 0 } =
   const path = `/api/bots/ws/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/live?${params.toString()}`
   return openWebSocket(path, { base: BASE })
 }
-
