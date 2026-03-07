@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from engines.bot_runtime.core.indicator_state.contracts import IndicatorStateSnapshot, SignalEvaluationInput
-from engines.bot_runtime.core.indicator_state.signal_evaluator import evaluate_rules_from_state_snapshots
+from engines.indicator_engine.contracts import IndicatorStateSnapshot, SignalEvaluationInput
+from engines.indicator_engine.signal_evaluator import evaluate_rules_from_state_snapshots
 
 
 def test_signal_evaluator_consumes_snapshots_only() -> None:
