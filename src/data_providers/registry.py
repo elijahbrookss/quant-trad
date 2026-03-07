@@ -7,6 +7,7 @@ for developers to add new providers/venues without editing static lists.
 """
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Callable, Dict, List, Optional
 
 
@@ -17,6 +18,8 @@ class ProviderConfig:
     supported_venues: List[str] = field(default_factory=list)
     capabilities: Dict[str, object] = field(default_factory=dict)
     required_secrets: List[str] = field(default_factory=list)
+    implementation_module: Optional[str] = None
+    implementation_class: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -52,9 +55,24 @@ class _Registry:
     # Decorators to allow @register_provider syntax
     def provider(self, **kwargs):
         def decorator(obj: Callable):
-            cfg = ProviderConfig(**kwargs)
+            payload = dict(kwargs)
+            if not payload.get("implementation_module") or not payload.get("implementation_class"):
+                candidate = obj if inspect.isclass(obj) else None
+                if candidate is None:
+                    try:
+                        maybe_cls = obj()
+                    except TypeError:
+                        maybe_cls = None
+                    if inspect.isclass(maybe_cls):
+                        candidate = maybe_cls
+                if inspect.isclass(candidate):
+                    payload.setdefault("implementation_module", candidate.__module__)
+                    payload.setdefault("implementation_class", candidate.__name__)
+
+            cfg = ProviderConfig(**payload)
             self.register_provider(cfg)
             return obj
+
         return decorator
 
     def venue(self, **kwargs):
@@ -62,6 +80,7 @@ class _Registry:
             cfg = VenueConfig(**kwargs)
             self.register_venue(cfg)
             return obj
+
         return decorator
 
     @property
@@ -142,6 +161,8 @@ _REGISTRY.register_provider(
         label="Alpaca API",
         supported_venues=["ALPACA"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities"]},
+        implementation_module="data_providers.providers.alpaca",
+        implementation_class="AlpacaProvider",
     )
 )
 _REGISTRY.register_provider(
@@ -150,6 +171,8 @@ _REGISTRY.register_provider(
         label="Yahoo Finance",
         supported_venues=["YAHOO"],
         capabilities={"supportsHistorical": True, "supportsLive": False, "supportsOrders": False, "assetClasses": ["equities", "etf"]},
+        implementation_module="data_providers.providers.yahoo",
+        implementation_class="YahooFinanceProvider",
     )
 )
 _REGISTRY.register_provider(
@@ -158,6 +181,8 @@ _REGISTRY.register_provider(
         label="Interactive Brokers",
         supported_venues=["INTERACTIVE_BROKERS"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities", "futures", "options"]},
+        implementation_module="data_providers.providers.interactive_brokers",
+        implementation_class="InteractiveBrokersProvider",
     )
 )
 _REGISTRY.register_provider(
@@ -166,6 +191,8 @@ _REGISTRY.register_provider(
         label="CCXT (multi-exchange)",
         supported_venues=["KRAKEN_PRO", "BINANCE_US", "COINBASE"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+        implementation_module="data_providers.providers.ccxt",
+        implementation_class="CCXTProvider",
     )
 )
 _REGISTRY.register_provider(
@@ -174,6 +201,8 @@ _REGISTRY.register_provider(
         label="Coinbase Direct API",
         supported_venues=["COINBASE_DIRECT"],
         capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+        implementation_module="data_providers.providers.coinbase",
+        implementation_class="CoinbaseProvider",
     )
 )
 

@@ -11,7 +11,7 @@ COMPOSE_FILE="docker/docker-compose.test.yml"
 
 run_in_container() {
   local cmd="$1"
-  docker compose -f "$COMPOSE_FILE" run --rm test bash -lc "python -m pip install --upgrade pip && /app/wait-for-db.sh ${cmd}"
+  docker compose -f "$COMPOSE_FILE" run --rm test bash -lc "python -m pip install --upgrade pip && /app/scripts/wait-for-db.sh ${cmd}"
 }
 
 case "$SUITE" in
