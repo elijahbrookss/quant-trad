@@ -149,12 +149,23 @@ class ProviderRegistry:
 
 
 _REGISTRY = ProviderRegistry()
+_PROVIDER_CACHE = _REGISTRY.cache
 
 
 def configure_persistence_factory(factory):
     """Provide a service-layer persistence builder for provider instances."""
 
+    global _PROVIDER_CACHE
     _REGISTRY.configure_persistence_factory(factory)
+    _PROVIDER_CACHE = _REGISTRY.cache
+
+
+def _sync_legacy_cache_alias() -> None:
+    """Keep the legacy module cache alias wired to the active registry cache."""
+
+    global _PROVIDER_CACHE
+    if _REGISTRY.cache is not _PROVIDER_CACHE:
+        _REGISTRY.cache = _PROVIDER_CACHE
 
 
 def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -181,4 +192,5 @@ def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[s
 def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = None, exchange: Optional[str] = None) -> BaseDataProvider:
     """Return a data provider instance for the requested provider/venue."""
 
+    _sync_legacy_cache_alias()
     return _REGISTRY.get_provider(provider_id, venue=venue, exchange=exchange)

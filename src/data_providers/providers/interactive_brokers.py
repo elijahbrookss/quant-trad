@@ -30,6 +30,7 @@ mapping whenever required.
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import datetime as dt
 import json
@@ -581,6 +582,8 @@ for _method_name in (
     "_build_contract",
 ):
     setattr(InteractiveBrokersProvider, _method_name, globals()[_method_name])
+
+abc.update_abstractmethods(InteractiveBrokersProvider)
 
 
 @_REGISTRY.provider(
