@@ -22,12 +22,12 @@ _SCHEMA_LOCK_KEY = 9021001
 class Database:
     """Lightweight wrapper around SQLAlchemy engine/session handling."""
 
-    def __init__(self) -> None:
+    def __init__(self, dsn: Optional[str] = None) -> None:
         self._engine = None
         self._session_factory: Optional[sessionmaker] = None
         self._available = False
         self._error: Optional[Exception] = None
-        self.dsn = self._resolve_dsn()
+        self.dsn = str(dsn).strip() if dsn else None
 
     @staticmethod
     def _resolve_dsn() -> str:
@@ -89,6 +89,8 @@ class Database:
         if self._engine is not None and self._available:
             return True
         try:
+            if not self.dsn:
+                self.dsn = self._resolve_dsn()
             if self._engine is None:
                 self._engine = create_engine(self.dsn, **self._engine_options())
             if self._session_factory is None:
