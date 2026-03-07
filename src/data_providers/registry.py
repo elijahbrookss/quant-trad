@@ -104,8 +104,20 @@ _REGISTRY = _Registry()
 def normalize_provider_id(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    text = str(value).strip().upper()
-    return text or None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    compact = text.replace("-", "_").replace(" ", "_").upper()
+    aliases = {
+        "YFINANCE": "YAHOO",
+        "YAHOO_FINANCE": "YAHOO",
+        "IBKR": "INTERACTIVE_BROKERS",
+        "INTERACTIVEBROKERS": "INTERACTIVE_BROKERS",
+    }
+
+    canonical = aliases.get(compact, compact)
+    return canonical or None
 
 
 def normalize_venue_id(value: Optional[str]) -> Optional[str]:
