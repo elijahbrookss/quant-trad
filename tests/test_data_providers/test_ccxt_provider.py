@@ -1,11 +1,13 @@
+import importlib
 import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 pd = pytest.importorskip("pandas")
+pytest.importorskip("ccxt")
 
-from data_providers import ccxt_provider as ccxt_module
+ccxt_module = importlib.import_module("data_providers.providers.ccxt")
 
 
 def test_ccxt_provider_continues_pagination_when_exchange_caps(monkeypatch):

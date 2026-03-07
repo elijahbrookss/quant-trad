@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+pytest.importorskip("numpy")
+
 from engines.bot_runtime.core.domain import Candle
-from engines.bot_runtime.core.indicator_state.contracts import IndicatorStateSnapshot, OverlayProjectionInput
-from engines.bot_runtime.core.indicator_state.market_profile_engine import MarketProfileStateEngine
-from engines.bot_runtime.core.indicator_state.plugins.market_profile import market_profile_overlay_entries
+from engines.indicator_engine.contracts import IndicatorStateSnapshot, OverlayProjectionInput
+from indicators.market_profile.runtime.state_engine import MarketProfileStateEngine
+from indicators.market_profile.signals import market_profile_overlay_entries
 
 
 def _candle(ts: str, close: float) -> Candle:
