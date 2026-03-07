@@ -42,17 +42,24 @@ def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
         return None
 
     candidates: List[Any] = []
+
+    metadata = signal.get("metadata")
+    metadata_mapping = metadata if isinstance(metadata, Mapping) else None
+
+    # Prefer explicit signal-time fields over generic time/timestamp fields,
+    # regardless of whether the value is on the root payload or metadata.
     if "signal_time" in signal:
         candidates.append(signal.get("signal_time"))
+    if metadata_mapping and "signal_time" in metadata_mapping:
+        candidates.append(metadata_mapping.get("signal_time"))
+
     if "time" in signal:
         candidates.append(signal.get("time"))
     if "timestamp" in signal:
         candidates.append(signal.get("timestamp"))
 
-    metadata = signal.get("metadata")
-    if isinstance(metadata, Mapping):
+    if metadata_mapping:
         for key in (
-            "signal_time",
             "time",
             "timestamp",
             "bar_time",
@@ -61,8 +68,8 @@ def _extract_signal_epoch(signal: Optional[Mapping[str, Any]]) -> Optional[int]:
             "event_time",
             "retest_time",
         ):
-            if key in metadata:
-                candidates.append(metadata.get(key))
+            if key in metadata_mapping:
+                candidates.append(metadata_mapping.get(key))
 
     for value in candidates:
         epoch = _iso_to_epoch_seconds(value)
