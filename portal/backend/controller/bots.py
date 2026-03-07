@@ -17,8 +17,6 @@ from ..service.bots import bot_service
 from ..service.bots.ledger_service import list_run_ledger_events
 from ..service.bots.telemetry_stream import telemetry_hub
 from ..service.bots.botlens_series_service import get_series_history, get_series_window, list_series_keys
-from ..service.storage.storage import get_latest_bot_runtime_run_id
-
 router = APIRouter()
 
 
@@ -204,8 +202,27 @@ async def stop_bot(bot_id: str) -> Dict[str, Any]:
 
 @router.get("/{bot_id}/active-run")
 async def bot_active_run(bot_id: str) -> Dict[str, Any]:
-    run_id = await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
-    return {"bot_id": str(bot_id), "run_id": run_id}
+    try:
+        bot = await asyncio.to_thread(bot_service.get_bot, str(bot_id))
+        run_id = bot.get("active_run_id")
+        return {"bot_id": str(bot_id), "run_id": run_id}
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{bot_id}/runs")
+async def bot_runs(
+    bot_id: str,
+    limit: int = 25,
+) -> Dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            bot_service.list_bot_runs_for_bot,
+            str(bot_id),
+            limit=max(1, min(int(limit or 25), 100)),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.get("/{bot_id}/runs/{run_id}/events")
@@ -302,4 +319,3 @@ async def bot_lens_series_live(
         pass
     finally:
         await telemetry_hub.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=websocket)
-

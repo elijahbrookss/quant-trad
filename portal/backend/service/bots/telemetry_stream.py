@@ -582,6 +582,7 @@ class BotTelemetryHub:
             return
         raw_chart = view_envelope.get("payload") if isinstance(view_envelope, AbcMapping) else {}
         full_snapshot = _trim_chart_snapshot(raw_chart)
+        snapshot_runtime = dict(full_snapshot.get("runtime") or {}) if isinstance(full_snapshot.get("runtime"), AbcMapping) else {}
         snapshot_at = view_envelope.get("at") or payload.get("at")
         snapshot_known_at = view_envelope.get("known_at") or payload.get("known_at") or snapshot_at
         snapshot_schema_version = _resolve_schema_version(view_envelope.get("schema_version"))
@@ -628,6 +629,31 @@ class BotTelemetryHub:
         async with self._lock:
             self._latest_view_state[key] = dict(view_state_row)
             self._latest_run_by_bot[bot_id] = run_id
+
+        try:
+            from .bot_service import publish_runtime_update
+
+            await asyncio.to_thread(
+                publish_runtime_update,
+                bot_id,
+                {
+                    **snapshot_runtime,
+                    "status": str(snapshot_runtime.get("status") or "running"),
+                    "run_id": run_id,
+                    "seq": view_seq,
+                    "known_at": snapshot_known_at,
+                    "last_snapshot_at": snapshot_at,
+                    "warnings": list(full_snapshot.get("warnings") or []),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "bot_telemetry_runtime_broadcast_failed | bot_id=%s | run_id=%s | seq=%s | error=%s",
+                bot_id,
+                run_id,
+                view_seq,
+                exc,
+            )
 
         persist_item = {
             "row": view_state_row,
