@@ -48,13 +48,14 @@ def _build_provider_instance(
     provider_cls = _provider_class(provider_cfg)
     signature = inspect.signature(provider_cls)
     parameters = signature.parameters
+    accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
 
     kwargs = {}
-    if "persistence" in parameters:
+    if "persistence" in parameters or accepts_var_kwargs:
         kwargs["persistence"] = persistence
-    if "settings" in parameters:
+    if "settings" in parameters or accepts_var_kwargs:
         kwargs["settings"] = runtime_config
-    if "exchange" in parameters:
+    if "exchange" in parameters or accepts_var_kwargs:
         kwargs["exchange"] = exchange or resolved_venue
     if "exchange_id" in parameters:
         slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()

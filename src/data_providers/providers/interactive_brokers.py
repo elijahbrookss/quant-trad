@@ -212,375 +212,375 @@ class InteractiveBrokersProvider(BaseDataProvider):
         return []
 
 
-@_REGISTRY.provider(
-    id="INTERACTIVE_BROKERS",
-    label="Interactive Brokers",
-    supported_venues=["INTERACTIVE_BROKERS"],
-    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["equities", "futures", "options"]},
-)
-def _register_ibkr_provider():
-    return InteractiveBrokersProvider
 
+# ------------------------------------------------------------------
+# Public helpers
+# ------------------------------------------------------------------
+def fetch_from_api(
+    self,
+    symbol: str,
+    start: dt.datetime | str,
+    end: dt.datetime | str,
+    interval: str,
+) -> pd.DataFrame:
+    """Retrieve OHLCV bars for *symbol* between *start* and *end*.
 
-@_REGISTRY.venue(
-    id="INTERACTIVE_BROKERS",
-    label="Interactive Brokers",
-    provider_id="INTERACTIVE_BROKERS",
-    adapter_id=None,
-)
-def _register_ibkr_venue():
-    return "INTERACTIVE_BROKERS"
+    Parameters
+    ----------
+    symbol:
+        The instrument identifier. The provider supports a handful of
+        modifiers (``SYMBOL:SECTYPE:EXCHANGE[:CURRENCY]`` or
+        ``SYMBOL.SEC``) to specify the security type inline. Complex
+        instruments should be defined through ``IB_SYMBOL_OVERRIDES``.
+    start / end:
+        ISO formatted timestamps or :class:`datetime.datetime` objects.
+    interval:
+        Requested bar size (``1m``, ``5m``, ``1h``, ``1d`` ...).
+    """
 
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
-    def fetch_from_api(
-        self,
-        symbol: str,
-        start: dt.datetime | str,
-        end: dt.datetime | str,
-        interval: str,
-    ) -> pd.DataFrame:
-        """Retrieve OHLCV bars for *symbol* between *start* and *end*.
+    if not symbol:
+        raise ValueError("symbol is required for Interactive Brokers fetch")
 
-        Parameters
-        ----------
-        symbol:
-            The instrument identifier. The provider supports a handful of
-            modifiers (``SYMBOL:SECTYPE:EXCHANGE[:CURRENCY]`` or
-            ``SYMBOL.SEC``) to specify the security type inline. Complex
-            instruments should be defined through ``IB_SYMBOL_OVERRIDES``.
-        start / end:
-            ISO formatted timestamps or :class:`datetime.datetime` objects.
-        interval:
-            Requested bar size (``1m``, ``5m``, ``1h``, ``1d`` ...).
-        """
+    start_dt = self._coerce_datetime(start)
+    end_dt = self._coerce_datetime(end)
+    if end_dt <= start_dt:
+        raise ValueError("end must be after start for Interactive Brokers fetch")
 
-        if not symbol:
-            raise ValueError("symbol is required for Interactive Brokers fetch")
+    bar_size = self._map_interval(interval)
+    if not bar_size:
+        raise ValueError(f"Unsupported interval for Interactive Brokers: {interval}")
 
-        start_dt = self._coerce_datetime(start)
-        end_dt = self._coerce_datetime(end)
-        if end_dt <= start_dt:
-            raise ValueError("end must be after start for Interactive Brokers fetch")
+    duration = self._derive_duration(start_dt, end_dt)
+    contract = self._build_contract(symbol)
 
-        bar_size = self._map_interval(interval)
-        if not bar_size:
-            raise ValueError(f"Unsupported interval for Interactive Brokers: {interval}")
+    logger.info(
+        "ibkr_fetch_request | symbol=%s | interval=%s | start=%s | end=%s | bar_size=%s | duration=%s",
+        symbol,
+        interval,
+        start_dt.isoformat(),
+        end_dt.isoformat(),
+        bar_size,
+        duration,
+    )
 
-        duration = self._derive_duration(start_dt, end_dt)
-        contract = self._build_contract(symbol)
-
-        logger.info(
-            "ibkr_fetch_request | symbol=%s | interval=%s | start=%s | end=%s | bar_size=%s | duration=%s",
-            symbol,
-            interval,
-            start_dt.isoformat(),
-            end_dt.isoformat(),
-            bar_size,
-            duration,
-        )
-
-        with self._lock:
-            self._ensure_connection()
-            try:
-                logger.debug("ibkr_fetch_before_request | connected=%s", self._ib.isConnected())
-                bars = self._ib.reqHistoricalData(
-                    contract,
-                    endDateTime=end_dt,
-                    durationStr=duration,
-                    barSizeSetting=bar_size,
-                    whatToShow=os.getenv("IB_WHAT_TO_SHOW", "TRADES"),
-                    useRTH=False,
-                    formatDate=1,
-                    keepUpToDate=False,
-                )
-                logger.debug("ibkr_fetch_after_request | bar_count=%s", len(bars) if bars else 0)
-            except Exception as exc:  # pragma: no cover - network interaction
-                logger.exception(
-                    "ibkr_fetch_failed | symbol=%s | interval=%s | error=%s",
-                    symbol,
-                    interval,
-                    exc,
-                )
-                raise
-
-        if not bars:
-            logger.info(
-                "ibkr_fetch_empty | symbol=%s | interval=%s | start=%s | end=%s",
-                symbol,
-                interval,
-                start_dt.isoformat(),
-                end_dt.isoformat(),
-            )
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-        frame = util.df(bars)
-        if frame.empty:
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-        frame["timestamp"] = pd.to_datetime(frame["date"], utc=True)
-        filtered = frame[(frame["timestamp"] >= start_dt) & (frame["timestamp"] <= end_dt)]
-
-        if filtered.empty:
-            logger.info(
-                "ibkr_fetch_preserve_unfiltered | symbol=%s | interval=%s | start=%s | end=%s | bars=%s",
-                symbol,
-                interval,
-                start_dt.isoformat(),
-                end_dt.isoformat(),
-                len(frame),
-            )
-            filtered = frame
-
-        return filtered[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _ensure_connection(self) -> None:
-        """Open an IB connection if we are not already connected."""
-        if self._ib.isConnected():
-            logger.debug("ibkr_already_connected | host=%s | port=%s | client_id=%s",
-                        self._host, self._port, self._client_id)
-            return
-
-        logger.info("ibkr_connect_start | host=%s | port=%s | client_id=%s",
-                    self._host, self._port, self._client_id)
-
+    with self._lock:
+        self._ensure_connection()
         try:
-            self._ensure_event_loop()
-            logger.debug("ibkr_event_loop_ready | loop=%s | loop_is_closed=%s | thread=%s",
-                        self._loop, getattr(self._loop, 'is_closed', lambda: None)(),
-                        threading.current_thread().name)
-
-            self._ib.connect(
-                self._host,
-                self._port,
-                clientId=self._client_id,
-                readonly=True,
+            logger.debug("ibkr_fetch_before_request | connected=%s", self._ib.isConnected())
+            bars = self._ib.reqHistoricalData(
+                contract,
+                endDateTime=end_dt,
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow=os.getenv("IB_WHAT_TO_SHOW", "TRADES"),
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False,
             )
-
-            logger.info(
-                "ibkr_connect_success | host=%s | port=%s | client_id=%s | isConnected=%s",
-                self._host,
-                self._port,
-                self._client_id,
-                self._ib.isConnected(),
-            )
-        except Exception as exc:
+            logger.debug("ibkr_fetch_after_request | bar_count=%s", len(bars) if bars else 0)
+        except Exception as exc:  # pragma: no cover - network interaction
             logger.exception(
-                "ibkr_connect_failed | host=%s | port=%s | client_id=%s | exc_type=%s | exc_repr=%r",
-                self._host,
-                self._port,
-                self._client_id,
-                type(exc).__name__,
+                "ibkr_fetch_failed | symbol=%s | interval=%s | error=%s",
+                symbol,
+                interval,
                 exc,
             )
             raise
 
+    if not bars:
+        logger.info(
+            "ibkr_fetch_empty | symbol=%s | interval=%s | start=%s | end=%s",
+            symbol,
+            interval,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+        )
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-    def _ensure_event_loop(self) -> None:
-        """Ensure the current thread has an asyncio event loop."""
+    frame = util.df(bars)
+    if frame.empty:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        try:
-            asyncio.get_running_loop()
-            return
-        except RuntimeError:
-            pass
+    frame["timestamp"] = pd.to_datetime(frame["date"], utc=True)
+    filtered = frame[(frame["timestamp"] >= start_dt) & (frame["timestamp"] <= end_dt)]
 
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            loop = asyncio.new_event_loop()
-            self._loop = loop
+    if filtered.empty:
+        logger.info(
+            "ibkr_fetch_preserve_unfiltered | symbol=%s | interval=%s | start=%s | end=%s | bars=%s",
+            symbol,
+            interval,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+            len(frame),
+        )
+        filtered = frame
 
-        asyncio.set_event_loop(loop)
+    return filtered[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
-    def _parse_exchange(self, exchange: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-        """Split ``SEC:EXCHANGE`` style hints into components."""
+# ------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------
+def _ensure_connection(self) -> None:
+    """Open an IB connection if we are not already connected."""
+    if self._ib.isConnected():
+        logger.debug("ibkr_already_connected | host=%s | port=%s | client_id=%s",
+                    self._host, self._port, self._client_id)
+        return
 
-        if not exchange:
-            return None, None
+    logger.info("ibkr_connect_start | host=%s | port=%s | client_id=%s",
+                self._host, self._port, self._client_id)
 
-        token = str(exchange).strip()
-        if not token:
-            return None, None
+    try:
+        self._ensure_event_loop()
+        logger.debug("ibkr_event_loop_ready | loop=%s | loop_is_closed=%s | thread=%s",
+                    self._loop, getattr(self._loop, 'is_closed', lambda: None)(),
+                    threading.current_thread().name)
 
-        normalized = token.replace("|", ":")
-        parts = [part for part in normalized.split(":") if part]
-        if not parts:
-            return None, None
-
-        sec = parts[0].upper()
-        if sec in _KNOWN_SEC_TYPES and len(parts) >= 2:
-            return sec, parts[1].upper()
-
-        return None, parts[0].upper()
-
-    def _load_symbol_overrides(self) -> Dict[str, Dict[str, Any]]:
-        """Load optional per-symbol contract overrides from the environment."""
-
-        raw = os.getenv("IB_SYMBOL_OVERRIDES")
-        if not raw:
-            return {}
-
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            logger.warning("ibkr_symbol_override_parse_failed | error=%s", exc)
-            return {}
-
-        overrides: Dict[str, Dict[str, Any]] = {}
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if isinstance(value, dict):
-                    overrides[str(key)] = value
-        return overrides
-
-    def _coerce_datetime(self, value: dt.datetime | str) -> dt.datetime:
-        """Return a timezone-aware timestamp from *value*."""
-
-        ts = pd.to_datetime(value, utc=True)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        return ts.to_pydatetime()
-
-    def _map_interval(self, interval: str) -> Optional[str]:
-        """Translate internal interval strings into IB bar sizes."""
-
-        mapping = {
-            "1m": "1 min",
-            "2m": "2 mins",
-            "3m": "3 mins",
-            "5m": "5 mins",
-            "10m": "10 mins",
-            "15m": "15 mins",
-            "30m": "30 mins",
-            "45m": "45 mins",
-            "1h": "1 hour",
-            "2h": "2 hours",
-            "3h": "3 hours",
-            "4h": "4 hours",
-            "1d": "1 day",
-            "1w": "1 week",
-            "1mo": "1 month",
-        }
-        return mapping.get(interval.lower())
-
-    def _build_duration_rules(self) -> Iterable[_DurationRule]:
-        """Return duration formatting rules in ascending order of window size."""
-
-        return (
-            _DurationRule(upper_bound=3600, unit="S", unit_seconds=1),
-            _DurationRule(upper_bound=86400, unit="H", unit_seconds=3600),
-            _DurationRule(upper_bound=604800, unit="D", unit_seconds=86400),
-            _DurationRule(upper_bound=2592000, unit="W", unit_seconds=604800),
-            _DurationRule(upper_bound=31536000, unit="M", unit_seconds=2592000),
-            _DurationRule(upper_bound=None, unit="Y", unit_seconds=31536000),
+        self._ib.connect(
+            self._host,
+            self._port,
+            clientId=self._client_id,
+            readonly=True,
         )
 
-    def _derive_duration(self, start: dt.datetime, end: dt.datetime) -> str:
-        """Derive an IB-compatible duration string from *start* and *end*."""
+        logger.info(
+            "ibkr_connect_success | host=%s | port=%s | client_id=%s | isConnected=%s",
+            self._host,
+            self._port,
+            self._client_id,
+            self._ib.isConnected(),
+        )
+    except Exception as exc:
+        logger.exception(
+            "ibkr_connect_failed | host=%s | port=%s | client_id=%s | exc_type=%s | exc_repr=%r",
+            self._host,
+            self._port,
+            self._client_id,
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
-        seconds = max(int((end - start).total_seconds()), 60)
 
-        for rule in self._duration_rules:
-            if rule.upper_bound is None or seconds < rule.upper_bound:
-                return rule.format(seconds)
+def _ensure_event_loop(self) -> None:
+    """Ensure the current thread has an asyncio event loop."""
 
-        # Fallback should never trigger because the last rule has no bound.
-        return _DurationRule(upper_bound=None, unit="S", unit_seconds=1).format(seconds)
+    try:
+        asyncio.get_running_loop()
+        return
+    except RuntimeError:
+        pass
 
-    def _apply_override(self, symbol: str) -> Optional[Contract]:
-        """Return an override contract if the user supplied one."""
+    loop = self._loop
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        self._loop = loop
 
-        if symbol in self._symbol_overrides:
-            override = self._symbol_overrides[symbol]
-        elif symbol.upper() in self._symbol_overrides:
-            override = self._symbol_overrides[symbol.upper()]
-        else:
-            return None
+    asyncio.set_event_loop(loop)
 
-        contract = Contract()
-        for key, value in override.items():
-            setattr(contract, key, value)
-        return contract
+def _parse_exchange(self, exchange: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Split ``SEC:EXCHANGE`` style hints into components."""
 
-    def _extract_symbol_hints(self, symbol: str) -> Tuple[str, str, str, str, Optional[str]]:
-        """Infer contract hints from inline symbol tokens."""
+    if not exchange:
+        return None, None
 
-        base = symbol.strip()
-        sec_type = self._default_sec_type
-        exchange = self._default_exchange
-        currency = self._default_currency
-        expiry = None
+    token = str(exchange).strip()
+    if not token:
+        return None, None
 
-        # Support SYMBOL:SECTYPE:EXCHANGE[:CURRENCY[:EXPIRY]] patterns.
-        tokens = [token for token in base.replace("|", ":").split(":") if token]
-        if len(tokens) >= 2 and tokens[1].upper() in _KNOWN_SEC_TYPES:
-            base = tokens[0]
-            sec_type = tokens[1].upper()
-            if len(tokens) >= 3:
-                exchange = tokens[2].upper()
-            if len(tokens) >= 4:
-                currency = tokens[3].upper()
-            if len(tokens) >= 5:
-                expiry = tokens[4]
-            return base, sec_type, exchange, currency, expiry
+    normalized = token.replace("|", ":")
+    parts = [part for part in normalized.split(":") if part]
+    if not parts:
+        return None, None
 
-        if "." in base:
-            parts = base.split(".")
-            maybe_sec = parts[-1].upper()
-            if maybe_sec in _KNOWN_SEC_TYPES:
-                base = ".".join(parts[:-1])
-                sec_type = maybe_sec
+    sec = parts[0].upper()
+    if sec in _KNOWN_SEC_TYPES and len(parts) >= 2:
+        return sec, parts[1].upper()
 
-        if "-" in base and sec_type == "FUT":
-            base, expiry = base.split("-", 1)
+    return None, parts[0].upper()
 
+def _load_symbol_overrides(self) -> Dict[str, Dict[str, Any]]:
+    """Load optional per-symbol contract overrides from the environment."""
+
+    raw = os.getenv("IB_SYMBOL_OVERRIDES")
+    if not raw:
+        return {}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("ibkr_symbol_override_parse_failed | error=%s", exc)
+        return {}
+
+    overrides: Dict[str, Dict[str, Any]] = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, dict):
+                overrides[str(key)] = value
+    return overrides
+
+def _coerce_datetime(self, value: dt.datetime | str) -> dt.datetime:
+    """Return a timezone-aware timestamp from *value*."""
+
+    ts = pd.to_datetime(value, utc=True)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.to_pydatetime()
+
+def _map_interval(self, interval: str) -> Optional[str]:
+    """Translate internal interval strings into IB bar sizes."""
+
+    mapping = {
+        "1m": "1 min",
+        "2m": "2 mins",
+        "3m": "3 mins",
+        "5m": "5 mins",
+        "10m": "10 mins",
+        "15m": "15 mins",
+        "30m": "30 mins",
+        "45m": "45 mins",
+        "1h": "1 hour",
+        "2h": "2 hours",
+        "3h": "3 hours",
+        "4h": "4 hours",
+        "1d": "1 day",
+        "1w": "1 week",
+        "1mo": "1 month",
+    }
+    return mapping.get(interval.lower())
+
+def _build_duration_rules(self) -> Iterable[_DurationRule]:
+    """Return duration formatting rules in ascending order of window size."""
+
+    return (
+        _DurationRule(upper_bound=3600, unit="S", unit_seconds=1),
+        _DurationRule(upper_bound=86400, unit="H", unit_seconds=3600),
+        _DurationRule(upper_bound=604800, unit="D", unit_seconds=86400),
+        _DurationRule(upper_bound=2592000, unit="W", unit_seconds=604800),
+        _DurationRule(upper_bound=31536000, unit="M", unit_seconds=2592000),
+        _DurationRule(upper_bound=None, unit="Y", unit_seconds=31536000),
+    )
+
+def _derive_duration(self, start: dt.datetime, end: dt.datetime) -> str:
+    """Derive an IB-compatible duration string from *start* and *end*."""
+
+    seconds = max(int((end - start).total_seconds()), 60)
+
+    for rule in self._duration_rules:
+        if rule.upper_bound is None or seconds < rule.upper_bound:
+            return rule.format(seconds)
+
+    # Fallback should never trigger because the last rule has no bound.
+    return _DurationRule(upper_bound=None, unit="S", unit_seconds=1).format(seconds)
+
+def _apply_override(self, symbol: str) -> Optional[Contract]:
+    """Return an override contract if the user supplied one."""
+
+    if symbol in self._symbol_overrides:
+        override = self._symbol_overrides[symbol]
+    elif symbol.upper() in self._symbol_overrides:
+        override = self._symbol_overrides[symbol.upper()]
+    else:
+        return None
+
+    contract = Contract()
+    for key, value in override.items():
+        setattr(contract, key, value)
+    return contract
+
+def _extract_symbol_hints(self, symbol: str) -> Tuple[str, str, str, str, Optional[str]]:
+    """Infer contract hints from inline symbol tokens."""
+
+    base = symbol.strip()
+    sec_type = self._default_sec_type
+    exchange = self._default_exchange
+    currency = self._default_currency
+    expiry = None
+
+    # Support SYMBOL:SECTYPE:EXCHANGE[:CURRENCY[:EXPIRY]] patterns.
+    tokens = [token for token in base.replace("|", ":").split(":") if token]
+    if len(tokens) >= 2 and tokens[1].upper() in _KNOWN_SEC_TYPES:
+        base = tokens[0]
+        sec_type = tokens[1].upper()
+        if len(tokens) >= 3:
+            exchange = tokens[2].upper()
+        if len(tokens) >= 4:
+            currency = tokens[3].upper()
+        if len(tokens) >= 5:
+            expiry = tokens[4]
         return base, sec_type, exchange, currency, expiry
 
-    def _qualify_contract(self, contract: Contract) -> Contract:
-        """Qualify a partially filled contract via IB if possible."""
+    if "." in base:
+        parts = base.split(".")
+        maybe_sec = parts[-1].upper()
+        if maybe_sec in _KNOWN_SEC_TYPES:
+            base = ".".join(parts[:-1])
+            sec_type = maybe_sec
 
-        try:
-            qualified: Iterable[Contract] = self._ib.qualifyContracts(contract)
-        except Exception as exc:  # pragma: no cover - network interaction
-            logger.warning("ibkr_contract_qualify_failed | error=%s", exc)
-            return contract
+    if "-" in base and sec_type == "FUT":
+        base, expiry = base.split("-", 1)
 
-        qualified_list = list(qualified)
-        if qualified_list:
-            return qualified_list[0]
+    return base, sec_type, exchange, currency, expiry
+
+def _qualify_contract(self, contract: Contract) -> Contract:
+    """Qualify a partially filled contract via IB if possible."""
+
+    try:
+        qualified: Iterable[Contract] = self._ib.qualifyContracts(contract)
+    except Exception as exc:  # pragma: no cover - network interaction
+        logger.warning("ibkr_contract_qualify_failed | error=%s", exc)
         return contract
 
-    def _build_contract(self, symbol: str) -> Contract:
-        """Construct a best-effort IB contract for *symbol*."""
+    qualified_list = list(qualified)
+    if qualified_list:
+        return qualified_list[0]
+    return contract
 
-        override = self._apply_override(symbol)
-        if override is not None:
-            logger.debug("ibkr_contract_override | symbol=%s", symbol)
-            return self._qualify_contract(override)
+def _build_contract(self, symbol: str) -> Contract:
+    """Construct a best-effort IB contract for *symbol*."""
 
-        base_symbol, sec_type, exchange, currency, expiry = self._extract_symbol_hints(symbol)
-        contract = Contract()
-        contract.symbol = base_symbol
-        contract.secType = sec_type
-        contract.exchange = exchange
-        contract.currency = currency or self._default_currency
+    override = self._apply_override(symbol)
+    if override is not None:
+        logger.debug("ibkr_contract_override | symbol=%s", symbol)
+        return self._qualify_contract(override)
 
-        if expiry and sec_type == "FUT":
-            contract.lastTradeDateOrContractMonth = expiry
+    base_symbol, sec_type, exchange, currency, expiry = self._extract_symbol_hints(symbol)
+    contract = Contract()
+    contract.symbol = base_symbol
+    contract.secType = sec_type
+    contract.exchange = exchange
+    contract.currency = currency or self._default_currency
 
-        qualified = self._qualify_contract(contract)
-        logger.debug(
-            "ibkr_contract_built | symbol=%s | secType=%s | exchange=%s | expiry=%s",
-            qualified.symbol,
-            qualified.secType,
-            qualified.exchange,
-            getattr(qualified, "lastTradeDateOrContractMonth", None),
-        )
-        return qualified
+    if expiry and sec_type == "FUT":
+        contract.lastTradeDateOrContractMonth = expiry
+
+    qualified = self._qualify_contract(contract)
+    logger.debug(
+        "ibkr_contract_built | symbol=%s | secType=%s | exchange=%s | expiry=%s",
+        qualified.symbol,
+        qualified.secType,
+        qualified.exchange,
+        getattr(qualified, "lastTradeDateOrContractMonth", None),
+    )
+    return qualified
+
+
+for _method_name in (
+    "fetch_from_api",
+    "_ensure_connection",
+    "_ensure_event_loop",
+    "_parse_exchange",
+    "_load_symbol_overrides",
+    "_coerce_datetime",
+    "_map_interval",
+    "_build_duration_rules",
+    "_derive_duration",
+    "_apply_override",
+    "_extract_symbol_hints",
+    "_qualify_contract",
+    "_build_contract",
+):
+    setattr(InteractiveBrokersProvider, _method_name, globals()[_method_name])
 
 
 @_REGISTRY.provider(
