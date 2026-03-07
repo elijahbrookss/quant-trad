@@ -9,6 +9,7 @@ translate the same artefacts.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Literal, Mapping, MutableMapping, Optional, Sequence, TypedDict
 
 
@@ -150,6 +151,37 @@ def coerce_overlay_payload(payload: Mapping[str, Any] | None) -> OverlayPayload:
 
 
 logger = logging.getLogger(__name__)
+_OVERLAY_SPEC_LOGGED: set[tuple[str, tuple[str, ...], tuple[str, ...], str | None, bool | None]] = set()
+_OVERLAY_SPEC_LOGGED_LOCK = threading.Lock()
+
+
+def _log_overlay_spec_resolved_once(
+    *,
+    indicator_type: str,
+    pane_views: Sequence[str],
+    payload_keys: Sequence[str],
+    ui_color: str | None,
+    ui_default_visible: bool | None,
+) -> None:
+    signature = (
+        indicator_type,
+        tuple(str(v) for v in pane_views),
+        tuple(str(v) for v in payload_keys),
+        ui_color,
+        ui_default_visible,
+    )
+    with _OVERLAY_SPEC_LOGGED_LOCK:
+        if signature in _OVERLAY_SPEC_LOGGED:
+            return
+        _OVERLAY_SPEC_LOGGED.add(signature)
+    logger.debug(
+        "overlay_spec_resolved | type=%s | pane_views=%s | payload_keys=%s | ui_color=%s | ui_default_visible=%s",
+        indicator_type,
+        pane_views,
+        payload_keys,
+        ui_color,
+        ui_default_visible,
+    )
 
 
 def build_overlay(indicator_type: str, payload: Mapping[str, Any] | None) -> ChartOverlay:
@@ -178,13 +210,12 @@ def build_overlay(indicator_type: str, payload: Mapping[str, Any] | None) -> Cha
         "color": spec.ui_color,
         "default_visible": spec.ui_default_visible,
     }
-    logger.debug(
-        "overlay_spec_resolved | type=%s | pane_views=%s | payload_keys=%s | ui_color=%s | ui_default_visible=%s",
-        indicator_type,
-        spec.pane_views,
-        spec.payload_keys,
-        spec.ui_color,
-        spec.ui_default_visible,
+    _log_overlay_spec_resolved_once(
+        indicator_type=indicator_type,
+        pane_views=spec.pane_views,
+        payload_keys=spec.payload_keys,
+        ui_color=spec.ui_color,
+        ui_default_visible=spec.ui_default_visible,
     )
     validate_overlay_payload(indicator_type, overlay["payload"])
     return overlay

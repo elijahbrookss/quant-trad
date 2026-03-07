@@ -32,12 +32,10 @@ the code is wrong.
 
 Agents MUST understand these documents before making architectural or behavioral changes:
 
-- `docs/agents/00_core_principles.md`
-- `docs/agents/01_layer_model.md`
-- `docs/agents/02_temporal_rules.md`
-- `docs/agents/03_artifact_lifecycle.md`
-- `docs/agents/04_execution_and_playback.md`
-- `docs/agents/05_engineering_principles.md`
+- `docs/agents/00_system_contract.md`
+- `docs/agents/01_runtime_contract.md`
+- `docs/agents/02_execution_playback_contract.md`
+- `docs/agents/03_engineering_contract.md`
 
 These define the system contract.
 
@@ -55,6 +53,21 @@ Indicators, regimes, and profiles:
 Nothing “snaps into existence” retroactively.
 
 If an artifact would not exist yet in live trading, it must not exist yet in the system.
+
+## Engine Consistency Rule
+
+All derived outputs must come from one runtime state-engine timeline:
+
+`initialize -> apply_bar -> snapshot`
+
+This applies to indicators, overlays, signals, strategy previews, bot runtime, and playback views.
+
+- Do not add alternate reconstruction paths for the same artifact.
+- Do not read mutable engine internals from outside the engine.
+- If required data is missing from `snapshot.payload`, add it to the engine contract.
+- If a consumer cannot run from snapshots, fail loud with actionable context.
+
+This rule exists to prevent semantic drift and preserve trust across the platform.
 
 ---
 
@@ -74,6 +87,7 @@ QuantLab → Strategy → Bot → Trades → Playback
 ### Debugging Guidance
 - If the root cause isn’t clear, add targeted, temporary logs to observe state transitions—do not ship workarounds that mask the issue.
 - Prefer stabilizing dependencies (refs, memoized callbacks) before adding logs; throttle diagnostics and remove them once the fix is in.
+- For container log inspection in this environment, prefer `docker logs --tail <N>`; `--since` is not reliable here.
 
 ### Required Correlation Fields (when applicable)
 Include these whenever they exist:
@@ -158,3 +172,14 @@ Refactor with logs, tests, or concrete pressure.
 
 Quant-Trad is designed to be explainable first.
 Performance, polish, and optimization come second.
+
+---
+
+## Docs Sync Workflow
+
+- After updating files in this repo, run `make sync-docs`.
+- `make up` and `make build` also trigger `sync-docs` automatically.
+- Configure destination per machine using:
+  - `SYNC_DOCS_DEST`
+  - or `OBSIDIAN_SYNC_DOCS_DEST`
+  - optional local override file: `.sync-docs.mk`

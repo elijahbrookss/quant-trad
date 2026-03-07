@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from typing import Any, Dict, Mapping, Optional
@@ -33,14 +34,39 @@ class AsyncJobNotFoundError(RuntimeError):
 
 
 def _series_partition_key(payload: Mapping[str, Any]) -> str:
-    return "|".join(
+    partition_key = "|".join(
         [
             str(payload.get("datasource") or ""),
             str(payload.get("exchange") or ""),
             str(payload.get("symbol") or ""),
             str(payload.get("interval") or ""),
+            str(payload.get("inst_id") or ""),
         ]
     )
+    key_len = len(partition_key)
+    partition_key_hashed = False
+    if key_len > 255:
+        digest = hashlib.sha256(partition_key.encode("utf-8")).hexdigest()
+        partition_key = f"v1|{digest}"
+        partition_key_hashed = True
+        logger.warning(
+            "quantlab_partition_key_hashed | partition_key_len=%s | partition_key_hashed=%s | inst_id=%s | symbol=%s | interval=%s",
+            key_len,
+            partition_key_hashed,
+            payload.get("inst_id"),
+            payload.get("symbol"),
+            payload.get("interval"),
+        )
+    else:
+        logger.info(
+            "quantlab_partition_key_ready | partition_key_len=%s | partition_key_hashed=%s | inst_id=%s | symbol=%s | interval=%s",
+            key_len,
+            partition_key_hashed,
+            payload.get("inst_id"),
+            payload.get("symbol"),
+            payload.get("interval"),
+        )
+    return partition_key
 
 
 
@@ -72,6 +98,18 @@ def enqueue_overlay_job(
         payload=payload,
         partition_key=_series_partition_key(payload),
         max_attempts=2,
+    )
+    logger.info(
+        "event=overlay_job_enqueued job_id=%s indicator_id=%s symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s instrument_id=%s",
+        job_id,
+        inst_id,
+        symbol,
+        interval,
+        start,
+        end,
+        datasource,
+        exchange,
+        instrument_id,
     )
     return job_id
 

@@ -28,8 +28,43 @@ from .entry_execution import EntryExecutionCoordinator, PendingEntry
 from .entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from .exit_settlement import ExitSettlement, ExitSettlementContext, ExitSettlementService
 from .fees import FeeDetail, FeeResolver, FeeSchedule
-from .wallet import LockedWalletLedger, WalletEvent, WalletLedger, WalletState, project_wallet, wallet_can_apply
-from .wallet_gateway import LedgerWalletGateway, WalletGateway
+from .wallet import (
+    LockedWalletLedger,
+    WalletEvent,
+    WalletLedger,
+    WalletState,
+    project_wallet,
+    project_wallet_from_events,
+    wallet_can_apply,
+    wallet_required_reservation,
+)
+from .wallet_gateway import BaseWalletGateway, SharedWalletGateway, WalletGateway
+from .execution_profile import (
+    InstrumentContract,
+    ExecutionConstraintsContract,
+    ExecutionCapabilities,
+    RiskConfigContract,
+    CollateralModel,
+    SimpleCollateralModel,
+    SeriesExecutionProfile,
+    normalize_runtime_instrument_type,
+    compile_series_execution_profile,
+    compile_runtime_profile_or_error,
+)
+from .runtime_events import (
+    SCHEMA_VERSION,
+    ExitKind,
+    ReasonCode,
+    RuntimeEvent,
+    RuntimeEventCategory,
+    RuntimeEventName,
+    build_correlation_id,
+    coerce_reason_code,
+    format_correlation_bar_ts,
+    new_runtime_event,
+    normalize_utc_datetime,
+    runtime_event_from_dict,
+)
 
 __all__ = [
     "Candle",
@@ -72,7 +107,32 @@ __all__ = [
     "WalletLedger",
     "WalletState",
     "project_wallet",
+    "project_wallet_from_events",
     "wallet_can_apply",
-    "LedgerWalletGateway",
+    "wallet_required_reservation",
+    "BaseWalletGateway",
+    "SharedWalletGateway",
     "WalletGateway",
+    "InstrumentContract",
+    "ExecutionConstraintsContract",
+    "ExecutionCapabilities",
+    "RiskConfigContract",
+    "CollateralModel",
+    "SimpleCollateralModel",
+    "SeriesExecutionProfile",
+    "normalize_runtime_instrument_type",
+    "compile_series_execution_profile",
+    "compile_runtime_profile_or_error",
+    "SCHEMA_VERSION",
+    "ExitKind",
+    "ReasonCode",
+    "RuntimeEvent",
+    "RuntimeEventCategory",
+    "RuntimeEventName",
+    "build_correlation_id",
+    "coerce_reason_code",
+    "format_correlation_bar_ts",
+    "new_runtime_event",
+    "normalize_utc_datetime",
+    "runtime_event_from_dict",
 ]

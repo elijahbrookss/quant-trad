@@ -7,6 +7,7 @@ from typing import Any, Dict, Literal, Optional, TypedDict
 
 class ExitSettlementPayload(TypedDict, total=False):
     event_type: str
+    exit_kind: str
     side: str
     base_currency: str
     quote_currency: str

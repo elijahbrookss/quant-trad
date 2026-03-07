@@ -22,7 +22,7 @@ export function BotCreateModal({
   const submitDisabled =
     !strategies.length ||
     !form.name ||
-    !form.strategy_ids.length ||
+    !form.strategy_id ||
     !(form.wallet_balances && form.wallet_balances.length) ||
     Boolean(walletError) ||
     (form.run_type === 'backtest' && (!form.backtest_start || !form.backtest_end))

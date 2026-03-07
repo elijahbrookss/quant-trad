@@ -45,6 +45,7 @@ from ..storage.storage import (
     mark_bot_crashed,
     update_bot_heartbeat,
 )
+from .runner import DockerBotRunner
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,42 @@ class BotWatchdog:
 
         return crashed_ids
 
+    def verify_container_ownership(self) -> List[str]:
+        """Verify running bot rows still map to live docker containers."""
+
+        from ..storage.storage import load_bots
+
+        failed: List[str] = []
+        for bot in load_bots():
+            status = str(bot.get("status") or "").lower()
+            if status not in {
+                "starting",
+                "running",
+                "paused",
+                "degraded",
+                "telemetry_degraded",
+            }:
+                continue
+            if status == "starting" and not bot.get("heartbeat_at"):
+                continue
+            bot_id = str(bot.get("id") or "").strip()
+            if not bot_id:
+                continue
+            container = DockerBotRunner.inspect_bot_container(bot_id)
+            if bool(container.get("running")):
+                continue
+            container_name = str(container.get("name") or "").strip()
+            if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_name}"):
+                failed.append(bot_id)
+                logger.error(
+                    "bot_watchdog_container_missing | bot_id=%s | container_name=%s | container_status=%s | error=%s",
+                    bot_id,
+                    container_name,
+                    container.get("status"),
+                    container.get("error"),
+                )
+        return failed
+
     def start_background_monitor(self) -> None:
         """Start background threads for heartbeat emission and orphan detection.
 
@@ -320,6 +357,7 @@ class BotWatchdog:
         while not self._stop_event.is_set():
             try:
                 self.scan_stale_heartbeats()
+                self.verify_container_ownership()
             except Exception as exc:
                 logger.exception("bot_watchdog_monitor_loop_error | error=%s", exc)
 

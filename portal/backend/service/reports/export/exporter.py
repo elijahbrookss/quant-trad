@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import create_engine
 from data_providers.utils.ohlcv import interval_to_timedelta
 
-from portal.backend.service.market.stats_queue import REGIME_VERSION, STATS_VERSION
+from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 
 from data_providers.config.runtime import runtime_config_from_env
 from utils.log_context import build_log_context, with_log_context
@@ -386,8 +386,17 @@ def _build_decision_ledger_rows(
         if timeframe:
             try:
                 timeframe_secs = int(interval_to_timedelta(timeframe).total_seconds())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    with_log_context(
+                        "report_export_timeframe_parse_failed",
+                        build_log_context(
+                            timeframe=timeframe,
+                            event_id=event.get("event_id"),
+                            error=str(exc),
+                        ),
+                    )
+                )
         rows.append(
             {
                 "ts": event.get("event_ts"),

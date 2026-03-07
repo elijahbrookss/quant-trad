@@ -9,10 +9,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .context import IndicatorServiceContext, _context
 from .instances import IndicatorInstanceCreator, IndicatorInstanceUpdater
 from .overlays import IndicatorOverlayBuilder
+from .runtime_contract import assert_engine_signal_runtime_path
 from .signals import BreakoutCacheContext, IndicatorSignalExecutor
 from .utils import (
     build_indicator_instance,
     build_meta_from_record,
+    build_signal_catalog,
     ensure_color,
     load_indicator_record,
     purge_breakout_cache,
@@ -97,7 +99,7 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
     if runtime_input_specs:
         details["runtime_input_specs"] = runtime_input_specs
 
-    rule_meta = ctx.signal_runner.build_signal_catalog(indicator_name)
+    rule_meta = build_signal_catalog(indicator_name)
     if rule_meta:
         details["signal_rules"] = rule_meta
 
@@ -252,7 +254,7 @@ def generate_signals_for_instance(
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     executor = IndicatorSignalExecutor(ctx)
-    return executor.execute(
+    payload = executor.execute(
         inst_id,
         start,
         end,
@@ -262,6 +264,12 @@ def generate_signals_for_instance(
         exchange=exchange,
         config=config,
     )
+    assert_engine_signal_runtime_path(
+        payload,
+        context="indicator_signal_service_execute",
+        indicator_id=inst_id,
+    )
+    return payload
 
 
 def runtime_input_plan_for_instance(

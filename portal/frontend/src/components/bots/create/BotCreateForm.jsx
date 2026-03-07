@@ -108,13 +108,35 @@ export function BotCreateForm({
   submitDisabled,
   error,
 }) {
+  const [envText, setEnvText] = useState('')
+
+  useEffect(() => {
+    const entries = Object.entries(form.bot_env || {})
+    setEnvText(entries.map(([k, v]) => `${k}=${v ?? ''}`).join('\n'))
+  }, [form.bot_env])
+
+  const handleEnvTextChange = (value) => {
+    setEnvText(value)
+    const next = {}
+    for (const line of String(value || '').split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const idx = trimmed.indexOf('=')
+      if (idx <= 0) continue
+      const key = trimmed.slice(0, idx).trim()
+      const val = trimmed.slice(idx + 1).trim()
+      if (key) next[key] = val
+    }
+    onChange('bot_env', next)
+  }
+
   // Auto-generate name based on selected strategy
   const selectedStrategy = useMemo(() => {
-    if (form.strategy_ids?.length === 1) {
-      return strategies.find(s => s.id === form.strategy_ids[0])
+    if (form.strategy_id) {
+      return strategies.find((s) => s.id === form.strategy_id)
     }
     return null
-  }, [form.strategy_ids, strategies])
+  }, [form.strategy_id, strategies])
 
   const suggestedName = useMemo(() => {
     if (selectedStrategy) {
@@ -139,7 +161,7 @@ export function BotCreateForm({
   }
 
   // Check if form has the minimum required fields
-  const hasStrategy = form.strategy_ids?.length > 0
+  const hasStrategy = Boolean(form.strategy_id)
   const hasDateRange = form.backtest_start && form.backtest_end
   const hasWallet = form.wallet_balances?.length > 0 && form.wallet_balances.some(w => w.currency && w.amount)
   const hasName = Boolean(form.name && form.name.trim())
@@ -157,14 +179,14 @@ export function BotCreateForm({
               <div className="text-xs font-medium text-slate-300">Run type</div>
               <RunTypeSelector
                 value={form.run_type}
-                onChange={(value) => onChange({ target: { name: 'run_type', value } })}
+                onChange={(value) => onChange('run_type', value)}
               />
             </div>
             <div className="space-y-2">
               <div className="text-xs font-medium text-slate-300">Strategy (choose one)</div>
               <StrategySelector
                 strategies={strategies}
-                selectedIds={form.strategy_ids}
+                selectedIds={form.strategy_id ? [form.strategy_id] : []}
                 onToggle={onStrategyToggle}
                 loading={strategiesLoading}
                 error={strategyError}
@@ -184,7 +206,7 @@ export function BotCreateForm({
           <div className="space-y-4">
             <PlaybackModeSelector
               value={form.mode}
-              onChange={(value) => onChange({ target: { name: 'mode', value } })}
+              onChange={(value) => onChange('mode', value)}
             />
             <div className="space-y-3">
               <div className="flex items-center justify-between">
@@ -245,6 +267,29 @@ export function BotCreateForm({
               />
             </div>
             <div className="space-y-1.5">
+              <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Snapshot interval (ms)</label>
+              <input
+                type="number"
+                min={100}
+                step={100}
+                name="snapshot_interval_ms"
+                value={form.snapshot_interval_ms || 1000}
+                onChange={(event) => onChange('snapshot_interval_ms', Number(event.target.value) || 1000)}
+                className="w-full rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              />
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
+              <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Bot env overrides</label>
+              <textarea
+                value={envText}
+                onChange={(event) => handleEnvTextChange(event.target.value)}
+                rows={4}
+                placeholder={'KEY=value\nANOTHER_KEY=value'}
+                className="w-full rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 font-mono text-xs text-slate-200 placeholder:text-slate-600 transition-colors focus:border-slate-700 focus:bg-slate-950 focus:outline-none"
+              />
+              <p className="text-[11px] text-slate-500">Applied on container start. Changes require stop + restart.</p>
+            </div>
+            <div className="space-y-1.5">
               <label className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Bot name</label>
               <input
                 type="text"
@@ -263,7 +308,7 @@ export function BotCreateForm({
     return baseSteps.filter((step) => step.enabled !== false)
   }, [
     form.run_type,
-    form.strategy_ids,
+    form.strategy_id,
     form.backtest_start,
     form.backtest_end,
     form.wallet_balances,

@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 from ...market import instrument_service
 from ...risk.atm import normalise_template
 from ...indicators.indicator_service import get_instance_meta
+from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 from strategies import evaluator
 from . import persistence
 from .filters import (
@@ -22,6 +23,7 @@ from .evaluation_orchestrator import StrategyEvaluationDependencies, StrategyEva
 
 
 logger = logging.getLogger(__name__)
+_RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 
 
 def _utcnow() -> datetime:
@@ -609,7 +611,14 @@ class StrategyRegistry:
                                 direction=_normalise_direction(cond.get("direction")),
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "strategy_rule_condition_skipped | strategy_id=%s rule_id=%s condition=%s error=%s",
+                            entry.get("id"),
+                            rule_id,
+                            cond,
+                            exc,
+                        )
                         continue
                 rule = StrategyRule(
                     id=rule_id,
@@ -687,6 +696,19 @@ class StrategyRegistry:
                         "instrument_id": inst_id,
                         **instrument_rec,
                     }
+                symbol = slot.symbol
+                try:
+                    compile_runtime_profile_or_error(
+                        instrument_rec,
+                        allowed_derivative_types=_RUNTIME_ALLOWED_DERIVATIVE_TYPES,
+                    )
+                except ValueError as exc:
+                    record.instrument_messages.append(
+                        {
+                            "symbol": symbol,
+                            "message": str(exc),
+                        }
+                    )
             if error:
                 record.instrument_messages.append(
                     {
@@ -853,7 +875,15 @@ class StrategyRegistry:
                 try:
                     rec = instrument_service.resolve_instrument(datasource, exchange, slot.symbol)
                     return rec.get("id") if rec else None
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                        strategy_id,
+                        slot.symbol,
+                        datasource,
+                        exchange,
+                        exc,
+                    )
                     return None
 
             old_ids = {i for i in (_resolve_slot_id(s, old_datasource, old_exchange) for s in old_slots) if i}
@@ -866,7 +896,15 @@ class StrategyRegistry:
                     try:
                         rec = instrument_service.resolve_instrument(record.datasource, record.exchange, slot.symbol)
                         inst_id = rec.get("id") if rec else None
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "strategy_instrument_resolution_failed | strategy_id=%s symbol=%s datasource=%s exchange=%s error=%s",
+                            strategy_id,
+                            slot.symbol,
+                            record.datasource,
+                            record.exchange,
+                            exc,
+                        )
                         inst_id = None
                 if inst_id:
                     new_ids.add(inst_id)
@@ -881,9 +919,14 @@ class StrategyRegistry:
             # delete removed links
             for removed in (old_ids - new_ids):
                 storage_delete_strategy_instrument(strategy_id, removed)
-        except Exception:
-            # Fail silently on resolution errors; main strategy update should still succeed
-            pass
+        except Exception as exc:
+            logger.exception(
+                "strategy_update_instrument_link_sync_failed | strategy=%s",
+                strategy_id,
+            )
+            raise RuntimeError(
+                f"strategy_update_instrument_link_sync_failed: strategy={strategy_id}"
+            ) from exc
         logger.info("strategy_updated | id=%s", strategy_id)
         return record.to_dict()
 

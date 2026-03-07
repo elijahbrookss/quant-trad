@@ -24,6 +24,9 @@ class InstrumentPayload(BaseModel):
     tick_value: Optional[float] = None
     contract_size: Optional[float] = Field(default=None, gt=0)
     min_order_size: Optional[float] = Field(default=None, gt=0)
+    qty_step: Optional[float] = Field(default=None, gt=0)
+    max_qty: Optional[float] = Field(default=None, gt=0)
+    min_notional: Optional[float] = Field(default=None, ge=0)
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
     can_short: Optional[bool] = None

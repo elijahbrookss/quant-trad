@@ -1,6 +1,6 @@
 """Pivot level indicator package."""
 
-from .indicator import PivotLevelIndicator, Level
+from .compute import PivotLevelIndicator, Level
 
 __all__ = [
     "PivotLevelIndicator",

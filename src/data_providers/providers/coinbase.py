@@ -292,6 +292,18 @@ class CoinbaseProvider(BaseDataProvider):
                 raise ValueError(
                     f"Coinbase product '{symbol}' invalid base_min_size '{min_order_size_value}'"
                 ) from exc
+        qty_step = float(min_order_size) if min_order_size is not None else None
+        max_qty = None
+        raw_base_max_size = (
+            (self._last_product_payload or {}).get("base_max_size")
+            if isinstance(self._last_product_payload, dict)
+            else None
+        )
+        if raw_base_max_size is not None:
+            try:
+                max_qty = float(Decimal(raw_base_max_size))
+            except (TypeError, ValueError):
+                max_qty = None
 
         product_type = str(product.product_type or "").upper()
         is_future = product_type == "FUTURE"
@@ -395,6 +407,8 @@ class CoinbaseProvider(BaseDataProvider):
             "contract_size": str(contract_size) if contract_size is not None else None,
             "tick_value": str(tick_value) if tick_value is not None else None,
             "min_order_size": str(min_order_size) if min_order_size is not None else None,
+            "qty_step": str(qty_step) if qty_step is not None else None,
+            "max_qty": str(max_qty) if max_qty is not None else None,
             "maker_fee_rate": str(maker_fee_rate) if maker_fee_rate is not None else None,
             "taker_fee_rate": str(taker_fee_rate) if taker_fee_rate is not None else None,
             "base_currency": base_currency,
@@ -402,7 +416,16 @@ class CoinbaseProvider(BaseDataProvider):
             "has_funding": has_funding,
             "expiry_ts": expiry_ts.isoformat() if expiry_ts else None,
         }
-        logger.debug("coinbase_instrument_metadata_mapped | %s", mapped_payload)
+        logger.debug(
+            "coinbase_instrument_metadata_mapped | symbol=%s product_type=%s tick_size=%s contract_size=%s min_order_size=%s has_funding=%s expiry_ts=%s",
+            symbol,
+            product_type,
+            mapped_payload.get("tick_size"),
+            mapped_payload.get("contract_size"),
+            mapped_payload.get("min_order_size"),
+            mapped_payload.get("has_funding"),
+            mapped_payload.get("expiry_ts"),
+        )
 
         if missing_fields:
             raise ValueError(
@@ -435,6 +458,8 @@ class CoinbaseProvider(BaseDataProvider):
             contract_size=float(contract_size) if contract_size is not None else None,
             tick_value=float(tick_value) if tick_value is not None else None,
             min_order_size=float(min_order_size) if min_order_size is not None else None,
+            qty_step=qty_step,
+            max_qty=max_qty,
             maker_fee_rate=float(maker_fee_rate) if maker_fee_rate is not None else None,
             taker_fee_rate=float(taker_fee_rate) if taker_fee_rate is not None else None,
             margin_rates=margin_rates if margin_rates else None,

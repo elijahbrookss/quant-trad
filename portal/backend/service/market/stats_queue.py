@@ -25,10 +25,8 @@ from portal.backend.service.async_jobs import (
 
 from .candle_stats_service import CandleStatsService
 from .regime_stats_service import RegimeStatsService
+from .stats_contract import REGIME_VERSION, STATS_VERSION
 
-
-STATS_VERSION = "v1"
-REGIME_VERSION = "v1"
 MAX_RETRIES = 3
 JOB_TYPE_STATS_COMPUTE = "stats_compute"
 

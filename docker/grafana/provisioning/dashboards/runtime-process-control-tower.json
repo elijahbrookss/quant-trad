@@ -1,0 +1,513 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [
+    {
+      "title": "Bot Run Profiler",
+      "url": "/d/quanttrad-bot-profiler",
+      "targetBlank": false
+    },
+    {
+      "title": "Bot Run Attribution",
+      "url": "/d/qt-bot-run-attribution",
+      "targetBlank": false
+    },
+    {
+      "title": "Workers: Active Jobs",
+      "url": "/d/qt-worker-activity",
+      "targetBlank": false
+    },
+    {
+      "title": "IO + DB Observability",
+      "url": "/d/qt-io-db-observability",
+      "targetBlank": false
+    },
+    {
+      "title": "Overlay Runtime Optimization",
+      "url": "/d/qt-overlay-runtime-opt",
+      "targetBlank": false
+    },
+    {
+      "title": "Loki Error Deep Dive",
+      "url": "/d/qt-loki-error-deep-dive",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Control Tower Guide",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Primary dashboard for multi-symbol runtime health.\\n\\nRead top row left→right:\\n1) configured workers, 2) active workers, 3) utilization, 4) degraded symbols, 5) no-view cycles.\\n\\nThen use **Activation Gap** and **Expected vs Activated Symbols** to explain why symbols are not starting together.\\n\\nUse **Lock + Persist Pressure** and **Potential Blockers** for thread-safety/blocked-path diagnostics."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Configured Workers",
+      "description": "Target number of symbol worker processes for the selected run.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(NULLIF(context->>'worker_count','')::double precision) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}');"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active Workers p95",
+      "description": "Observed active worker processes during snapshot cycles.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'active_workers','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}');"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Worker Utilization Avg (%)",
+      "description": "active_workers / worker_count over cycle history.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH c AS ( SELECT NULLIF(context->>'active_workers','')::double precision AS active_workers, NULLIF(context->>'worker_count','')::double precision AS worker_count FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ) SELECT ROUND(avg(CASE WHEN worker_count > 0 THEN (active_workers / worker_count) * 100.0 ELSE NULL END)::numeric, 2)::double precision AS value FROM c;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Degraded Symbols",
+      "description": "Count of symbols marked degraded by container runtime.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT max(NULLIF(context->>'degraded_symbols_count','')::double precision) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}');"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "No-View Cycles (%)",
+      "description": "Percent of cycles where active workers existed but no worker emitted fresh view_state in that cycle.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH c AS ( SELECT NULLIF(context->>'active_workers','')::int AS active_workers, NULLIF(context->>'snapshot_events_in_cycle','')::int AS snapshot_events FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ) SELECT ROUND((100.0 * count(*) FILTER (WHERE active_workers > 0 AND COALESCE(snapshot_events, 0) = 0) / NULLIF(count(*) FILTER (WHERE active_workers > 0), 0))::numeric, 2)::double precision AS value FROM c;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Workers: Configured vs Active",
+      "description": "If Active < Configured, not all symbol processes are currently healthy/running.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'configured_workers' AS metric, avg(NULLIF(context->>'worker_count','')::double precision) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'active_workers' AS metric, avg(NULLIF(context->>'active_workers','')::double precision) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Container Cycle Backpressure (p95 ms)",
+      "description": "High queue_drain/worker_reconcile/telemetry_emit often means orchestration pressure rather than pure bar compute.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'queue_drain_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'queue_drain_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'worker_reconcile_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'worker_reconcile_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'telemetry_emit_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'telemetry_emit_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'merge_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'merge_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Activation Gap by Symbol",
+      "description": "First observed bar step per symbol and lag from run start.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH chosen_run AS ( SELECT CASE WHEN '${run_id:raw}' = '__all' THEN (SELECT run_id FROM portal_bot_run_steps WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY started_at DESC LIMIT 1) ELSE '${run_id:raw}' END AS run_id ), run_base AS ( SELECT min(started_at) AS run_start FROM portal_bot_run_steps s JOIN chosen_run cr ON s.run_id = cr.run_id WHERE ('${bot_id:raw}'='__all' OR s.bot_id='${bot_id:raw}') ), first_bar AS ( SELECT symbol, timeframe, min(started_at) AS first_bar_at, count(*) AS bars_seen FROM portal_bot_run_steps s JOIN chosen_run cr ON s.run_id = cr.run_id WHERE step_name='step_series_state' AND symbol IS NOT NULL AND ('${bot_id:raw}'='__all' OR s.bot_id='${bot_id:raw}') GROUP BY symbol, timeframe ) SELECT fb.symbol, fb.timeframe, fb.bars_seen, fb.first_bar_at, ROUND(EXTRACT(EPOCH FROM (fb.first_bar_at - rb.run_start)) * 1000.0, 1)::double precision AS activation_lag_ms FROM first_bar fb CROSS JOIN run_base rb ORDER BY activation_lag_ms ASC NULLS LAST, fb.symbol;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Expected vs Activated Symbols",
+      "description": "Compares strategy symbols for selected run against symbols that actually emitted bar steps.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH chosen_run AS ( SELECT CASE WHEN '${run_id:raw}' = '__all' THEN (SELECT run_id FROM portal_bot_run_steps WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY started_at DESC LIMIT 1) ELSE '${run_id:raw}' END AS run_id ), expected AS ( SELECT upper(value::text) AS symbol FROM portal_bot_runs r JOIN chosen_run cr ON r.run_id = cr.run_id CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(to_jsonb(r.symbols), '[]'::jsonb)) value ), activated AS ( SELECT DISTINCT upper(symbol) AS symbol FROM portal_bot_run_steps s JOIN chosen_run cr ON s.run_id = cr.run_id WHERE step_name='step_series_state' AND symbol IS NOT NULL AND ('${bot_id:raw}'='__all' OR s.bot_id='${bot_id:raw}') ) SELECT e.symbol, CASE WHEN a.symbol IS NULL THEN 'missing' ELSE 'active' END AS status FROM expected e LEFT JOIN activated a USING(symbol) UNION ALL SELECT a.symbol, 'unexpected' AS status FROM activated a LEFT JOIN expected e USING(symbol) WHERE e.symbol IS NULL ORDER BY status DESC, symbol;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Per-Symbol Bar Throughput (events/min)",
+      "description": "Throughput by symbol; drops isolate slow/blocked series.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), COALESCE(symbol,'?') || '|' || COALESCE(timeframe,'?') AS metric, (count(*)::double precision * 60.0) / GREATEST($__interval_ms / 1000.0, 1.0) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Lock + Persist Pressure (p95)",
+      "description": "Lock contention and step trace persistence pressure from step_series_state context.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'trade_lock_wait_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'trade_lock_wait_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'trade_lock_wait_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'step_trace_queue_depth' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'step_trace_queue_depth','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'step_trace_queue_depth') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'step_trace_persist_lag_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'step_trace_persist_lag_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'step_trace_persist_lag_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'step_trace_dropped_count' AS metric, max(NULLIF(context->>'step_trace_dropped_count','')::double precision) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'step_trace_dropped_count') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "step_trace_queue_depth" },
+            "properties": [
+              { "id": "unit", "value": "none" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "step_trace_dropped_count" },
+            "properties": [
+              { "id": "unit", "value": "none" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Potential Blockers (Top Bars)",
+      "description": "Bars ranked by combined contention/backpressure signals.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT started_at, run_id, symbol, timeframe, NULLIF(context->>'bar_index','')::int AS bar_index, ROUND(duration_ms::numeric,2)::double precision AS step_ms, ROUND(NULLIF(context->>'trade_lock_wait_ms','')::numeric,2)::double precision AS trade_lock_wait_ms, ROUND(NULLIF(context->>'trade_lock_hold_ms','')::numeric,2)::double precision AS trade_lock_hold_ms, ROUND(NULLIF(context->>'step_trace_queue_depth','')::numeric,2)::double precision AS step_trace_queue_depth, ROUND(NULLIF(context->>'step_trace_persist_lag_ms','')::numeric,2)::double precision AS step_trace_persist_lag_ms, ROUND(NULLIF(context->>'stream_emit_ms','')::numeric,2)::double precision AS stream_emit_ms, ROUND(NULLIF(context->>'execution_decision_flow_ms','')::numeric,2)::double precision AS decision_flow_ms FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') ORDER BY GREATEST(duration_ms, COALESCE(NULLIF(context->>'trade_lock_wait_ms','')::double precision, 0), COALESCE(NULLIF(context->>'step_trace_persist_lag_ms','')::double precision, 0), COALESCE(NULLIF(context->>'stream_emit_ms','')::double precision, 0)) DESC LIMIT 250;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 14,
+      "type": "logs",
+      "title": "Runtime Process/Thread Logs",
+      "description": "Worker start/fail, series step failures/degradation, runtime loop failures, and step trace pressure logs.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "$stream |~ \"bot_symbol_worker_started|bot_symbol_worker_failed|bot_symbol_worker_error_event|series_step_failed|series_step_degraded|bot_runtime_loop_failed|bot_runtime_step_trace\" |~ \"$contains\"",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["runtime", "bot", "control-tower", "process", "thread-safety"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "label": "Bot",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_run_steps WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "current": { "selected": true, "text": "All", "value": "__all" }
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM portal_bot_run_steps WHERE ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') ORDER BY run_id DESC LIMIT 2000;",
+        "current": { "selected": true, "text": "All", "value": "__all" }
+      },
+      {
+        "name": "symbol",
+        "label": "Symbol",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM portal_bot_run_steps WHERE symbol IS NOT NULL AND step_name='step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ORDER BY 1;",
+        "current": { "selected": true, "text": "All", "value": "__all" }
+      },
+      {
+        "name": "timeframe",
+        "label": "Timeframe",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT timeframe AS __value, timeframe AS __text FROM portal_bot_run_steps WHERE timeframe IS NOT NULL AND step_name='step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') ORDER BY 1;",
+        "current": { "selected": true, "text": "All", "value": "__all" }
+      },
+      {
+        "name": "stream",
+        "label": "Log Stream Selector",
+        "type": "textbox",
+        "query": "{service=\"backend\"}",
+        "current": { "selected": true, "text": "{service=\"backend\"}", "value": "{service=\"backend\"}" }
+      },
+      {
+        "name": "contains",
+        "label": "Logs Contains Regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": { "selected": true, "text": ".*", "value": ".*" }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-2h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Quant-Trad: Runtime Process Control Tower",
+  "uid": "qt-runtime-control-tower",
+  "version": 1,
+  "weekStart": ""
+}

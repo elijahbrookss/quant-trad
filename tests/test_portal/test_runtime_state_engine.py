@@ -42,6 +42,7 @@ def test_market_profile_state_engine_rolls_session_and_updates_revision() -> Non
     assert profiles[0]["start"].isoformat().startswith("2024-01-01T00:00:00")
     assert profiles[0]["end"].isoformat().startswith("2024-01-01T23:59:59")
     assert snapshot.revision == 2
+    assert snapshot.schema_version == 1
     assert snapshot.payload["chart_timeframe"] == "1h"
     assert snapshot.payload["chart_timeframe_seconds"] == 3600
     assert snapshot.payload["_indicator_id"] == "ind-1"

@@ -84,3 +84,11 @@ Or use the backup script to export all dashboards at once.
 Each JSON file should contain a Grafana dashboard model. The filename will be used as the slug.
 
 Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metrics`
+
+## Recommended Entry Dashboard
+
+For bot runtime process/thread health, start with:
+
+- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`)
+
+This dashboard links to profiler, attribution, workers, IO/DB, overlay optimization, and Loki error deep-dive dashboards.

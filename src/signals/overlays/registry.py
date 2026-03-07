@@ -72,8 +72,9 @@ def register_overlay_type(
             raise ValueError(
                 f"Overlay type '{overlay_type}' already registered with different metadata."
             )
+        if existing == spec:
+            continue
         _REGISTRY[overlay_type] = spec
-        logger.debug("overlay_type_registered | type=%s | pane_views=%s", overlay_type, view_tuple)
 
 
 def overlay_type(

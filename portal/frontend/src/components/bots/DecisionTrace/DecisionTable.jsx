@@ -11,6 +11,8 @@ const EVENT_BADGES = {
   decision: { label: 'DECISION', color: 'bg-amber-500/15 text-amber-400 border-amber-500/30' },
   execution: { label: 'EXEC', color: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' },
   outcome: { label: 'OUTCOME', color: 'bg-violet-500/15 text-violet-400 border-violet-500/30' },
+  wallet: { label: 'WALLET', color: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30' },
+  runtime: { label: 'RUNTIME', color: 'bg-rose-500/15 text-rose-400 border-rose-500/30' },
 };
 
 const formatTimeWithDate = (value) => {
@@ -54,6 +56,34 @@ const formatValue = (value) => {
   return JSON.stringify(value);
 };
 
+const toFiniteNumber = (value) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const feeFromEvent = (event) => {
+  if (!event || typeof event !== 'object') return null;
+  const direct = toFiniteNumber(event.fee_paid);
+  if (direct !== null) return direct;
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : null;
+  const payloadFee = toFiniteNumber(payload?.fee_paid);
+  if (payloadFee !== null) return payloadFee;
+  const walletDelta = payload?.wallet_delta && typeof payload.wallet_delta === 'object' ? payload.wallet_delta : null;
+  return toFiniteNumber(walletDelta?.fee_paid);
+};
+
+const aggregateMetric = (events, getter) => {
+  let total = 0;
+  let seen = 0;
+  events.forEach((event) => {
+    const value = getter(event);
+    if (value === null) return;
+    total += value;
+    seen += 1;
+  });
+  return { total, hasValue: seen > 0 };
+};
+
 const getEventBadge = (eventType) => {
   return EVENT_BADGES[eventType] || { label: 'EVENT', color: 'bg-slate-500/15 text-slate-400 border-slate-500/30' };
 };
@@ -67,6 +97,8 @@ const actionFromEvent = (event) => {
   if (['target', 'tp'].includes(subtype)) return 'tp';
   if (['close', 'exit'].includes(subtype)) return 'close';
   if (event.event_type === 'signal') return 'signal';
+  if (event.event_type === 'wallet') return subtype || 'wallet';
+  if (event.event_type === 'runtime') return subtype || 'runtime';
   return subtype || '—';
 };
 
@@ -230,6 +262,10 @@ function InspectModal({ selection, eventIndex, onSelectEvent, onClose }) {
               <p className="decision-explain-id">{formatSigned(event.trade_net_pnl, 2) || '—'}</p>
             </div>
             <div>
+              <p className="decision-explain-key">fees</p>
+              <p className="decision-explain-id">{formatNumber(feeFromEvent(event), 4) || '—'}</p>
+            </div>
+            <div>
               <p className="decision-explain-key">instrument_id</p>
               <div className="identifier-value">
                 <span className="decision-explain-id">{event.instrument_id || '—'}</span>
@@ -327,12 +363,26 @@ function InspectModal({ selection, eventIndex, onSelectEvent, onClose }) {
         </div>
 
         <div className="decision-explain-section">
+          <p className="decision-explain-label">Payload</p>
+          {event.payload && typeof event.payload === 'object' ? (
+            <details className="decision-explain-raw">
+              <summary>View event payload</summary>
+              <pre className="decision-explain-json">{JSON.stringify(event.payload, null, 2)}</pre>
+            </details>
+          ) : (
+            <p className="decision-explain-muted">No payload captured.</p>
+          )}
+        </div>
+
+        <div className="decision-explain-section">
           <p className="decision-explain-label">Identifiers</p>
           <div className="decision-explain-grid two-col">
             {[
               ['event_id', event.event_id],
               ['parent_event_id', event.parent_event_id],
               ['trade_id', event.trade_id],
+              ['run_id', event.run_id],
+              ['bot_id', event.bot_id],
             ].map(([label, value]) => (
               <div key={label} className="identifier-row">
                 <p className="decision-explain-key">{label}</p>
@@ -421,6 +471,9 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
       const createdAt = sortOrder === 'asc'
         ? (sorted[0]?.created_at || sorted[0]?.event_ts || null)
         : (sorted[sorted.length - 1]?.created_at || sorted[sorted.length - 1]?.event_ts || null);
+      const impactMetric = aggregateMetric(sorted, (item) => toFiniteNumber(item.event_impact_pnl));
+      const netMetric = aggregateMetric(sorted, (item) => toFiniteNumber(item.trade_net_pnl));
+      const feeMetric = aggregateMetric(sorted, feeFromEvent);
       return {
         kind: 'group',
         groupId: tradeId,
@@ -428,6 +481,12 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
         created_at: createdAt,
         symbol,
         children: sorted,
+        impactTotal: impactMetric.total,
+        netTotal: netMetric.total,
+        feeTotal: feeMetric.total,
+        hasImpactTotal: impactMetric.hasValue,
+        hasNetTotal: netMetric.hasValue,
+        hasFeeTotal: feeMetric.hasValue,
       };
     });
 
@@ -521,6 +580,9 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
   const renderGroupRow = (row, idx) => {
     const isExpanded = expandedGroups.has(row.groupId);
     const summary = buildClusterSummary(row.children);
+    const impactText = row.hasImpactTotal ? formatSigned(row.impactTotal, 2) : null;
+    const netText = row.hasNetTotal ? formatSigned(row.netTotal, 2) : null;
+    const feeText = row.hasFeeTotal ? formatNumber(row.feeTotal, 4) : null;
     return (
       <tr key={`group-${row.groupId}-${idx}`} className="group-row">
         <td className="tabular-nums">
@@ -542,8 +604,13 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
         <td className="tabular-nums">—</td>
         <td className="tabular-nums">—</td>
         <td className="tabular-nums">—</td>
-        <td className="tabular-nums">—</td>
-        <td className="tabular-nums">—</td>
+        <td className={`tabular-nums ${impactText ? (Number(row.impactTotal) >= 0 ? 'pnl-positive' : 'pnl-negative') : ''}`}>
+          {impactText || '—'}
+        </td>
+        <td className={`tabular-nums ${netText ? (Number(row.netTotal) >= 0 ? 'pnl-positive' : 'pnl-negative') : ''}`}>
+          {netText || '—'}
+        </td>
+        <td className="tabular-nums">{feeText || '—'}</td>
         <td className="tabular-nums">—</td>
       </tr>
     );
@@ -554,6 +621,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
     const badge = getEventBadge(event.event_type);
     const createdAt = event.created_at || event.event_ts || null;
     const action = actionFromEvent(event).toUpperCase();
+    const feeText = formatNumber(feeFromEvent(event), 4);
     return (
       <tr key={`dup-${row.dupKey}-${idx}`} className="dup-row">
         <td className="tabular-nums">
@@ -583,6 +651,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
         <td className="tabular-nums">{formatNumber(event.price, 4) || '—'}</td>
         <td className="tabular-nums">—</td>
         <td className="tabular-nums">—</td>
+        <td className="tabular-nums">{feeText || '—'}</td>
         <td className="tabular-nums">{event.reason_code || '—'}</td>
       </tr>
     );
@@ -593,6 +662,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
     const badge = getEventBadge(event.event_type);
     const impactPnl = formatSigned(event.event_impact_pnl, 2);
     const netPnl = formatSigned(event.trade_net_pnl, 2);
+    const feeText = formatNumber(feeFromEvent(event), 4);
     const createdAt = event.created_at || event.event_ts || null;
     return (
       <tr
@@ -618,6 +688,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
         <td className={`tabular-nums ${netPnl ? (Number(event.trade_net_pnl) >= 0 ? 'pnl-positive' : 'pnl-negative') : ''}`}>
           {netPnl || '—'}
         </td>
+        <td className="tabular-nums">{feeText || '—'}</td>
         <td className="tabular-nums">{event.reason_code || '—'}</td>
       </tr>
     );
@@ -639,6 +710,8 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
               <option value="decision">DECISION</option>
               <option value="execution">EXEC</option>
               <option value="outcome">OUTCOME</option>
+              <option value="wallet">WALLET</option>
+              <option value="runtime">RUNTIME</option>
             </select>
           </div>
           <div className="decision-ledger-filter">
@@ -706,6 +779,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
                   <th style={{ width: '90px' }}>price</th>
                   <th style={{ width: '120px' }}>event_impact_pnl</th>
                   <th style={{ width: '120px' }}>trade_net_pnl</th>
+                  <th style={{ width: '90px' }}>fees</th>
                   <th>reason_code</th>
                 </tr>
               </thead>
@@ -720,7 +794,7 @@ export default function DecisionTable({ ledgerEvents, onRowClick }) {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={10} className="decision-table-empty">
+                    <td colSpan={11} className="decision-table-empty">
                       No ledger events yet.
                     </td>
                   </tr>

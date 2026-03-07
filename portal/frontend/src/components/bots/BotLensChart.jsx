@@ -20,6 +20,10 @@ import {
   findNearestCandleTime,
 } from './regimeReadoutUtils.js'
 
+const AUTO_FIT_OVERLAY_EXTENTS = String(import.meta.env?.VITE_BOTLENS_AUTO_FIT_OVERLAY_EXTENTS || '')
+  .trim()
+  .toLowerCase() === 'true'
+
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()
   if (!text) return null
@@ -154,6 +158,7 @@ export function BotLensChart({
   heightClass = 'h-[360px]',
   timeframe = null,
   overlayVisibility = {},
+  followLive = true,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -165,6 +170,8 @@ export function BotLensChart({
   const barSpacingRef = useRef(null)
   const latestCandlesRef = useRef([])
   const [hoveredEpoch, setHoveredEpoch] = useState(null)
+  const hoveredEpochRef = useRef(null)
+  const hoverRafRef = useRef(0)
   const seriesInstanceRef = useRef(null)
   const markerCacheRef = useRef([])
   const prevPriceLinesRef = useRef([])
@@ -205,13 +212,13 @@ export function BotLensChart({
     }, {})
     const regime = summary.regime_overlay || 0
     const regimeMarkers = summary.regime_markers || 0
-    logger.info('overlay_render_input', {
-      overlays_total: resolvedOverlays.length,
-      overlays_by_type: summary,
-      regime_overlay: regime,
-      regime_markers: regimeMarkers,
-    })
     if (BOTLENS_DEBUG) {
+      logger.debug('overlay_render_input', {
+        overlays_total: resolvedOverlays.length,
+        overlays_by_type: summary,
+        regime_overlay: regime,
+        regime_markers: regimeMarkers,
+      })
       console.debug('[BotLensChart] overlays received', { total: resolvedOverlays.length, summary, regime, regimeMarkers })
     }
   }, [logger, resolvedOverlays])
@@ -298,6 +305,19 @@ export function BotLensChart({
     markerManager,
   })
 
+  useEffect(() => {
+    if (followLive) {
+      lock()
+      requestIntent({
+        intent: CameraIntents.FOLLOW_LATEST,
+        reason: 'follow-live-enabled',
+        isUser: true,
+      })
+      return
+    }
+    unlock()
+  }, [followLive, lock, requestIntent, unlock])
+
   const regimeOverlay = useMemo(
     () => resolvedOverlays.find((overlay) => overlay?.type === 'regime_overlay'),
     [resolvedOverlays],
@@ -310,6 +330,7 @@ export function BotLensChart({
   const lastReadoutSnapshotRef = useRef(null)
 
   const readoutSnapshot = useMemo(() => {
+    if (!showRegimeReadout) return null
     const focusEpoch = Number.isFinite(hoveredEpoch)
       ? findNearestCandleTime(candleData, hoveredEpoch)
       : lastCandleEpoch
@@ -324,28 +345,43 @@ export function BotLensChart({
       return snapshot
     }
     return lastReadoutSnapshotRef.current
-  }, [blockSnapshots, candleSnapshots, hoveredEpoch, lastCandleEpoch, candleData])
+  }, [blockSnapshots, candleSnapshots, hoveredEpoch, lastCandleEpoch, candleData, showRegimeReadout])
 
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return undefined
 
+    const queueHoveredEpoch = (nextEpoch) => {
+      const normalized = Number.isFinite(nextEpoch) ? Math.floor(nextEpoch) : null
+      if (hoveredEpochRef.current === normalized) return
+      hoveredEpochRef.current = normalized
+      if (hoverRafRef.current) return
+      hoverRafRef.current = window.requestAnimationFrame(() => {
+        hoverRafRef.current = 0
+        setHoveredEpoch(hoveredEpochRef.current)
+      })
+    }
+
     const handleCrosshair = (param) => {
       if (!param?.time) {
-        setHoveredEpoch(null)
+        queueHoveredEpoch(null)
         return
       }
       const epoch = typeof param.time === 'number' ? param.time : param.time.timestamp?.()
       if (!Number.isFinite(epoch)) {
-        setHoveredEpoch(null)
+        queueHoveredEpoch(null)
         return
       }
-      setHoveredEpoch(Math.floor(epoch))
+      queueHoveredEpoch(epoch)
     }
 
     chart.subscribeCrosshairMove(handleCrosshair)
     return () => {
       chart.unsubscribeCrosshairMove(handleCrosshair)
+      if (hoverRafRef.current) {
+        window.cancelAnimationFrame(hoverRafRef.current)
+        hoverRafRef.current = 0
+      }
     }
   }, [chartRef])
 
@@ -509,16 +545,18 @@ export function BotLensChart({
       tradePriceLines: showTradeRays ? tradePriceLines : [],
       candleData,
     })
-    logger.info('overlay_render_artifacts', {
-      overlays_total: resolvedOverlays.length,
-      markers: Array.isArray(artifacts?.markers) ? artifacts.markers.length : 0,
-      touch_points: Array.isArray(artifacts?.touchPoints) ? artifacts.touchPoints.length : 0,
-      boxes: Array.isArray(artifacts?.boxes) ? artifacts.boxes.length : 0,
-      segments: Array.isArray(artifacts?.segments) ? artifacts.segments.length : 0,
-      polylines: Array.isArray(artifacts?.polylines) ? artifacts.polylines.length : 0,
-      bubbles: Array.isArray(artifacts?.bubbles) ? artifacts.bubbles.length : 0,
-      price_lines: Array.isArray(artifacts?.priceLines) ? artifacts.priceLines.length : 0,
-    })
+    if (BOTLENS_DEBUG) {
+      logger.debug('overlay_render_artifacts', {
+        overlays_total: resolvedOverlays.length,
+        markers: Array.isArray(artifacts?.markers) ? artifacts.markers.length : 0,
+        touch_points: Array.isArray(artifacts?.touchPoints) ? artifacts.touchPoints.length : 0,
+        boxes: Array.isArray(artifacts?.boxes) ? artifacts.boxes.length : 0,
+        segments: Array.isArray(artifacts?.segments) ? artifacts.segments.length : 0,
+        polylines: Array.isArray(artifacts?.polylines) ? artifacts.polylines.length : 0,
+        bubbles: Array.isArray(artifacts?.bubbles) ? artifacts.bubbles.length : 0,
+        price_lines: Array.isArray(artifacts?.priceLines) ? artifacts.priceLines.length : 0,
+      })
+    }
     const overlayResult = applyArtifacts(artifacts)
     if (debugRanges) {
       const markerTimes = (artifacts?.markers || [])
@@ -532,7 +570,7 @@ export function BotLensChart({
         last: markerTimes[markerTimes.length - 1] ?? null,
       })
     }
-    if (overlayResult.extentChanged && overlayResult.extents) {
+    if (AUTO_FIT_OVERLAY_EXTENTS && overlayResult.extentChanged && overlayResult.extents) {
       requestIntent({
         intent: CameraIntents.FIT_OVERLAY_EXTENTS,
         payload: { extents: overlayResult.extents, signature: overlayResult.signature, segments: artifacts.tradeSegments },

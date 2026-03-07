@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from queue import Queue
+from queue import Empty, Full, Queue
 from threading import Lock
 from typing import Callable, Dict, Mapping, Tuple
 
@@ -66,12 +66,12 @@ class BotStreamManager:
         try:
             channel.put_nowait(message)
             return True
-        except Exception:
+        except Full:
             self._drain_queue(channel)
         try:
             channel.put_nowait(message)
             return True
-        except Exception:
+        except Full:
             return False
 
     @staticmethod
@@ -81,5 +81,5 @@ class BotStreamManager:
         try:
             while True:
                 channel.get_nowait()
-        except Exception:
+        except Empty:
             return

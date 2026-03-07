@@ -25,7 +25,15 @@ export class PaneViewManager {
     this.series = new Map();
     this.views = new Map();
     this.vaBoxState = { boxes: [], lastSeriesTime: null, barSpacing: null };
-    this.ensure(PaneViewType.VA_BOX); // create VA boxes first so they are in back
+    // Pre-initialize all overlay series so they sit below candles in z-order.
+    // Candles must be added to the chart AFTER PaneViewManager is constructed.
+    this.ensure(PaneViewType.VA_BOX);
+    this.ensure(PaneViewType.SEGMENT);
+    this.ensure(PaneViewType.POLYLINE);
+    this.ensure(PaneViewType.HIGHLIGHT_BAND);
+    this.ensure(PaneViewType.TOUCH);
+    this.ensure(PaneViewType.SIGNAL_BUBBLE);
+    this.ensure(PaneViewType.MARKER);
   }
   ensure(type) {
     if (this.series.has(type)) return;

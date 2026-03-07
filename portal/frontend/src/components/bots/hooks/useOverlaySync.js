@@ -40,7 +40,12 @@ export const useOverlaySync = ({
       const bubbles = []
       const priceLines = [...tradePriceLines]
 
+      const firstSeriesTime = candleData[0]?.time ?? null
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
+      const hasSeriesWindow =
+        Number.isFinite(firstSeriesTime) &&
+        Number.isFinite(lastSeriesTime) &&
+        Number(firstSeriesTime) <= Number(lastSeriesTime)
       const lastCandle = candleData[candleData.length - 1]
       const prevCandle = candleData[candleData.length - 2]
       if (lastCandle && Number.isFinite(lastCandle?.time)) {
@@ -69,8 +74,45 @@ export const useOverlaySync = ({
         return { ...segment, x1, x2, y1, y2 }
       }
 
+      const isWithinSeriesWindow = (epoch) => {
+        if (!Number.isFinite(epoch)) return false
+        if (!hasSeriesWindow) return true
+        return Number(epoch) >= Number(firstSeriesTime) && Number(epoch) <= Number(lastSeriesTime)
+      }
+
+      const toScopedRange = (left, right) => {
+        let x1 = toFiniteNumber(left)
+        let x2 = toFiniteNumber(right)
+        if (!Number.isFinite(x1) && Number.isFinite(x2)) x1 = x2
+        if (!Number.isFinite(x2) && Number.isFinite(x1)) x2 = x1
+        if (!Number.isFinite(x1) || !Number.isFinite(x2)) return null
+
+        let start = Math.min(x1, x2)
+        let end = Math.max(x1, x2)
+
+        if (hasSeriesWindow) {
+          if (end < Number(firstSeriesTime) || start > Number(lastSeriesTime)) return null
+          start = Math.max(start, Number(firstSeriesTime))
+          end = Math.min(end, Number(lastSeriesTime))
+        }
+        return { x1: start, x2: end }
+      }
+
+      const dedupeByKey = (entries, keyFn) => {
+        const out = []
+        const seen = new Set()
+        for (const entry of entries || []) {
+          const key = keyFn(entry)
+          if (seen.has(key)) continue
+          seen.add(key)
+          out.push(entry)
+        }
+        return out
+      }
+
       for (const overlay of overlayPayloads || []) {
         const { type, payload, color, ind_id } = overlay || {}
+        const resolvedColor = color || overlay?.ui?.color || null
         if (!payload) continue
         const paneViews = getPaneViewsForOverlay(overlay)
         const paneSet = new Set(paneViews || [])
@@ -105,7 +147,7 @@ export const useOverlaySync = ({
             symbol: overlay?.symbol,
           })
         }
-        const norm = adaptPayload(type, payload, color)
+        const norm = adaptPayload(type, payload, resolvedColor)
         if (Array.isArray(payload.price_lines)) {
           payload.price_lines.forEach((pl) => {
             const price = toFiniteNumber(pl?.price)
@@ -113,7 +155,7 @@ export const useOverlaySync = ({
             priceLines.push({
               ...pl,
               price,
-              color: pl.color ?? color,
+              color: pl.color ?? resolvedColor,
               source: type || pl.title || 'overlay',
             })
           })
@@ -129,7 +171,7 @@ export const useOverlaySync = ({
                 ...point,
                 time: toSec(point.time),
                 text: point.text || point.label || '',
-                textColor: point.textColor || color,
+                textColor: point.textColor || resolvedColor,
                 ind_id,
               }))
               .filter((point) => Number.isFinite(point.time)),
@@ -180,11 +222,11 @@ export const useOverlaySync = ({
         }
         const wantsBubbles = paneSet.has('signal_bubble') || (Array.isArray(norm.bubbles) && norm.bubbles.length > 0)
         if (wantsBubbles && Array.isArray(norm.bubbles) && norm.bubbles.length) {
-          const bubbleColor = color ? toRgba(color, 0.16) : undefined
-          const tinted = color
+          const bubbleColor = resolvedColor ? toRgba(resolvedColor, 0.16) : undefined
+          const tinted = resolvedColor
             ? norm.bubbles.map((bubble) => ({
                 ...bubble,
-                accentColor: color,
+                accentColor: resolvedColor,
                 backgroundColor: bubbleColor || bubble.backgroundColor,
               }))
             : norm.bubbles
@@ -205,6 +247,92 @@ export const useOverlaySync = ({
           }
         }
       }
+
+      const toScopedSegment = (segment) => {
+        const normalised = normaliseSegment(segment)
+        if (!Number.isFinite(normalised.y2) && Number.isFinite(normalised.y1)) {
+          normalised.y2 = normalised.y1
+        }
+        if (!Number.isFinite(normalised.y1) && Number.isFinite(normalised.y2)) {
+          normalised.y1 = normalised.y2
+        }
+        const range = toScopedRange(normalised.x1, normalised.x2)
+        if (!range) return null
+        if (!Number.isFinite(normalised.y1) || !Number.isFinite(normalised.y2)) return null
+        return {
+          ...normalised,
+          x1: range.x1,
+          x2: range.x2,
+        }
+      }
+
+      const scopedMarkers = [...baseMarkers, ...overlayMarkers]
+        .map((marker) => ({ ...marker, time: toSec(marker?.time) }))
+        .filter((marker) => isWithinSeriesWindow(marker?.time))
+
+      const scopedMarkerDetails = (markerDetails || [])
+        .map((detail) => {
+          const epoch = toSec(detail?.time)
+          if (!Number.isFinite(epoch)) return null
+          return { ...detail, time: epoch }
+        })
+        .filter((detail) => detail && isWithinSeriesWindow(detail.time))
+
+      const scopedTouchPoints = (touchPoints || [])
+        .map((point) => ({ ...point, time: toSec(point?.time) }))
+        .filter((point) => isWithinSeriesWindow(point?.time))
+
+      const scopedBoxes = dedupeByKey(
+        (boxes || [])
+          .map((box) => {
+            const range = toScopedRange(
+              toSec(coalesce(box?.x1, box?.start, box?.start_date, box?.startDate)),
+              toSec(coalesce(box?.x2, box?.end, box?.end_date, box?.endDate, box?.x1, box?.start, box?.start_date, box?.startDate)),
+            )
+            const y1 = toFiniteNumber(coalesce(box?.y1, box?.val, box?.VAL))
+            const y2 = toFiniteNumber(coalesce(box?.y2, box?.vah, box?.VAH))
+            if (!range || !Number.isFinite(y1) || !Number.isFinite(y2)) return null
+            return {
+              ...box,
+              x1: range.x1,
+              x2: range.x2,
+              y1,
+              y2,
+            }
+          })
+          .filter(Boolean),
+        (box) => `${box.x1}|${box.x2}|${box.y1}|${box.y2}|${box.color || ''}|${box?.border?.color || ''}|${box?.border?.width || 0}`,
+      )
+
+      const scopedSegments = dedupeByKey(
+        (segments || []).map((segment) => toScopedSegment(segment)).filter(Boolean),
+        (segment) =>
+          `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
+      )
+
+      const scopedTradeSegments = dedupeByKey(
+        (tradeSegments || []).map((segment) => toScopedSegment(segment)).filter(Boolean),
+        (segment) =>
+          `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
+      )
+
+      const scopedPolylines = (polylines || [])
+        .map((polyline) => {
+          const points = (polyline?.points || [])
+            .map((point) => ({
+              ...point,
+              time: toSec(point?.time),
+              price: toFiniteNumber(point?.price),
+            }))
+            .filter((point) => isWithinSeriesWindow(point?.time) && Number.isFinite(point?.price))
+          if (!points.length) return null
+          return { ...polyline, points }
+        })
+        .filter(Boolean)
+
+      const scopedBubbles = (bubbles || [])
+        .map((bubble) => ({ ...bubble, time: toSec(bubble?.time) }))
+        .filter((bubble) => isWithinSeriesWindow(bubble?.time))
 
       const groupedPriceLines = (() => {
         const normalised = []
@@ -247,19 +375,19 @@ export const useOverlaySync = ({
       })()
 
       const extentSignature = (() => {
-        if (!tradeSegments.length) return null
-        const candidateTimes = tradeSegments
+        if (!scopedTradeSegments.length) return null
+        const candidateTimes = scopedTradeSegments
           .flatMap((segment) => [segment.x1, segment.x2])
           .filter((value) => Number.isFinite(value))
         if (!candidateTimes.length) return null
         const min = Math.min(...candidateTimes)
         const max = Math.max(...candidateTimes)
-        return `${min}-${max}-${lastSeriesTime}`
+        return `${min}-${max}-${scopedTradeSegments.length}`
       })()
 
       const extents = (() => {
         if (!extentSignature) return null
-        const candidateTimes = tradeSegments
+        const candidateTimes = scopedTradeSegments
           .flatMap((segment) => [segment.x1, segment.x2])
           .filter((value) => Number.isFinite(value))
         if (!candidateTimes.length) return null
@@ -271,15 +399,15 @@ export const useOverlaySync = ({
       })()
 
       return {
-        markers: [...baseMarkers, ...overlayMarkers],
-        markerDetails,
-        touchPoints,
-        boxes,
-        segments,
-        polylines,
-        bubbles,
+        markers: scopedMarkers,
+        markerDetails: scopedMarkerDetails,
+        touchPoints: scopedTouchPoints,
+        boxes: scopedBoxes,
+        segments: scopedSegments,
+        polylines: scopedPolylines,
+        bubbles: scopedBubbles,
         priceLines: groupedPriceLines,
-        tradeSegments,
+        tradeSegments: scopedTradeSegments,
         lastSeriesTime,
         extentSignature,
         extents,
@@ -290,7 +418,7 @@ export const useOverlaySync = ({
 
   const applyArtifacts = useCallback(
     (artifacts = {}) => {
-      const { markers, markerDetails, touchPoints, boxes, segments, polylines, bubbles, priceLines, tradeSegments, extentSignature, extents, lastSeriesTime } = artifacts
+      const { markers, markerDetails, touchPoints, boxes, segments, polylines, bubbles, priceLines, extentSignature, extents, lastSeriesTime } = artifacts
       if (!seriesRef.current || !paneMgrRef.current) return { extentChanged: false }
 
       markerDetailsRef.current = markerDetails || []
@@ -396,7 +524,7 @@ export const useOverlaySync = ({
 
       return { extentChanged, extents, signature: extentSignature }
     },
-    [barSpacingRef, markerManager, overlayHandlesRef, paneMgrRef, prevPriceLinesRef, seriesRef],
+    [barSpacingRef, markerDetailsRef, markerManager, overlayHandlesRef, paneMgrRef, prevPriceLinesRef, seriesRef],
   )
 
   return { computeArtifacts, applyArtifacts }

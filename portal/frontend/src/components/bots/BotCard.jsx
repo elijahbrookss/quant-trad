@@ -1,9 +1,7 @@
-import { Play, Square, Eye, Trash2, Pause, RotateCw, TriangleAlert, X } from 'lucide-react'
+import { Play, Square, Trash2, RotateCw, TriangleAlert, X, Eye } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { describeBotLifecycle, getBotControls, getBotRunId, getBotStatus } from './botStatusModel.js'
 import { symbolsFromInstrumentSlots } from '../../utils/instrumentSymbols.js'
-
-const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
 
 /**
  * Get status color for the card stripe
@@ -12,9 +10,12 @@ const getStatusColor = (status) => {
   const colors = {
     running: 'bg-emerald-500',
     paused: 'bg-amber-500',
+    degraded: 'bg-amber-500',
+    telemetry_degraded: 'bg-amber-500',
     stopped: 'bg-rose-500',
     crashed: 'bg-rose-500',
     error: 'bg-rose-500',
+    failed: 'bg-rose-500',
     completed: 'bg-sky-500',
     starting: 'bg-slate-500',
     initialising: 'bg-slate-500',
@@ -40,18 +41,16 @@ const formatDateShort = (dateStr) => {
 /**
  * Get base currency from instrument or symbol
  */
-const getBaseCurrency = (symbol, strategyLookup, strategyIds) => {
+const getBaseCurrency = (symbol, strategyLookup, strategyId) => {
   if (!symbol) return symbol
 
-  // Try to find instrument metadata from strategies
-  for (const strategyId of strategyIds || []) {
-    const strategy = strategyLookup?.get(strategyId)
-    const instruments = strategy?.instruments || []
-    for (const inst of instruments) {
-      if (inst?.symbol?.toUpperCase() === symbol.toUpperCase()) {
-        const baseCurrency = inst?.metadata?.instrument_fields?.base_currency || inst?.base_currency
-        if (baseCurrency) return baseCurrency
-      }
+  // Try to find instrument metadata from selected strategy
+  const strategy = strategyId ? strategyLookup?.get(strategyId) : null
+  const instruments = strategy?.instruments || []
+  for (const inst of instruments) {
+    if (inst?.symbol?.toUpperCase() === symbol.toUpperCase()) {
+      const baseCurrency = inst?.metadata?.instrument_fields?.base_currency || inst?.base_currency
+      if (baseCurrency) return baseCurrency
     }
   }
 
@@ -63,28 +62,20 @@ const getBaseCurrency = (symbol, strategyLookup, strategyIds) => {
 export const BotCard = memo(function BotCard({
   bot,
   strategyLookup,
-  describeRange,
-  statusBadge,
   nowEpochMs,
   onStart,
   onStop,
-  onPause,
-  onResume,
   onDelete,
   onOpen,
   pendingStart,
   pendingDelete,
 }) {
-  const navigate = useNavigate()
   const [errorOpen, setErrorOpen] = useState(false)
   const [warningsOpen, setWarningsOpen] = useState(false)
-  const assignedNames = useMemo(
-    () =>
-      (bot.strategy_ids || [])
-        .map((id) => strategyLookup.get(id)?.name || id)
-        .filter(Boolean),
-    [bot.strategy_ids, strategyLookup],
-  )
+  const assignedName = useMemo(() => {
+    if (!bot.strategy_id) return ''
+    return strategyLookup.get(bot.strategy_id)?.name || bot.strategy_id
+  }, [bot.strategy_id, strategyLookup])
   const runtimeWarnings = Array.isArray(bot?.runtime?.warnings) ? bot.runtime.warnings : []
   const warningCount = runtimeWarnings.length
   const warningMessages = runtimeWarnings
@@ -113,7 +104,10 @@ export const BotCard = memo(function BotCard({
     [warningCount],
   )
 
-  const runtimeStatus = computeStatus(bot)
+  const runtimeStatus = getBotStatus(bot)
+  const lifecycle = describeBotLifecycle(bot)
+  const controls = getBotControls(bot)
+  const liveRunId = getBotRunId(bot)
   const statusColor = getStatusColor(runtimeStatus)
   const progressValue =
     typeof bot.runtime?.progress === 'number'
@@ -122,26 +116,15 @@ export const BotCard = memo(function BotCard({
         ? 1
         : 0
   const progressPct = Math.min(100, Math.max(0, progressValue * 100))
-  const showProgress = progressPct > 0 || ['running', 'starting', 'paused'].includes(runtimeStatus)
-  const showPause = runtimeStatus === 'running' && bot.mode === 'walk-forward'
-  const showResume = runtimeStatus === 'paused'
+  const showProgress = progressPct > 0 || ['running', 'starting', 'paused', 'degraded', 'telemetry_degraded'].includes(runtimeStatus)
   const timeframeLabel = describeBotMeta(bot, strategyLookup, 'timeframe')
   const rawSymbols = describeBotMeta(bot, strategyLookup, 'symbol')
-  const canStart = ['idle', 'stopped', 'completed', 'error', 'crashed'].includes(runtimeStatus)
-  const canStop = ['running', 'paused', 'starting'].includes(runtimeStatus)
-  const isCompleted = runtimeStatus === 'completed'
-  const isStopped = runtimeStatus === 'stopped'
-  const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error'
-  const isIdle = runtimeStatus === 'idle'
-  const showDetails = !isCompleted && !isStopped && !isCrashed && !isIdle
-  const showViewReport = isCompleted
+  const canStart = controls.canStart
+  const canStop = controls.canStop
+  const isCrashed = runtimeStatus === 'crashed' || runtimeStatus === 'error' || runtimeStatus === 'failed'
   const showViewError = isCrashed
-  const startLabel =
-    runtimeStatus === 'completed'
-      ? 'Rerun'
-      : runtimeStatus === 'stopped' || runtimeStatus === 'crashed' || runtimeStatus === 'error'
-        ? 'Restart'
-        : 'Start'
+  const showLens = controls.canOpenLens
+  const startLabel = controls.startLabel
   const runDurationLabel = buildRunDuration(bot, runtimeStatus, nowEpochMs)
   const completedDuration = buildCompletedDuration(bot)
   const runType = (bot.run_type || 'backtest').toLowerCase()
@@ -174,10 +157,10 @@ export const BotCard = memo(function BotCard({
   const symbolsDisplay = useMemo(() => {
     if (!rawSymbols) return '—'
     const symbolList = rawSymbols.split(', ').slice(0, 3)
-    const formatted = symbolList.map(s => getBaseCurrency(s, strategyLookup, bot.strategy_ids))
+    const formatted = symbolList.map(s => getBaseCurrency(s, strategyLookup, bot.strategy_id))
     const extra = rawSymbols.split(', ').length - 3
     return formatted.join(', ') + (extra > 0 ? ` +${extra}` : '')
-  }, [rawSymbols, strategyLookup, bot.strategy_ids])
+  }, [rawSymbols, strategyLookup, bot.strategy_id])
 
   // Compact date range
   const dateRangeShort = useMemo(() => {
@@ -185,10 +168,16 @@ export const BotCard = memo(function BotCard({
     return `${formatDateShort(bot.backtest_start)} → ${formatDateShort(bot.backtest_end)}`
   }, [runType, bot.backtest_start, bot.backtest_end])
 
-  const reportRunId = bot?.last_run_artifact?.run_id || bot?.runtime?.run_id || null
   const errorPayload = bot?.runtime?.error || bot?.last_run_artifact?.error || null
   const errorMessage = typeof errorPayload === 'string' ? errorPayload : errorPayload?.message || 'Bot crashed'
   const errorMeta = typeof errorPayload === 'object' && errorPayload ? errorPayload : {}
+  const lifecycleToneClass = {
+    emerald: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100',
+    sky: 'border-sky-500/30 bg-sky-500/10 text-sky-100',
+    amber: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+    rose: 'border-rose-500/30 bg-rose-500/10 text-rose-100',
+    slate: 'border-slate-700/70 bg-slate-900/60 text-slate-100',
+  }[lifecycle.tone] || 'border-slate-700/70 bg-slate-900/60 text-slate-100'
 
   return (
     <article className="group relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950/80 via-slate-950/60 to-slate-900/80 shadow-[0_12px_40px_rgba(2,6,23,0.35)] transition-all duration-200 hover:border-slate-700">
@@ -207,6 +196,33 @@ export const BotCard = memo(function BotCard({
                   {modeLabel}
                 </span>
               ) : null}
+              <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] ${lifecycleToneClass}`}>
+                <span className="relative flex h-2.5 w-2.5 items-center justify-center">
+                  {['live', 'starting_container', 'booting_runtime', 'awaiting_snapshot'].includes(lifecycle.phase) ? (
+                    <span className={`absolute inline-flex h-full w-full rounded-full opacity-70 ${
+                      lifecycle.tone === 'emerald'
+                        ? 'animate-ping bg-emerald-400/70'
+                        : lifecycle.tone === 'sky'
+                          ? 'animate-pulse bg-sky-400/70'
+                          : lifecycle.tone === 'amber'
+                            ? 'animate-pulse bg-amber-400/70'
+                            : 'bg-slate-500/70'
+                    }`} />
+                  ) : null}
+                  <span className={`relative inline-flex h-2 w-2 rounded-full ${
+                    lifecycle.tone === 'emerald'
+                      ? 'bg-emerald-300'
+                      : lifecycle.tone === 'sky'
+                        ? 'bg-sky-300'
+                        : lifecycle.tone === 'amber'
+                          ? 'bg-amber-300'
+                          : lifecycle.tone === 'rose'
+                            ? 'bg-rose-300'
+                            : 'bg-slate-400'
+                  }`} />
+                </span>
+                {lifecycle.label}
+              </span>
               {warningCount > 0 && (
                 <div
                   className="flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
@@ -226,7 +242,10 @@ export const BotCard = memo(function BotCard({
               )}
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
-              {assignedNames.length === 1 ? assignedNames[0] : `${assignedNames.length} strategies`}
+              {assignedName || "—"}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-slate-400">
+              {lifecycle.detail}
             </p>
           </div>
 
@@ -256,6 +275,22 @@ export const BotCard = memo(function BotCard({
               <span className="tabular-nums text-slate-400">{runDurationLabel}</span>
             </>
           )}
+        </div>
+
+        <div className={`rounded-2xl border px-3.5 py-3 ${lifecycleToneClass}`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.28em] opacity-80">Lifecycle</p>
+              <p className="mt-1 text-sm font-medium">{lifecycle.label}</p>
+              <p className="mt-1 text-xs opacity-80">{lifecycle.detail}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.2em] opacity-80">
+              {liveRunId ? <span className="rounded-full border border-white/10 px-2 py-1">Run {liveRunId.slice(0, 8)}</span> : null}
+              {bot?.runtime?.seq ? <span className="rounded-full border border-white/10 px-2 py-1">Seq {Number(bot.runtime.seq)}</span> : null}
+              <span className="rounded-full border border-white/10 px-2 py-1">Container {lifecycle.containerStatus}</span>
+              <span className="rounded-full border border-white/10 px-2 py-1">Heartbeat {lifecycle.heartbeatState}</span>
+            </div>
+          </div>
         </div>
 
         {/* Progress bar */}
@@ -298,32 +333,26 @@ export const BotCard = memo(function BotCard({
             )}
           </div>
 
-          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
-            runtimeStatus === 'running' ? 'border-emerald-500/40 text-emerald-400' :
-            runtimeStatus === 'paused' ? 'border-amber-500/40 text-amber-400' :
-            runtimeStatus === 'error' || runtimeStatus === 'crashed' ? 'border-rose-500/40 text-rose-400' :
-            runtimeStatus === 'completed' ? 'border-sky-500/40 text-sky-400' :
-            'border-slate-600/40 text-slate-500'
-          }`}>
-            {runtimeStatus}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest ${
+              runtimeStatus === 'running' ? 'border-emerald-500/40 text-emerald-400' :
+              runtimeStatus === 'paused' ? 'border-amber-500/40 text-amber-400' :
+              runtimeStatus === 'error' || runtimeStatus === 'crashed' || runtimeStatus === 'failed' ? 'border-rose-500/40 text-rose-400' :
+              runtimeStatus === 'completed' ? 'border-sky-500/40 text-sky-400' :
+              'border-slate-600/40 text-slate-500'
+            }`}>
+              {runtimeStatus}
+            </span>
+            <span className="rounded-full border border-slate-700/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+              {lifecycle.phase.replaceAll('_', ' ')}
+            </span>
+          </div>
         </div>
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
-          {showDetails && (
-            <ActionButton onClick={() => onOpen(bot)} icon={<Eye className="size-3" />} label="Details" size="sm" />
-          )}
-          {showViewReport && (
-            <ActionButton
-              onClick={() => {
-                const path = reportRunId ? `/reports?runId=${reportRunId}` : '/reports'
-                navigate(path)
-              }}
-              icon={<Eye className="size-3" />}
-              label="View Report"
-              size="sm"
-            />
+          {showLens && (
+            <ActionButton onClick={() => onOpen?.(bot)} icon={<Eye className="size-3" />} label="Live Lens" size="sm" />
           )}
           {showViewError && (
             <ActionButton
@@ -333,12 +362,6 @@ export const BotCard = memo(function BotCard({
               size="sm"
               variant="danger"
             />
-          )}
-          {showPause && (
-            <ActionButton onClick={() => onPause(bot.id)} icon={<Pause className="size-3" />} label="Pause" size="sm" />
-          )}
-          {showResume && (
-            <ActionButton onClick={() => onResume(bot.id)} icon={<Play className="size-3" />} label="Resume" size="sm" variant="success" />
           )}
           {canStop && (
             <ActionButton onClick={() => onStop(bot.id)} icon={<Square className="size-3" />} label="Stop" size="sm" />
@@ -358,9 +381,11 @@ export const BotCard = memo(function BotCard({
               onClick={() => onDelete(bot.id)}
               icon={<Trash2 className="size-3" />}
               busy={pendingDelete === bot.id}
+              disabled={!controls.canDelete}
               variant="danger"
               size="sm"
               iconOnly
+              label={controls.canDelete ? 'Delete bot' : 'Stop the bot before deleting'}
             />
           </div>
         </div>
@@ -455,7 +480,7 @@ export const BotCard = memo(function BotCard({
 
 function buildRunDuration(bot, status, nowEpochMs = Date.now()) {
   if (!bot?.runtime?.started_at) return null
-  if (!['running', 'paused', 'starting'].includes(status)) return null
+  if (!['running', 'paused', 'starting', 'degraded', 'telemetry_degraded'].includes(status)) return null
   const startMs = Date.parse(bot.runtime.started_at)
   if (!Number.isFinite(startMs)) return null
   const elapsedSeconds = Math.max(0, Math.floor((nowEpochMs - startMs) / 1000))
@@ -496,19 +521,18 @@ function describeBotMeta(bot, strategyLookup, key) {
   if (!bot) return null
 
   const fromStrategies = new Set()
-  for (const strategyId of bot.strategy_ids || []) {
-    const strategy = strategyLookup.get(strategyId)
-    if (!strategy) continue
+  const strategy = bot.strategy_id ? strategyLookup.get(bot.strategy_id) : null
+  if (strategy) {
     if (key === 'symbol') {
       symbolsFromInstrumentSlots(strategy.instrument_slots).forEach((sym) => fromStrategies.add(sym))
-      continue
-    }
-    const value = strategy[key]
-    if (value) {
-      if (Array.isArray(value)) {
-        value.forEach((val) => fromStrategies.add(val))
-      } else {
-        fromStrategies.add(value)
+    } else {
+      const value = strategy[key]
+      if (value) {
+        if (Array.isArray(value)) {
+          value.forEach((val) => fromStrategies.add(val))
+        } else {
+          fromStrategies.add(value)
+        }
       }
     }
   }
@@ -520,7 +544,7 @@ function describeBotMeta(bot, strategyLookup, key) {
   return null
 }
 
-function ActionButton({ onClick, icon, label, busy, variant = 'ghost', size = 'md', iconOnly = false }) {
+function ActionButton({ onClick, icon, label, busy, disabled = false, variant = 'ghost', size = 'md', iconOnly = false }) {
   const variantClass = {
     primary:
       'border-slate-700 bg-slate-800/80 text-slate-200 hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50',
@@ -540,47 +564,13 @@ function ActionButton({ onClick, icon, label, busy, variant = 'ghost', size = 'm
       type="button"
       onClick={onClick}
       className={`inline-flex items-center gap-1 rounded-md border font-medium transition-colors ${variantClass} ${sizeClass} disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={busy}
+      disabled={busy || disabled}
       title={iconOnly ? label : undefined}
     >
       {icon}
       {!iconOnly && <span>{label}</span>}
     </button>
   )
-}
-
-function buildStats(bot) {
-  const source = bot?.runtime?.stats || bot?.last_stats || {}
-  const entries = [
-    { key: 'net_pnl', label: 'NET PNL', value: source.net_pnl },
-    { key: 'total_trades', label: 'TOTAL TRADES', value: source.total_trades },
-    { key: 'wins', label: 'WINS', value: source.wins },
-    { key: 'losses', label: 'LOSSES', value: source.losses },
-    { key: 'win_rate', label: 'WIN RATE', value: source.win_rate },
-  ]
-
-  return entries
-    .map((entry) => {
-      if (entry.value === undefined || entry.value === null) return null
-      if (entry.key === 'net_pnl') {
-        const numeric = Number(entry.value)
-        const tone = Number.isFinite(numeric)
-          ? numeric > 0
-            ? 'positive'
-            : numeric < 0
-              ? 'negative'
-              : 'neutral'
-          : 'neutral'
-        return {
-          ...entry,
-          tone,
-          value: Number.isFinite(numeric) ? numeric.toFixed(2) : entry.value,
-        }
-      }
-
-      return { ...entry, value: entry.value }
-    })
-    .filter(Boolean)
 }
 
 function WarningContextChips({ context }) {
@@ -606,21 +596,6 @@ function formatWarningLabel(label) {
     .filter(Boolean)
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ')
-}
-
-function buildWalletEntries(bot) {
-  const balances = bot?.wallet_config?.balances
-  if (!balances || typeof balances !== 'object') return []
-  return Object.entries(balances)
-    .map(([currency, amount]) => {
-      const numeric = Number(amount)
-      const value = Number.isFinite(numeric)
-        ? numeric.toLocaleString(undefined, { maximumFractionDigits: 8 })
-        : amount
-      const label = currency ? currency.toUpperCase() : 'BAL'
-      return { label, value }
-    })
-    .filter((entry) => entry.value !== undefined && entry.value !== null)
 }
 
 export function sortBots(bots) {

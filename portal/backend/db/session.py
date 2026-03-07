@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Dict, Iterator, Optional
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateTable
 
 from .models import Base
 
@@ -31,37 +31,86 @@ class Database:
 
     @staticmethod
     def _resolve_dsn() -> str:
-        """Return the configured DSN or fall back to a local SQLite file."""
+        """Return the configured PostgreSQL DSN."""
 
         value = os.getenv("PG_DSN")
         if value:
             return value
         raise RuntimeError("PG_DSN is required. No SQLite fallback is supported.")
 
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.getenv(name)
+        if raw in (None, ""):
+            return int(default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _engine_options(self) -> Dict[str, object]:
+        """Build SQLAlchemy engine options with liveness guards enabled by default."""
+
+        pool_recycle = max(-1, self._env_int("PG_POOL_RECYCLE_SECONDS", 900))
+        pool_timeout = max(1, self._env_int("PG_POOL_TIMEOUT_SECONDS", 30))
+        connect_timeout = max(1, self._env_int("PG_CONNECT_TIMEOUT_SECONDS", 5))
+
+        connect_args: Dict[str, object] = {
+            "connect_timeout": connect_timeout,
+            "application_name": str(os.getenv("PG_APPLICATION_NAME", "quant_trad_portal")).strip()
+            or "quant_trad_portal",
+        }
+
+        # TCP keepalive improves resilience to dead sockets/network middleboxes.
+        if self._env_flag("PG_TCP_KEEPALIVE_ENABLED", True):
+            connect_args["keepalives"] = 1
+            connect_args["keepalives_idle"] = max(1, self._env_int("PG_TCP_KEEPALIVE_IDLE_SECONDS", 30))
+            connect_args["keepalives_interval"] = max(
+                1, self._env_int("PG_TCP_KEEPALIVE_INTERVAL_SECONDS", 10)
+            )
+            connect_args["keepalives_count"] = max(1, self._env_int("PG_TCP_KEEPALIVE_COUNT", 3))
+
+        return {
+            "future": True,
+            "pool_pre_ping": self._env_flag("PG_POOL_PRE_PING", True),
+            "pool_recycle": pool_recycle,
+            "pool_timeout": pool_timeout,
+            "connect_args": connect_args,
+        }
+
     def ensure_schema(self) -> bool:
         """Initialise the database engine and create tables if required."""
 
-        if self._engine is not None:
-            return self._available
+        if self._engine is not None and self._available:
+            return True
         try:
-            self._engine = create_engine(self.dsn, future=True)
-            self._session_factory = sessionmaker(
-                bind=self._engine,
-                expire_on_commit=False,
-                autoflush=False,
-                future=True,
-            )
-            Base.metadata.create_all(self._engine)
-            self._apply_schema_migrations()
+            if self._engine is None:
+                self._engine = create_engine(self.dsn, **self._engine_options())
+            if self._session_factory is None:
+                self._session_factory = sessionmaker(
+                    bind=self._engine,
+                    expire_on_commit=False,
+                    autoflush=False,
+                    future=True,
+                )
+            self._create_tables_if_not_exists()
+            self._assert_schema_contract()
             self._available = True
             logger.info("portal_db_ready | dsn=%s", self.dsn)
         except SQLAlchemyError as exc:
             self._error = exc
             self._available = False
+            self._reset_engine()
             logger.warning("portal_db_unavailable | dsn=%s | error=%s", self.dsn, exc)
         except Exception as exc:  # noqa: BLE001 - defensive catch
             self._error = exc
             self._available = False
+            self._reset_engine()
             logger.exception("portal_db_initialise_failed | dsn=%s", self.dsn)
         return self._available
 
@@ -82,8 +131,42 @@ class Database:
         finally:
             session.close()
 
-    def _apply_schema_migrations(self) -> None:
-        """Perform lightweight in-place migrations for existing installations."""
+    def _create_tables_if_not_exists(self) -> None:
+        """Create ORM tables using PostgreSQL IF NOT EXISTS semantics."""
+
+        if not self._engine:
+            return
+        with self._engine.begin() as conn:
+            # Serialize schema DDL across backend + workers.
+            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+            try:
+                for table in Base.metadata.sorted_tables:
+                    conn.execute(CreateTable(table, if_not_exists=True))
+            finally:
+                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
+
+    def _reset_engine(self) -> None:
+        """Dispose engine/session so the next readiness check can retry init cleanly."""
+
+        if self._engine is not None:
+            self._engine.dispose()
+        self._engine = None
+        self._session_factory = None
+
+    def reset_for_fork(self) -> None:
+        """Reset inherited engine/session state when running in a forked process."""
+
+        self.reset_connection_state()
+
+    def reset_connection_state(self) -> None:
+        """Dispose engine/session so future operations reopen fresh DB connections."""
+
+        self._reset_engine()
+        self._available = False
+        self._error = None
+
+    def _assert_schema_contract(self) -> None:
+        """Assert tables/columns match ORM contract; create missing tables once."""
         if not self._engine:
             return
         inspector = inspect(self._engine)
@@ -114,83 +197,14 @@ class Database:
         require_table("portal_bot_trades")
         require_table("portal_bots")
         require_table("portal_async_jobs")
+        require_table("portal_bot_run_events")
+        require_table("portal_bot_run_view_state")
         assert_columns("portal_bot_run_steps")
         assert_columns("portal_bot_trades")
         assert_columns("portal_bots")
         assert_columns("portal_async_jobs")
-        with self._engine.begin() as conn:
-            # Serialize schema/index DDL across backend + workers.
-            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_LOCK_KEY})
-            try:
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_bot_started_at "
-                    "ON portal_bot_run_steps (bot_id, started_at DESC)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_step_started_at "
-                    "ON portal_bot_run_steps (run_id, step_name, started_at DESC)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_run_steps_run_started_at "
-                    "ON portal_bot_run_steps (run_id, started_at DESC)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_started_at "
-                    "ON portal_bot_runs (bot_id, started_at DESC)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_ended_at "
-                    "ON portal_bot_runs (bot_id, ended_at DESC)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_run_entry_time "
-                    "ON portal_bot_trades (run_id, entry_time)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_trades_bot_exit_time "
-                    "ON portal_bot_trades (bot_id, exit_time)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_bot_trade_events_trade_event_time "
-                    "ON portal_bot_trade_events (trade_id, event_time)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_status_available "
-                    "ON portal_async_jobs (status, available_at, created_at)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_type_status "
-                    "ON portal_async_jobs (job_type, status, created_at)",
-                )
-                self._create_index_best_effort(
-                    conn,
-                    "CREATE INDEX IF NOT EXISTS idx_async_jobs_partition "
-                    "ON portal_async_jobs (job_type, status, partition_hash, created_at)",
-                )
-            finally:
-                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_LOCK_KEY})
-
-    @staticmethod
-    def _create_index_best_effort(conn, ddl: str) -> None:
-        try:
-            conn.execute(text(ddl))
-        except SQLAlchemyError as exc:
-            msg = str(exc).lower()
-            # Concurrent startup can race on index creation. Continue when index already exists.
-            if "already exists" in msg or "duplicate" in msg:
-                logger.warning("portal_db_index_exists_race | ddl=%s | error=%s", ddl, exc)
-                return
-            raise
+        assert_columns("portal_bot_run_events")
+        assert_columns("portal_bot_run_view_state")
 
     @property
     def available(self) -> bool:

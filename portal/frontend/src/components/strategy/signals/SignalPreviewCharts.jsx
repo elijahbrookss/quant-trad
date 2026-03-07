@@ -4,6 +4,7 @@ import { fetchInstrumentCandles } from '../../../hooks/useInstrumentCandles.js'
 import { fetchIndicatorOverlays } from '../../../adapters/indicator.adapter.js'
 import { createLogger } from '../../../utils/logger.js'
 import { toSec } from '../../bots/chartDataUtils.js'
+import { useChartState } from '../../../contexts/ChartStateContext.jsx'
 
 const buildSignalOverlay = ({ strategyId, instrumentId, markers }) => ({
   id: `strategy-${strategyId}-${instrumentId}-signals`,
@@ -29,9 +30,11 @@ export const SignalPreviewCharts = ({
   previewInstrumentId = null,
   signalResult,
   attachedIndicators,
+  focusRequest = null,
 }) => {
   const [previewState, setPreviewState] = useState({})
   const logger = useMemo(() => createLogger('SignalPreviewCharts'), [])
+  const { getChart } = useChartState()
   const hasInstrumentsPayload = Boolean(signalResult?.instruments)
 
   const instrumentResults = useMemo(() => {
@@ -179,6 +182,18 @@ export const SignalPreviewCharts = ({
 
     run()
   }, [attachedIndicators, instrumentResults, strategy])
+
+  useEffect(() => {
+    if (!focusRequest || !Number.isFinite(focusRequest?.epoch)) return
+    const targetInstrumentId = focusRequest.instrumentId || previewInstrumentId
+    if (!targetInstrumentId || !strategy?.id) return
+    const chartId = `signal-preview-${strategy.id}-${targetInstrumentId}`
+    const chart = getChart?.(chartId)
+    const handles = chart?.handles
+    const focusFn = handles?.focusAtTime
+    if (typeof focusFn !== 'function') return
+    focusFn(Number(focusRequest.epoch))
+  }, [focusRequest, getChart, previewInstrumentId, strategy?.id])
 
   if (!signalResult) return null
 

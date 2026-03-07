@@ -21,7 +21,6 @@ import IndicatorCard from './IndicatorCard.jsx';
 import DeleteIndicatorModal from './DeleteIndicatorModal.jsx';
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
 import { createLogger } from '../utils/logger.js';
-import LoadingOverlay from './LoadingOverlay.jsx';
 
 
 // Gold, Maroon, Orange, Purple, Lime, Gray
@@ -33,7 +32,6 @@ const COLOR_SWATCHES = [
 const DEFAULT_INDICATOR_COLOR = '#60a5fa';
 const DEFAULT_PAGE_SIZE = 6;
 const PAGE_SIZE_OPTIONS = [6, 12, 24, 48];
-const BUSY_MESSAGE = 'Chart is computing indicators—please wait.';
 
 const buildColorMap = (list = []) => {
   if (!Array.isArray(list)) return {};
@@ -754,7 +752,6 @@ export const IndicatorSection = ({ chartId }) => {
     }
   };
 
-  // Legacy handler - now opens modal
   const handleDelete = (id) => {
     openDeleteModal(id);
   };
@@ -1200,16 +1197,6 @@ export const IndicatorSection = ({ chartId }) => {
     bulkActionLoading
   );
 
-  const overlayMessage = jobState.busy
-    ? (jobState.label || BUSY_MESSAGE)
-    : chartState?.overlayLoading
-      ? BUSY_MESSAGE
-      : refreshingList
-        ? 'Refreshing indicators…'
-        : bulkActionLoading
-          ? 'Applying bulk changes…'
-          : '';
-
   const actionLocked = sectionBusy || isLoading;
 
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
@@ -1241,8 +1228,7 @@ export const IndicatorSection = ({ chartId }) => {
       )}
 
       <section className="relative overflow-visible rounded-2xl border border-white/10 bg-[#0d1422]/90 shadow-[0_22px_80px_-60px_rgba(0,0,0,0.85)]">
-        <LoadingOverlay show={Boolean(overlayMessage)} message={overlayMessage || 'Working…'} />
-        <div className={`relative space-y-4 p-5 ${overlayMessage ? 'opacity-80' : ''}`}>
+        <div className="relative space-y-4 p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <p className="text-[11px] uppercase tracking-[0.32em] text-slate-400">Indicators / overlays & signals</p>
@@ -1254,12 +1240,6 @@ export const IndicatorSection = ({ chartId }) => {
                 <span className="h-4 w-px bg-white/10" aria-hidden="true" />
                 <span className="text-slate-500">Total</span>
                 <span className="font-semibold text-slate-100">{totalCount}</span>
-                {sectionBusy && (
-                  <span className="inline-flex items-center gap-2 rounded-full bg-amber-400/10 px-3 py-1 text-[11px] font-medium text-amber-100">
-                    <span className="h-2 w-2 rounded-full bg-amber-300 animate-pulse" />
-                    {BUSY_MESSAGE}
-                  </span>
-                )}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">

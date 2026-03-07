@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from portal.backend.service.indicators.indicator_factory import IndicatorFactory
+from portal.backend.service.indicators.indicator_service.runtime_contract import (
+    SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+)
 from portal.backend.service.strategies.strategy_service import indicator_signal_service
 
 
@@ -92,7 +95,7 @@ def test_generate_indicator_payloads_uses_runtime_input_plan(monkeypatch):
         captured["end"] = end
         captured["interval"] = interval
         captured["config"] = dict(config or {})
-        return {"signals": []}
+        return {"signals": [], "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT}
 
     monkeypatch.setattr(
         indicator_signal_service,
@@ -126,3 +129,57 @@ def test_generate_indicator_payloads_uses_runtime_input_plan(monkeypatch):
     assert captured["start"] == "2026-01-01T00:00:00+00:00"
     assert "runtime_input_plan" in captured["config"]
     assert payloads["ind-1"]["runtime_input_plan"]["source_timeframe"] == "30m"
+
+
+def test_generate_indicator_payloads_rejects_non_engine_runtime_path(monkeypatch):
+    def fake_runtime_input_plan(inst_id: str, *, strategy_interval: str, start: str, end: str):
+        return {
+            "indicator_id": inst_id,
+            "indicator_type": "market_profile",
+            "strategy_interval": strategy_interval,
+            "source_timeframe": "30m",
+            "start": start,
+            "end": end,
+        }
+
+    def fake_generate_signals_for_instance(
+        inst_id: str,
+        start: str,
+        end: str,
+        interval: str,
+        symbol: str | None = None,
+        datasource: str | None = None,
+        exchange: str | None = None,
+        config: dict | None = None,
+    ):
+        return {"signals": [], "runtime_path": "legacy"}
+
+    monkeypatch.setattr(
+        indicator_signal_service,
+        "runtime_input_plan_for_instance",
+        fake_runtime_input_plan,
+    )
+    monkeypatch.setattr(
+        indicator_signal_service,
+        "generate_signals_for_instance",
+        fake_generate_signals_for_instance,
+    )
+
+    payloads, missing, total = indicator_signal_service.generate_indicator_payloads(
+        strategy_id="strat-1",
+        instrument_id="inst-1",
+        indicator_ids=["ind-1"],
+        indicator_rule_map={},
+        start="2026-02-10T00:00:00+00:00",
+        end="2026-02-10T01:00:00+00:00",
+        interval="5m",
+        symbol="ES",
+        datasource="ALPACA",
+        exchange=None,
+        base_config={},
+        run_id="run-1",
+    )
+
+    assert missing == []
+    assert total == 0
+    assert "runtime_path_mismatch" in str(payloads["ind-1"].get("error") or "")

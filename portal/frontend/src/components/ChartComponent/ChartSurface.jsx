@@ -306,25 +306,26 @@ export function ChartSurface({
           </div>
         ) : null}
       </div>
-      <button
-        type="button"
-        aria-pressed={isFullscreen}
-        onClick={toggleFullscreen}
-        className="pointer-events-none absolute right-6 top-6 z-10 inline-flex translate-y-1 items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 opacity-0 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 focus:outline-none focus-visible:pointer-events-auto focus-visible:translate-y-0 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
-      >
-        {isFullscreen ? (
-          <>
-            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Exit Fullscreen
-          </>
-        ) : (
-          <>
-            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Fullscreen
-          </>
-        )}
-      </button>
-      <div className="pointer-events-none absolute right-6 top-6 z-10 flex translate-y-1 gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100 focus-within:translate-y-0 focus-within:opacity-100">
+      <div className="pointer-events-none absolute right-6 top-6 z-10 flex translate-y-1 flex-col items-end gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100 focus-within:translate-y-0 focus-within:opacity-100">
+        <button
+          type="button"
+          data-chart-ui-control="true"
+          aria-pressed={isFullscreen}
+          onClick={toggleFullscreen}
+          className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+        >
+          {isFullscreen ? (
+            <>
+              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Exit Fullscreen
+            </>
+          ) : (
+            <>
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Fullscreen
+            </>
+          )}
+        </button>
         <button
           type="button"
           data-chart-ui-control="true"
@@ -344,11 +345,6 @@ export function ChartSurface({
         onPointerUp={finishDraw}
         onPointerCancel={finishDraw}
       />
-      <div className="pointer-events-none absolute bottom-5 right-6 z-10 rounded-full border border-white/15 bg-black/65 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-200">
-        {interactionLayerActive
-          ? 'Selection armed: drag to highlight'
-          : 'Double-click then drag to highlight'}
-      </div>
       {chartStateNotice?.message && chartStateNotice.state !== 'ready' && chartStateNotice.state !== 'loading' ? (
         <div className="pointer-events-none absolute inset-0 z-[5] grid place-items-center px-6">
           <div className="relative max-w-xl rounded-2xl border border-white/8 bg-black/70 px-6 py-5 text-center text-sm text-slate-200 shadow-[0_26px_90px_rgba(0,0,0,0.7)] backdrop-blur">

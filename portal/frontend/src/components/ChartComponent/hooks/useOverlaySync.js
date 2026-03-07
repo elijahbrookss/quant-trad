@@ -155,6 +155,7 @@ export function useOverlaySync({
     // 3) Walk overlays and apply
     for (const ov of overlays) {
       const { type, payload, color, ind_id: indicatorId } = ov || {};
+      const resolvedColor = color || ov?.ui?.color || null;
       if (!payload) continue;
 
       const overlayLogger = logger.child({ indicatorId, indicatorType: type });
@@ -167,7 +168,7 @@ export function useOverlaySync({
       });
 
       const paneViews = getPaneViewsForOverlay(ov);
-      const norm = adaptPayload(type, payload, color);
+      const norm = adaptPayload(type, payload, resolvedColor);
       overlayLogger.debug('overlay_adapted', {
         priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,
         markers: Array.isArray(norm.markers) ? norm.markers.length : 0,
@@ -193,7 +194,7 @@ export function useOverlaySync({
         for (const pl of payload.price_lines) {
           const handle = seriesRef.current.createPriceLine({
             price: pl.price,
-            color: pl.color ?? undefined,
+            color: pl.color ?? resolvedColor ?? undefined,
             lineWidth: pl.lineWidth ?? 1,
             lineStyle: pl.lineStyle ?? 0,
             axisLabelVisible: pl.axisLabelVisible ?? false,
@@ -219,9 +220,9 @@ export function useOverlaySync({
             signalDetails.push({ time: bubbleTime, kind: 'signal', entries: lines });
           }
         }
-        if (color) {
+        if (resolvedColor) {
           signalBubbles.push(...norm.bubbles.map(b => {
-            const accentColor = color;
+            const accentColor = resolvedColor;
             const backgroundColor = toRgba(accentColor, 0.16) ?? undefined;
             return {
               ...b,

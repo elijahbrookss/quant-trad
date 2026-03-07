@@ -2,6 +2,8 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 ## ---------- Config ----------
+-include .sync-docs.mk
+
 PYTHONPATH ?= .:src
 PY          ?= python3
 VENV        ?= .venv
@@ -20,7 +22,7 @@ NPM         ?= npm
 
 COMPOSE_FILE ?= docker/docker-compose.yml
 COMPOSE_CMD  ?= docker compose -f $(COMPOSE_FILE)
-COMPOSE_BAKE ?= true
+COMPOSE_BAKE ?= false
 export COMPOSE_BAKE
 
 TSDB_PORT ?= 15432
@@ -50,6 +52,14 @@ STACK_BUILD_FLAG := $(if $(filter 1 true yes on,$(BUILD)),--build,)
 PID_DIR     ?= .pids
 LOG_DIR     ?= logs
 
+# Docs sync (Obsidian/Windows rsync friendly)
+SYNC_DOCS_SRC         ?= docs/
+SYNC_DOCS_DEST        ?= $(or $(OBSIDIAN_SYNC_DOCS_DEST),$(OBSIDIAN_SYNC_DEST),)
+SYNC_DOCS_RSYNC       ?= rsync
+SYNC_DOCS_RSYNC_FLAGS ?= -az
+SYNC_DOCS_DELETE      ?= 0
+SYNC_DOCS_DELETE_FLAG := $(if $(filter 1 true yes on,$(SYNC_DOCS_DELETE)),--delete,)
+
 ## ============================== HELP ==================================== ##
 .PHONY: help
 help: ## Show this help
@@ -57,15 +67,51 @@ help: ## Show this help
 	/^[a-zA-Z0-9_.-]+:.*##/ {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 ## ========================== QUICK COMMANDS ============================== ##
-.PHONY: up down restart logs build rebuild ps
+.PHONY: up down restart logs build rebuild ps sync-docs sync-logs
 
-up: stack-up ## Start stack (alias for stack-up, use STACK_PROFILES= to customize)
+up: stack-up sync-docs ## Start stack (alias for stack-up, use STACK_PROFILES= to customize)
 down: stack-down ## Stop and remove stack (alias for stack-down)
 restart: stack-restart ## Restart stack (alias for stack-restart, use BUILD=1 to rebuild)
 logs: stack-logs ## Tail logs (alias for stack-logs, use SERVICE= to filter)
-build: stack-build ## Build images (alias for stack-build)
+build: stack-build sync-docs ## Build images (alias for stack-build)
 rebuild: stack-rebuild ## Rebuild images from scratch (alias for stack-rebuild)
 ps: stack-ps ## Show running containers (alias for stack-ps)
+
+sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSIDIAN_SYNC_DOCS_DEST)
+	@set -euo pipefail; \
+	if ! command -v "$(SYNC_DOCS_RSYNC)" >/dev/null 2>&1; then \
+		echo "✗ rsync not found on PATH"; exit 1; \
+	fi; \
+	src_raw="$(SYNC_DOCS_SRC)"; \
+	dest_raw="$(SYNC_DOCS_DEST)"; \
+	if [ -z "$$dest_raw" ]; then \
+		echo "ℹ sync-docs skipped: set SYNC_DOCS_DEST (or OBSIDIAN_SYNC_DOCS_DEST)"; \
+		exit 0; \
+	fi; \
+	src="$$(cd "$$src_raw" >/dev/null 2>&1 && pwd)/"; \
+	dest="$$dest_raw"; \
+	dest="$${dest//\{HOME\}/$$HOME}"; \
+	dest="$${dest//\{USER\}/$$USER}"; \
+	dest="$${dest//\{REPO\}/$(CURDIR)}"; \
+	if [[ "$$dest" =~ ^[A-Za-z]:\\\\ ]]; then \
+		drive="$${dest:0:1}"; \
+		rest="$${dest:2}"; \
+		rest="$${rest//\\//}"; \
+		drive="$$(echo "$$drive" | tr '[:upper:]' '[:lower:]')"; \
+		dest="/mnt/$$drive/$${rest#/}"; \
+	fi; \
+	is_remote=0; \
+	if [[ "$$dest" == *:* ]] && [[ ! "$$dest" =~ ^/mnt/[a-z]/ ]]; then \
+		is_remote=1; \
+	fi; \
+	if [ "$$is_remote" -eq 0 ]; then \
+		mkdir -p "$$dest"; \
+	fi; \
+	echo "► Syncing docs: $$src -> $$dest"; \
+	"$(SYNC_DOCS_RSYNC)" $(SYNC_DOCS_RSYNC_FLAGS) $(SYNC_DOCS_DELETE_FLAG) "$$src" "$$dest"; \
+	echo "✓ Docs synced"
+
+sync-logs: sync-docs ## Alias for docs sync (backward-compatible target name)
 
 ## ============================ BOOTSTRAP ================================= ##
 .PHONY: deps _deps_hash _ensure_python _ensure_dirs
@@ -231,3 +277,21 @@ branch-artifact: ## Build artifact with all commits and merged PRs for a branch 
 	branch=$${BRANCH:-$$(git branch --show-current)}; \
 	if [ -z "$$branch" ]; then echo "✗ Could not determine branch (not on a branch?)"; exit 1; fi; \
 	scripts/automation/branch_artifact_builder.sh "$$branch"
+
+
+BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
+BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
+
+.PHONY: bots-up bots-down bots-ps bots-logs
+
+bots-up: ## Start isolated bot containers stack
+	@$(BOTS_COMPOSE_CMD) up -d
+
+bots-down: ## Stop isolated bot containers stack
+	@$(BOTS_COMPOSE_CMD) down --remove-orphans
+
+bots-ps: ## List isolated bot containers
+	@$(BOTS_COMPOSE_CMD) ps
+
+bots-logs: ## Tail isolated bot containers logs
+	@$(BOTS_COMPOSE_CMD) logs -f

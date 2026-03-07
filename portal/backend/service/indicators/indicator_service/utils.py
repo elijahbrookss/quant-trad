@@ -4,13 +4,14 @@ import inspect
 import logging
 import math
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from data_providers import DataSource
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
+from engines.indicator_engine.plugins import plugin_registry
 
 from .context import IndicatorServiceContext, _context
 
@@ -37,8 +38,9 @@ def load_indicator_record(inst_id: str, *, ctx: IndicatorServiceContext = _conte
 def get_indicator_entry(
     inst_id: str,
     *,
-    fallback_context: Optional[Mapping[str, Any]] = None,
-    persist_backfill: bool = False,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+    build_instance: bool = True,
     ctx: IndicatorServiceContext = _context,
 ):
     """Build indicator entry directly from DB without caching.
@@ -53,7 +55,7 @@ def get_indicator_entry(
     class IndicatorEntry:
         """Temporary container for indicator metadata and instance."""
         meta: Dict[str, Any]
-        instance: Any
+        instance: Optional[Any]
         updated_at: Optional[str] = None
 
     # Load fresh record from DB
@@ -61,30 +63,16 @@ def get_indicator_entry(
     if not record:
         raise KeyError("Indicator not found")
 
-    # Backfill context fields if needed (symbol, start, end, interval)
-    if fallback_context:
-        params = dict(record.get("params") or {})
-        context_keys = ("symbol", "start", "end", "interval")
-        missing = [key for key in context_keys if not params.get(key)]
-
-        if missing:
-            for key in missing:
-                value = fallback_context.get(key)
-                if value is not None and (not isinstance(value, str) or value.strip()):
-                    params[key] = value
-
-            # Update in-memory record (don't persist context fields to DB)
-            record = dict(record)
-            record["params"] = params
-
     # Build meta and instance fresh from DB record
     meta = ctx.factory.build_meta_from_record(record)
 
-    # Allow fallback context to supply runtime provider overrides
-    fb = fallback_context or {}
-    fb_ds = fb.get("datasource")
-    fb_ex = fb.get("exchange")
-    instance = ctx.factory.build_indicator_instance(meta, datasource=fb_ds, exchange=fb_ex)
+    instance = None
+    if build_instance:
+        instance = ctx.factory.build_indicator_instance(
+            meta,
+            datasource=datasource,
+            exchange=exchange,
+        )
 
     return IndicatorEntry(
         meta=meta,
@@ -153,29 +141,55 @@ def attach_signal_catalog(
 ) -> Dict[str, Any]:
     indicator_type = meta.get("type") or meta.get("name")
 
-    logger.debug(
-        "attach_signal_catalog | meta.type=%s | meta.name=%s | resolved_type='%s'",
-        meta.get("type"),
-        meta.get("name"),
-        indicator_type
-    )
-
     if not indicator_type:
-        logger.warning("⚠ attach_signal_catalog: No indicator type in meta | meta_keys=%s", list(meta.keys()))
+        logger.warning("attach_signal_catalog_missing_type | meta_keys=%s", list(meta.keys()))
         return meta
 
-    catalog = ctx.signal_runner.build_signal_catalog(str(indicator_type))
-
-    logger.info(
-        "attach_signal_catalog | indicator_type='%s' | catalog_size=%d | signal_ids=%s",
-        indicator_type,
-        len(catalog) if catalog else 0,
-        [s.get('id') for s in catalog] if catalog else []
-    )
+    catalog = build_signal_catalog(str(indicator_type))
 
     if catalog:
         meta["signal_rules"] = catalog
     return meta
+
+
+def build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
+    indicator_key = str(indicator_type or "").strip().lower()
+    if not indicator_key:
+        return []
+    ensure_builtin_indicator_plugins_registered()
+    try:
+        manifest = plugin_registry().resolve(indicator_key)
+    except RuntimeError:
+        logger.warning(
+            "signal_catalog_empty | indicator_type=%s",
+            indicator_type,
+        )
+        return []
+    catalog: List[Dict[str, Any]] = []
+    for entry in manifest.signal_rules:
+        record: Dict[str, Any] = {
+            "id": str(entry.id),
+            "label": str(entry.label),
+            "description": str(entry.description),
+            "signal_type": str(entry.signal_type),
+        }
+        directions = [
+            {
+                "id": str(direction.id),
+                "label": str(direction.label),
+                "description": str(direction.description),
+            }
+            for direction in (entry.directions or ())
+        ]
+        if directions:
+            record["directions"] = directions
+        catalog.append(record)
+    if not catalog:
+        logger.warning(
+            "signal_catalog_empty | indicator_type=%s",
+            indicator_type,
+        )
+    return catalog
 
 
 def normalize_color(value: Optional[str]) -> Optional[str]:
@@ -292,6 +306,7 @@ __all__ = [
     "IndicatorServiceContext",
     "attach_signal_catalog",
     "build_indicator_instance",
+    "build_signal_catalog",
     "build_meta_from_record",
     "coerce_float",
     "coerce_int",

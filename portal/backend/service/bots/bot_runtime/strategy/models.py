@@ -6,6 +6,7 @@ replacing the Dict[str, Any] approach that caused confusion and drift.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -132,4 +133,6 @@ class Strategy:
                 }
                 for link in self.instrument_links
             ],
+            # Runtime consumes rules from series.meta["rules"].
+            "rules": deepcopy(self.rules),
         }

@@ -56,6 +56,18 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     };
   });
 
+const normalizeSignalOverlays = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value.entries)) return value.entries;
+  if (Array.isArray(value.items)) return value.items;
+  if (value.payload && typeof value.payload === 'object') {
+    if (Array.isArray(value.payload.entries)) return value.payload.entries;
+    if (Array.isArray(value.payload.items)) return value.payload.items;
+  }
+  return [];
+};
+
 export async function runSignalGeneration({
   indicator,
   chartId,
@@ -149,7 +161,7 @@ export async function runSignalGeneration({
     const response = await signalsAdapter(indicator.id, requestPayload);
 
     const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
-    const signalOverlays = Array.isArray(response?.overlays) ? response.overlays : [];
+    const signalOverlays = normalizeSignalOverlays(response?.overlays);
 
     const annotatedSignals = signalOverlays.map(ov => ({
       ...ov,

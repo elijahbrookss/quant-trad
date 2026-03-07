@@ -47,7 +47,3 @@ class PlotIndicatorMixin:
         plt.close(fig)
         logger.info("%s plot saved → %s", self.NAME, path)
         return path
-
-
-# Legacy alias to avoid breaking external imports while indicators migrate.
-BaseIndicator = ComputeIndicator

@@ -374,6 +374,9 @@ class InstrumentRecord(Base):
             "tick_value": instrument_fields.get("tick_value"),
             "contract_size": instrument_fields.get("contract_size"),
             "min_order_size": instrument_fields.get("min_order_size"),
+            "qty_step": instrument_fields.get("qty_step"),
+            "max_qty": instrument_fields.get("max_qty"),
+            "min_notional": instrument_fields.get("min_notional"),
             "base_currency": instrument_fields.get("base_currency"),
             "quote_currency": instrument_fields.get("quote_currency"),
             "maker_fee_rate": instrument_fields.get("maker_fee_rate"),
@@ -404,6 +407,8 @@ class BotRecord(Base):
     backtest_end = Column(DateTime, nullable=True)
     risk = Column(JSON, nullable=False, default=dict)
     wallet_config = Column(JSON, nullable=False, default=dict)
+    snapshot_interval_ms = Column(Integer, nullable=False, default=250)
+    bot_env = Column(JSON, nullable=False, default=dict)
     status = Column(String(32), nullable=False, default="idle")
     last_run_at = Column(DateTime, nullable=True)
     last_stats = Column(JSON, nullable=False, default=dict)
@@ -429,6 +434,8 @@ class BotRecord(Base):
             "backtest_end": (self.backtest_end.isoformat() + "Z") if self.backtest_end else None,
             "risk": dict(self.risk or {}),
             "wallet_config": dict(self.wallet_config or {}),
+            "snapshot_interval_ms": int(self.snapshot_interval_ms or 0),
+            "bot_env": dict(self.bot_env or {}),
             "status": self.status,
             "last_run_at": (self.last_run_at.isoformat() + "Z") if self.last_run_at else None,
             "last_stats": dict(self.last_stats or {}),
@@ -617,6 +624,80 @@ class BotRunStepRecord(Base):
             "timeframe": self.timeframe,
             "error": self.error,
             "context": dict(self.context or {}),
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+
+
+class BotRunViewStateRecord(Base):
+    """Materialized BotLens view state for run/bootstrap reads."""
+
+    __tablename__ = "portal_bot_run_view_state"
+    __table_args__ = (
+        UniqueConstraint("bot_id", "run_id", "series_key", name="uq_portal_bot_run_view_state_scope"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False)
+    bot_id = Column(String(64), nullable=False)
+    series_key = Column(String(255), nullable=False)
+    seq = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    payload = Column(JSONB, nullable=False, default=dict)
+    event_time = Column(DateTime, nullable=True)
+    known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "run_id": self.run_id,
+            "bot_id": self.bot_id,
+            "series_key": self.series_key,
+            "seq": int(self.seq or 0),
+            "schema_version": int(self.schema_version or 1),
+            "payload": dict(self.payload or {}),
+            "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
+            "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class BotRunEventRecord(Base):
+    """Durable runtime event log for BotLens snapshot+stream delivery."""
+
+    __tablename__ = "portal_bot_run_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_portal_bot_run_events_event_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(128), nullable=False)
+    bot_id = Column(String(64), nullable=False)
+    run_id = Column(String(64), nullable=False)
+    seq = Column(Integer, nullable=False)
+    event_type = Column(String(64), nullable=False, default="state_delta")
+    critical = Column(Boolean, nullable=False, default=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    payload = Column(JSONB, nullable=False, default=dict)
+    event_time = Column(DateTime, nullable=True)
+    known_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": int(self.id or 0),
+            "event_id": self.event_id,
+            "bot_id": self.bot_id,
+            "run_id": self.run_id,
+            "seq": int(self.seq or 0),
+            "event_type": self.event_type,
+            "critical": bool(self.critical),
+            "schema_version": int(self.schema_version or 1),
+            "payload": dict(self.payload or {}),
+            "event_time": (self.event_time.isoformat() + "Z") if self.event_time else None,
+            "known_at": (self.known_at or datetime.utcnow()).isoformat() + "Z",
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
