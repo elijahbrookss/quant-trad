@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..storage.storage import get_bot_run, list_bot_runtime_events
+from ..storage.storage import get_bot_run, get_latest_bot_run_view_state, list_bot_runtime_events
 
 _SCHEMA_VERSION = 1
 _MAX_SCAN_EVENTS = 5000
@@ -62,6 +62,16 @@ def _event_rows_for_run(*, run_id: str, limit: int = _MAX_SCAN_EVENTS) -> Tuple[
     return bot_id, rows
 
 
+def _view_state_for_run(*, run_id: str) -> Tuple[str, Optional[Dict[str, Any]], Dict[str, Any]]:
+    run_row = get_bot_run(str(run_id)) or {}
+    bot_id = str(run_row.get("bot_id") or "").strip()
+    if not bot_id:
+        raise ValueError(f"bot_id missing for run_id={run_id}")
+    view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=str(run_id), series_key="bot")
+    snapshot = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
+    return bot_id, dict(view_row) if isinstance(view_row, Mapping) else None, snapshot
+
+
 def _extract_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
     payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), Mapping) else {}
@@ -77,9 +87,91 @@ def _extract_series_point(candle: Mapping[str, Any]) -> Optional[Tuple[int, Dict
     return key, dict(candle)
 
 
+def _window_from_snapshot(
+    *,
+    run_id: str,
+    series_key: str,
+    snapshot: Mapping[str, Any],
+    seq: int,
+    event_time: Any,
+    limit: int,
+) -> Dict[str, Any]:
+    series = _find_series(snapshot, series_key) or {}
+    candles = series.get("candles") if isinstance(series.get("candles"), list) else []
+    bounded = [dict(c) for c in candles[-max(1, int(limit)): ] if isinstance(c, Mapping)]
+    symbol = str(series.get("symbol") or "").strip().upper()
+
+    trades = []
+    for trade in snapshot.get("trades") if isinstance(snapshot.get("trades"), list) else []:
+        if not isinstance(trade, Mapping):
+            continue
+        if symbol and str(trade.get("symbol") or "").strip().upper() != symbol:
+            continue
+        trades.append(dict(trade))
+
+    return {
+        "run_id": str(run_id),
+        "series_key": str(series_key),
+        "schema_version": _SCHEMA_VERSION,
+        "seq": int(seq),
+        "event_time": event_time,
+        "window": {
+            "candles": bounded,
+            "trades": trades[-max(1, int(limit)):],
+            "markers": [],
+            "status": str((snapshot.get("runtime") or {}).get("status") or "running"),
+        },
+    }
+
+
+def _series_keys_from_snapshot(snapshot: Mapping[str, Any]) -> List[str]:
+    series = snapshot.get("series") if isinstance(snapshot.get("series"), list) else []
+    keys: List[str] = []
+    for entry in series:
+        if not isinstance(entry, Mapping):
+            continue
+        key = _series_identity(entry)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _merge_snapshot_candles(
+    *,
+    candle_map: Dict[int, Dict[str, Any]],
+    snapshot: Mapping[str, Any],
+    series_key: str,
+    before_dt: Optional[datetime],
+) -> None:
+    series = _find_series(snapshot, series_key) or {}
+    candles = series.get("candles") if isinstance(series.get("candles"), list) else []
+    for candle in candles:
+        if not isinstance(candle, Mapping):
+            continue
+        point = _extract_series_point(candle)
+        if point is None:
+            continue
+        ts_int, candle_value = point
+        if before_dt is not None:
+            candle_dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+            if candle_dt >= before_dt:
+                continue
+        candle_map[ts_int] = candle_value
+
+
 def get_series_window(*, run_id: str, series_key: str, to: Optional[str], limit: int) -> Dict[str, Any]:
-    bot_id, rows = _event_rows_for_run(run_id=run_id)
+    _bot_id, rows = _event_rows_for_run(run_id=run_id)
     if not rows:
+        _view_bot_id, view_row, snapshot = _view_state_for_run(run_id=run_id)
+        if snapshot:
+            return _window_from_snapshot(
+                run_id=run_id,
+                series_key=series_key,
+                snapshot=snapshot,
+                seq=_coerce_int((view_row or {}).get("seq"), 0),
+                event_time=(view_row or {}).get("event_time") or (view_row or {}).get("known_at"),
+                limit=limit,
+            )
         return {
             "run_id": str(run_id),
             "series_key": str(series_key),
@@ -100,57 +192,48 @@ def get_series_window(*, run_id: str, series_key: str, to: Optional[str], limit:
         selected_row = dict(rows[0])
 
     snapshot = _extract_snapshot(selected_row)
-    series = _find_series(snapshot, series_key) or {}
-    candles = series.get("candles") if isinstance(series.get("candles"), list) else []
-    bounded = [dict(c) for c in candles[-max(1, int(limit)): ] if isinstance(c, Mapping)]
-    symbol = str(series.get("symbol") or "").strip().upper()
-
-    trades = []
-    for trade in snapshot.get("trades") if isinstance(snapshot.get("trades"), list) else []:
-        if not isinstance(trade, Mapping):
-            continue
-        if symbol and str(trade.get("symbol") or "").strip().upper() != symbol:
-            continue
-        trades.append(dict(trade))
-
-    return {
-        "run_id": str(run_id),
-        "series_key": str(series_key),
-        "schema_version": _SCHEMA_VERSION,
-        "seq": _coerce_int(selected_row.get("seq"), 0),
-        "event_time": selected_row.get("event_time") or selected_row.get("known_at"),
-        "window": {
-            "candles": bounded,
-            "trades": trades[-max(1, int(limit)):],
-            "markers": [],
-            "status": str((snapshot.get("runtime") or {}).get("status") or "running"),
-        },
-    }
+    if not _find_series(snapshot, series_key):
+        _bot_id, view_row, fallback_snapshot = _view_state_for_run(run_id=run_id)
+        if fallback_snapshot:
+            snapshot = fallback_snapshot
+            selected_row = {
+                **selected_row,
+                "seq": _coerce_int((view_row or {}).get("seq"), _coerce_int(selected_row.get("seq"), 0)),
+                "event_time": (view_row or {}).get("event_time") or (view_row or {}).get("known_at") or selected_row.get("event_time"),
+                "known_at": (view_row or {}).get("known_at") or selected_row.get("known_at"),
+            }
+    return _window_from_snapshot(
+        run_id=run_id,
+        series_key=series_key,
+        snapshot=snapshot,
+        seq=_coerce_int(selected_row.get("seq"), 0),
+        event_time=selected_row.get("event_time") or selected_row.get("known_at"),
+        limit=limit,
+    )
 
 
 def get_series_history(*, run_id: str, series_key: str, before_ts: Optional[str], limit: int) -> Dict[str, Any]:
-    bot_id, rows = _event_rows_for_run(run_id=run_id)
+    _bot_id, rows = _event_rows_for_run(run_id=run_id)
     before_dt = _to_datetime(before_ts)
     candle_map: Dict[int, Dict[str, Any]] = {}
+    _view_bot_id, _view_row, fallback_snapshot = _view_state_for_run(run_id=run_id)
+
+    if fallback_snapshot:
+        _merge_snapshot_candles(
+            candle_map=candle_map,
+            snapshot=fallback_snapshot,
+            series_key=series_key,
+            before_dt=before_dt,
+        )
 
     for row in rows:
         snapshot = _extract_snapshot(row)
-        series = _find_series(snapshot, series_key)
-        if not series:
-            continue
-        candles = series.get("candles") if isinstance(series.get("candles"), list) else []
-        for candle in candles:
-            if not isinstance(candle, Mapping):
-                continue
-            point = _extract_series_point(candle)
-            if point is None:
-                continue
-            ts_int, candle_value = point
-            if before_dt is not None:
-                candle_dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
-                if candle_dt >= before_dt:
-                    continue
-            candle_map[ts_int] = candle_value
+        _merge_snapshot_candles(
+            candle_map=candle_map,
+            snapshot=snapshot,
+            series_key=series_key,
+            before_dt=before_dt,
+        )
 
     ordered = [candle_map[key] for key in sorted(candle_map.keys())]
     page = ordered[-max(1, int(limit)):]
@@ -224,15 +307,9 @@ def build_live_tail_messages(
 
 def list_series_keys(*, run_id: str) -> Dict[str, Any]:
     _bot_id, rows = _event_rows_for_run(run_id=run_id)
-    if not rows:
-        return {"run_id": str(run_id), "series": []}
-    latest = _extract_snapshot(rows[-1])
-    series = latest.get("series") if isinstance(latest.get("series"), list) else []
-    keys: List[str] = []
-    for entry in series:
-        if not isinstance(entry, Mapping):
-            continue
-        key = _series_identity(entry)
-        if key and key not in keys:
-            keys.append(key)
-    return {"run_id": str(run_id), "series": keys}
+    if rows:
+        keys = _series_keys_from_snapshot(_extract_snapshot(rows[-1]))
+        if keys:
+            return {"run_id": str(run_id), "series": keys}
+    _view_bot_id, _view_row, snapshot = _view_state_for_run(run_id=run_id)
+    return {"run_id": str(run_id), "series": _series_keys_from_snapshot(snapshot)}
