@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import os
 import threading
 import time
+from importlib import import_module
 from typing import Dict, Optional, Tuple
 
 from core.logger import logger
@@ -19,12 +20,22 @@ from ..registry import (
     normalize_venue_id,
     provider_for_venue,
 )
-from .alpaca import AlpacaProvider
 from .base import BaseDataProvider, DataSource
-from .ccxt import CCXTProvider
-from .coinbase import CoinbaseProvider
-from .interactive_brokers import InteractiveBrokersProvider
-from .yahoo import YahooFinanceProvider
+
+
+def _provider_class(name: str):
+    module_map = {
+        "AlpacaProvider": "data_providers.providers.alpaca",
+        "CCXTProvider": "data_providers.providers.ccxt",
+        "CoinbaseProvider": "data_providers.providers.coinbase",
+        "InteractiveBrokersProvider": "data_providers.providers.interactive_brokers",
+        "YahooFinanceProvider": "data_providers.providers.yahoo",
+    }
+    module_name = module_map.get(name)
+    if module_name is None:
+        raise RuntimeError(f"provider_factory_unknown_provider_class: {name}")
+    module = import_module(module_name)
+    return getattr(module, name)
 
 
 @dataclass
@@ -86,21 +97,26 @@ class ProviderRegistry:
         persistence = self.get_persistence()
 
         if provider == DataSource.ALPACA.value or provider == "ALPACA":
+            AlpacaProvider = _provider_class("AlpacaProvider")
             instance = AlpacaProvider(persistence=persistence, settings=self.runtime_config)
         elif provider == DataSource.YFINANCE.value or provider == "YAHOO":
+            YahooFinanceProvider = _provider_class("YahooFinanceProvider")
             instance = YahooFinanceProvider(persistence=persistence, settings=self.runtime_config)
         elif provider == DataSource.IBKR.value or provider == "INTERACTIVE_BROKERS":
+            InteractiveBrokersProvider = _provider_class("InteractiveBrokersProvider")
             instance = InteractiveBrokersProvider(
                 exchange=exchange or resolved_venue,
                 persistence=persistence,
                 settings=self.runtime_config,
             )
         elif provider == DataSource.CCXT.value or provider == "CCXT":
+            CCXTProvider = _provider_class("CCXTProvider")
             slug = exchange_slug_for_venue(resolved_venue) or (exchange or "").lower()
             if not slug:
                 raise ValueError("CCXT provider requires a venue/exchange identifier")
             instance = CCXTProvider(slug, persistence=persistence, settings=self.runtime_config)
         elif provider == DataSource.COINBASE.value or provider == "COINBASE":
+            CoinbaseProvider = _provider_class("CoinbaseProvider")
             instance = CoinbaseProvider(persistence=persistence, settings=self.runtime_config)
         else:
             raise ValueError(f"No provider implementation for {provider}")
