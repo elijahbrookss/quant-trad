@@ -341,7 +341,23 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
             .scalars()
             .first()
         )
-        return str(row) if row else None
+        if row:
+            return str(row)
+        fallback = (
+            session.execute(
+                select(BotRunRecord.run_id)
+                .where(BotRunRecord.bot_id == str(bot_id))
+                .order_by(
+                    BotRunRecord.updated_at.desc(),
+                    BotRunRecord.started_at.desc(),
+                    BotRunRecord.created_at.desc(),
+                )
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        return str(fallback) if fallback else None
 
 
 def get_latest_bot_runtime_event(
@@ -378,8 +394,28 @@ def update_bot_runtime_status(*, bot_id: str, run_id: str, status: str, telemetr
             bot.updated_at = _utcnow()
             run = session.get(BotRunRecord, run_id)
             if run is None:
-                run = BotRunRecord(run_id=run_id, bot_id=bot_id, status=status, started_at=_utcnow())
+                run = BotRunRecord(
+                    run_id=run_id,
+                    bot_id=bot_id,
+                    bot_name=bot.name,
+                    strategy_id=bot.strategy_id,
+                    run_type=bot.run_type or "backtest",
+                    status=status,
+                    started_at=_utcnow(),
+                    backtest_start=bot.backtest_start,
+                    backtest_end=bot.backtest_end,
+                )
                 session.add(run)
+            if not run.bot_name:
+                run.bot_name = bot.name
+            if not run.strategy_id:
+                run.strategy_id = bot.strategy_id
+            if not run.run_type:
+                run.run_type = bot.run_type or "backtest"
+            if run.backtest_start is None:
+                run.backtest_start = bot.backtest_start
+            if run.backtest_end is None:
+                run.backtest_end = bot.backtest_end
             run.status = "telemetry_degraded" if telemetry_degraded else status
             run.updated_at = _utcnow()
             if status in {"stopped", "failed"}:

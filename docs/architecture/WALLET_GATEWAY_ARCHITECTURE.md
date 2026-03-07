@@ -5,7 +5,7 @@
 - `Component`: Shared wallet gateway and reservation coordination
 - `Owner/Domain`: Bot Runtime / Wallet
 - `Doc Version`: 1.1
-- `Related Contracts`: `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `src/engines/bot_runtime/core/wallet_gateway.py`, `src/engines/bot_runtime/core/wallet.py`, `docs/agents/01_runtime_contract.md`
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[RUNTIME_EVENT_MODEL_V1]], [[01_runtime_contract]], `src/engines/bot_runtime/core/wallet_gateway.py`, `src/engines/bot_runtime/core/wallet.py`
 
 ## 1) Problem and scope
 

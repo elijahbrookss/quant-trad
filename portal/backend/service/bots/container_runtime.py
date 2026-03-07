@@ -234,6 +234,11 @@ class _TelemetryEmitter:
         self.url = str(url or "").strip()
         self._sync_connect = None
         self._sync_ws = None
+        self._state_lock = threading.Condition()
+        self._latest_message: str | None = None
+        self._stop = False
+        self._dropped_messages = 0
+        self._worker_thread: threading.Thread | None = None
         if not self.url:
             return
         try:
@@ -242,6 +247,18 @@ class _TelemetryEmitter:
             self._sync_connect = sync_connect
         except Exception:
             self._sync_connect = None
+        self._worker_thread = threading.Thread(target=self._worker_loop, name="bot-telemetry-emitter", daemon=True)
+        self._worker_thread.start()
+
+    def _close_sync_ws(self) -> None:
+        ws = self._sync_ws
+        self._sync_ws = None
+        if ws is None:
+            return
+        try:
+            ws.close()
+        except Exception:
+            pass
 
     def _send_sync_message(self, message: str) -> bool:
         if self._sync_connect is None:
@@ -254,29 +271,57 @@ class _TelemetryEmitter:
                 return True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("bot_telemetry_send_failed | mode=sync | attempt=%s | error=%s", attempt + 1, exc)
-                self.close()
+                self._close_sync_ws()
         return False
+
+    def _deliver_message(self, message: str) -> bool:
+        if self._sync_connect is not None:
+            return self._send_sync_message(message)
+        return _emit_telemetry_ephemeral_message(self.url, message)
+
+    def _worker_loop(self) -> None:
+        while True:
+            message = None
+            dropped = 0
+            with self._state_lock:
+                while not self._stop and self._latest_message is None:
+                    self._state_lock.wait(timeout=0.25)
+                if self._stop:
+                    break
+                message = self._latest_message
+                self._latest_message = None
+                dropped = int(self._dropped_messages)
+                self._dropped_messages = 0
+            if not message:
+                continue
+            if dropped > 0:
+                logger.warning("bot_telemetry_emit_compacted | dropped_messages=%s", dropped)
+            self._deliver_message(message)
 
     def send_message(self, message: str) -> bool:
         if not self.url:
             return False
-        if self._sync_connect is not None:
-            return self._send_sync_message(message)
-        return _emit_telemetry_ephemeral_message(self.url, message)
+        with self._state_lock:
+            if self._latest_message is not None:
+                self._dropped_messages += 1
+            self._latest_message = str(message)
+            self._state_lock.notify_all()
+        return True
 
     def send(self, payload: Mapping[str, Any]) -> bool:
         message = json.dumps(_json_safe(payload))
         return self.send_message(message)
 
     def close(self) -> None:
-        ws = self._sync_ws
-        self._sync_ws = None
-        if ws is None:
-            return
-        try:
-            ws.close()
-        except Exception:
-            pass
+        with self._state_lock:
+            self._stop = True
+            self._latest_message = None
+            self._state_lock.notify_all()
+        thread = self._worker_thread
+        self._worker_thread = None
+        if thread is not None:
+            thread.join(timeout=0.5)
+        self._close_sync_ws()
 
 
 def _normalise_balances(raw_balances: Mapping[str, Any]) -> Dict[str, float]:

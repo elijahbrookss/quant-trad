@@ -2,152 +2,210 @@
 
 ## Documentation Header
 
-- `Component`: Bot runtime service orchestration (API -> runner -> container runtime -> storage/telemetry)
+- `Component`: Bot runtime service orchestration
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 1.0
-- `Related Contracts`: `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
+- `Doc Version`: 2.0
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
 
 ## 1) Problem and scope
 
-This document defines how a bot run is started, executed, observed, and stopped at the service layer.
+This document describes the current service-layer architecture that starts, stops, and supervises bot runtime execution.
 
 In scope:
-- bot API + service start/stop lifecycle,
+- API/service validation before launch,
 - runner target resolution,
-- container runtime process model,
-- snapshot and event persistence boundaries,
-- watchdog ownership/heartbeat expectations.
+- docker container launch model,
+- container runtime responsibilities,
+- persistence and telemetry boundaries.
 
-### Non-goals
+Non-goals:
+- per-bar strategy execution details,
+- indicator/runtime engine internals,
+- UI rendering details beyond emitted service payloads.
 
-- signal/indicator algorithm internals,
-- strategy authoring semantics,
-- exchange-specific live order execution details.
+Deep execution semantics live in [[BOT_RUNTIME_ENGINE_ARCHITECTURE]].
+Deep event and wallet contracts live in [[RUNTIME_EVENT_MODEL_V1]] and [[WALLET_GATEWAY_ARCHITECTURE]].
 
-Upstream assumptions:
-- bot config, strategy config, and instrument metadata are valid,
-- `PG_DSN` is configured and reachable,
-- `PROVIDER_CREDENTIAL_KEY` is configured identically for backend and bot runtime containers,
-- runtime event/snapshot contracts are stable.
-
-## 2) Architecture at a glance
-
-Boundary:
-- inside: portal bot services, runner, container runtime, storage repositories, telemetry ingest
-- outside: UI/API clients, Docker daemon, exchange/provider services
+## 2) Current service topology
 
 ```mermaid
 flowchart LR
-    A[API /bots/{id}/start] --> B[BotRuntimeControlService]
-    B --> C[Runner Target Resolution]
-    C --> D[DockerBotRunner]
-    D --> E[container_runtime.py process]
-    E --> F[BotRuntime workers]
-    F --> G[Snapshot + Runtime Event persistence]
-    F --> H[Telemetry WS ingest]
-    G --> I[BotLens bootstrap/stream]
+    A[Bot API / service] --> B[BotRuntimeControlService]
+    B --> C[DockerBotRunner]
+    C --> D[container_runtime.py]
+    D --> E[one process per symbol]
+    E --> F[BotRuntime worker]
+    F --> G[Runtime events + trade persistence]
+    D --> H[Merged view_state + telemetry]
+    D --> I[Runtime status + container step traces]
 ```
 
-## 3) Startup sequence
+## 3) Service entrypoints
 
-1. API start request enters `runtime_control_service.start_bot`.
-2. Service validates:
-- wallet config,
-- strategy existence,
-- instrument policy,
-- runtime readiness.
-3. Runner target is resolved from `BOT_RUNTIME_TARGET`.
-4. Current implementation supports only `docker` target.
-5. `DockerBotRunner.start_bot(...)` launches `python -m portal.backend.service.bots.container_runtime` in a bot container.
-6. Container runtime creates a `run_id`, assigns one symbol per worker process, and starts workers.
-7. Container runtime emits periodic merged snapshots to storage and telemetry.
-8. Bot status is updated as `running`, then `stopped`/`failed` at terminal boundaries.
+Current entrypoints:
+- `portal/backend/service/bots/runtime_control_service.py`: API-facing start/stop and watchdog status surface.
+- `portal/backend/service/bots/runner.py`: runner abstraction plus `DockerBotRunner`.
+- `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, merged view-state emission, and container-level status/step traces.
 
-## 4) Runner types and runtime modes
+Current target support:
+- only `BOT_RUNTIME_TARGET=docker` is implemented.
 
-Two different axes exist and should not be conflated.
+## 4) Start flow
 
-Runner target (infrastructure):
-- `BOT_RUNTIME_TARGET=docker` -> process is launched in a Docker container.
-- Additional targets are not implemented yet.
+`BotRuntimeControlService.start_bot(bot_id)` performs the current service-side checks in this order:
+1. Load the bot from config storage.
+2. Validate wallet config.
+3. Validate strategy id and backtest window.
+4. Validate strategy existence.
+5. Validate instrument policy.
+6. Validate runtime readiness.
+7. Resolve the runner target.
+8. Launch the runtime container through `DockerBotRunner.start_bot(...)`.
 
-Run type (execution mode passed to runtime):
-- API currently accepts `backtest` and `sim_trade`.
-- Runtime policy treats `sim_trade`/`paper`/`live` as live-refresh-capable modes.
-- Strategy execution adapter mapping supports `backtest`, `paper`, and `live` modes internally.
+If container startup fails:
+- bot status is set to `error`,
+- `last_run_artifact.error` is written,
+- the failure is broadcast to stream subscribers,
+- the exception is re-raised.
 
-## 5) Worker model inside container runtime
+If startup succeeds:
+- bot status becomes `running`,
+- `runner_id` is set to the container id,
+- `last_run_at` is updated,
+- the updated bot payload is broadcast.
 
-- One container run can manage multiple symbols for one strategy.
-- Symbols are assigned one-per-worker process (`process-per-series`).
-- Each worker runs a `BotRuntime` instance scoped to exactly one symbol.
-- Runtime uses inline series execution inside each worker (no pool runner).
-- Container runtime merges worker snapshots into one bot-level snapshot envelope.
-- Worker failures degrade symbol subsets while healthy symbols continue.
+## 5) Docker runner contract
 
-## 6) Persistence and telemetry
+`DockerBotRunner` currently enforces:
+- `BOT_RUNTIME_IMAGE` must be set,
+- `BOT_RUNTIME_NETWORK` must resolve to an existing docker network,
+- `PROVIDER_CREDENTIAL_KEY` must be present in backend env,
+- `snapshot_interval_ms` must be configured on the bot before launch.
 
-Writes:
-- snapshots -> `portal_bot_run_snapshots` via `record_bot_run_snapshot(...)`
-- runtime events -> `portal_bot_run_events` via `record_bot_runtime_event(...)`
-- bot/run status -> bot + run records via `update_bot_runtime_status(...)`
+The runner passes through:
+- `PG_DSN`,
+- `PROVIDER_CREDENTIAL_KEY`,
+- `BOT_ID`,
+- snapshot cadence env vars,
+- BotLens stream sizing env vars,
+- step-trace buffer env vars,
+- optional `bot_env` overrides from bot config.
+
+The launched process is:
+- `python -m portal.backend.service.bots.container_runtime`
+
+## 6) Container runtime responsibilities
+
+`container_runtime.py` is the service-layer runtime supervisor. It is responsible for:
+- loading the bot row and its strategy id,
+- generating the shared `run_id`,
+- enforcing strategy symbol limits,
+- assigning symbols to worker processes,
+- creating the shared-wallet multiprocessing proxy,
+- supervising child workers,
+- merging worker view-state payloads,
+- emitting compact telemetry envelopes,
+- writing bot runtime status and container step traces.
+
+Important current limits:
+- default maximum symbols per strategy is 10,
+- one worker process is required per symbol,
+- startup fails loudly if `BOT_SYMBOL_PROCESS_MAX < symbol_count`.
+
+## 7) Worker model
+
+Each child worker process:
+- receives exactly one symbol shard,
+- receives the shared `run_id`,
+- constructs a `BotRuntime` with `degrade_series_on_error=True`,
+- forces `series_runner="inline"`,
+- emits compact `view_state` envelopes back to the parent process,
+- emits `worker_error` messages when runtime execution fails.
+
+The parent process treats worker failures as degraded-symbol events:
+- failed worker symbols are added to `degraded_symbols`,
+- healthy workers continue,
+- telemetry is marked degraded,
+- container execution only hard-fails on parent-level exceptions.
+
+## 8) Persistence boundaries
+
+The service/runtime split is important.
+
+Worker runtime persistence:
+- canonical runtime events via `storage.record_bot_runtime_event(...)`,
+- trade rows via `storage.record_bot_trade(...)`,
+- trade-event rows via `storage.record_bot_trade_event(...)`,
+- worker run artifacts via `storage.update_bot_run_artifact(...)`,
+- worker reports via `report_service.record_run_report(...)`,
+- runtime step traces via batched `storage.record_bot_run_steps_batch(...)`.
+
+Container runtime persistence:
+- run status via `update_bot_runtime_status(...)`,
+- container loop step traces via `record_bot_run_step(...)`.
+
+Current non-persistence:
+- merged BotLens `view_state` is not durably written by `container_runtime.py`,
+- the merged view is an ephemeral telemetry/read-model surface.
+
+## 9) Telemetry contract
+
+The container runtime builds a compact telemetry envelope with:
+- `run_id`,
+- `bot_id`,
+- container sequence numbers,
+- merged summary counts,
+- optional merged `view_state`.
 
 Transport:
-- optional WS telemetry push to backend ingest endpoint,
-- BotLens consumers read via bootstrap + stream.
+- websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
+- latest-message compaction inside `_TelemetryEmitter` to avoid backlog growth.
 
-Durability model:
-- writes are primary source of truth,
-- websocket delivery is supplemental real-time transport.
+Durability:
+- telemetry is supplemental,
+- runtime events, trades, run artifacts, status rows, and step traces remain the durable execution record.
 
-## 7) Connection liveness guards and retry behavior
+## 10) Merged runtime status semantics
 
-Database engine liveness guards are enabled by default:
-- `pool_pre_ping`: validates pooled connection health before use,
-- `pool_recycle`: rotates long-lived pooled connections,
-- TCP keepalive connect args: detects dead sockets earlier.
+Two status surfaces exist and should not be conflated.
 
-Runtime write retry behavior:
-- snapshot/event/status writes perform bounded retry for transient connection-loss errors,
-- retries reset DB connection state and re-open clean connections,
-- non-transient or exhausted retries still fail loud.
+Persisted service status:
+- `running`
+- `stopped`
+- `failed`
 
-Config knobs:
-- `PG_POOL_PRE_PING` (default: enabled)
-- `PG_POOL_RECYCLE_SECONDS` (default: 900)
-- `PG_POOL_TIMEOUT_SECONDS` (default: 30)
-- `PG_CONNECT_TIMEOUT_SECONDS` (default: 5)
-- `PG_TCP_KEEPALIVE_ENABLED` (default: enabled)
-- `PG_TCP_KEEPALIVE_IDLE_SECONDS` (default: 30)
-- `PG_TCP_KEEPALIVE_INTERVAL_SECONDS` (default: 10)
-- `PG_TCP_KEEPALIVE_COUNT` (default: 3)
-- `PORTAL_DB_WRITE_RETRY_ATTEMPTS` (default: 2)
+Merged runtime payload status inside `view_state.runtime.status`:
+- `running`
+- `completed`
+- `stopped`
+- `error`
+- `degraded`
 
-## 8) Watchdog responsibilities
+Current nuance:
+- if any workers are still active, merged runtime status remains `running` even when `degraded_symbols` is non-empty,
+- degraded state is primarily surfaced through merged payload warnings plus `telemetry_degraded`,
+- the persisted bot runtime status row does not currently store a separate `degraded` terminal state.
 
-- assigns stable `runner_id` for service instance,
-- emits bot heartbeats,
-- detects stale heartbeats/orphaned runs,
-- verifies running bot rows still map to live containers,
-- marks orphaned/crashed bots and clears ownership when needed.
+## 11) Stop and watchdog flow
 
-## 9) Strict contract
+`BotRuntimeControlService.stop_bot(bot_id)`:
+- resolves the runner,
+- removes the docker container,
+- unregisters the bot from the watchdog,
+- updates bot status to `stopped`,
+- clears `runner_id`,
+- persists and broadcasts the new bot state.
 
-- Start/stop operations must remain explicit and auditable.
-- Runtime bootstrap/prepare is explicit (`warm_up`/`start`) and single-flight; read paths must not trigger prepare as a side effect.
-- Runtime status transitions must be persisted with `run_id` context.
-- Snapshot/event sequencing must remain monotonic and causal.
-- Degrade behavior must isolate failed symbols without inventing success state.
-- Transient DB connectivity may be retried, but terminal failures must still surface as errors.
+The watchdog remains responsible for:
+- stale-heartbeat scans,
+- container ownership verification,
+- marking orphaned/crashed bots failed,
+- reporting current watchdog status.
 
-## 10) Operational notes
+## 12) Strict contract
 
-- If bot start fails before container launch, bot status is set to `error` with artifact context.
-- If DB disconnect occurs during runtime writes, bounded retry attempts recovery.
-- If retries fail, the run fails loud (container runtime exits and status transitions to failed/crashed path).
-
-## 11) Runtime Capacity Endpoint
-
-- `GET /api/bots/runtime-capacity` exposes host CPU core count and estimated active bot worker usage.
-- Response includes: `host_cpu_cores`, `workers_in_use`, `workers_requested`, `running_bots`, `over_capacity_workers`, `in_use_pct`, `updated_at`.
-- Frontend Bot panel renders a compact `CPU in_use/max` indicator near bot search/count controls.
+- Service start/stop must remain explicit and auditable.
+- Runtime readiness validation happens before container launch, not lazily inside UI paths.
+- The shared `run_id` belongs to the whole container run and is propagated to all symbol workers.
+- Container runtime owns symbol sharding and merged telemetry; worker runtimes own execution semantics and canonical runtime events.
+- Failures must be surfaced either as explicit bot/container failure or explicit symbol degradation. No silent success state may be invented.

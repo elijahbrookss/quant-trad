@@ -5,7 +5,7 @@
 - `Component`: Instrument contract normalization and runtime readiness gates
 - `Owner/Domain`: Market Instruments / Bot Runtime Preflight
 - `Doc Version`: 1.1
-- `Related Contracts`: `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `src/engines/bot_runtime/core/execution_profile.py`, `portal/backend/service/bots/config_service.py`
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], `src/engines/bot_runtime/core/execution_profile.py`, `portal/backend/service/bots/config_service.py`
 
 ## 1) Problem and scope
 

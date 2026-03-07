@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { LocateFixed, Maximize2, Minimize2, X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { OverlayToggleBar } from './OverlayToggleBar.jsx'
@@ -6,7 +6,17 @@ import { ActiveTradeChip } from './ActiveTradeChip.jsx'
 import DecisionTrace from './DecisionTrace/index.jsx'
 import { useOverlayControls } from './hooks/useOverlayControls.js'
 import { createLogger } from '../../utils/logger.js'
-import { fetchBotLensBootstrap, fetchBotRunLedgerEvents, openBotLensStream } from '../../adapters/bot.adapter.js'
+import {
+  fetchBotRuns,
+  fetchBotLensSeriesCatalog,
+  fetchBotLensSeriesHistory,
+  fetchBotLensSeriesWindow,
+  fetchBotRunLedgerEvents,
+  openBotLensSeriesLiveStream,
+} from '../../adapters/bot.adapter.js'
+import { describeBotLifecycle, getBotRunId, getBotStatus, normalizeBotStatus } from './botStatusModel.js'
+import { shouldForceResyncForSeqGap } from './botlensStreamContract.js'
+import { BOTLENS_PHASES, botlensReducer, initialBotLensState } from './botlensStateMachine.js'
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -23,14 +33,36 @@ function formatNumber(value, digits = 2) {
 }
 
 function normalizeEventPayload(message) {
-  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
-  const snapshot = payload?.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : null
+  if (!message || typeof message !== 'object') return null
+  if (String(message.type || '') !== 'botlens_live_tail') return null
   return {
     runId: message?.run_id ? String(message.run_id) : null,
     seq: Number(message?.seq || 0),
-    eventType: String(message?.event_type || 'state_delta'),
-    critical: Boolean(message?.critical),
-    snapshot,
+    messageType: String(message?.message_type || ''),
+    payload: message?.payload && typeof message.payload === 'object' ? message.payload : {},
+  }
+}
+
+function buildWindowSnapshot({ seriesKey, candles, status = 'running' }) {
+  const [symbolRaw, timeframeRaw] = String(seriesKey || '').split('|')
+  const symbol = String(symbolRaw || '').toUpperCase()
+  const timeframe = String(timeframeRaw || '').toLowerCase()
+  return {
+    series: [
+      {
+        strategy_id: 'botlens',
+        symbol,
+        timeframe,
+        candles: Array.isArray(candles) ? candles : [],
+        overlays: [],
+        stats: {},
+      },
+    ],
+    trades: [],
+    logs: [],
+    decisions: [],
+    warnings: [],
+    runtime: { status },
   }
 }
 
@@ -88,84 +120,6 @@ function primaryCandleCount(snapshot) {
   return Array.isArray(candles) ? candles.length : 0
 }
 
-function overlayIdentity(overlay, index) {
-  if (!overlay || typeof overlay !== 'object') return `index:${index}`
-  const keys = ['id', 'overlay_id', 'name', 'key', 'slug', 'indicator_id', 'type']
-  for (const key of keys) {
-    const value = String(overlay?.[key] || '').trim()
-    if (value) return `${key}:${value}`
-  }
-  return `index:${index}`
-}
-
-function seriesIdentity(series, index) {
-  if (!series || typeof series !== 'object') return `series_index:${index}`
-  const strategyId = String(series?.strategy_id || '').trim()
-  const symbol = String(series?.symbol || '').trim()
-  const timeframe = String(series?.timeframe || '').trim()
-  if (strategyId || symbol || timeframe) return `${strategyId}|${symbol}|${timeframe}`
-  return `series_index:${index}`
-}
-
-function mergeSeriesOverlays(baseSeriesEntry, incomingSeriesEntry) {
-  const incomingOverlays = Array.isArray(incomingSeriesEntry?.overlays) ? incomingSeriesEntry.overlays : []
-  const overlayDelta = incomingSeriesEntry?.overlay_delta && typeof incomingSeriesEntry.overlay_delta === 'object'
-    ? incomingSeriesEntry.overlay_delta
-    : null
-  const mode = String(overlayDelta?.mode || 'replace').toLowerCase()
-  if (mode !== 'delta') return incomingOverlays
-
-  const previousOverlays = Array.isArray(baseSeriesEntry?.overlays) ? baseSeriesEntry.overlays : []
-  const mergedById = new Map()
-  const overlayOrder = []
-  previousOverlays.forEach((overlay, index) => {
-    const id = overlayIdentity(overlay, index)
-    if (!mergedById.has(id)) overlayOrder.push(id)
-    mergedById.set(id, overlay)
-  })
-  incomingOverlays.forEach((overlay, index) => {
-    const id = overlayIdentity(overlay, index)
-    if (!mergedById.has(id)) overlayOrder.push(id)
-    mergedById.set(id, overlay)
-  })
-
-  const removedIds = new Set(
-    Array.isArray(overlayDelta?.removed) ? overlayDelta.removed.map((value) => String(value)) : [],
-  )
-  const merged = []
-  overlayOrder.forEach((id) => {
-    if (removedIds.has(String(id))) return
-    const overlay = mergedById.get(id)
-    if (overlay) merged.push(overlay)
-  })
-  return merged
-}
-
-function mergeSnapshotFromStreamDelta(baseSnapshot, incomingSnapshot) {
-  if (!incomingSnapshot || typeof incomingSnapshot !== 'object') return null
-  const incomingSeries = Array.isArray(incomingSnapshot?.series) ? incomingSnapshot.series : []
-  if (!incomingSeries.length || !baseSnapshot || typeof baseSnapshot !== 'object') return incomingSnapshot
-
-  const baseSeries = Array.isArray(baseSnapshot?.series) ? baseSnapshot.series : []
-  const baseById = new Map()
-  baseSeries.forEach((entry, index) => {
-    if (!entry || typeof entry !== 'object') return
-    baseById.set(seriesIdentity(entry, index), entry)
-  })
-
-  const mergedSeries = incomingSeries.map((entry, index) => {
-    if (!entry || typeof entry !== 'object') return entry
-    const baseEntry = baseById.get(seriesIdentity(entry, index))
-    const overlays = mergeSeriesOverlays(baseEntry, entry)
-    const next = { ...entry, overlays }
-    if ('overlay_delta' in next) {
-      delete next.overlay_delta
-    }
-    return next
-  })
-  return { ...incomingSnapshot, series: mergedSeries }
-}
-
 function candleLag(renderedSnapshot, canonicalSnapshot) {
   if (!renderedSnapshot || !canonicalSnapshot) return 0
   if (primarySeriesKey(renderedSnapshot) !== primarySeriesKey(canonicalSnapshot)) return 0
@@ -195,55 +149,6 @@ function snapshotWithPrimaryCandles(snapshot, candles) {
     next.runtime = runtime
   }
   return next
-}
-
-function buildSnapshotFrames({ baseSnapshot, targetSnapshot, envelope }) {
-  const finalFrame = {
-    runId: envelope.runId,
-    seq: envelope.seq,
-    snapshot: targetSnapshot,
-    receivedAt: envelope.receivedAt,
-    critical: envelope.critical,
-    eventType: envelope.eventType,
-    staged: false,
-  }
-  if (!baseSnapshot || !targetSnapshot) {
-    return [finalFrame]
-  }
-  if (envelope.critical) {
-    return [finalFrame]
-  }
-  if (primarySeriesKey(baseSnapshot) !== primarySeriesKey(targetSnapshot)) {
-    return [finalFrame]
-  }
-  const baseTrades = Array.isArray(baseSnapshot?.trades) ? baseSnapshot.trades : []
-  const targetTrades = Array.isArray(targetSnapshot?.trades) ? targetSnapshot.trades : []
-  if (baseTrades.length !== targetTrades.length) {
-    return [finalFrame]
-  }
-  const base = primaryCandles(baseSnapshot)
-  const target = primaryCandles(targetSnapshot)
-  if (!Array.isArray(base) || !Array.isArray(target)) {
-    return [finalFrame]
-  }
-  const deltaBars = target.length - base.length
-  if (deltaBars <= 1) {
-    return [finalFrame]
-  }
-  const frames = []
-  for (let length = base.length + 1; length < target.length; length += 1) {
-    frames.push({
-      runId: envelope.runId,
-      seq: envelope.seq,
-      snapshot: snapshotWithPrimaryCandles(targetSnapshot, target.slice(0, length)),
-      receivedAt: envelope.receivedAt,
-      critical: false,
-      eventType: 'staged_bar_fill',
-      staged: true,
-    })
-  }
-  frames.push(finalFrame)
-  return frames
 }
 
 function nowMs() {
@@ -349,12 +254,82 @@ function buildTradeChip(trade) {
   }
 }
 
+function shortRunId(runId) {
+  const value = String(runId || '').trim()
+  if (!value) return '—'
+  return value.length <= 12 ? value : `${value.slice(0, 8)}…${value.slice(-4)}`
+}
+
+function formatRunMoment(value) {
+  if (!value) return '—'
+  try {
+    return new Date(value).toLocaleString()
+  } catch {
+    return String(value)
+  }
+}
+
+function describeRunRow(run) {
+  if (!run || typeof run !== 'object') return 'No run selected'
+  const status = normalizeBotStatus(run.runtime_status || run.status || 'idle')
+  const started = run.started_at || run.created_at
+  const ended = run.ended_at
+  if (run.is_active) {
+    return `Active ${status} run · started ${formatRunMoment(started)}`
+  }
+  if (ended) {
+    return `${status} · ended ${formatRunMoment(ended)}`
+  }
+  return `${status} · started ${formatRunMoment(started)}`
+}
+
+function buildLensStages({ botLifecycle, selectedRun, snapshotReady, streamState, liveTarget }) {
+  const hasRun = Boolean(selectedRun?.run_id)
+  const hasSnapshot = Boolean(snapshotReady)
+  const liveConnected = liveTarget ? streamState === 'open' : hasSnapshot
+  return [
+    {
+      key: 'run',
+      label: liveTarget ? 'Run attached' : 'Run selected',
+      status: hasRun ? 'done' : 'current',
+      detail: hasRun ? shortRunId(selectedRun?.run_id) : 'Waiting for run_id',
+    },
+    {
+      key: 'runtime',
+      label: liveTarget ? 'Runtime' : 'Archive',
+      status: !hasRun
+        ? 'upcoming'
+        : liveTarget
+          ? botLifecycle.live || ['awaiting_snapshot', 'booting_runtime', 'starting_container', 'degraded'].includes(botLifecycle.phase)
+            ? 'current'
+            : 'done'
+          : 'done',
+      detail: liveTarget ? botLifecycle.label : selectedRun?.view_state_available ? 'Persisted snapshot found' : 'Snapshot not persisted yet',
+    },
+    {
+      key: 'snapshot',
+      label: 'Snapshot',
+      status: hasSnapshot ? 'done' : hasRun ? 'current' : 'upcoming',
+      detail: hasSnapshot ? 'Chart bootstrapped' : liveTarget ? 'Waiting for first BotLens frame' : 'Loading persisted window',
+    },
+    {
+      key: 'bridge',
+      label: liveTarget ? 'Live bridge' : 'History mode',
+      status: liveConnected ? 'done' : hasSnapshot ? 'current' : 'upcoming',
+      detail: liveTarget ? (streamState === 'open' ? 'Streaming deltas into chart' : 'Connecting websocket') : 'Viewing archived state only',
+    },
+  ]
+}
+
 export function BotLensLiveModal({ bot, open, onClose }) {
   const logger = useMemo(() => createLogger('BotLensLiveModal'), [])
   const [snapshot, setSnapshot] = useState(null)
   const [streamState, setStreamState] = useState('idle')
   const [statusMessage, setStatusMessage] = useState('')
   const [error, setError] = useState(null)
+  const [runCatalog, setRunCatalog] = useState([])
+  const [runCatalogState, setRunCatalogState] = useState('idle')
+  const [selectedRunId, setSelectedRunId] = useState(null)
   const [cursor, setCursor] = useState({ runId: null, seq: 0 })
   const [renderCursor, setRenderCursor] = useState({ runId: null, seq: 0 })
   const [ledgerEvents, setLedgerEvents] = useState([])
@@ -378,6 +353,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     lagMs: 0,
     appliedRate: 0,
   })
+  const [lensState, dispatchLens] = useReducer(botlensReducer, initialBotLensState)
   const socketRef = useRef(null)
   const cursorRef = useRef({ runId: null, seq: 0 })
   const renderCursorRef = useRef({ runId: null, seq: 0 })
@@ -394,6 +370,32 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const canonicalFrameRef = useRef({ runId: null, seq: 0, snapshot: null })
   const lastSnapCursorRef = useRef({ runId: null, seq: 0 })
   const ledgerSyncTokenRef = useRef(0)
+  const lastCursorPublishRef = useRef(0)
+  const activeSeriesKeyRef = useRef(null)
+  const botLifecycle = useMemo(() => describeBotLifecycle(bot), [bot])
+  const activeBotRunId = getBotRunId(bot)
+  const botStatus = getBotStatus(bot)
+  const selectedRun = useMemo(
+    () => runCatalog.find((entry) => String(entry?.run_id || '') === String(selectedRunId || '')) || null,
+    [runCatalog, selectedRunId],
+  )
+  const selectedRunViewStateAvailable = Boolean(selectedRun?.view_state_available)
+  const selectedRunStatus = normalizeBotStatus(selectedRun?.runtime_status || selectedRun?.status || botStatus)
+  const selectedRunIsTerminal = ['completed', 'stopped', 'failed', 'crashed', 'error'].includes(selectedRunStatus)
+  const selectedRunIsLiveTarget = Boolean(selectedRunId) && (
+    (selectedRun?.is_active ?? false) || (activeBotRunId && selectedRunId === activeBotRunId)
+  ) && !selectedRunIsTerminal
+  const showStaleStatus = staleMode && selectedRunIsLiveTarget
+  const lifecycleStages = useMemo(
+    () => buildLensStages({
+      botLifecycle,
+      selectedRun,
+      snapshotReady: Boolean(snapshot),
+      streamState,
+      liveTarget: selectedRunIsLiveTarget,
+    }),
+    [botLifecycle, selectedRun, snapshot, streamState, selectedRunIsLiveTarget],
+  )
 
   useEffect(() => {
     cursorRef.current = cursor
@@ -417,6 +419,75 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   useEffect(() => {
     setFollowLive(true)
   }, [bot?.id])
+
+  useEffect(() => {
+    if (!open) return
+    pendingFramesRef.current = []
+    renderedSnapshotRef.current = null
+    canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+    setSnapshot(null)
+    setError(null)
+  }, [open, selectedRunId])
+
+  useEffect(() => {
+    if (!open || !bot?.id) {
+      setRunCatalog([])
+      setRunCatalogState('idle')
+      setSelectedRunId(null)
+      return undefined
+    }
+
+    let cancelled = false
+    const loadRuns = async () => {
+      try {
+        setRunCatalogState((current) => (current === 'open' ? current : 'loading'))
+        const payload = await fetchBotRuns(bot.id, { limit: 30 })
+        if (cancelled) return
+        const runs = Array.isArray(payload?.runs) ? payload.runs : []
+        setRunCatalog(runs)
+        setRunCatalogState('open')
+        setSelectedRunId((current) => {
+          if (current && runs.some((entry) => String(entry?.run_id || '') === current)) return current
+          const active = runs.find((entry) => entry?.is_active)
+          return String(active?.run_id || runs[0]?.run_id || activeBotRunId || '') || null
+        })
+      } catch (err) {
+        if (cancelled) return
+        setRunCatalogState('error')
+        logger.warn('botlens_run_catalog_failed', { bot_id: bot.id }, err)
+      }
+    }
+
+    loadRuns()
+    const pollId = window.setInterval(loadRuns, 4000)
+    return () => {
+      cancelled = true
+      window.clearInterval(pollId)
+    }
+  }, [activeBotRunId, bot?.id, logger, open])
+
+
+  useEffect(() => {
+    if (!open) return undefined
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        pendingFramesRef.current = []
+        const socket = socketRef.current
+        socketRef.current = null
+        if (socket) {
+          try {
+            socket.close()
+          } catch {
+            // no-op
+          }
+        }
+      } else if (document.visibilityState === 'visible') {
+        syncTokenRef.current += 1
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [open])
 
   useEffect(() => {
     if (!open) return undefined
@@ -443,6 +514,10 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         lagMs,
         appliedRate,
       })
+      if (ts - Number(lastCursorPublishRef.current || 0) >= Math.max(80, METRICS_PUBLISH_MS)) {
+        setCursor({ runId: canonical?.runId || null, seq: Number(canonical?.seq || 0) })
+        lastCursorPublishRef.current = ts
+      }
     }
 
     const step = (ts) => {
@@ -549,20 +624,23 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const connectSocket = useCallback(
     ({ botId, runId, seq, token }) => {
       closeSocket()
-      const socket = openBotLensStream(botId, { runId, sinceSeq: seq })
+      const socket = openBotLensSeriesLiveStream(runId, activeSeriesKeyRef.current || primarySeriesKey(renderedSnapshotRef.current) || 'UNKNOWN|1m', { afterSeq: seq })
       if (!socket) {
         setStreamState('stale')
         setStaleMode(true)
         setStatusMessage('WebSocket unavailable. Retrying bootstrap...')
+        dispatchLens({ type: 'STREAM_STALE' })
         return
       }
       socketRef.current = socket
       setStreamState('connecting')
+      dispatchLens({ type: 'LIVE_CONNECTING' })
 
       socket.onopen = () => {
         if (syncTokenRef.current !== token || !mountedRef.current) return
         setStreamState('open')
         setStatusMessage('Live stream connected.')
+        dispatchLens({ type: 'LIVE_CONNECTED' })
         logger.info('botlens_ws_open', { bot_id: botId, run_id: runId, seq })
       }
 
@@ -570,22 +648,29 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         if (syncTokenRef.current !== token || !mountedRef.current) return
         try {
           const message = JSON.parse(event.data)
-          if (message?.type !== 'bot_runtime_event') return
           const next = normalizeEventPayload(message)
-          if (!next.runId || next.seq <= 0 || !next.snapshot) return
+          if (!next || !next.runId || next.seq <= 0) return
 
           const prev = cursorRef.current
           if (prev.runId && next.runId === prev.runId) {
             if (next.seq <= prev.seq) return
-            if (next.seq !== prev.seq + 1) {
+            if (shouldForceResyncForSeqGap({ previousSeq: prev.seq, nextSeq: next.seq, maxAllowedGap: 1 })) {
               pendingFramesRef.current = []
-              setStatusMessage(`Stream catch-up: skipped ${Math.max(0, next.seq - prev.seq - 1)} frames.`)
+              renderedSnapshotRef.current = null
+              canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+              setStaleMode(true)
+              setStreamState('resyncing')
+              setStatusMessage(`Stream gap detected (${prev.seq} -> ${next.seq}). Re-syncing snapshot...`)
+              dispatchLens({ type: 'SEQ_GAP' })
               logger.warn('botlens_stream_seq_gap', {
                 bot_id: botId,
                 run_id: next.runId,
                 expected_seq: prev.seq + 1,
                 actual_seq: next.seq,
               })
+              syncTokenRef.current += 1
+              closeSocket()
+              return
             }
           } else if (prev.runId && next.runId !== prev.runId) {
             pendingFramesRef.current = []
@@ -594,6 +679,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             setStaleMode(true)
             setStreamState('resyncing')
             setStatusMessage(`Run changed (${prev.runId} -> ${next.runId}). Auto-attaching to latest run...`)
+            dispatchLens({ type: 'SEQ_GAP' })
             syncTokenRef.current += 1
             closeSocket()
             return
@@ -604,28 +690,48 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           const baseSnapshot = queue.length > 0
             ? queue[queue.length - 1]?.snapshot || null
             : renderedSnapshotRef.current
-          const mergedSnapshot = mergeSnapshotFromStreamDelta(baseSnapshot, next.snapshot)
-          if (!mergedSnapshot) return
-          const frames = buildSnapshotFrames({
-            baseSnapshot,
-            targetSnapshot: mergedSnapshot,
-            envelope: {
-              runId: next.runId,
-              seq: next.seq,
-              critical: next.critical,
-              eventType: next.eventType,
-              receivedAt,
-            },
+          const base = baseSnapshot && typeof baseSnapshot === 'object' ? baseSnapshot : buildWindowSnapshot({
+            seriesKey: activeSeriesKeyRef.current || 'UNKNOWN|1m',
+            candles: [],
+            status: 'running',
           })
+          const bars = primaryCandles(base) || []
+          let nextBars = bars
+          if (next.messageType === 'bar_append' && next.payload?.bar) {
+            nextBars = [...bars, next.payload.bar]
+          } else if (next.messageType === 'bar_update' && next.payload?.bar) {
+            const bar = next.payload.bar
+            const tail = bars.length ? bars[bars.length - 1] : null
+            if (tail && Number(tail.time) === Number(bar.time)) {
+              nextBars = [...bars.slice(0, -1), bar]
+            } else {
+              nextBars = [...bars, bar]
+            }
+          }
+          const mergedSnapshot = snapshotWithPrimaryCandles(base, nextBars)
+          if (next.messageType === 'status') {
+            mergedSnapshot.runtime = { ...(mergedSnapshot.runtime || {}), status: String(next.payload?.status || 'running') }
+          }
+          const frames = [{
+            runId: next.runId,
+            seq: next.seq,
+            snapshot: mergedSnapshot,
+            receivedAt,
+            critical: false,
+            eventType: next.messageType || 'live_tail',
+            staged: false,
+          }]
           canonicalFrameRef.current = { runId: next.runId, seq: next.seq, snapshot: mergedSnapshot }
           pendingFramesRef.current.push(...frames)
           cursorRef.current = { runId: next.runId, seq: next.seq }
-          setCursor({ runId: next.runId, seq: next.seq })
           setStreamState('open')
           setStaleMode(false)
-          if (next.critical) {
-            setStatusMessage(`Live update (${next.eventType})`)
+          if (next.messageType === 'status') {
+            setStatusMessage(`Runtime status update received: ${String(next.payload?.status || 'running')}`)
+          } else if (streamStateRef.current !== 'open') {
+            setStatusMessage('Live stream connected. Rendering incoming updates.')
           }
+          dispatchLens({ type: 'LIVE_CONNECTED' })
         } catch (err) {
           logger.warn('botlens_ws_parse_failed', { bot_id: botId }, err)
         }
@@ -636,6 +742,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         setStaleMode(true)
         setStreamState('stale')
         setStatusMessage('WebSocket error. Keeping stale snapshot and retrying bootstrap...')
+        dispatchLens({ type: 'STREAM_STALE' })
         logger.warn('botlens_ws_error', { bot_id: botId, run_id: runId }, err)
       }
 
@@ -644,6 +751,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         setStaleMode(true)
         setStreamState('stale')
         setStatusMessage('WebSocket closed. Keeping stale snapshot and retrying bootstrap...')
+        dispatchLens({ type: 'STREAM_STALE' })
         syncTokenRef.current += 1
       }
     },
@@ -658,35 +766,84 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       if (syncInFlightRef.current) return
       syncInFlightRef.current = true
       const token = ++syncTokenRef.current
+      dispatchLens({ type: 'BOOTSTRAP_START' })
       if (reason) {
         setStaleMode(true)
         setStatusMessage(reason)
       } else {
         setStreamState('bootstrapping')
-        setStatusMessage('Loading latest BotLens snapshot...')
+        if (!selectedRunIsLiveTarget) setStaleMode(false)
+        setStatusMessage(selectedRunIsLiveTarget ? 'Loading BotLens snapshot…' : 'Loading historical BotLens snapshot…')
       }
       while (!cancelled && mountedRef.current && token === syncTokenRef.current) {
         try {
-          const boot = await fetchBotLensBootstrap(bot.id)
-          const runId = boot?.run_id ? String(boot.run_id) : null
-          const seq = Number(boot?.seq || 0)
-          const snap = boot?.snapshot && typeof boot.snapshot === 'object' ? boot.snapshot : null
-          if (!runId || seq <= 0 || !snap) {
+          const runId = selectedRunId ? String(selectedRunId) : null
+          if (!runId) {
+            dispatchLens({ type: 'WAITING_FOR_RUN' })
             setStreamState('waiting')
-            setStatusMessage('Runtime has not emitted snapshot events yet. Retrying...')
-            await delay(1200)
-            continue
+            setStatusMessage(selectedRunIsLiveTarget ? botLifecycle.detail : 'Select a run to open BotLens.')
+            syncInFlightRef.current = false
+            return
+          }
+          if (!selectedRunIsLiveTarget && selectedRunId && !selectedRunViewStateAvailable) {
+            dispatchLens({ type: 'WAITING_FOR_SNAPSHOT' })
+            setStreamState('historical')
+            setStaleMode(false)
+            setSnapshot(null)
+            setStatusMessage('This historical run did not persist BotLens snapshot data.')
+            syncInFlightRef.current = false
+            return
           }
           pendingFramesRef.current = []
           lastApplyAtRef.current = nowMs()
-          setSnapshot(snap)
-          renderedSnapshotRef.current = snap
-          canonicalFrameRef.current = { runId, seq, snapshot: snap }
+          const catalog = await fetchBotLensSeriesCatalog(runId)
+          const availableSeries = Array.isArray(catalog?.series) ? catalog.series : []
+          const retainedSeriesKey = activeSeriesKeyRef.current
+          const bootSeriesKey = retainedSeriesKey && availableSeries.includes(retainedSeriesKey) ? retainedSeriesKey : availableSeries[0] || null
+          if (!bootSeriesKey) {
+            dispatchLens({ type: 'WAITING_FOR_SNAPSHOT' })
+            setStreamState(selectedRunIsLiveTarget ? 'waiting' : 'historical')
+            if (!selectedRunIsLiveTarget) setStaleMode(false)
+            activeSeriesKeyRef.current = null
+            setStatusMessage(
+              selectedRunIsLiveTarget
+                ? 'Run is active, but BotLens has not published the first series catalog yet. Retrying…'
+                : selectedRunViewStateAvailable
+                  ? 'Persisted snapshot contains no chart series for this run.'
+                  : 'No BotLens series were persisted for this run.',
+            )
+            if (selectedRunIsLiveTarget) {
+              await delay(1200)
+              continue
+            }
+            syncInFlightRef.current = false
+            return
+          }
+          activeSeriesKeyRef.current = bootSeriesKey
+          const window = await fetchBotLensSeriesWindow(runId, bootSeriesKey, { to: 'now', limit: 320 })
+          const windowCandles = Array.isArray(window?.window?.candles) ? window.window.candles : []
+          const seeded = buildWindowSnapshot({
+            seriesKey: bootSeriesKey,
+            candles: windowCandles,
+            status: window?.window?.status || (selectedRunIsLiveTarget ? 'running' : selectedRunStatus),
+          })
+          setSnapshot(seeded)
+          renderedSnapshotRef.current = seeded
+          const startSeq = Number(window?.seq || 0)
+          canonicalFrameRef.current = { runId, seq: startSeq, snapshot: seeded }
+          dispatchLens({
+            type: 'BOOTSTRAP_SUCCESS',
+            runId,
+            seriesKey: bootSeriesKey,
+            seq: startSeq,
+            candles: windowCandles,
+            live: selectedRunIsLiveTarget,
+          })
           lastSnapCursorRef.current = { runId: null, seq: 0 }
-          cursorRef.current = { runId, seq }
-          renderCursorRef.current = { runId, seq }
-          setCursor({ runId, seq })
-          setRenderCursor({ runId, seq })
+          cursorRef.current = { runId, seq: startSeq }
+          renderCursorRef.current = { runId, seq: startSeq }
+          setCursor({ runId, seq: startSeq })
+          setRenderCursor({ runId, seq: startSeq })
           setRenderMetrics({
             mode: 'smooth',
             queueDepth: 0,
@@ -697,12 +854,18 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           })
           setError(null)
           setStaleMode(false)
-          setStatusMessage('Snapshot loaded. Connecting live stream...')
-          connectSocket({ botId: bot.id, runId, seq, token })
+          if (selectedRunIsLiveTarget) {
+            setStatusMessage('Snapshot loaded. Connecting live stream…')
+            connectSocket({ botId: bot.id, runId, seq: startSeq, token })
+          } else {
+            setStreamState('historical')
+            setStatusMessage('Historical run loaded. Live stream is disabled for archived runs.')
+          }
           syncInFlightRef.current = false
           return
         } catch (err) {
-          logger.warn('botlens_bootstrap_failed', { bot_id: bot.id }, err)
+          logger.warn('botlens_bootstrap_failed', { bot_id: bot.id, run_id: selectedRunId || null }, err)
+          dispatchLens({ type: 'STREAM_STALE' })
           setStaleMode(true)
           setStreamState('stale')
           setError(err?.message || 'Unable to bootstrap BotLens state.')
@@ -717,8 +880,10 @@ export function BotLensLiveModal({ bot, open, onClose }) {
 
     const monitor = setInterval(() => {
       if (!mountedRef.current || cancelled) return
-      if (streamStateRef.current === 'open') return
-      bootstrapAndConnect('Resyncing BotLens snapshot...')
+      if (!selectedRunId) return
+      if (selectedRunIsLiveTarget && streamStateRef.current === 'open') return
+      if (!selectedRunIsLiveTarget && renderedSnapshotRef.current) return
+      bootstrapAndConnect('Re-syncing BotLens snapshot…')
     }, 2500)
 
     return () => {
@@ -728,9 +893,20 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       syncInFlightRef.current = false
       closeSocket()
     }
-  }, [bot?.id, connectSocket, closeSocket, logger, open])
+  }, [
+    bot?.id,
+    botLifecycle.detail,
+    closeSocket,
+    connectSocket,
+    logger,
+    open,
+    selectedRunId,
+    selectedRunIsLiveTarget,
+    selectedRunStatus,
+    selectedRunViewStateAvailable,
+  ])
 
-  const activeRunId = cursor.runId || renderCursor.runId || null
+  const activeRunId = selectedRunId || cursor.runId || renderCursor.runId || null
 
   useEffect(() => {
     if (!open || !bot?.id) {
@@ -875,7 +1051,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const decisionEvents = useMemo(() => (Array.isArray(ledgerEvents) ? ledgerEvents : []), [ledgerEvents])
   const runtime = snapshot?.runtime || bot?.runtime || {}
   const stats = runtime?.stats || {}
-  const status = runtime?.status || bot?.status || 'idle'
+  const status = runtime?.status || botStatus || 'idle'
   const { overlayOptions, visibility, visibleOverlays, toggleOverlay } = useOverlayControls({ overlays })
   const seriesStats = useMemo(() => {
     return series.map((entry) => {
@@ -892,6 +1068,46 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     })
   }, [series])
   const selectedSeriesLabel = `${selectedSeries?.symbol || '—'} ${selectedSeries?.timeframe || ''}`.trim()
+
+  useEffect(() => {
+    if (!selectedSeries || !selectedSeries.symbol || !selectedSeries.timeframe) return
+    const nextSeriesKey = `${String(selectedSeries.symbol || '').toUpperCase()}|${String(selectedSeries.timeframe || '').toLowerCase()}`
+    if (activeSeriesKeyRef.current === nextSeriesKey) return
+    activeSeriesKeyRef.current = nextSeriesKey
+    if (cursorRef.current?.runId) {
+      pendingFramesRef.current = []
+      renderedSnapshotRef.current = null
+      canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+      setSnapshot(null)
+      syncTokenRef.current += 1
+      closeSocket()
+      dispatchLens({ type: 'BOOTSTRAP_START' })
+      setStreamState('resyncing')
+      setStatusMessage(`Switching series to ${nextSeriesKey}...`)
+    }
+  }, [closeSocket, selectedSeries])
+
+
+  const loadOlderHistory = useCallback(async () => {
+    const runId = cursorRef.current?.runId
+    const sk = selectedSeries ? `${String(selectedSeries.symbol || '').toUpperCase()}|${String(selectedSeries.timeframe || '').toLowerCase()}` : null
+    if (!runId || !sk) return
+    const oldest = candles.length ? candles[0] : null
+    const beforeTs = oldest?.time ? new Date(Number(oldest.time) * 1000).toISOString() : undefined
+    try {
+      dispatchLens({ type: 'HISTORY_PAGE_START' })
+      const page = await fetchBotLensSeriesHistory(runId, sk, { beforeTs, limit: 240 })
+      const pageCandles = Array.isArray(page?.history?.candles) ? page.history.candles : []
+      if (!pageCandles.length) return
+      dispatchLens({ type: 'HISTORY_PAGE_SUCCESS', candles: pageCandles })
+      setSnapshot((current) => {
+        const merged = [...pageCandles, ...(primaryCandles(current) || [])]
+        return snapshotWithPrimaryCandles(current, merged)
+      })
+    } catch (err) {
+      logger.warn('botlens_history_page_failed', { run_id: runId, series_key: sk }, err)
+    }
+  }, [candles, logger, selectedSeries])
 
   useEffect(() => {
     if (!hoveredTradeId) return
@@ -919,7 +1135,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           <div>
             <p className="text-sm font-semibold text-slate-100">BotLens Live</p>
             <p className="text-xs text-slate-500">
-              bot_id={bot.id} · run={renderCursor.runId || cursor.runId || '—'} · seq(render/canon)={renderCursor.seq || 0}/{cursor.seq || 0} · stream={streamState}
+              bot_id={bot.id} · run={shortRunId(selectedRunId || renderCursor.runId || cursor.runId || '—')} · seq(render/canon)={renderCursor.seq || 0}/{cursor.seq || 0} · stream={streamState}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -958,16 +1174,78 @@ export function BotLensLiveModal({ bot, open, onClose }) {
         </div>
 
         <div className={`${modalBodyHeightClass} overflow-auto p-4`}>
+          <div className="mb-4 overflow-hidden rounded-3xl border border-slate-800 bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_45%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.12),transparent_42%),rgba(2,6,23,0.84)]">
+            <div className="border-b border-slate-800/80 px-4 py-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400">Lifecycle</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{botLifecycle.label}</p>
+                  <p className="mt-1 text-sm text-slate-300">{statusMessage || botLifecycle.detail}</p>
+                </div>
+                <div className="flex min-w-[18rem] flex-col gap-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">Run</label>
+                  <select
+                    value={selectedRunId || ''}
+                    onChange={(event) => setSelectedRunId(event.target.value || null)}
+                    className="rounded-xl border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-500/60"
+                  >
+                    <option value="" disabled>Select a run</option>
+                    {runCatalog.map((run) => (
+                      <option key={run.run_id} value={run.run_id}>
+                        {`${run.is_active ? 'LIVE' : 'RUN '} · ${shortRunId(run.run_id)} · ${normalizeBotStatus(run.runtime_status || run.status || 'idle')}`}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-slate-400">{describeRunRow(selectedRun)}</p>
+                </div>
+              </div>
+            </div>
+            <div className="grid gap-2 px-4 py-4 md:grid-cols-4">
+              {lifecycleStages.map((stage, index) => {
+                const stageClass =
+                  stage.status === 'done'
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100'
+                    : stage.status === 'current'
+                      ? 'border-sky-500/40 bg-sky-500/10 text-sky-100'
+                      : 'border-slate-800 bg-slate-950/40 text-slate-500'
+                return (
+                  <div key={stage.key} className={`rounded-2xl border p-3 ${stageClass}`}>
+                    <div className="flex items-center gap-2">
+                      <div className={`relative flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold ${
+                        stage.status === 'done'
+                          ? 'border-emerald-400/70 bg-emerald-400/15 text-emerald-200'
+                          : stage.status === 'current'
+                            ? 'border-sky-400/70 bg-sky-400/15 text-sky-200'
+                            : 'border-slate-700 bg-slate-900/80 text-slate-500'
+                      }`}>
+                        {stage.status === 'current' ? <span className="absolute inset-0 rounded-full animate-pulse bg-sky-400/10" /> : null}
+                        <span className="relative">{index + 1}</span>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.24em]">{stage.label}</p>
+                        <p className="mt-1 text-xs opacity-80">{stage.detail}</p>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
           {statusMessage ? (
             <div
               className={`mb-3 rounded border px-3 py-2 text-sm ${
-                staleMode
+                showStaleStatus
                   ? 'border-amber-700/70 bg-amber-950/30 text-amber-200'
                   : 'border-slate-800 bg-slate-900/40 text-slate-300'
               }`}
             >
-              {staleMode ? 'Read-only stale mode: ' : ''}
+              {showStaleStatus ? 'Read-only stale mode: ' : ''}
               {statusMessage}
+            </div>
+          ) : null}
+          {runCatalogState === 'error' ? (
+            <div className="mb-3 rounded border border-amber-700/60 bg-amber-950/30 px-3 py-2 text-sm text-amber-200">
+              Run catalog unavailable right now. BotLens will keep the current selection until the backend responds again.
             </div>
           ) : null}
           {error ? <div className="mb-3 rounded border border-rose-800/60 bg-rose-950/30 px-3 py-2 text-sm text-rose-200">{error}</div> : null}
@@ -977,8 +1255,38 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             </div>
           ) : null}
           {!snapshot ? (
-            <div className="rounded border border-slate-800 bg-slate-900/40 px-4 py-8 text-sm text-slate-400">
-              Waiting for runtime snapshot data...
+            <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/50 px-6 py-8">
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.12),transparent_40%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.10),transparent_35%)]" />
+              <div className="relative flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl border border-sky-500/30 bg-sky-500/10">
+                    <span className="absolute inset-2 rounded-xl border border-sky-400/20 animate-pulse" />
+                    <span className="absolute h-3 w-3 rounded-full bg-sky-300 shadow-[0_0_24px_rgba(125,211,252,0.75)]" />
+                    <span className="absolute h-7 w-7 rounded-full border border-sky-300/40 animate-ping" />
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-sky-300/80">
+                      {selectedRunIsLiveTarget ? 'Joining live runtime' : 'Loading archived run'}
+                    </p>
+                    <p className="mt-1 text-xl font-semibold text-slate-100">
+                      {selectedRunIsLiveTarget ? botLifecycle.label : selectedRun ? 'Historical snapshot bootstrap' : 'Waiting for run selection'}
+                    </p>
+                    <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-300">
+                      {statusMessage || botLifecycle.detail}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-2 text-xs text-slate-300 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Selected Run</p>
+                    <p className="mt-1 font-semibold text-slate-100">{shortRunId(selectedRunId)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Lifecycle Reason</p>
+                    <p className="mt-1 font-semibold text-slate-100">{botLifecycle.reason.replaceAll('_', ' ')}</p>
+                  </div>
+                </div>
+              </div>
             </div>
           ) : (
             <>
@@ -1061,6 +1369,17 @@ export function BotLensLiveModal({ bot, open, onClose }) {
                   </div>
                 </div>
               ) : null}
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{String(lensState.phase || '').replaceAll('_', ' ')}</p>
+                <button
+                  type="button"
+                  onClick={loadOlderHistory}
+                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!selectedRunId}
+                >
+                  Load older
+                </button>
+              </div>
               <div className="mb-3">
                 <OverlayToggleBar
                   overlays={overlayOptions}

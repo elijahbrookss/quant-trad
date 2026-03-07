@@ -6,10 +6,10 @@ import logging
 import math
 import os
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Mapping as AbcMapping
 from datetime import datetime
-from typing import Any, DefaultDict, Deque, Dict, Optional, Tuple
+from typing import Any, DefaultDict, Dict, Optional, Tuple
 
 from fastapi import WebSocket
 
@@ -18,6 +18,7 @@ from ..storage.storage import (
     get_latest_bot_runtime_run_id,
     upsert_bot_run_view_state,
 )
+from .botlens_series_service import build_live_tail_messages
 
 logger = logging.getLogger(__name__)
 
@@ -341,13 +342,12 @@ def _trim_chart_snapshot(raw_chart: Any) -> Dict[str, Any]:
 
 class BotTelemetryHub:
     def __init__(self) -> None:
-        self._viewers: DefaultDict[str, Dict[WebSocket, Dict[str, Any]]] = defaultdict(dict)
         self._trade_state: Dict[tuple[str, str], Dict[str, Dict[str, Any]]] = {}
-        self._recent_events: Dict[Tuple[str, str], Deque[Dict[str, Any]]] = {}
         self._latest_view_state: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._latest_run_by_bot: Dict[str, str] = {}
         self._persisted_seq: Dict[Tuple[str, str], int] = {}
         self._persist_lag_ms: Dict[Tuple[str, str], float] = {}
+        self._series_viewers: DefaultDict[Tuple[str, str], Dict[WebSocket, Dict[str, Any]]] = defaultdict(dict)
         self._ingest_queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=_INGEST_QUEUE_MAX)
         self._persist_queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=_PERSIST_QUEUE_MAX)
         self._ingest_task: Optional[asyncio.Task[None]] = None
@@ -458,55 +458,6 @@ class BotTelemetryHub:
             for _ in batch:
                 self._persist_queue.task_done()
 
-    async def _append_recent_event(self, event: Dict[str, Any]) -> None:
-        bot_id = str(event.get("bot_id") or "").strip()
-        run_id = str(event.get("run_id") or "").strip()
-        if not bot_id or not run_id:
-            return
-        key = (bot_id, run_id)
-        async with self._lock:
-            ring = self._recent_events.get(key)
-            if ring is None:
-                ring = deque(maxlen=_RING_SIZE)
-                self._recent_events[key] = ring
-            ring.append(dict(event))
-
-    async def _replay_recent_events(
-        self,
-        *,
-        bot_id: str,
-        run_id: str,
-        ws: WebSocket,
-        after_seq: int,
-    ) -> int:
-        key = (str(bot_id), str(run_id))
-        async with self._lock:
-            ring = list(self._recent_events.get(key) or [])
-        replay = [entry for entry in ring if int(entry.get("seq") or 0) > int(after_seq)]
-        if not replay:
-            return 0
-        replay.sort(key=lambda entry: int(entry.get("seq") or 0))
-        expected_next = int(after_seq) + 1
-        first_seq = int(replay[0].get("seq") or 0)
-        if first_seq != expected_next:
-            return 0
-        sent = 0
-        for event in replay:
-            try:
-                await ws.send_text(json.dumps(event))
-            except Exception:
-                await self.remove_viewer(bot_id=bot_id, ws=ws)
-                return sent
-            sent += 1
-
-        last_seq = int(replay[-1].get("seq") or after_seq)
-        async with self._lock:
-            state = self._viewers.get(str(bot_id), {}).get(ws)
-            if state is not None:
-                state["run_id"] = str(run_id)
-                state["last_seq"] = last_seq
-        return sent
-
     def _derive_trade_lifecycle_events(self, *, bot_id: str, run_id: str, trades: Any) -> list[Dict[str, Any]]:
         trade_list = list(trades) if isinstance(trades, list) else []
         current: Dict[str, Dict[str, Any]] = {}
@@ -583,50 +534,6 @@ class BotTelemetryHub:
         self._trade_state[key] = current
         return lifecycle
 
-    async def bootstrap(self, *, bot_id: str, run_id: Optional[str] = None) -> Dict[str, Any]:
-        await self._ensure_workers()
-        target_run = str(run_id or "").strip() or None
-        latest_view_state = await self._latest_view_state_for(bot_id=str(bot_id), run_id=target_run)
-        if latest_view_state:
-            target_run = str(latest_view_state.get("run_id") or "").strip() or target_run
-        if not target_run:
-            async with self._lock:
-                target_run = self._latest_run_by_bot.get(str(bot_id)) or target_run
-        if not target_run:
-            target_run = await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
-        if not target_run:
-            return {
-                "bot_id": str(bot_id),
-                "run_id": None,
-                "seq": 0,
-                "schema_version": _SCHEMA_VERSION,
-                "snapshot": None,
-                "state": "waiting",
-            }
-        if latest_view_state is None:
-            latest_view_state = await self._latest_view_state_for(bot_id=str(bot_id), run_id=target_run)
-        if latest_view_state is None:
-            return {
-                "bot_id": str(bot_id),
-                "run_id": target_run,
-                "seq": 0,
-                "schema_version": _SCHEMA_VERSION,
-                "snapshot": None,
-                "state": "waiting",
-            }
-        envelope = self._event_envelope(self._view_state_row_to_row(latest_view_state))
-        payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-        return {
-            "bot_id": str(bot_id),
-            "run_id": target_run,
-            "seq": int(envelope.get("seq") or 0),
-            "schema_version": int(envelope.get("schema_version") or _SCHEMA_VERSION),
-            "event_time": envelope.get("event_time"),
-            "known_at": envelope.get("known_at"),
-            "snapshot": payload.get("snapshot"),
-            "state": "ok",
-        }
-
     async def ingest(self, payload: Dict[str, Any]) -> None:
         await self._ensure_workers()
         item = {
@@ -675,6 +582,7 @@ class BotTelemetryHub:
             return
         raw_chart = view_envelope.get("payload") if isinstance(view_envelope, AbcMapping) else {}
         full_snapshot = _trim_chart_snapshot(raw_chart)
+        snapshot_runtime = dict(full_snapshot.get("runtime") or {}) if isinstance(full_snapshot.get("runtime"), AbcMapping) else {}
         snapshot_at = view_envelope.get("at") or payload.get("at")
         snapshot_known_at = view_envelope.get("known_at") or payload.get("known_at") or snapshot_at
         snapshot_schema_version = _resolve_schema_version(view_envelope.get("schema_version"))
@@ -693,6 +601,18 @@ class BotTelemetryHub:
                 previous_seq,
             )
             return
+        expected_next_seq = previous_seq + 1 if previous_seq > 0 else view_seq
+        seq_gap = max(0, view_seq - expected_next_seq)
+        resync_required = previous_seq > 0 and seq_gap > 0
+        if resync_required:
+            logger.warning(
+                "bot_telemetry_seq_gap_detected | bot_id=%s | run_id=%s | previous_seq=%s | incoming_seq=%s | seq_gap=%s | action=resync_required",
+                bot_id,
+                run_id,
+                previous_seq,
+                view_seq,
+                seq_gap,
+            )
         stream_snapshot = _build_overlay_delta_snapshot(previous=previous_snapshot, current=full_snapshot)
 
         view_state_row = {
@@ -709,6 +629,31 @@ class BotTelemetryHub:
         async with self._lock:
             self._latest_view_state[key] = dict(view_state_row)
             self._latest_run_by_bot[bot_id] = run_id
+
+        try:
+            from .bot_service import publish_runtime_update
+
+            await asyncio.to_thread(
+                publish_runtime_update,
+                bot_id,
+                {
+                    **snapshot_runtime,
+                    "status": str(snapshot_runtime.get("status") or "running"),
+                    "run_id": run_id,
+                    "seq": view_seq,
+                    "known_at": snapshot_known_at,
+                    "last_snapshot_at": snapshot_at,
+                    "warnings": list(full_snapshot.get("warnings") or []),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "bot_telemetry_runtime_broadcast_failed | bot_id=%s | run_id=%s | seq=%s | error=%s",
+                bot_id,
+                run_id,
+                view_seq,
+                exc,
+            )
 
         persist_item = {
             "row": view_state_row,
@@ -778,7 +723,9 @@ class BotTelemetryHub:
                 "snapshot_meta": {
                     "schema_version": snapshot_schema_version,
                     "known_at": snapshot_known_at,
-                    "overlay_stream_mode": "delta",
+                    "previous_seq": previous_seq,
+                    "seq_gap_from_previous": seq_gap,
+                    "resync_required": bool(resync_required),
                 },
                 "stream_metrics": {
                     "payload_bytes": payload_bytes,
@@ -790,163 +737,100 @@ class BotTelemetryHub:
                 "trade_lifecycle_events": lifecycle,
             },
         }
-        envelope = self._event_envelope(row)
-        await self._append_recent_event(envelope)
+        envelope = self._state_event_envelope(row)
         await self._broadcast_event(envelope)
+        await self._broadcast_series_live_tail(
+            run_id=run_id,
+            seq=view_seq,
+            known_at=snapshot_known_at,
+            previous_snapshot=previous_snapshot if isinstance(previous_snapshot, AbcMapping) else None,
+            current_snapshot=full_snapshot,
+        )
 
-    async def add_viewer(
+
+    async def _broadcast_event(self, event: Dict[str, Any]) -> None:
+        # State-delta fanout intentionally disabled for BotLens live model (series WS is canonical).
+        # Method exists for observability hooks/tests and future internal subscribers.
+        _ = event
+        return
+
+    async def add_series_viewer(
         self,
         *,
-        bot_id: str,
+        run_id: str,
+        series_key: str,
         ws: WebSocket,
-        run_id: Optional[str] = None,
-        since_seq: int = 0,
+        after_seq: int = 0,
     ) -> None:
         await self._ensure_workers()
         await ws.accept()
-        requested_run = str(run_id or "").strip() or None
-        requested_seq = max(0, _coerce_int(since_seq, default=0))
-        if requested_run is None:
-            async with self._lock:
-                requested_run = self._latest_run_by_bot.get(str(bot_id)) or requested_run
-        if requested_run is None:
-            latest_view_state = await self._latest_view_state_for(bot_id=str(bot_id), run_id=None)
-            if latest_view_state is not None:
-                requested_run = str(latest_view_state.get("run_id") or "").strip() or None
-        if requested_run is None:
-            requested_run = await asyncio.to_thread(get_latest_bot_runtime_run_id, str(bot_id))
-
+        key = (str(run_id), str(series_key).upper())
         async with self._lock:
-            self._viewers[str(bot_id)][ws] = {
-                "run_id": requested_run,
-                "last_seq": requested_seq,
-            }
+            self._series_viewers[key][ws] = {"last_seq": max(0, int(after_seq or 0))}
 
-        if not requested_run:
-            return
-
-        if requested_seq > 0:
-            replayed = await self._replay_recent_events(
-                bot_id=str(bot_id),
-                run_id=str(requested_run),
-                ws=ws,
-                after_seq=requested_seq,
-            )
-            if replayed > 0:
-                return
-
-        latest_for_run = await self._latest_view_state_for(bot_id=str(bot_id), run_id=requested_run)
-        if latest_for_run is None:
-            return
-        envelope = self._event_envelope(self._view_state_row_to_row(latest_for_run))
-        envelope_seq = int(envelope.get("seq") or 0)
-        if envelope_seq <= requested_seq:
-            return
-        try:
-            await ws.send_text(json.dumps(envelope))
-        except Exception:
-            await self.remove_viewer(bot_id=bot_id, ws=ws)
-            return
+    async def remove_series_viewer(self, *, run_id: str, series_key: str, ws: WebSocket) -> None:
+        key = (str(run_id), str(series_key).upper())
         async with self._lock:
-            state = self._viewers.get(str(bot_id), {}).get(ws)
-            if state is not None:
-                state["run_id"] = str(envelope.get("run_id") or state.get("run_id") or "")
-                state["last_seq"] = int(envelope.get("seq") or state.get("last_seq") or 0)
-
-    async def remove_viewer(self, *, bot_id: str, ws: WebSocket) -> None:
-        async with self._lock:
-            viewers = self._viewers.get(str(bot_id))
+            viewers = self._series_viewers.get(key)
             if not viewers:
                 return
             viewers.pop(ws, None)
             if not viewers:
-                self._viewers.pop(str(bot_id), None)
+                self._series_viewers.pop(key, None)
 
-    async def _broadcast_event(self, event: Dict[str, Any]) -> None:
-        bot_id = str(event.get("bot_id") or "").strip()
-        run_id = str(event.get("run_id") or "").strip()
-        seq = int(event.get("seq") or 0)
-        if not bot_id or not run_id or seq <= 0:
-            return
-
+    async def _broadcast_series_live_tail(
+        self,
+        *,
+        run_id: str,
+        seq: int,
+        known_at: Any,
+        previous_snapshot: Optional[AbcMapping],
+        current_snapshot: Dict[str, Any],
+    ) -> None:
         async with self._lock:
-            viewers = list(self._viewers.get(bot_id, {}).items())
-
-        for ws, state in viewers:
-            viewer_run = str(state.get("run_id") or "").strip() or None
-            viewer_last_seq = int(state.get("last_seq") or 0)
-
-            # Auto-attach to latest run when run_id changes.
-            if viewer_run is None or viewer_run != run_id:
-                viewer_last_seq = 0
-                viewer_run = run_id
-            if seq <= viewer_last_seq:
+            targets = list(self._series_viewers.items())
+        for key, viewers in targets:
+            target_run, series_key = key
+            if str(target_run) != str(run_id):
                 continue
-
-            try:
-                await ws.send_text(json.dumps(event))
-            except Exception:
-                logger.warning("bot_telemetry_viewer_send_failed | bot_id=%s", bot_id)
-                await self.remove_viewer(bot_id=bot_id, ws=ws)
+            messages = build_live_tail_messages(
+                run_id=str(run_id),
+                series_key=str(series_key),
+                seq=int(seq),
+                known_at=known_at,
+                previous_snapshot=previous_snapshot,
+                current_snapshot=current_snapshot,
+            )
+            if not messages:
                 continue
-
-            async with self._lock:
-                slot = self._viewers.get(bot_id, {}).get(ws)
-                if slot is not None:
-                    slot["run_id"] = run_id
-                    slot["last_seq"] = seq
+            for ws, state in list(viewers.items()):
+                last_seq = int(state.get("last_seq") or 0)
+                if int(seq) <= last_seq:
+                    continue
+                try:
+                    for message in messages:
+                        await ws.send_text(json.dumps(message))
+                except Exception:
+                    await self.remove_series_viewer(run_id=str(run_id), series_key=str(series_key), ws=ws)
+                    continue
+                async with self._lock:
+                    slot = self._series_viewers.get((str(run_id), str(series_key).upper()), {}).get(ws)
+                    if slot is not None:
+                        slot["last_seq"] = int(seq)
 
     @staticmethod
-    def _event_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
+    def _state_event_envelope(row: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "type": "bot_runtime_event",
+            "type": "botlens_state_delta",
             "bot_id": str(row.get("bot_id") or ""),
             "run_id": str(row.get("run_id") or ""),
-            "event_id": str(row.get("event_id") or ""),
             "seq": int(row.get("seq") or 0),
-            "event_type": str(row.get("event_type") or "state_delta"),
-            "critical": bool(row.get("critical", False)),
             "schema_version": int(row.get("schema_version") or _SCHEMA_VERSION),
             "event_time": row.get("event_time"),
             "known_at": row.get("known_at"),
             "payload": _sanitize_json(row.get("payload") or {}),
         }
 
-    @staticmethod
-    def _view_state_row_to_row(view_row: Dict[str, Any]) -> Dict[str, Any]:
-        raw_payload = view_row.get("payload")
-        payload = raw_payload if isinstance(raw_payload, AbcMapping) else {}
-        snapshot = _trim_chart_snapshot(payload if isinstance(payload, AbcMapping) else {})
-        schema_version = _resolve_schema_version(view_row.get("schema_version"))
-        snapshot_seq = _coerce_int(view_row.get("seq"), default=0)
-        summary = {
-            "series_count": len(snapshot.get("series") or []),
-            "trade_count": len(snapshot.get("trades") or []),
-            "warning_count": len(snapshot.get("warnings") or []),
-        }
-        known_at = view_row.get("known_at") or view_row.get("updated_at")
-        event_time = view_row.get("event_time") or view_row.get("updated_at")
-        return {
-            "event_id": f"{view_row.get('bot_id')}:{view_row.get('run_id')}:view_state:{snapshot_seq}",
-            "bot_id": str(view_row.get("bot_id") or ""),
-            "run_id": str(view_row.get("run_id") or ""),
-            "seq": snapshot_seq,
-            "event_type": "state_delta",
-            "critical": False,
-            "schema_version": schema_version,
-            "event_time": event_time,
-            "known_at": known_at,
-            "payload": {
-                "snapshot": snapshot,
-                "summary": summary,
-                "snapshot_meta": {
-                    "schema_version": schema_version,
-                    "known_at": known_at,
-                    "overlay_stream_mode": "replace",
-                },
-                "trade_lifecycle_events": [],
-            },
-        }
 
 
 telemetry_hub = BotTelemetryHub()
