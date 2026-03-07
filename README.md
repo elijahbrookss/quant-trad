@@ -1,181 +1,190 @@
 # quant-trad
 
-A modular quantitative trading platform for automated strategy development, backtesting, and live execution across equities, futures, and crypto markets.
+Quant-trad is a quantitative trading platform for research, strategy evaluation, execution realism, and playback inspection.
 
-## What is this?
+The repo is organized around one core idea: trading behavior should be explainable from a single runtime timeline, not reconstructed later from loosely related artifacts.
 
-**quant-trad** is a framework for building and running algorithmic trading strategies with:
+## What This Repo Is
 
-- **Multi-asset support** - Trade equities (Alpaca), futures/options (Interactive Brokers), and crypto (CCXT exchanges)
-- **Modular indicators** - Composable technical indicators with incremental caching for performance
-- **Signal-driven architecture** - Define trading rules as signals that trigger on market conditions
-- **Walk-forward backtesting** - Test strategies on historical data with realistic execution simulation
-- **Live execution** - Deploy validated strategies to paper or live trading accounts
-- **Observability stack** - Grafana dashboards, Loki logs, and TimescaleDB for performance tracking
+Quant-trad separates responsibilities into explicit layers:
 
-This is a **work in progress** but contributions are welcome from frontier developers comfortable with evolving APIs.
+- QuantLab: research and indicator exploration
+- Strategy: decision logic from indicator outputs
+- Bot: execution realism, fills, costs, risk, and lifecycle outcomes
+- Playback / BotLens: audit and debugging surfaces for what the runtime actually did
+
+The system contract is strict about live-equivalent sequencing. Derived outputs are valid only when they respect known-at timing and can be explained by sequential candle arrival.
+
+## Platform Guarantees
+
+These are the semantics the repo is built around:
+
+- Live-equivalent evaluation: logic must hold under sequential market-data arrival
+- Known-at causality: artifacts are usable only when `known_at <= evaluation_time`
+- Determinism: fixed inputs, params, and versions should produce stable outputs
+- Layer integrity: research, decision, execution, and playback stay separated
+- Single runtime path: `initialize -> apply_bar -> snapshot`
+- Playback is an audit surface, not a demo layer
+
+If code conflicts with these semantics, the contracts in [`docs/agents/`](docs/agents/) are the source of truth.
+
+## Main Components
+
+- `src/engines/indicator_engine`: indicator execution and snapshot flow
+- `src/engines/bot_runtime`: bot runtime engine and execution semantics
+- `src/indicators`: indicator implementations and runtime-facing payloads
+- `src/signals`: signal rules, overlays, and runtime signal plumbing
+- `src/strategies`: strategy logic built on indicator and signal outputs
+- `portal/backend`: FastAPI services for bots, data, storage, reports, and APIs
+- `portal/frontend`: React/Vite UI including bot cards, BotLens, and operational views
+- `docker/`: compose stack, observability services, database, and broker support
 
 ## Quick Start
 
-**Prerequisites:** Docker, Python 3.10+, Make
+Prerequisites:
+
+- Docker
+- GNU Make
+- Python 3.12+ if you want to run local tooling outside Docker
+
+Create local secrets:
 
 ```bash
-# Clone and setup
-git clone https://github.com/elijahbrookss/quant-trad.git
-cd quant-trad
-cp secrets.env.example secrets.env  # Add your API keys
-
-# Start the stack
-make build up
-
-# View logs
-make logs SERVICE=backend
+cp secrets.env.example secrets.env
 ```
 
-**Services:**
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:8000
-- Grafana: http://localhost:3000
-- pgAdmin: http://localhost:8080
+Config file roles:
 
-## Core Concepts
+- `.env`: checked-in local defaults for root Python tooling and test bootstrap
+- `.env.test`: docker-compose test defaults
+- `secrets.env`: private credentials and operator overrides
+- `portal/frontend/.env`: frontend Vite defaults
 
-### 1. **Indicators**
-Technical indicators compute market signals from OHLCV data. They support:
-- **Incremental caching** - Reuse computed results across runs (e.g., cache daily profiles, only compute new days)
-- **Overlay rendering** - Generate chart overlays (boxes, markers, lines) for visualization
-- **Composition** - Combine simple indicators into complex strategies
-
-Example indicators: Market Profile (TPO), VWAP, Moving Averages, RSI
-
-### 2. **Signals**
-Signals represent trading events triggered by indicator conditions:
-- `breakout` - Price breaks through a key level
-- `retest` - Price returns to test a previous breakout level
-- `reversal` - Trend change detected
-- Custom signal types for strategy-specific logic
-
-### 3. **Strategies**
-Strategies orchestrate indicators and signals into complete trading systems:
-- Define entry/exit rules
-- Manage position sizing and risk
-- Handle multi-timeframe analysis
-- Track performance metrics
-
-### 4. **Data Providers**
-Pluggable data sources for market data:
-- **Alpaca** - Equities and crypto (US markets)
-- **Interactive Brokers** - Futures, options, global equities
-- **CCXT** - 100+ cryptocurrency exchanges
-- **TimescaleDB** - Local OHLCV storage with time-series optimization
-
-## Development Workflow
-
-This project uses **Docker-based development** for consistency:
+Bring up the core stack:
 
 ```bash
-# Daily workflow
-make build up          # Build images and start stack
-make logs              # Watch all logs
-make restart BUILD=1   # Rebuild and restart
-make down              # Stop everything
-
-# Testing
-make test              # Run test suite
-make fmt               # Format code
-make lint              # Check code quality
-
-# Database
-make ps                # Show running containers
+make up BUILD=1 STACK_PROFILES=core
 ```
 
-For detailed commands: `make help`
+This starts:
 
-## Project Structure
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:8000`
+- TimescaleDB: `localhost:15432`
+- pgAdmin: `http://localhost:8080`
 
+If you want observability as well:
+
+```bash
+make up BUILD=1 STACK_PROFILES=all
 ```
-quant-trad/
-├── src/
-│   ├── indicators/          # Technical indicators with caching
-│   ├── signals/             # Signal generation and overlays
-│   ├── strategies/          # Trading strategy implementations
-│   ├── data_providers/      # Market data integrations
-│   └── core/                # Shared utilities
-├── portal/
-│   ├── backend/             # FastAPI application
-│   └── frontend/            # React/Vite UI
-├── docker/                  # Docker Compose services
-├── tests/                   # Test suite
-└── docs/                    # Additional documentation
+
+That adds:
+
+- Grafana: `http://localhost:3000`
+- Loki: `http://localhost:3100`
+
+## Daily Workflow
+
+Common commands:
+
+```bash
+make up BUILD=1 STACK_PROFILES=core   # build and start the core stack
+make logs SERVICE=backend             # tail backend logs
+make restart BUILD=1                  # rebuild/restart the current stack
+make ps                               # inspect running services
+make down                             # stop and remove containers
+make test                             # run tests
+make fmt                              # format code
+make lint                             # lint code
+make sync-docs                        # sync docs to your Obsidian/docs target
 ```
+
+Run `make help` for the full command set.
 
 ## Configuration
 
-Create `secrets.env` with your API credentials:
+Runtime configuration is split across a few files on purpose:
 
-```bash
-# Required for equities
-ALPACA_API_KEY=your_key
-ALPACA_SECRET_KEY=your_secret
+- `.env`: tracked local defaults for Python tooling, local DB wiring, and root test bootstrap
+- `.env.test`: tracked defaults for `docker/docker-compose.test.yml`
+- `secrets.env`: untracked private credentials and machine-specific overrides
+- `portal/frontend/.env`: frontend API base defaults for Vite
 
-# Optional: Interactive Brokers
-IBKR_TWS_USERNAME=your_username
-IBKR_TWS_PASSWORD=your_password
-IBKR_TRADING_MODE=paper  # or 'live'
+Tests load `.env` and `secrets.env`. The Docker test stack uses `.env.test`.
 
-# Optional: Crypto exchanges (CCXT)
-CCXT_BINANCE_API_KEY=your_key
-CCXT_BINANCE_API_SECRET=your_secret
+Common integrations in this repo include:
+
+- Alpaca
+- Interactive Brokers
+- CCXT-backed crypto exchanges
+- TimescaleDB/Postgres
+- Grafana / Loki
+
+See [`secrets.env.example`](secrets.env.example) for the available settings and operational knobs. The platform uses a single database DSN: `PG_DSN`.
+
+## Repository Map
+
+```text
+quant-trad/
+├── src/
+│   ├── engines/            # indicator and bot runtime engines
+│   ├── indicators/         # indicator implementations
+│   ├── signals/            # signal rules and overlays
+│   ├── strategies/         # strategy definitions
+│   ├── data_providers/     # provider integrations
+│   └── core/               # shared runtime utilities
+├── portal/
+│   ├── backend/            # FastAPI backend and services
+│   └── frontend/           # React/Vite frontend
+├── docker/                 # compose stack and service images
+├── docs/
+│   ├── agents/             # canonical system/runtime contracts
+│   └── architecture/       # focused architecture notes
+└── tests/                  # test coverage
 ```
 
-See [secrets.env.example](secrets.env.example) for all options.
+## Recommended Reading
 
-## Documentation
+Start here if you are new to the repo:
 
-For detailed guides on architecture, indicator development, backtesting, and deployment:
+1. [`docs/agents/README.md`](docs/agents/README.md)
+2. [`docs/agents/00_system_contract.md`](docs/agents/00_system_contract.md)
+3. [`docs/agents/01_runtime_contract.md`](docs/agents/01_runtime_contract.md)
+4. [`docs/agents/02_execution_playback_contract.md`](docs/agents/02_execution_playback_contract.md)
+5. [`docs/agents/03_engineering_contract.md`](docs/agents/03_engineering_contract.md)
 
-**📚 [quant-trad.gitbook.io/docs](https://quant-trad.gitbook.io/docs/)**
+Then use these architecture docs for current implementation details:
 
-Topics covered:
-- Indicator caching system
-- Signal overlay rendering
-- Walk-forward backtesting methodology
-- Strategy development guide
-- Data provider integration
-- Production deployment
+- [`docs/architecture/ENGINE_OVERVIEW.md`](docs/architecture/ENGINE_OVERVIEW.md)
+- [`docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md`](docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md)
+- [`docs/architecture/BOT_RUNTIME_DOCS_HUB.md`](docs/architecture/BOT_RUNTIME_DOCS_HUB.md)
+- [`docs/architecture/RUNTIME_EVENT_MODEL_V1.md`](docs/architecture/RUNTIME_EVENT_MODEL_V1.md)
+- [`docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`](docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md)
+
+## Current State
+
+This is an active development repo, not a polished end-user product.
+
+That means:
+
+- architecture and APIs are still evolving
+- correctness and semantic consistency are prioritized over convenience
+- logs are treated as part of the product
+- invalid runtime states should fail loudly, not be hidden
+
+Use caution before pointing this at real capital. The repo is built to be explainable first, optimized second.
 
 ## Contributing
 
-Contributions are welcome! This project is in active development and APIs may change.
+Before making non-trivial changes:
 
-**Good first contributions:**
-- New indicator implementations
-- Data provider integrations
-- Strategy templates
-- Documentation improvements
-- Bug fixes and tests
-
-Before contributing:
-1. Read the [GitBook docs](https://quant-trad.gitbook.io/docs/) to understand the architecture
-2. Check existing issues and PRs
-3. Open an issue to discuss major changes
-4. Follow the existing code style (`make fmt lint`)
-5. Add tests for new features (`make test`)
-
-## Status
-
-⚠️ **Active Development** - APIs are stabilizing but expect breaking changes. Not recommended for production trading without thorough testing.
-
-Current focus areas:
-- Strategy backtesting framework
-- Real-time signal processing
-- Performance optimization (caching, database queries)
-- Production deployment tooling
+1. Read the system and runtime contracts in [`docs/agents/`](docs/agents/)
+2. Preserve the layer boundaries between research, strategy, execution, and playback
+3. Prefer extending canonical snapshot/runtime contracts over adding alternate reconstruction paths
+4. Add tests or targeted verification when behavior changes
+5. Run `make sync-docs` after doc updates
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details
-
----
-
-**Questions?** Check the [GitBook docs](https://quant-trad.gitbook.io/docs/) or open an issue.
+MIT. See [`LICENSE`](LICENSE).
