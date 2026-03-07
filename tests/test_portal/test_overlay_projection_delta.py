@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from engines.bot_runtime.core.indicator_state.overlay_projection import project_overlay_delta
-from engines.bot_runtime.core.indicator_state.contracts import IndicatorStateSnapshot, OverlayProjectionInput
+import pytest
+
+pytest.importorskip("numpy")
+
+from engines.indicator_engine.overlay_projection import project_overlay_delta
+from engines.indicator_engine.contracts import IndicatorStateSnapshot, OverlayProjectionInput
 from indicators.market_profile.overlays import market_profile_overlay_transformer
 
 

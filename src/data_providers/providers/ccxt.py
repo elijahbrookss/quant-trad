@@ -5,6 +5,7 @@ import datetime as dt
 from typing import Optional, Tuple, Union, Dict, Any
 
 import pandas as pd
+
 import ccxt
 
 from core.logger import logger
