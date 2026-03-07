@@ -14,7 +14,7 @@ This document captures the suite-routing strategy for test reliability without s
 1. **targeted-suites** (matrix): `core`, `provider`, `web`
 2. **integration-tests** (depends on targeted suites)
 
-Suite commands are centralized in `scripts/ci/run_test_suite.sh`.
+Suite commands are centralized in `scripts/ci/run_test_suite.sh` and run directly on the GitHub runner by default.
 
 ## Why this structure
 
@@ -40,3 +40,44 @@ Suite commands are centralized in `scripts/ci/run_test_suite.sh`.
 
 If you change suite contents, update only `scripts/ci/run_test_suite.sh`.
 Workflow jobs should continue to call that script and avoid duplicating pytest arguments.
+
+
+## Local CI Reproduction
+
+To mimic GitHub Actions locally (default host mode):
+
+1. Install dependencies:
+   - `python -m pip install --upgrade pip`
+   - `pip install -r requirements.txt`
+2. Run targeted suites exactly as CI does:
+   - `./scripts/ci/run_test_suite.sh core`
+   - `./scripts/ci/run_test_suite.sh provider`
+   - `./scripts/ci/run_test_suite.sh web`
+3. Run full integration suite:
+   - `./scripts/ci/run_test_suite.sh integration`
+
+## Optional Container Reproduction
+
+If you want to debug container-specific issues locally, run with:
+
+- `CI_USE_DOCKER=1 ./scripts/ci/run_test_suite.sh core`
+- `CI_USE_DOCKER=1 ./scripts/ci/run_test_suite.sh integration`
+
+### Troubleshooting: wait script permission errors
+
+If you see `Permission denied` for `wait-for-db.sh` inside a bind-mounted container, invoke it through bash:
+- `bash /app/scripts/wait-for-db.sh ...`
+
+This avoids dependency on executable bits from host mounts and matches the robust path used in the container wrapper path.
+
+
+## Agent CI Preflight Checklist
+
+Before attempting local CI reproduction, run:
+
+- `bash -n scripts/ci/run_test_suite.sh`
+- `python -m pip --version`
+
+Before optional container reproduction, also run:
+
+- `command -v docker`
