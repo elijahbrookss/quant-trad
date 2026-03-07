@@ -5,7 +5,7 @@
 - `Component`: Signal generation and consumption across QuantLab, Strategy Preview, and Bot Runtime
 - `Owner/Domain`: Indicators + Strategies + Bot Runtime
 - `Doc Version`: 1.0
-- `Related Contracts`: `docs/agents/00_system_contract.md`, `docs/agents/01_runtime_contract.md`, `docs/architecture/INDICATOR_AUTHORING_CONTRACT.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`
+- `Related Contracts`: [[00_system_contract]], [[01_runtime_contract]], [[INDICATOR_AUTHORING_CONTRACT]], [[RUNTIME_EVENT_MODEL_V1]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]]
 
 ## 1) Problem and scope
 

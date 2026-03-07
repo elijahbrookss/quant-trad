@@ -7,7 +7,7 @@ This document defines how to add or modify indicators without creating drift.
 - `Component`: Indicator authoring and runtime integration contract
 - `Owner/Domain`: Indicators / Runtime Contracts
 - `Doc Version`: 1.1
-- `Related Contracts`: `docs/agents/01_runtime_contract.md`, `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`, `src/engines/indicator_engine/contracts.py`, `src/engines/indicator_engine/plugins.py`
+- `Related Contracts`: [[00_system_contract]], [[01_runtime_contract]], [[ENGINE_OVERVIEW]], `src/engines/indicator_engine/contracts.py`, `src/engines/indicator_engine/plugins.py`
 
 ## 1) Problem and scope
 
