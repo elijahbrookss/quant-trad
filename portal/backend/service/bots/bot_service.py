@@ -7,10 +7,12 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Mapping
 
+from .bot_state_projection import project_bot_state, project_bot_states
 from .bot_stream import BotStreamManager
+from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
 from .runtime_control_service import BotRuntimeControlService
-from ..storage.storage import get_latest_bot_run_view_state
+from ..storage.storage import get_latest_bot_run_view_state, list_bot_runs
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +26,42 @@ def _broadcast_bot_stream(event: str, payload: Dict[str, Any]) -> None:
 
 
 def list_bots() -> List[Dict[str, object]]:
-    return _config_service.list_bots()
+    return project_bot_states(_config_service.list_bots())
+
+
+def _broadcast_projected_bot(bot_id: str, *, inspect_container: bool = True) -> None:
+    try:
+        bot = _config_service.get_bot(bot_id)
+    except KeyError:
+        logger.warning("bot_stream_projection_missing | bot_id=%s", bot_id)
+        return
+    _broadcast_bot_stream("bot", {"bot": project_bot_state(bot, inspect_container=inspect_container)})
+
+
+def publish_runtime_update(bot_id: str, runtime: Mapping[str, Any]) -> None:
+    _broadcast_bot_stream(
+        "bot_runtime",
+        {
+            "bot_id": bot_id,
+            "runtime": dict(runtime or {}),
+        },
+    )
 
 
 def create_bot(name: str, **payload: object) -> Dict[str, object]:
     bot = _config_service.create_bot(name, **payload)
     logger.info("[BotService] bot created", extra={"bot_id": bot.get("id"), "run_type": bot.get("run_type")})
-    _broadcast_bot_stream("bot", {"bot": bot})
-    return bot
+    projected = project_bot_state(bot)
+    _broadcast_bot_stream("bot", {"bot": projected})
+    return projected
 
 
 def update_bot(bot_id: str, **payload: object) -> Dict[str, object]:
     bot = _config_service.update_bot(bot_id, **payload)
     logger.info("[BotService] bot updated", extra={"bot_id": bot_id})
-    _broadcast_bot_stream("bot", {"bot": bot})
-    return bot
+    projected = project_bot_state(bot)
+    _broadcast_bot_stream("bot", {"bot": projected})
+    return projected
 
 
 def delete_bot_record(bot_id: str) -> None:
@@ -56,7 +79,50 @@ def stop_bot(bot_id: str) -> Dict[str, object]:
 
 
 def get_bot(bot_id: str) -> Dict[str, object]:
-    return _config_service.get_bot(bot_id)
+    return project_bot_state(_config_service.get_bot(bot_id))
+
+
+def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
+    current = get_bot(bot_id)
+    active_run_id = str(current.get("active_run_id") or "").strip() or None
+    rows = list_bot_runs(bot_id=bot_id)
+
+    def _sort_key(run: Mapping[str, Any]) -> tuple[str, str]:
+        return (
+            str(run.get("started_at") or run.get("updated_at") or run.get("created_at") or ""),
+            str(run.get("run_id") or ""),
+        )
+
+    ordered = sorted(rows, key=_sort_key, reverse=True)
+    selected = ordered[: max(1, int(limit or 25))]
+    projected_runs: list[Dict[str, Any]] = []
+    for run in selected:
+        run_id = str(run.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key="bot")
+        view_payload = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
+        runtime_payload = dict(view_payload.get("runtime") or {}) if isinstance(view_payload.get("runtime"), Mapping) else {}
+        summary = dict(run.get("summary") or {})
+        if not summary and isinstance(runtime_payload.get("stats"), Mapping):
+            summary = dict(runtime_payload.get("stats") or {})
+        projected_runs.append(
+            {
+                **dict(run),
+                "is_active": run_id == active_run_id,
+                "runtime_status": str(runtime_payload.get("status") or run.get("status") or ""),
+                "view_state_available": bool(view_row),
+                "last_snapshot_at": view_row.get("event_time") if isinstance(view_row, Mapping) else None,
+                "known_at": view_row.get("known_at") if isinstance(view_row, Mapping) else None,
+                "seq": int(view_row.get("seq") or 0) if isinstance(view_row, Mapping) else 0,
+                "summary": summary,
+            }
+        )
+    return {
+        "bot_id": bot_id,
+        "active_run_id": active_run_id,
+        "runs": projected_runs,
+    }
 
 
 def bots_stream():
@@ -122,6 +188,13 @@ def bot_settings_catalog() -> Dict[str, Any]:
     return _config_service.settings_catalog()
 
 
+def _handle_watchdog_orphan(bot_id: str, _bot: Dict[str, Any]) -> None:
+    _broadcast_projected_bot(bot_id)
+
+
+get_watchdog().set_orphan_callback(_handle_watchdog_orphan)
+
+
 __all__ = [
     "create_bot",
     "delete_bot_record",
@@ -133,5 +206,7 @@ __all__ = [
     "bots_stream",
     "runtime_capacity",
     "bot_settings_catalog",
+    "list_bot_runs_for_bot",
+    "publish_runtime_update",
     "watchdog_status",
 ]

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, Mapping
 
 from .bot_stream import BotStreamManager
+from .bot_state_projection import project_bot_state
 from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
 from .runner import BotRunner
@@ -56,6 +57,12 @@ class BotRuntimeControlService:
 
         runner = self._resolve_runner()
         from ..storage.storage import upsert_bot
+        watchdog = get_watchdog()
+        bot["status"] = "starting"
+        bot["runner_id"] = watchdog.runner_id
+        bot["last_run_at"] = self._now_iso()
+        upsert_bot(bot)
+        self._broadcast("bot", {"bot": project_bot_state(bot)})
 
         try:
             container_id = runner.start_bot(bot=bot)
@@ -70,29 +77,32 @@ class BotRuntimeControlService:
             bot["runner_id"] = None
             bot["last_run_artifact"] = {"error": error_payload}
             upsert_bot(bot)
+            projected = project_bot_state(bot)
+            projected["runtime"] = {
+                **dict(projected.get("runtime") or {}),
+                "status": "error",
+                "error": error_payload,
+            }
             self._broadcast(
                 "bot",
                 {
-                    "bot": {
-                        **bot,
-                        "runtime": {
-                            "status": "error",
-                            "error": error_payload,
-                        },
-                    }
+                    "bot": projected
                 },
             )
             logger.error("bot_container_start_failed | bot_id=%s | error=%s", bot_id, exc)
             raise
 
-        bot["status"] = "running"
-        bot["runner_id"] = container_id
-        bot["last_run_at"] = self._now_iso()
-
-        upsert_bot(bot)
-        logger.info("bot_container_started | bot_id=%s | container_id=%s", bot_id, container_id)
-        self._broadcast("bot", {"bot": bot})
-        return bot
+        watchdog.register_bot(bot_id)
+        refreshed = self._config.get_bot(bot_id)
+        logger.info(
+            "bot_container_started | bot_id=%s | container_id=%s | runner_id=%s",
+            bot_id,
+            container_id,
+            watchdog.runner_id,
+        )
+        projected = project_bot_state(refreshed)
+        self._broadcast("bot", {"bot": projected})
+        return projected
 
     def stop_bot(self, bot_id: str) -> Dict[str, object]:
         runner = self._resolve_runner()
@@ -109,8 +119,9 @@ class BotRuntimeControlService:
 
         upsert_bot(bot)
         logger.info("bot_container_stopped | bot_id=%s", bot_id)
-        self._broadcast("bot", {"bot": bot})
-        return bot
+        projected = project_bot_state(bot)
+        self._broadcast("bot", {"bot": projected})
+        return projected
 
 
     def bots_stream(self):

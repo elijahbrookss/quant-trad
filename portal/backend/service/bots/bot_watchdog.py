@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import threading
 from typing import Callable, Dict, List, Optional, Set
 
@@ -46,6 +45,7 @@ from ..storage.storage import (
     mark_bot_crashed,
     update_bot_heartbeat,
 )
+from .runner import DockerBotRunner
 
 logger = logging.getLogger(__name__)
 
@@ -262,30 +262,32 @@ class BotWatchdog:
 
         failed: List[str] = []
         for bot in load_bots():
-            if str(bot.get("status") or "").lower() != "running":
+            status = str(bot.get("status") or "").lower()
+            if status not in {
+                "starting",
+                "running",
+                "paused",
+                "degraded",
+                "telemetry_degraded",
+            }:
                 continue
-            container_id = str(bot.get("runner_id") or "").strip()
-            if not container_id:
+            if status == "starting" and not bot.get("heartbeat_at"):
                 continue
-            proc = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", container_id],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            is_running = proc.returncode == 0 and str(proc.stdout or "").strip().lower() == "true"
-            if is_running:
-                continue
-            bot_id = str(bot.get("id") or "")
+            bot_id = str(bot.get("id") or "").strip()
             if not bot_id:
                 continue
-            if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_id}"):
+            container = DockerBotRunner.inspect_bot_container(bot_id)
+            if bool(container.get("running")):
+                continue
+            container_name = str(container.get("name") or "").strip()
+            if mark_bot_crashed(bot_id, reason=f"container_not_running:{container_name}"):
                 failed.append(bot_id)
                 logger.error(
-                    "bot_watchdog_container_missing | bot_id=%s | container_id=%s | stderr=%s",
+                    "bot_watchdog_container_missing | bot_id=%s | container_name=%s | container_status=%s | error=%s",
                     bot_id,
-                    container_id,
-                    str(proc.stderr or "").strip(),
+                    container_name,
+                    container.get("status"),
+                    container.get("error"),
                 )
         return failed
 

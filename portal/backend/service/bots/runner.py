@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Any, Dict, Mapping, Protocol
 
 logger = logging.getLogger(__name__)
 DEFAULT_BOT_RUNTIME_NETWORK = "quant-trad_quanttrad"
@@ -32,8 +33,12 @@ class DockerBotRunner:
             raise RuntimeError("BOT_RUNTIME_NETWORK is required for docker bot runner")
         return cls(image=image, network=network)
 
+    @staticmethod
+    def container_name_for(bot_id: str, project: str = "quant-trad-bots") -> str:
+        return f"{project}-{bot_id}"
+
     def _container_name(self, bot_id: str) -> str:
-        return f"{self.project}-{bot_id}"
+        return self.container_name_for(bot_id, project=self.project)
 
     @staticmethod
     def _run_docker(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -60,6 +65,56 @@ class DockerBotRunner:
             f"{DEFAULT_BOT_RUNTIME_NETWORK}. "
             "Set BOT_RUNTIME_NETWORK explicitly to the exact docker network name in use."
         )
+
+    @classmethod
+    def inspect_bot_container(
+        cls,
+        bot_id: str,
+        *,
+        project: str = "quant-trad-bots",
+    ) -> Dict[str, Any]:
+        container_name = cls.container_name_for(str(bot_id or "").strip(), project=project)
+        if not container_name or container_name.endswith("-"):
+            raise RuntimeError("bot id is required to inspect docker runtime")
+
+        proc = cls._run_docker(["docker", "inspect", container_name])
+        stderr = str(proc.stderr or "").strip()
+        stdout = str(proc.stdout or "").strip()
+        if proc.returncode != 0:
+            missing_markers = ("No such object", "No such container")
+            missing = any(marker in stderr or marker in stdout for marker in missing_markers)
+            return {
+                "name": container_name,
+                "status": "missing" if missing else "unknown",
+                "running": False,
+                "id": None,
+                "started_at": None,
+                "finished_at": None,
+                "exit_code": None,
+                "error": stderr or stdout or None,
+            }
+
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"docker inspect returned invalid json for {container_name}: {exc}"
+            ) from exc
+        if not isinstance(payload, list) or not payload:
+            raise RuntimeError(f"docker inspect returned empty payload for {container_name}")
+        container = payload[0] if isinstance(payload[0], dict) else {}
+        state = container.get("State") if isinstance(container.get("State"), dict) else {}
+        status = str(state.get("Status") or "").strip().lower() or "unknown"
+        return {
+            "name": container_name,
+            "status": status,
+            "running": bool(state.get("Running")),
+            "id": str(container.get("Id") or "").strip() or None,
+            "started_at": str(state.get("StartedAt") or "").strip() or None,
+            "finished_at": str(state.get("FinishedAt") or "").strip() or None,
+            "exit_code": state.get("ExitCode"),
+            "error": str(state.get("Error") or "").strip() or None,
+        }
 
     def start_bot(self, *, bot: Mapping[str, object]) -> str:
         bot_id = str(bot.get("id") or "").strip()
