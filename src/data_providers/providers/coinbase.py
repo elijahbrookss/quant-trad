@@ -29,6 +29,8 @@ from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
     label="Coinbase Direct API",
     supported_venues=["COINBASE_DIRECT"],
     capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+    implementation_module="data_providers.providers.coinbase",
+    implementation_class="CoinbaseProvider",
 )
 def _register_coinbase_provider():
     return CoinbaseProvider
