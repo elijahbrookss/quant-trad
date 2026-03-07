@@ -184,6 +184,17 @@ class InteractiveBrokersProvider(BaseDataProvider):
 
         self._resolve_contract_details(symbol)
 
+    def fetch_from_api(
+        self,
+        symbol: str,
+        start: dt.datetime | str,
+        end: dt.datetime | str,
+        interval: str,
+    ) -> pd.DataFrame:
+        """Retrieve OHLCV bars for *symbol* between *start* and *end*."""
+
+        return _fetch_from_api_impl(self, symbol, start, end, interval)
+
     def _resolve_contract_details(self, symbol: str) -> Tuple[Contract, list]:
         if not symbol:
             raise ValueError("symbol is required for Interactive Brokers validation")
@@ -216,7 +227,7 @@ class InteractiveBrokersProvider(BaseDataProvider):
 # ------------------------------------------------------------------
 # Public helpers
 # ------------------------------------------------------------------
-def fetch_from_api(
+def _fetch_from_api_impl(
     self,
     symbol: str,
     start: dt.datetime | str,
@@ -566,7 +577,6 @@ def _build_contract(self, symbol: str) -> Contract:
 
 
 for _method_name in (
-    "fetch_from_api",
     "_ensure_connection",
     "_ensure_event_loop",
     "_parse_exchange",
@@ -581,6 +591,7 @@ for _method_name in (
     "_build_contract",
 ):
     setattr(InteractiveBrokersProvider, _method_name, globals()[_method_name])
+
 
 
 @_REGISTRY.provider(

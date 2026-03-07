@@ -149,12 +149,15 @@ class ProviderRegistry:
 
 
 _REGISTRY = ProviderRegistry()
+_PROVIDER_CACHE = _REGISTRY.cache
 
 
 def configure_persistence_factory(factory):
     """Provide a service-layer persistence builder for provider instances."""
 
+    global _PROVIDER_CACHE
     _REGISTRY.configure_persistence_factory(factory)
+    _PROVIDER_CACHE = _REGISTRY.cache
 
 
 def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[str, Optional[str]]:
@@ -176,6 +179,14 @@ def _resolve_ids(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[s
             venue = provider_cfg.supported_venues[0]
 
     return provider, venue
+
+
+def reset_provider_cache(cache: Optional[dict[Tuple[str, str], BaseDataProvider]] = None) -> None:
+    """Reset provider instance cache for tests and process-lifecycle hooks."""
+
+    global _PROVIDER_CACHE
+    _REGISTRY.cache = {} if cache is None else cache
+    _PROVIDER_CACHE = _REGISTRY.cache
 
 
 def get_provider(provider_id: Optional[str] = None, *, venue: Optional[str] = None, exchange: Optional[str] = None) -> BaseDataProvider:
