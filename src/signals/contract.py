@@ -10,7 +10,12 @@ Contract summary:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping, NotRequired, TypedDict
+from typing import Any, Mapping, TypedDict
+
+try:  # Python <3.11 compatibility
+    from typing import NotRequired
+except ImportError:  # pragma: no cover - executed on Python <3.11
+    from typing_extensions import NotRequired
 
 
 _EXECUTION_FIELDS = (
