@@ -1,356 +1,182 @@
-# Bot Runtime Symbol Sharding + BotLens Architecture
+# Bot Runtime Symbol Sharding Architecture
 
 ## Documentation Header
 
-- `Component`: Bot runtime symbol sharding and merged telemetry
+- `Component`: Bot runtime symbol sharding and merged view-state
 - `Owner/Domain`: Bot Runtime / Container Runtime
-- `Doc Version`: 1.3
-- `Related Contracts`: `docs/architecture/BOT_RUNTIME_ENGINE_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `portal/backend/service/bots/container_runtime.py`, `src/engines/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`, `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/`
+- `Doc Version`: 2.0
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[WALLET_GATEWAY_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], `portal/backend/service/bots/container_runtime.py`
 
 ## 1) Problem and scope
 
-This component maps one strategy across multiple symbols while preserving wallet safety and one coherent BotLens view.
+This document describes how the current container runtime fans one bot run out across symbols while keeping one shared wallet and one merged BotLens-facing read model.
 
 In scope:
-- symbol-to-worker sharding,
-- shared wallet coordination across workers,
-- merged snapshot production for BotLens.
+- symbol-to-worker assignment,
+- shared-wallet multiprocessing state,
+- worker-to-parent event flow,
+- merged runtime payload semantics,
+- degrade behavior.
 
-### Non-goals
+Non-goals:
+- cross-bot portfolio sharing,
+- dynamic worker rebalancing,
+- re-running execution semantics from merged view-state alone.
 
-- cross-bot wallet sharing,
-- standalone UI state reconstruction without runtime telemetry,
-- automatic live worker rebalancing while a run is active.
+This document only covers multi-symbol runtime fanout and merge behavior.
+Execution semantics stay in [[BOT_RUNTIME_ENGINE_ARCHITECTURE]]. Event and wallet truth stay in [[RUNTIME_EVENT_MODEL_V1]] and [[WALLET_GATEWAY_ARCHITECTURE]].
 
-Upstream assumptions:
-- strategy instruments are valid and symbol list is resolved,
-- runtime event model and wallet gateway contracts are available.
-
-## 2) Architecture at a glance
-
-Boundary:
-- inside: symbol sharder, worker processes, shared wallet gateway, container aggregator
-- outside: strategy configuration services and BotLens UI clients
-
-See section `## 3) High-level runtime topology` for the diagram.
-
-## Mentor Notes (Non-Normative)
-
-- Treat this as a two-layer system: execution workers and one merge/telemetry layer.
-- Worker isolation improves resilience, while shared wallet coordination preserves capital safety.
-- The merged view is a read model; canonical causality still comes from runtime events.
-- Worker count is operator-tunable, but runtime still enforces one worker per symbol.
-- This section is explanatory only.
-- If this conflicts with Strict contract, Strict contract wins.
-
-## 3) Inputs, outputs, and side effects
-
-- Inputs: bot start request, strategy symbol set, per-symbol bar streams, worker status events.
-- Dependencies: shared wallet gateway guarantees, runtime event contract, telemetry ingest contract.
-- Outputs: worker snapshots, merged container snapshot, degraded symbol list, runtime status updates.
-- Side effects: process lifecycle control, shared reservation mutations, snapshot persistence, telemetry websocket I/O.
-
-## 4) Core components and data flow
-
-- Symbol sharder assigns exactly one symbol to each worker process.
-- Workers run series execution and emit per-worker snapshots.
-- Shared wallet gateway validates and reconciles capital usage across workers.
-- Container aggregator merges worker snapshots and publishes one bot-level envelope.
-
-## 5) State model
-
-Authoritative state:
-- canonical runtime events and wallet projection inputs.
-
-Derived state:
-- merged chart/runtime snapshots and BotLens view state.
-
-Persistence boundaries:
-- persisted: runtime events, merged snapshot checkpoints, bot runtime status.
-- in-memory: active worker maps, worker queues, intermediate aggregation state.
-
-## 6) Why this architecture
-
-- Per-symbol workers maximize isolation and simplify failure blast radius.
-- Shared wallet gateway prevents cross-worker over-allocation.
-- Merged snapshot stream keeps BotLens aligned to one bot-level timeline.
-
-## 7) Tradeoffs
-
-- Aggregation adds additional latency compared to direct worker streaming.
-- Shared lock/reservation paths can create contention under high load.
-
-## 8) Risks accepted
-
-- Worker crash can degrade assigned symbols.
-- Delayed worker snapshots can temporarily stale merged view.
-- Mis-sized worker count can fail startup (`BOT_SYMBOL_PROCESS_MAX < symbol_count`) or overcommit CPU.
-
-## 9) Strict contract
-
-- Retry/idempotency semantics: telemetry/event delivery is at-least-once; consumers must dedupe by cursor/event identity.
-- Degrade state machine:
-  - `RUNNING`: all symbol workers healthy.
-  - `DEGRADED`: one or more workers failed; degraded symbols marked; healthy symbols continue.
-  - `HALTED`: container runtime unrecoverable or explicitly stopped.
-- In-flight work:
-  - failed worker symbols stop processing immediately;
-  - remaining workers continue unless transitioning to `HALTED`.
-- Sim vs live differences: same sharding/wallet/telemetry contract; execution adapter behavior differs by runtime mode.
-- Canonical error codes/reasons when emitted:
-  - `SYMBOL_WORKER_FAILED`,
-  - `WALLET_INSUFFICIENT_MARGIN`,
-  - `RUNTIME_EXCEPTION`,
-  - `SYMBOL_DEGRADED`.
-- Validation hooks (applicable):
-  - code: worker assignment/aggregation logic and degrade transitions,
-  - logs: worker failure and degrade symbol events with `run_id`/`worker_id`,
-  - storage: merged snapshot/event cursor monotonicity,
-  - metrics: active worker count, degraded symbol count, telemetry lag.
-
-## 10) Versioning and compatibility
-
-- Runtime envelopes include schema and cursor fields.
-- Additive envelope evolution is preferred.
-- Breaking changes require explicit version bump and compatible consumer rollout.
-
----
-
-## Detailed Design
-
-## Who this is for
-
-This document is for new team members and non-specialists who want to understand:
-
-- how one bot can run multiple symbols,
-- how capital is shared safely,
-- how BotLens shows live state without replaying history.
-
----
-
-## 1) What we built
-
-We now run bots with this model:
-
-- `1 bot container = 1 strategy`
-- `up to 10 symbols per strategy`
-- `1 worker process = 1 symbol`
-- each worker uses inline series execution (no internal series pool)
-- runtime startup fails if configured worker ceiling is below symbol count
-
-Key behavior:
-
-- if one symbol fails at runtime, that symbol is degraded
-- healthy symbols keep running
-- capital is one shared pool across all symbol workers
-- BotLens receives one merged live view for the bot
-
----
-
-## 2) Why this shape
-
-### Problem before
-
-Before this refactor, the container runtime process model was effectively strategy-centric, not symbol-centric. That made it harder to:
-
-- control per-symbol isolation,
-- bound process count,
-- keep a clean “peek into the bot” UX in BotLens.
-
-### Goal now
-
-We want BotLens to feel like direct observability into the deployed bot, with:
-
-- low-latency updates,
-- durable state continuity,
-- and enough isolation so one symbol issue does not collapse the full run.
-
----
-
-## 3) High-level runtime topology
+## 2) Topology
 
 ```mermaid
 flowchart LR
-    A[Bot Container\n1 strategy] --> B[Symbol Sharder]
-    B --> C1[Worker 1\nSymbol: BTC]
-    B --> C2[Worker 2\nSymbol: SOL]
-    B --> C3[Worker 3\nSymbol: ADA]
-
-    C1 --> D[Shared Wallet Gateway\nEvent-sourced can_apply]
+    A[container_runtime.py] --> B[assign one worker per symbol]
+    B --> C1[worker-1 / BotRuntime / symbol A]
+    B --> C2[worker-2 / BotRuntime / symbol B]
+    B --> C3[worker-n / BotRuntime / symbol N]
+    C1 --> D[shared_wallet_proxy]
     C2 --> D
     C3 --> D
-
-    C1 --> E[Worker Snapshot Stream]
+    C1 --> E[event_queue]
     C2 --> E
     C3 --> E
-
-    E --> F[Container Aggregator\nSingle merged bot snapshot]
-    F --> G[BotLens Telemetry Hub]
-    G --> H[BotLens UI]
+    E --> F[parent merge loop]
+    F --> G[merged view_state]
+    F --> H[telemetry + status + container step traces]
 ```
 
----
+## 3) Sharding rules
 
-## 4) Symbol-to-worker assignment
+Current assignment rules in `container_runtime.py`:
+- one bot container run maps to one strategy,
+- strategy symbols are loaded from `StrategyLoader.fetch_strategy(...)`,
+- one symbol is assigned to one worker process,
+- startup fails if the configured worker ceiling is below the symbol count,
+- no in-run rebalancing or multi-symbol worker packing is performed.
 
-Rules:
+Current limits:
+- `_MAX_SYMBOLS_PER_STRATEGY = 10`
+- `_MAX_SYMBOL_WORKERS = 8` default floor for worker capacity calculation
 
-- hard cap: 10 symbols per strategy
-- assignment is deterministic
-- one symbol per worker process
-- startup guard: `BOT_SYMBOL_PROCESS_MAX` must be `>= symbol_count`
+## 4) Shared wallet proxy
 
-Example:
+All workers receive the same multiprocessing-backed `shared_wallet_proxy`.
 
-- 3 symbols => 3 workers
-- 10 symbols => 10 workers
-- if `BOT_SYMBOL_PROCESS_MAX=8` and symbol count is `10`, runtime fails loud at startup
+Current proxy contents:
+- `runtime_events`: shared append-only list of serialized runtime events,
+- `runtime_event_seq`: shared integer counter,
+- `reservations`: shared reservation map,
+- `lock`: shared process lock.
 
-Tradeoff:
+Bootstrap behavior:
+- the parent process seeds `runtime_events` with a serialized `WALLET_INITIALIZED` event at `seq=0`,
+- all worker runtimes receive the same `run_id`,
+- each worker attaches `SharedWalletGateway(shared_wallet_proxy)` inside `_build_run_context()`.
 
-- strict one-symbol-per-process gives maximum isolation and clearer failure domains
-- CPU/memory usage scales linearly with symbol count
-- capacity planning is explicit and operator-controlled
+Why this matters:
+- wallet availability is projected from canonical runtime events plus active reservations,
+- workers do not own independent balance copies,
+- cross-worker over-allocation is prevented at the wallet gateway boundary.
 
----
+## 5) Worker runtime contract
 
-## 5) Shared capital pool design
+Each worker process receives:
+- `run_id`
+- `bot_id`
+- `strategy_id`
+- exactly one symbol in `runtime_symbols`
+- the shared wallet proxy
 
-All workers share one wallet source-of-truth through a process-safe gateway.
+Each worker forces these runtime settings:
+- `degrade_series_on_error=True`
+- `series_runner="inline"`
 
-The source-of-truth is the shared canonical `RuntimeEvent` stream, not mutable per-process balance maps.
+Each worker emits messages back to the parent over an `mp.Queue`:
+- `view_state`: compact BotLens-style payload plus worker status
+- `worker_error`: explicit worker failure payload
 
-### Important detail
+## 6) View-state merge model
 
-A race can happen if multiple workers validate entries at the same time.
+The parent process keeps only the latest view-state per worker and merges it into one bot-level read model.
 
-To prevent this, the shared gateway uses:
+Merged sections:
+- `series`
+- `trades`
+- `logs`
+- `decisions`
+- `warnings`
+- `runtime`
 
-- one process lock around validation/reservation paths,
-- reservation IDs,
-- reservation-aware checks against wallet state projected from shared runtime events.
+Merge rules:
+- series/trades/logs/decisions are de-duplicated by derived keys,
+- warnings are appended and trimmed,
+- runtime stats are aggregated across worker runtime payloads,
+- `degraded_symbols` is carried into the merged runtime payload.
 
-`apply_fill` does not mutate wallet balances directly. It marks a reservation as consumed, and wallet state advances when the corresponding canonical runtime event is appended.
+Important boundary:
+- this merged payload is a read model for telemetry and BotLens,
+- it is not the canonical execution ledger.
 
-```mermaid
-sequenceDiagram
-    participant W1 as Worker A
-    participant W2 as Worker B
-    participant GW as Shared Wallet Gateway
-    participant EV as Shared RuntimeEvent Stream
+## 7) Runtime status semantics
 
-    W1->>GW: can_apply(order A)
-    GW-->>W1: allowed + reservation_id=R1
+Merged `runtime.status` is derived from worker payloads plus container health.
 
-    W2->>GW: can_apply(order B)
-    Note over GW: sees reserved funds from R1
-    GW-->>W2: allow/reject using reduced available balance
+Current logic:
+- `running` if any child workers are still active,
+- `degraded` if no workers remain active and `degraded_symbols` is non-empty,
+- `completed` if all worker runtime payloads report completed and no workers are active,
+- `error` if worker payloads report failure and no workers are active,
+- `stopped` otherwise.
 
-    W1->>GW: apply_fill(..., reservation_id=R1)
-    GW-->>W1: reservation consumed
-    W1->>EV: append ENTRY_FILLED RuntimeEvent
-    EV-->>GW: projected state advances
-```
+Current nuance:
+- a partially degraded bot still reports merged `runtime.status=running` while healthy workers continue,
+- degradation is primarily signaled by `degraded_symbols` and a synthetic warning entry,
+- parent-level persisted status is still written separately as `running`, `stopped`, or `failed`.
 
----
+## 8) Persistence boundaries
 
-## 6) Degrade-only-symbol behavior
+Authoritative persistence is still worker-owned for execution semantics:
+- worker runtimes persist canonical runtime events,
+- worker runtimes persist trade rows and trade-event rows,
+- worker runtimes persist run artifacts and reports,
+- worker and container code persist step traces.
 
-Runtime series stepping now supports degrade mode.
+Container-owned persistence:
+- `update_bot_runtime_status(...)`
+- `record_bot_run_step(...)`
 
-If a series step throws:
+Current non-persistence:
+- merged `view_state` is not durably stored by the parent process,
+- the latest merged state exists to drive telemetry and live inspection.
 
-- that series is marked done/degraded,
-- warning is emitted with symbol context,
-- worker continues other series.
+## 9) Failure and degrade behavior
 
-Container-level behavior:
+There are two layers of failure handling.
 
-- non-zero worker exit marks that worker’s symbols degraded,
-- remaining workers continue,
-- container publishes merged runtime state with `degraded_symbols`.
+Series-level in worker runtime:
+- `_safe_step(...)` degrades the series when `degrade_series_on_error=True`,
+- the worker emits `SYMBOL_DEGRADED` runtime events and runtime warnings for degraded series.
 
-This preserves visibility and avoids all-or-nothing failure.
+Worker-process level in container runtime:
+- `worker_error` queue messages mark the worker's symbols degraded,
+- non-zero worker exit codes also mark symbols degraded,
+- healthy workers continue running,
+- parent runtime only moves to `failed` on supervisor-level exceptions.
 
----
+This is degrade-isolated, not self-healing:
+- failed symbols are not restarted automatically,
+- no symbol is silently treated as healthy once degraded.
 
-## 7) BotLens data semantics (catch up, then live)
+## 10) Why this architecture exists
 
-When BotLens opens:
+- One worker per symbol gives the clearest failure boundary.
+- One shared wallet proxy preserves capital safety across workers.
+- One merged view-state keeps BotLens aligned to the deployed bot without inventing a second execution path.
+- Keeping merged state ephemeral avoids conflating observability payloads with execution truth.
 
-1. client requests bootstrap snapshot,
-2. server returns latest merged snapshot + cursor (`run_id`, `seq`),
-3. client connects websocket from that cursor,
-4. client receives only newer events.
+## 11) Strict contract
 
-If user closes BotLens and returns later:
-
-- no replay animation is required,
-- it jumps to latest snapshot,
-- then continues streaming live.
-
-If sequence gap occurs:
-
-- UI keeps stale read-only state visible,
-- shows obvious warning,
-- retries bootstrap until healthy,
-- resumes streaming from recovered cursor.
-
----
-
-## 8) Why we merge worker snapshots in container
-
-BotLens expects one coherent bot state, not N independent worker states.
-
-So container runtime now merges worker snapshots into one envelope:
-
-- merged `series`
-- merged `trades`
-- merged `runtime` summary/stats
-- merged warnings + degraded symbol warnings
-
-This gives a single source for UI updates and removes worker-level churn from the frontend.
-
----
-
-## 9) Design tradeoffs
-
-### Benefits
-
-- better symbol isolation
-- deterministic symbol-to-worker ownership
-- shared capital correctness across processes
-- cleaner BotLens user experience
-
-### Costs
-
-- more orchestration complexity in container runtime
-- merged view introduces an aggregation layer
-- shared wallet gateway adds synchronization overhead
-
-Why this is acceptable:
-
-- correctness and auditability are prioritized over raw throughput,
-- symbol cap and explicit worker sizing keep runtime practical.
-
----
-
-## 10) Operational knobs
-
-Current runtime knobs:
-
-- `BOT_MAX_SYMBOLS_PER_STRATEGY` (default `10`)
-- `BOT_SYMBOL_PROCESS_MAX` (default `max(8, symbol_count)`; must be `>= symbol_count`)
-- `series_runner` (runtime-supported value: `inline`)
-
-These can be tuned as we collect real CPU/memory and latency data.
-
----
-
-## 11) What this does not solve yet
-
-- long-term event retention/archival policy (handled separately)
-- advanced worker auto-rebalancing during a running bot
-- historical multi-run comparison UX in BotLens
-
-Those are valid future increments, but not required for the correctness/UX baseline above.
+- Symbol sharding must not create an alternate execution semantics path; worker runtime events remain the source of truth.
+- Shared wallet checks must happen against the shared runtime-event/reservation model, not worker-local mutable balances.
+- The parent process may merge view-state, but it must not invent fills, decisions, or wallet transitions.
+- Degradation must be explicit through degraded-symbol tracking, warnings, and runtime events.

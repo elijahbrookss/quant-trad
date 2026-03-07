@@ -1,406 +1,194 @@
-# Bot Runtime Engine Architecture (v1)
+# Bot Runtime Engine Architecture
 
 ## Documentation Header
 
 - `Component`: Bot runtime execution engine
 - `Owner/Domain`: Bot Runtime
-- `Doc Version`: 1.3
-- `Related Contracts`: `docs/agents/01_runtime_contract.md`, `docs/architecture/BOT_RUNTIME_SERVICE_ARCHITECTURE.md`, `docs/architecture/RUNTIME_EVENT_MODEL_V1.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `src/engines/bot_runtime/core/domain/`, `src/engines/bot_runtime/runtime/runtime.py`, `portal/backend/service/bots/bot_runtime/runtime/runtime.py`
+- `Doc Version`: 2.0
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/runtime/`, `src/engines/bot_runtime/core/`, `portal/backend/service/bots/bot_runtime/runtime/`
 
 ## 1) Problem and scope
 
-The bot runtime engine converts strategy intent into execution outcomes with realistic risk, wallet, and fill semantics.
+This document describes the current bot runtime engine as implemented today.
 
 In scope:
-- per-bar execution lifecycle,
-- readiness/preflight enforcement,
-- runtime event emission and snapshot emission,
-- symbol isolation/degrade handling.
+- canonical runtime package layout,
+- prepare/start/step/snapshot lifecycle,
+- signal -> decision -> execution -> outcome flow,
+- wallet and runtime event ownership,
+- chart payload and streaming read models.
 
-### Non-goals
+Non-goals:
+- API/container orchestration,
+- BotLens transport details,
+- strategy authoring semantics outside runtime consumption.
 
-- market prediction logic,
-- indicator computation ownership,
-- external portfolio aggregation across bots.
+## 2) Canonical implementation location
 
-Upstream assumptions:
-- strategy/indicator signals are already computed,
-- instrument metadata and runtime profile inputs are available.
+The canonical implementation is under `src/engines/bot_runtime/`.
 
-## 2) Architecture at a glance
+Current package split:
+- `src/engines/bot_runtime/runtime/runtime.py`: `BotRuntime` assembly.
+- `src/engines/bot_runtime/runtime/mixins/setup_prepare.py`: preparation, series bootstrap, indicator runtime state, overlay aggregation, intrabar setup.
+- `src/engines/bot_runtime/runtime/mixins/execution_loop.py`: blocking start/run loop, per-series stepping, intrabar stepping, completion handling.
+- `src/engines/bot_runtime/runtime/mixins/runtime_events.py`: canonical runtime event emission, decision trace, run artifact construction, shared wallet runtime context.
+- `src/engines/bot_runtime/runtime/mixins/state_streaming.py`: snapshots, chart payloads, persistence buffer flush, push subscribers, step-trace recording.
+- `src/engines/bot_runtime/runtime/components/`: helpers for run context, runtime policy, series runner, chart state, intrabar cache, settlement, signal consumption, event sinks, trade persistence, and step-trace buffering.
+- `src/engines/bot_runtime/core/`: execution profile compilation, execution adapters, wallet gateway, wallet projection, margin/fee helpers, and the ladder trading domain engine.
+- `src/engines/bot_runtime/core/domain/engine.py`: `LadderRiskEngine`, the per-series execution core used by strategy series.
 
-Boundary:
-- inside: runtime preflight, execution engine, wallet gateway integration, event/snapshot emission
-- outside: strategy composition, provider data acquisition, BotLens UI rendering
+Compatibility wrappers still exist under `portal/backend/service/bots/bot_runtime/runtime/`, but they are re-exports, not the canonical implementation.
 
-See section `## 3) Architecture at a glance` for the runtime topology diagram.
-
-Implementation location (current):
-- canonical runtime implementation: `src/engines/bot_runtime/runtime/` (`runtime.py`, `mixins/`, `components/`, `core/`)
-- strategy series orchestration: `portal/backend/service/bots/bot_runtime/strategy/series_builder.py` + `series_builder_parts/`
-- compatibility adapters/re-exports: `portal/backend/service/bots/bot_runtime/runtime/`
-
-## Mentor Notes (Non-Normative)
-
-- Read this engine as a control loop: validate -> decide -> settle -> emit.
-- `SeriesExecutionProfile` is the “compiled contract” that keeps behavior stable across providers.
-- Events explain causality; snapshots make state easy to observe.
-- Degrade behavior is designed to isolate symbol failures instead of collapsing the full run.
-- This section is explanatory only.
-- If this conflicts with Strict contract, Strict contract wins.
-
-## 3) Inputs, outputs, and side effects
-
-- Inputs: candle arrivals, strategy entry/exit intents, bot start/stop requests.
-- Dependencies: instrument/runtime profile contract, wallet gateway contract, execution adapter contract.
-- Outputs: fills/rejections, runtime events, runtime snapshots, updated trade/wallet projections.
-- Side effects: persistence writes (events/snapshots), wallet reservations, telemetry network I/O.
-
-## 4) Core components and data flow
-
-- Runtime preflight validates strategy instruments and readiness before launch.
-- `LadderRiskEngine` evaluates intent and applies execution rules per symbol series.
-- Wallet gateway validates capital constraints and reservation lifecycle.
-- Runtime emits canonical execution events and snapshot payloads for downstream observability.
-
-Domain package structure (`src/engines/bot_runtime/core/domain/`):
-- `time_utils.py`: timestamp/epoch parsing and numeric coercion helpers.
-- `models.py`: domain dataclasses (`Candle`, `EntryRequest`, `EntryFill`, `Leg`, etc.).
-- `position.py`: `LadderPosition` per-trade lifecycle and bar-application logic.
-- `engine.py`: `LadderRiskEngine` orchestration (entry, sizing, margin caps, TP allocation, stats).
-- `__init__.py`: stable public re-exports for `engines.bot_runtime.core.domain`.
-
-## 5) State model
-
-Authoritative state:
-- append-only runtime events and deterministic runtime engine timeline.
-
-Derived state:
-- runtime snapshots, BotLens read models, aggregated metrics.
-
-Persistence boundaries:
-- persisted: runtime events, snapshot rows, bot run status/metadata.
-- in-memory: active position objects, worker-local transient execution context.
-
-## 6) Why this architecture
-
-- Single-path runtime semantics keep execution explainable and auditable.
-- Shared contracts (`SeriesExecutionProfile`, runtime events, wallet gateway) reduce provider-specific drift.
-- Symbol-level isolation allows degradation without collapsing healthy symbols.
-
-## 7) Tradeoffs
-
-- Multi-process symbol sharding adds orchestration complexity.
-- Futures/perps-first assumptions constrain instrument coverage in v1.
-- Strict fail-loud behavior can stop runs rather than degrade silently.
-
-## 8) Risks accepted
-
-- Misconfigured instrument metadata can block startup.
-- Wallet reservation contention can affect throughput under heavy concurrency.
-- Contract drift between runtime producers/consumers can break compatibility.
-
-## 9) Strict contract
-
-- Timeline contract: `initialize -> apply_bar -> snapshot`.
-- Retry/idempotency semantics: runtime event delivery is at-least-once; consumers must be idempotent by event identity/cursor.
-- Degrade state machine:
-  - `RUNNING`: normal per-symbol execution.
-  - `DEGRADED`: one or more symbols failed; healthy symbols continue.
-  - `HALTED`: unrecoverable runtime failure or stop.
-- In-flight work:
-  - work on failed symbol is terminated and marked degraded;
-  - work on healthy symbols proceeds unless run enters `HALTED`.
-- Sim vs live differences:
-  - execution adapter behavior differs by mode;
-  - core runtime contract, event taxonomy, and timing gates are unchanged.
-- Canonical error codes/reasons when emitted:
-  - `WALLET_INSTRUMENT_MISCONFIGURED`,
-  - `WALLET_INSUFFICIENT_MARGIN`,
-  - `DECISION_REJECTED_*`,
-  - `RUNTIME_EXCEPTION`,
-  - `SYMBOL_DEGRADED`.
-- Validation hooks (applicable):
-  - code: runtime contract checks in preflight/profile compilation/execution path,
-  - logs: lifecycle events and rejection reasons with run/symbol context,
-  - storage: runtime event records and snapshot cursor progression,
-  - tests: runtime engine and margin/wallet validation suites.
-
-## 10) Versioning and compatibility
-
-- Runtime events carry `schema_version`.
-- Additive payload evolution is preferred.
-- Breaking event/snapshot shape requires explicit schema version bump and compatible consumer handling.
-
----
-
-## Detailed Design
-
-## Scope
-
-This document describes:
-
-- what the bot runtime engine does,
-- how snapshots and live execution connect,
-- which contracts drive runtime behavior,
-- where the engine remains futures-coupled in v1.
-
----
-
-## 1) What the engine is
-
-The bot runtime engine is the part that turns strategy decisions into realistic trade behavior over time.
-
-In plain terms:
-
-1. A new candle arrives.
-2. Strategy rules may produce entry/exit intent.
-3. The engine sizes risk, validates wallet/collateral, and applies fills.
-4. The engine updates state and emits a snapshot for observability (BotLens, logs, persistence).
-
-The runtime engine is the source of truth for execution behavior.
-
-Current execution topology is process-isolated by symbol:
-
-- one bot container per strategy,
-- one worker process per symbol (`process-per-series`),
-- inline series runner inside each worker process (no internal pool runner).
-
----
-
-## 2) Core principle
-
-All derived runtime outputs must come from one timeline:
-
-`initialize -> apply_bar -> snapshot`
-
-No alternate reconstruction path produces a different execution story.
-
----
-
-## 3) Architecture at a glance
+## 3) Runtime topology
 
 ```mermaid
 flowchart LR
-    A[Bot Start Request] --> B[Runtime Preflight]
-    B --> C[Strategy + Instrument Load]
-    C --> D[Compile SeriesExecutionProfile]
-    D --> E[LadderRiskEngine per Symbol]
-    E --> F[Execution Adapter]
-    E --> G[Shared Wallet Gateway]
-    G --> H[RuntimeEvent Projection]
-    E --> I[Entry/Exit Settlement]
-    I --> H
-    E --> J[Runtime Snapshot]
-    H --> J
-    J --> K[Bot Telemetry Stream and BotLens]
+    A[SeriesBuilder] --> B[StrategySeries + SeriesExecutionState]
+    B --> C[BotRuntime warm_up/start]
+    C --> D[RunContext + SharedWalletGateway]
+    D --> E[Per-bar step loop]
+    E --> F[Canonical RuntimeEvent stream]
+    E --> G[Trade/Event persistence buffers]
+    E --> H[Chart payload + push updates]
+    F --> I[Decision trace + wallet projection]
+    H --> J[BotLens / container view-state consumers]
 ```
 
----
+## 4) Current module boundaries
 
-## 4) Contracts the engine uses
+`BotRuntime` is a composition root, not a monolith.
 
-The runtime is now driven by a compiled contract: `SeriesExecutionProfile`.
+Runtime assembly:
+- `BotRuntime` subclasses four mixins and adds no behavior of its own beyond assembly and overlay registration.
 
-It contains:
+Preparation boundary:
+- `RuntimeSetupPrepareMixin` owns strategy loading, series construction, indicator engine initialization, warmup replay, overlay bootstrap, and building `SeriesExecutionState`.
 
-- `instrument`: symbol/type/base/quote identity
-- `constraints`: tick size, contract size, qty step, min/max qty, min notional
-- `capabilities`: margin/short/funding/expiry flags
-- `risk`: base and multiplier inputs
-- `margin_model`: resolved calculator + margin rates
-- `collateral_model`: accounting mode (for v1, primarily margin vs full notional)
+Execution boundary:
+- `RuntimeExecutionLoopMixin` owns `warm_up()`, `start()`, `_execute_loop()`, `_step_series_state()`, intrabar stepping, and final status transitions.
 
-Why this matters:
+Event boundary:
+- `RuntimeEventsMixin` owns append-only canonical runtime events, correlation IDs, decision trace entries, shared wallet projection hooks, and final run artifact payloads.
 
-- engine semantics do not rely on ad-hoc provider payloads,
-- strategy warnings and bot startup blockers use the same compiler,
-- runtime behavior is deterministic from one canonical contract.
+Read-model boundary:
+- `RuntimeStateStreamingMixin` owns `snapshot()`, `chart_payload()`, subscriber updates, batched trade persistence, and asynchronous step-trace metrics.
 
----
+Component boundary:
+- `RunContext` is the in-memory per-run holder for `run_id`, status, wallet gateway, runtime events, and decision trace.
+- `RuntimeModePolicy` centralizes run-type switches such as `allow_live_refresh`, `use_intrabar`, and wallet enforcement.
+- `InlineSeriesRunner` is the only supported series runner type at runtime today.
+- `IntrabarManager` fetches and caches 1-minute candles for active-trade intrabar stepping on coarse timeframes.
+- `ChartStateBuilder` trims chart state to current visibility and enforces `known_at` overlay gating.
+- `TradePersistenceBuffer` batches trade and trade-event writes.
+- `StepTracePersistenceBuffer` asynchronously batches runtime step traces so execution is not DB-bound.
 
-## 5) Startup and readiness flow
+## 5) Lifecycle
 
-Before a bot starts, runtime preflight validates each strategy instrument.
+### Prepare
 
-For runtime v1:
+`warm_up()` and `start()` both flow through `_ensure_prepared()`.
 
-- only derivatives are allowed (`future` / `perp` policy),
-- margin rates are required for derivatives runtime,
-- missing execution-critical fields fail loud.
+Preparation does the following:
+1. Validate that `strategy_ids` are present.
+2. Build `StrategySeries` instances through `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`.
+3. Build `SeriesExecutionState` for each series.
+4. Initialize indicator plugin engines and replay warmup candles into each indicator engine using the canonical `initialize -> apply_bar -> snapshot` engine contract.
+5. Bootstrap indicator overlays and runtime regime overlays.
+6. Aggregate overlays into the runtime cache and mark the runtime `idle`.
 
-At strategy-edit time:
+Preparation is single-flight and guarded by `_prepare_lock`. Read paths must not implicitly build partial runtime state.
 
-- warnings are soft (you can keep editing).
+### Start
 
-At bot-start time:
+`start()` is blocking and does the following:
+1. Ensure preparation is complete.
+2. Build a `RunContext`.
+3. Require `wallet_config.balances` and `shared_wallet_proxy`.
+4. Attach `SharedWalletGateway` to every series risk engine.
+5. Emit `WALLET_INITIALIZED` if balances are available.
+6. Start the series runner and overlay aggregator.
 
-- errors are hard blockers (bot does not start).
+### Step
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant API as Bot API
-    participant CFG as Runtime Preflight
-    participant COMP as Profile Compiler
+Each due series state runs through `_step_series_state()`:
+1. Read the next candle.
+2. Update indicator runtime state and project overlays.
+3. Evaluate rules from the latest state snapshots.
+4. Consume pending signals up to the current epoch.
+5. Emit `SIGNAL_EMITTED` when a direction is chosen.
+6. Attempt entry through `LadderRiskEngine.maybe_enter(...)`.
+7. Emit `DECISION_ACCEPTED` or `DECISION_REJECTED`.
+8. Persist trade-entry rows and canonical `ENTRY_FILLED` / `EXIT_FILLED` events as execution occurs.
+9. If an active trade exists on a coarse timeframe, switch into intrabar stepping with cached 1-minute candles.
+10. Finalize the bar, refresh state, and push a chart/runtime update.
 
-    U->>API: Start bot
-    API->>CFG: validate_runtime_readiness
-    CFG->>COMP: compile_runtime_profile_or_error (per instrument)
-    COMP-->>CFG: profile or ValueError
-    alt Any instrument invalid
-        CFG-->>API: startup blocked with aggregated error
-        API-->>U: bot remains not running
-    else All valid
-        CFG-->>API: readiness passed
-        API-->>U: bot launch proceeds
-    end
-```
+### Complete
 
----
+At completion or stop:
+- runtime status is updated,
+- trade buffers are flushed,
+- step traces are flushed,
+- a run artifact is built from runtime events plus projected wallet state,
+- report persistence is triggered from the worker runtime.
 
-## 6) Per-bar execution flow
+## 6) Canonical event and wallet model
 
-Each symbol series follows this lifecycle repeatedly:
+The canonical audit surface is the append-only `RuntimeEvent` stream defined in `src/engines/bot_runtime/core/runtime_events.py`.
 
-1. Read next bar/candle.
-2. Evaluate strategy intent for this bar.
-3. Build entry/exit request.
-4. Validate wallet/collateral via gateway (`can_apply`).
-5. Apply fill + settlement (entry/exit lifecycle event).
-6. Recompute state and emit snapshot.
+Deep event taxonomy, payload rules, and causality semantics live in [[RUNTIME_EVENT_MODEL_V1]].
 
-```mermaid
-sequenceDiagram
-    participant S as Symbol Series
-    participant E as LadderRiskEngine
-    participant W as Wallet Gateway
-    participant L as RuntimeEvent Projection
-    participant T as Telemetry Snapshot
+Current runtime uses that contract for:
+- signal events,
+- decision events,
+- fill/outcome events,
+- wallet bootstrap and runtime fault/degrade events.
 
-    S->>E: apply_bar(bar)
-    E->>E: position sizing + constraints
-    E->>W: can_apply(request)
-    W->>L: project wallet state (+ reservations)
-    L-->>W: allow/reject + context
-    alt allowed
-        E->>W: apply_fill(event)
-        W->>L: write trade fill lifecycle
-        E->>T: emit latest runtime snapshot
-    else rejected
-        E->>T: emit rejection state and reason
-    end
-```
+Important invariants:
+- every runtime event is stamped with `run_id`, `bot_id`, `strategy_id`, symbol/timeframe context, and a deterministic bar correlation ID,
+- signal/decision/execution causality is linked through `root_id`, `parent_id`, and `correlation_id`,
+- runtime events are persisted immediately through `storage.record_bot_runtime_event(...)`,
+- wallet state is projected from runtime events, not from ad-hoc mutable balance copies,
+- shared-wallet coordination uses reservations plus the shared canonical runtime-event stream.
 
----
+## 7) Runtime state and read models
 
-## 7) Wallet and margin semantics
+Authoritative runtime state is split across:
+- worker-local sequential series state (`SeriesExecutionState`, active trades, indicator runtime state),
+- append-only canonical runtime events,
+- shared wallet reservations/runtime events when running in symbol-sharded mode.
 
-The engine supports two main accounting paths:
+Derived read models:
+- `snapshot()`: thread-safe runtime status/progress/stats surface.
+- `chart_payload()`: BotLens-oriented payload containing visible candles, overlays, trades, logs, decisions, warnings, and the runtime snapshot.
+- `decision_trace`: reduced causality ledger derived from runtime events.
+- final run artifact: serialized runtime event stream plus projected wallet start/end state.
 
-- `margin` (derivatives-style collateral),
-- `full_notional` (cash-secured spot-style behavior).
+`chart_payload()` is not a second execution path. It is a read model derived from the same runtime state timeline.
 
-In v1 runtime, derivatives are the primary live path.
+## 8) Known-at and visibility contract
 
-Important behavior:
+The runtime currently enforces visibility at the chart/read-model layer.
 
-- entry fills lock margin per trade,
-- exit fills release margin proportionally to closed quantity,
-- partial exits are supported by open-qty tracking,
-- wallet checks use free collateral, not raw balance.
+`ChartStateBuilder`:
+- trims candles to the visible prefix for the current status,
+- merges the active intrabar snapshot into the last visible candle,
+- trims overlay payloads to the current epoch,
+- hides overlays until `known_at` has passed.
 
-This keeps collateral accounting coherent across trade lifecycle events.
+This keeps playback and BotLens aligned with the same known-at causality used by indicator runtime state.
 
----
+## 9) Current limitations and accepted tradeoffs
 
-## 8) Capability flags (what they mean)
+- Only `inline` series execution is accepted by `BotRuntime`; alternate runner types are not part of the live contract.
+- Intrabar refinement is always enabled by `RuntimeModePolicy` and currently uses 1-minute fetches plus an in-memory cache.
+- The runtime still depends on `portal.backend.service.bots.bot_runtime.strategy.series_builder` for strategy-series construction.
+- Worker runtimes persist their own run artifacts/reports using the shared `run_id`; the container layer does not currently build a separate bot-level artifact.
+- Compatibility wrappers under `portal/backend/service/bots/bot_runtime/runtime/` remain in place to avoid breaking older imports.
 
-The profile compiler resolves these runtime flags:
+## 10) Strict contract
 
-- `supports_margin`: true when margin calculator type is `margin`
-- `supports_short`: from instrument capability (derivatives default to true in compiler)
-- `short_requires_borrow`: true when shorting needs borrow inventory (spot-style short borrow semantics)
-- `has_funding`: informational capability flag from instrument metadata
-- `has_expiry`: true when the contract has expiry
-
-These flags drive engine behavior, not provider-specific payload internals.
-
----
-
-## 9) Error and degrade behavior
-
-Current behavior is intentionally explicit:
-
-- startup misconfiguration: bot launch blocked,
-- runtime wallet/instrument misconfiguration: fail loud (`WALLET_INSTRUMENT_MISCONFIGURED`),
-- symbol runtime exception: degrade that symbol path, keep other symbols running when possible,
-- BotLens can remain in stale read-only mode until bootstrap recovers.
-
-This favors correctness and auditability over silent fallback behavior.
-
----
-
-## 10) Observability and instrumentation
-
-The engine emits lifecycle logs including:
-
-- `series_execution_profile_compiled`
-- `ladder_risk_constraints`
-- `ladder_risk_configured`
-- `position_sizing`
-- `margin_rate_selected`
-- `qty_capped_by_margin`
-- `wallet_entry_rejected`
-- `wallet_exit_rejected`
-- `tp_leg_allocation_finalized`
-
-Current runtime logs include fields such as:
-
-- run context: `run_id`, `bot_id`, `strategy_id`
-- market context: `symbol`, `timeframe`, `instrument_type`
-- trade context: `trade_id`, `event_type`, position sizing and wallet/margin details
-- time context: bar/runtime time cursor (event-specific)
-
----
-
-## 11) Futures-coupled hotspots (v1)
-
-These are known futures-oriented areas to decouple later:
-
-1. Margin model assumptions
-- notional * margin rate is the central model.
-- maintenance/liquidation/funding accrual are not modeled as first-class contracts yet.
-
-2. Contract quantity semantics
-- sizing logic assumes contract-style quantity controls (`qty_step`, `min_notional`, `max_qty`).
-
-3. Session-driven margin mode
-- intraday vs overnight is built into margin selection.
-
-4. Entry/exit collateral lifecycle
-- margin lock/release is trade-lifecycle based and futures-friendly.
-
-This is acceptable for v1 futures/perps focus and is scheduled for modularization for broader instrument support.
-
----
-
-## 12) Extensibility shape
-
-The current architecture is organized so that:
-
-1. provider-specific data is resolved at provider/service boundaries,
-2. runtime compiles one canonical execution profile per series,
-3. engine behavior reads the compiled profile instead of provider payload internals.
-
-This keeps behavior centralized and reduces provider-coupled engine semantics.
-
----
-
-## 13) Related docs
-
-- `docs/architecture/ENGINE_OVERVIEW.md`
-- `docs/architecture/INSTRUMENT_CONTRACT_FUTURES_V1_READINESS.md`
-- `docs/architecture/BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE.md`
-- `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`
-- `docs/architecture/SNAPSHOT_SEMANTICS_CONTRACT.md`
+- Derived runtime outputs must come from one sequential series timeline. No alternate reconstruction path should invent a different execution story.
+- `RunContext` must exist before canonical runtime events are emitted.
+- Wallet checks must flow through `SharedWalletGateway`; direct mutable wallet attachment is intentionally rejected.
+- Failures must either fail the run loudly or explicitly degrade the affected series and emit `SYMBOL_DEGRADED`.
+- Consumers should treat runtime events as the source of truth and `chart_payload()` as a derived observability surface.

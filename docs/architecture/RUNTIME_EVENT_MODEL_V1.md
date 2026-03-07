@@ -5,7 +5,7 @@
 - `Component`: Canonical runtime event model
 - `Owner/Domain`: Bot Runtime / Event Contracts
 - `Doc Version`: 1.1
-- `Related Contracts`: `src/engines/bot_runtime/core/runtime_events.py`, `docs/architecture/BOTLENS_LIVE_DATA_ARCHITECTURE.md`, `docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`, `portal/backend/db/models.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/core/runtime_events.py`, `portal/backend/db/models.py`, `portal/backend/service/storage/repos/runtime_events.py`, `portal/backend/service/storage/storage.py`
 
 ## 1) Problem and scope
 
