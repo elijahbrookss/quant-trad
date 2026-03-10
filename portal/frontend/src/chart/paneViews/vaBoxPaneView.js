@@ -91,6 +91,7 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
        target.useBitmapCoordinateSpace(({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }) =>
          ({ context, mediaSize, horizontalPixelRatio, verticalPixelRatio }));
 
+
       if (!ctx) return;
       ctx.save();
       // fill + hatch; keep outline off unless you set outlineFront=true
@@ -109,6 +110,12 @@ export function createVABoxPaneView(timeScaleApi, opts = {}) {
     isWhitespace: () => false,
     defaultOptions() { return { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }; },
     destroy: () => {},
-    setBoxes(arr) { boxes = Array.isArray(arr) ? arr : []; },
+    setBoxes(arr) {
+      boxes = Array.isArray(arr) ? arr : [];
+      // console.log('[vaBoxPaneView] event=set_boxes', {
+      //   boxCount: boxes.length,
+      //   sampleBoxes: boxes.slice(0, 2),
+      // })
+    },
   };
 }

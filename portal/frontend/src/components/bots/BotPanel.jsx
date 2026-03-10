@@ -2,29 +2,56 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlusCircle, RefreshCw, Search } from 'lucide-react'
 import {
   listBots,
+  fetchBotRuntimeCapacity,
   createBot,
   startBot as startBotApi,
   stopBot as stopBotApi,
   deleteBot as deleteBotApi,
-  pauseBot as pauseBotApi,
-  resumeBot as resumeBotApi,
 } from '../../adapters/bot.adapter.js'
 import { fetchStrategies } from '../../adapters/strategy.adapter.js'
-import { BotPerformanceModal } from './BotPerformanceModal.jsx'
-import { BotCreateModal, buildDefaultForm } from './BotCreateForm.jsx'
+import { createLogger } from '../../utils/logger.js'
+import { BotCreateModal } from './create/BotCreateModal.jsx'
+import { BotLensLiveModal } from './BotLensLiveModal.jsx'
+import { buildDefaultForm } from './create/botCreateFormDefaults.js'
+import { useBotCreateForm } from './create/useBotCreateForm.js'
+import { getBotStatus } from './botStatusModel.js'
 import { BotCard, sortBots } from './BotCard.jsx'
 import { useBotStream } from './useBotStream.js'
-import { cloneATMTemplate, DEFAULT_ATM_TEMPLATE } from '../atm/ATMConfigForm.jsx'
+import { usePortalSettings } from '../../contexts/PortalSettingsContext.jsx'
 
-const computeStatus = (bot) => (bot?.runtime?.status || bot?.status || 'idle').toLowerCase()
+const parseEnvText = (text) => {
+  const next = {}
+  for (const line of String(text || '').split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const idx = trimmed.indexOf('=')
+    if (idx <= 0) continue
+    const key = trimmed.slice(0, idx).trim()
+    const value = trimmed.slice(idx + 1).trim()
+    if (key) next[key] = value
+  }
+  return next
+}
 
 export function BotPanel() {
   const [bots, setBots] = useState([])
   const [loading, setLoading] = useState(false)
-  const [form, setForm] = useState(buildDefaultForm())
+  const { settings } = usePortalSettings()
+  const {
+    form,
+    walletConfig,
+    walletError,
+    handleChange,
+    handleBacktestRangeChange,
+    handleStrategyToggle,
+    handleWalletBalanceChange,
+    handleWalletBalanceAdd,
+    handleWalletBalanceRemove,
+    resetForm,
+  } = useBotCreateForm(buildDefaultForm())
   const [createOpen, setCreateOpen] = useState(false)
   const [createError, setCreateError] = useState(null)
-  const [lensBot, setLensBot] = useState(null)
+  const [lensBotId, setLensBotId] = useState(null)
   const [error, setError] = useState(null)
   const [strategies, setStrategies] = useState([])
   const [strategiesLoading, setStrategiesLoading] = useState(false)
@@ -32,13 +59,11 @@ export function BotPanel() {
   const [pendingDelete, setPendingDelete] = useState(null)
   const [pendingStart, setPendingStart] = useState(null)
   const [search, setSearch] = useState('')
+  const [runtimeCapacity, setRuntimeCapacity] = useState(null)
+  const [nowEpochMs, setNowEpochMs] = useState(() => Date.now())
+  const logger = useMemo(() => createLogger('BotPanel'), [])
   const runtimeQueueRef = useRef(new Map())
   const runtimeFrame = useRef(null)
-  const formatPlaybackValue = useCallback((value) => {
-    const numeric = Number(value)
-    if (!Number.isFinite(numeric)) return '—'
-    return numeric <= 0 ? 'Instant' : `${numeric.toFixed(2)}x`
-  }, [])
   const shallowEqualRuntime = useCallback((next = {}, prev = {}) => {
     if (next === prev) return true
     const keys = new Set([...Object.keys(next || {}), ...Object.keys(prev || {})])
@@ -49,20 +74,26 @@ export function BotPanel() {
   }, [])
 
   const mergeBots = useCallback(
-    (incoming) => {
+    (incoming, options = {}) => {
+      const { replace = false } = options || {}
       if (!Array.isArray(incoming)) return
       setBots((prev) => {
         const prevMap = new Map(prev.map((bot) => [bot.id, bot]))
+        const next = replace ? [] : [...prev]
+        const nextMap = new Map(next.map((bot) => [bot.id, bot]))
         let changed = false
-        const next = incoming.map((bot) => {
-          if (!bot?.id) return bot
-          const current = prevMap.get(bot.id)
+
+        for (const bot of incoming) {
+          if (!bot?.id) continue
+          const current = nextMap.get(bot.id) || prevMap.get(bot.id)
           if (!current) {
+            next.push(bot)
+            nextMap.set(bot.id, bot)
             changed = true
-            return bot
+            continue
           }
           const runtimeSame = shallowEqualRuntime(bot.runtime, current.runtime)
-          const payload = {
+          const merged = {
             ...current,
             ...bot,
             runtime: runtimeSame
@@ -73,12 +104,18 @@ export function BotPanel() {
             (key) => key !== 'runtime' && bot[key] !== current[key],
           )
           if (!nonRuntimeChanged && runtimeSame) {
-            return current
+            continue
           }
+          const index = next.findIndex((item) => item.id === merged.id)
+          if (index !== -1) {
+            next[index] = merged
+          } else {
+            next.push(merged)
+          }
+          nextMap.set(merged.id, merged)
           changed = true
-          return payload
-        })
-        return changed ? next : prev
+        }
+        return changed || replace ? next : prev
       })
     },
     [shallowEqualRuntime],
@@ -92,6 +129,11 @@ export function BotPanel() {
     [mergeBots],
   )
 
+  const removeBot = useCallback((botId) => {
+    if (!botId) return
+    setBots((prev) => prev.filter((bot) => bot.id !== botId))
+  }, [])
+
   const flushRuntimeQueue = useCallback(() => {
     setBots((prev) => {
       let nextState = prev
@@ -101,8 +143,52 @@ export function BotPanel() {
         const bot = nextState[index]
         const mergedRuntime = { ...(bot.runtime || {}), ...runtime }
         if (shallowEqualRuntime(mergedRuntime, bot.runtime)) return
+        const nextStatus = String(runtime?.status || '').trim().toLowerCase()
+        const nextLifecycle = { ...(bot.lifecycle || {}) }
+        const nextControls = { ...(bot.controls || {}) }
+        if (nextStatus) {
+          nextLifecycle.status = nextStatus
+          if (nextStatus === 'running') {
+            nextLifecycle.phase = Number(runtime?.seq || 0) > 0 ? 'live' : 'awaiting_snapshot'
+            nextLifecycle.reason = Number(runtime?.seq || 0) > 0 ? 'live_runtime' : 'awaiting_first_snapshot'
+            nextLifecycle.live = Number(runtime?.seq || 0) > 0
+            nextControls.can_start = false
+            nextControls.can_stop = true
+          } else if (nextStatus === 'starting') {
+            nextLifecycle.phase = 'starting_container'
+            nextLifecycle.reason = 'container_start_pending'
+            nextLifecycle.live = false
+            nextControls.can_start = false
+            nextControls.can_stop = true
+          } else if (['completed', 'stopped'].includes(nextStatus)) {
+            nextLifecycle.phase = nextStatus === 'completed' ? 'completed' : 'stopped'
+            nextLifecycle.reason = nextStatus === 'completed' ? 'run_completed' : 'run_stopped'
+            nextLifecycle.live = false
+            nextControls.can_start = true
+            nextControls.can_stop = false
+          } else if (['degraded', 'telemetry_degraded'].includes(nextStatus)) {
+            nextLifecycle.phase = 'degraded'
+            nextLifecycle.reason = 'runtime_degraded'
+            nextLifecycle.live = true
+            nextControls.can_start = true
+            nextControls.can_stop = true
+          } else if (['error', 'failed', 'crashed'].includes(nextStatus)) {
+            nextLifecycle.phase = 'failed'
+            nextLifecycle.reason = 'runtime_failed'
+            nextLifecycle.live = false
+            nextControls.can_start = true
+            nextControls.can_stop = false
+          }
+        }
         if (nextState === prev) nextState = [...prev]
-        nextState[index] = { ...bot, runtime: mergedRuntime }
+        nextState[index] = {
+          ...bot,
+          status: nextStatus || bot.status,
+          active_run_id: runtime?.run_id || bot.active_run_id,
+          controls: nextControls,
+          lifecycle: nextLifecycle,
+          runtime: mergedRuntime,
+        }
       })
       runtimeQueueRef.current.clear()
       return nextState
@@ -122,101 +208,107 @@ export function BotPanel() {
     [flushRuntimeQueue],
   )
 
+  const loadRuntimeCapacity = useCallback(async () => {
+    try {
+      const payload = await fetchBotRuntimeCapacity()
+      setRuntimeCapacity(payload && typeof payload === 'object' ? payload : null)
+    } catch (err) {
+      logger.warn('bot_runtime_capacity_load_failed', { message: err?.message }, err)
+    }
+  }, [logger])
+
   const loadBots = useCallback(
     async (withSpinner = true) => {
       if (withSpinner) setLoading(true)
       setError(null)
+      logger.info('bots_load_start', { with_spinner: withSpinner })
       try {
         const data = await listBots()
-        mergeBots(data)
+        logger.info('bots_load_success', { count: Array.isArray(data) ? data.length : 0 })
+        mergeBots(data, { replace: true })
+        await loadRuntimeCapacity()
       } catch (err) {
+        logger.error('bots_load_failed', { message: err?.message }, err)
         setError(err?.message || 'Unable to load bots')
       } finally {
         if (withSpinner) setLoading(false)
       }
     },
-    [mergeBots],
+    [loadRuntimeCapacity, logger, mergeBots],
   )
 
   const loadStrategies = useCallback(async () => {
     setStrategiesLoading(true)
     setStrategyError(null)
+    logger.info('strategies_load_start')
     try {
       const data = await fetchStrategies()
       setStrategies(data)
+      logger.info('strategies_load_success', { count: Array.isArray(data) ? data.length : 0 })
     } catch (err) {
+      logger.error('strategies_load_failed', { message: err?.message }, err)
       setStrategyError(err?.message || 'Unable to load strategies')
     } finally {
       setStrategiesLoading(false)
     }
-  }, [])
+  }, [logger])
 
   useEffect(() => {
-    loadBots()
     loadStrategies()
-    console.info('[BotPanel] mounted, loading bots and strategies')
-  }, [loadBots, loadStrategies])
+    logger.info('bot_panel_mounted')
+  }, [loadStrategies, logger])
+
+  useEffect(() => {
+    loadRuntimeCapacity()
+  }, [loadRuntimeCapacity])
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadRuntimeCapacity()
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [loadRuntimeCapacity])
+
+  useEffect(() => {
+    logger.info('bot_create_modal_state', { open: createOpen })
+  }, [createOpen, logger])
+
+  useEffect(() => {
+    if (createOpen) {
+      logger.debug('bot_panel_tick_paused', { reason: 'create_modal_open' })
+      return undefined
+    }
+    logger.debug('bot_panel_tick_started')
+    const timer = setInterval(() => setNowEpochMs(Date.now()), 1000)
+    return () => {
+      clearInterval(timer)
+      logger.debug('bot_panel_tick_stopped')
+    }
+  }, [createOpen, logger])
 
   useEffect(() => () => {
     if (runtimeFrame.current) cancelAnimationFrame(runtimeFrame.current)
   }, [])
 
-  const botStreamState = useBotStream({ mergeBots, upsertBot, applyRuntime, loadBots })
-
-  const handleChange = (event) => {
-    const { name, value } = event.target
-    setForm((prev) => {
-      const next = { ...prev, [name]: value }
-      if (name === 'run_type' && value !== 'backtest') {
-        next.backtest_start = ''
-        next.backtest_end = ''
-      }
-      return next
-    })
-  }
+  const { state: botStreamState, reconnect: reconnectBotStream } = useBotStream({
+    mergeBots,
+    upsertBot,
+    removeBot,
+    applyRuntime,
+    loadBots,
+  })
 
   const closeCreateModal = useCallback(() => {
     setCreateOpen(false)
     setCreateError(null)
   }, [])
 
-  const handleBacktestRangeChange = useCallback((range) => {
-    const [start, end] = Array.isArray(range) ? range : []
-    const normalize = (value) => {
-      if (!(value instanceof Date)) return ''
-      const time = value.getTime()
-      return Number.isNaN(time) ? '' : new Date(time).toISOString()
-    }
-    setForm((prev) => ({
-      ...prev,
-      backtest_start: normalize(start),
-      backtest_end: normalize(end),
-    }))
-  }, [])
-
-  const handleStrategyToggle = (strategyId) => {
-    setForm((prev) => {
-      const next = prev.strategy_ids.includes(strategyId)
-        ? prev.strategy_ids.filter((id) => id !== strategyId)
-        : [...prev.strategy_ids, strategyId]
-      return { ...prev, strategy_ids: next }
-    })
-  }
-
-  const handleATMTemplateChange = useCallback((template) => {
-    setForm((prev) => ({ ...prev, atm_template: cloneATMTemplate(template) }))
-  }, [])
-
-  const toggleCustomATM = () => {
-    setForm((prev) => ({ ...prev, use_custom_atm: !prev.use_custom_atm }))
-  }
-
   const handleCreate = async (event) => {
     event.preventDefault()
     setError(null)
     setCreateError(null)
     if (!form.name) return
-    if (!form.strategy_ids.length) {
+    if (!form.strategy_id) {
       setCreateError('Select at least one strategy for this bot.')
       return
     }
@@ -224,32 +316,38 @@ export function BotPanel() {
       setCreateError('Provide both a start and end date for backtests.')
       return
     }
+    if (walletError || !walletConfig) {
+      setCreateError(walletError || 'Wallet config is required.')
+      return
+    }
     const startISO = form.backtest_start ? new Date(form.backtest_start).toISOString() : undefined
     const endISO = form.backtest_end ? new Date(form.backtest_end).toISOString() : undefined
+    const normalizedMode = form.run_type === 'backtest' ? form.mode : 'walk-forward'
+    logger.info('bot_create_request', {
+      run_type: form.run_type,
+      mode: normalizedMode,
+      strategy_id: form.strategy_id,
+      backtest_start: startISO,
+      backtest_end: endISO,
+    })
     try {
-      const { use_custom_atm, atm_template, ...rest } = form
       const payloadBody = {
-        ...rest,
+        ...form,
+        snapshot_interval_ms: Number(form.snapshot_interval_ms || 1000),
+        bot_env: form.bot_env || {},
+        mode: normalizedMode,
         backtest_start: form.run_type === 'backtest' ? startISO : undefined,
         backtest_end: form.run_type === 'backtest' ? endISO : undefined,
+        wallet_config: walletConfig,
       }
-      if (use_custom_atm) {
-        payloadBody.risk = atm_template
-      }
+      delete payloadBody.wallet_balances
       const payload = await createBot(payloadBody)
-      console.info('[BotPanel] bot created', { id: payload?.id })
+      logger.info('bot_create_success', { bot_id: payload?.id })
       upsertBot(payload)
-      setForm((prev) => ({
-        ...buildDefaultForm(),
-        strategy_ids: prev.strategy_ids,
-        run_type: prev.run_type,
-        atm_template: use_custom_atm
-          ? cloneATMTemplate(atm_template)
-          : cloneATMTemplate(DEFAULT_ATM_TEMPLATE),
-        use_custom_atm: use_custom_atm && Boolean(payloadBody.risk),
-      }))
+      resetForm({ strategy_id: form.strategy_id, run_type: form.run_type })
       closeCreateModal()
     } catch (err) {
+      logger.error('bot_create_failed', { message: err?.message }, err)
       setCreateError(err?.message || 'Unable to create bot')
     }
   }
@@ -257,17 +355,31 @@ export function BotPanel() {
   const handleStart = async (botId) => {
     setError(null)
     const target = bots.find((bot) => bot.id === botId)
-    if (!target?.strategy_ids?.length) {
+    if (!target?.strategy_id) {
       setError('Assign at least one strategy before starting the bot.')
       return
     }
-    console.info('[BotPanel] start requested', { botId })
+    logger.info('bot_start_requested', { bot_id: botId })
     setPendingStart(botId)
     setBots((prev) =>
       prev.map((bot) =>
         bot.id === botId
           ? {
               ...bot,
+              status: 'starting',
+              controls: {
+                ...(bot.controls || {}),
+                can_start: false,
+                can_stop: true,
+                start_label: 'Starting',
+              },
+              lifecycle: {
+                ...(bot.lifecycle || {}),
+                status: 'starting',
+                phase: 'starting_container',
+                reason: 'container_start_pending',
+                live: false,
+              },
               runtime: { ...(bot.runtime || {}), status: 'starting' },
             }
           : bot,
@@ -278,7 +390,40 @@ export function BotPanel() {
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_start_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to start bot')
+      setBots((prev) =>
+        prev.map((bot) =>
+          bot.id === botId
+            ? {
+                ...bot,
+                status: 'error',
+                controls: {
+                  ...(bot.controls || {}),
+                  can_start: true,
+                  can_stop: false,
+                  start_label: 'Restart',
+                },
+                lifecycle: {
+                  ...(bot.lifecycle || {}),
+                  status: 'error',
+                  phase: 'failed',
+                  reason: 'runtime_failed',
+                  live: false,
+                },
+                last_run_artifact: {
+                  ...(bot.last_run_artifact || {}),
+                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
+                },
+                runtime: {
+                  ...(bot.runtime || {}),
+                  status: 'error',
+                  error: { message: err?.message || 'Container start failed', phase: 'container_start' },
+                },
+              }
+            : bot,
+        ),
+      )
     } finally {
       setPendingStart(null)
     }
@@ -286,72 +431,50 @@ export function BotPanel() {
 
   const handleStop = async (botId) => {
     setError(null)
-    console.info('[BotPanel] stop requested', { botId })
+    logger.info('bot_stop_requested', { bot_id: botId })
+    setBots((prev) =>
+      prev.map((bot) =>
+        bot.id === botId
+          ? {
+              ...bot,
+              controls: {
+                ...(bot.controls || {}),
+                can_start: false,
+                can_stop: false,
+              },
+            }
+          : bot,
+      ),
+    )
     try {
       const payload = await stopBotApi(botId)
       upsertBot(payload)
       loadBots(false)
     } catch (err) {
+      logger.error('bot_stop_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to stop bot')
     }
   }
 
-  const handlePause = async (botId) => {
-    setError(null)
-    console.info('[BotPanel] pause requested', { botId })
-    try {
-      const payload = await pauseBotApi(botId)
-      upsertBot(payload)
-      loadBots(false)
-    } catch (err) {
-      setError(err?.message || 'Unable to pause bot')
-    }
-  }
 
-  const handleResume = async (botId) => {
-    setError(null)
-    console.info('[BotPanel] resume requested', { botId })
-    try {
-      const payload = await resumeBotApi(botId)
-      upsertBot(payload)
-      loadBots(false)
-    } catch (err) {
-      setError(err?.message || 'Unable to resume bot')
-    }
-  }
 
   const handleDelete = async (botId) => {
     if (!botId) return
     if (!window.confirm('Delete this bot? This cannot be undone.')) return
     setError(null)
-    console.info('[BotPanel] delete requested', { botId })
+    logger.info('bot_delete_requested', { bot_id: botId })
     setPendingDelete(botId)
     try {
       await deleteBotApi(botId)
+      if (lensBotId === botId) setLensBotId(null)
       setBots((prev) => prev.filter((bot) => bot.id !== botId))
     } catch (err) {
+      logger.error('bot_delete_failed', { bot_id: botId, message: err?.message }, err)
       setError(err?.message || 'Unable to delete bot')
     } finally {
       setPendingDelete(null)
     }
   }
-
-  const statusBadge = useCallback((status) => {
-    const tone = status === 'running'
-      ? 'bg-emerald-500/10 text-emerald-200 border-emerald-400/30'
-      : status === 'paused'
-        ? 'bg-amber-500/10 text-amber-200 border-amber-400/30'
-        : status === 'stopped'
-          ? 'bg-rose-500/10 text-rose-200 border-rose-400/30'
-          : status === 'completed'
-            ? 'bg-sky-500/10 text-sky-200 border-sky-400/30'
-            : 'bg-slate-600/20 text-slate-200 border-white/10'
-    return (
-      <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.25em] ${tone}`}>
-        {status || 'idle'}
-      </span>
-    )
-  }, [])
 
   const formatDate = (value) => {
     if (!value) return '—'
@@ -362,18 +485,23 @@ export function BotPanel() {
     }
   }
 
-  const describeRange = (bot) => {
+  const describeRange = useCallback((bot) => {
     if ((bot?.run_type || '').toLowerCase() === 'backtest') {
       return `${formatDate(bot?.backtest_start)} → ${formatDate(bot?.backtest_end)}`
     }
     return 'Sim trade (live)'
-  }
+  }, [])
 
     const sortedBots = useMemo(() => sortBots(bots), [bots])
 
   const sortedStrategies = useMemo(() => {
     return [...strategies].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
   }, [strategies])
+
+  const lensBot = useMemo(
+    () => bots.find((bot) => bot.id === lensBotId) || null,
+    [bots, lensBotId],
+  )
 
   const strategyLookup = useMemo(() => {
     const map = new Map()
@@ -389,12 +517,10 @@ export function BotPanel() {
     const query = search.trim().toLowerCase()
     if (!query) return sortedBots
     return sortedBots.filter((bot) => {
-      const assignedNames = (bot.strategy_ids || [])
-        .map((id) => strategyLookup.get(id)?.name || id)
-        .join(' ')
+      const assignedNames = bot.strategy_id ? (strategyLookup.get(bot.strategy_id)?.name || bot.strategy_id) : ''
       const haystack = [
         bot.name,
-        computeStatus(bot),
+        getBotStatus(bot),
         describeRange(bot),
         assignedNames,
         bot.timeframe,
@@ -406,101 +532,122 @@ export function BotPanel() {
         .toLowerCase()
       return haystack.includes(query)
     })
-  }, [search, sortedBots, strategyLookup])
-
-  const describeBotMeta = useCallback(
-    (botItem, field) => {
-      if (!botItem) return ''
-      const values = new Set()
-      for (const strategyId of botItem.strategy_ids || []) {
-        const strategy = strategyLookup.get(strategyId)
-        const value = strategy?.[field]
-        if (value) values.add(value)
-      }
-      if (values.size) {
-        return Array.from(values).join(', ')
-      }
-      return botItem?.[field] || ''
-    },
-    [strategyLookup],
-  )
+  }, [describeRange, search, sortedBots, strategyLookup])
 
   return (
-    <section className="space-y-6">
-      <header className="flex flex-col gap-4 rounded-3xl border border-white/8 bg-white/5 p-6">
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.35em] text-[color:var(--accent-text-kicker)]">Automation</p>
-            <h3 className="text-xl font-semibold text-slate-100">Bot control tower</h3>
-            <p className="text-sm text-slate-400">Launch walk-forward backtests wired to live strategies; dial playback speed as needed.</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="text-xs text-slate-400">
-              {strategiesLoading ? 'Loading strategies…' : `${strategies.length} strategies available`}
+    <section className="space-y-5">
+      <header className="space-y-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-1.5">
+            <div className="flex items-baseline gap-3">
+              <h3 className="text-2xl font-medium tracking-tight text-slate-50">Bots</h3>
+              <span className="text-xs font-medium tabular-nums text-slate-500">
+                {strategiesLoading ? 'Loading…' : `${strategies.length} ${strategies.length === 1 ? 'strategy' : 'strategies'}`}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                console.info('[BotPanel] open create bot modal')
-                setCreateError(null)
-                setCreateOpen(true)
-              }}
-              className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-            >
-              <PlusCircle className="size-4" /> Create bot
-            </button>
+            <p className="text-sm leading-relaxed text-slate-400">
+              Monitor and control walk-forward backtests across all configured strategies
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              logger.info('bot_create_modal_open')
+              setCreateError(null)
+              resetForm({
+                strategy_id: form.strategy_id || "",
+                run_type: form.run_type || 'backtest',
+                snapshot_interval_ms: Number(settings?.botDefaults?.snapshotIntervalMs || 1000),
+                bot_env: parseEnvText(settings?.botDefaults?.envText || ''),
+              })
+              setCreateOpen(true)
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-200 backdrop-blur-sm transition-colors hover:border-slate-600 hover:bg-slate-800 hover:text-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
+          >
+            <PlusCircle className="size-4" /> New Bot
+          </button>
         </div>
-        <div className="flex flex-col gap-3 rounded-3xl border border-white/5 bg-black/30 p-4 text-sm text-slate-200 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-1 flex-wrap items-center gap-3">
-            <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-slate-200">
-              <Search className="size-4 text-slate-500" />
+
+        <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3 backdrop-blur-sm lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-1 flex-wrap items-center gap-2.5">
+            <label className="flex min-w-[240px] flex-1 items-center gap-2.5 rounded-md border border-slate-800 bg-slate-950/80 px-3 py-2 text-slate-200 focus-within:border-slate-700 focus-within:bg-slate-950">
+              <Search className="size-3.5 shrink-0 text-slate-600" />
               <input
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search bots by name, status, or strategy"
-                className="w-full bg-transparent text-sm text-white placeholder:text-slate-500 focus:outline-none"
+                placeholder="Filter by name, strategy, or status…"
+                className="min-w-0 flex-1 bg-transparent text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none"
               />
             </label>
             <button
               type="button"
-              onClick={() => loadBots()}
-              className="inline-flex items-center gap-2 rounded-2xl border border-white/10 px-4 py-2 text-sm text-slate-200 hover:border-white/40"
+              onClick={() => {
+                if (botStreamState === 'open') {
+                  logger.info('bot_stream_refresh_requested')
+                  reconnectBotStream()
+                  return
+                }
+                loadBots()
+              }}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/80 px-3.5 py-2 text-sm font-medium text-slate-400 transition-colors hover:border-slate-700 hover:bg-slate-950 hover:text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={loading}
             >
-              <RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+              <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">Refresh</span>
             </button>
           </div>
-          <span className="text-xs uppercase tracking-[0.3em] text-slate-500">{`${filteredBots.length} of ${sortedBots.length} bots`}</span>
+          <div className="flex flex-col items-end gap-1 text-xs tabular-nums">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-slate-400">{filteredBots.length}</span>
+              <span className="text-slate-600">of</span>
+              <span className="font-medium text-slate-500">{sortedBots.length}</span>
+            </div>
+            {runtimeCapacity ? (
+              <div className="text-[11px] text-slate-600">
+                <span>
+                  CPU {Number(runtimeCapacity.workers_in_use || 0)}/{Number(runtimeCapacity.host_cpu_cores || 0)}
+                </span>
+                <span className="ml-1 text-slate-700">({Number(runtimeCapacity.in_use_pct || 0)}%)</span>
+                <span className="mx-1.5 text-slate-700">•</span>
+                <span>{Number(runtimeCapacity.running_bots || 0)} running</span>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
-        {error ? (
-          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 p-4 text-sm text-rose-200">{error}</div>
-        ) : null}
+      {error ? (
+        <div className="rounded-lg border border-rose-900/50 bg-rose-950/20 px-4 py-3 text-sm text-rose-300">
+          {error}
+        </div>
+      ) : null}
 
-        <div className="space-y-3">
-          {loading && sortedBots.length === 0 ? (
-            <p className="text-sm text-slate-400">Loading bots…</p>
-          ) : filteredBots.length === 0 ? (
+      <div className="space-y-2.5">
+        {loading && sortedBots.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
+            <p className="text-sm text-slate-500">Loading bots…</p>
+          </div>
+        ) : filteredBots.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-8 text-center">
             <p className="text-sm text-slate-400">
-              {search.trim() ? 'No bots match your search.' : 'No bots yet. Create one to begin a backtest.'}
+              {search.trim() ? 'No bots match your filter.' : 'No bots configured.'}
             </p>
-          ) : (
+            {!search.trim() ? (
+              <p className="mt-1 text-xs text-slate-600">Create your first bot to begin backtesting.</p>
+            ) : null}
+          </div>
+        ) : (
             filteredBots.map((bot) => (
               <BotCard
                 key={bot.id}
                 bot={bot}
                 strategyLookup={strategyLookup}
-                describeRange={describeRange}
-                statusBadge={statusBadge}
+                nowEpochMs={nowEpochMs}
                 onStart={handleStart}
                 onStop={handleStop}
-                onPause={handlePause}
-                onResume={handleResume}
                 onDelete={handleDelete}
-                onOpen={setLensBot}
+                onOpen={(selectedBot) => setLensBotId(selectedBot?.id || null)}
                 pendingStart={pendingStart}
                 pendingDelete={pendingDelete}
               />
@@ -508,7 +655,7 @@ export function BotPanel() {
           )}
         </div>
 
-        <BotPerformanceModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBot(null)} onRefresh={loadBots} />
+        <BotLensLiveModal bot={lensBot} open={Boolean(lensBot)} onClose={() => setLensBotId(null)} />
         <BotCreateModal
           open={createOpen}
           onClose={closeCreateModal}
@@ -516,15 +663,16 @@ export function BotPanel() {
           strategies={sortedStrategies}
           strategiesLoading={strategiesLoading}
           strategyError={strategyError}
+          walletError={walletError}
           onSubmit={handleCreate}
           onChange={handleChange}
           onBacktestRangeChange={handleBacktestRangeChange}
           onStrategyToggle={handleStrategyToggle}
-          onATMTemplateChange={handleATMTemplateChange}
-          onToggleCustomATM={toggleCustomATM}
+          onWalletBalanceChange={handleWalletBalanceChange}
+          onWalletBalanceAdd={handleWalletBalanceAdd}
+          onWalletBalanceRemove={handleWalletBalanceRemove}
           error={createError}
         />
       </section>
     )
   }
-

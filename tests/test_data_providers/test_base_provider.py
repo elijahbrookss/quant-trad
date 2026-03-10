@@ -1,10 +1,11 @@
 """Tests for BaseDataProvider helpers."""
 
-from __future__ import annotations
 
-import pandas as pd
+import pytest
 
-from data_providers.base_provider import BaseDataProvider
+pd = pytest.importorskip("pandas")
+
+from data_providers import utils
 
 
 def _ts_range(start: str, count: int, step: str) -> list[pd.Timestamp]:
@@ -20,7 +21,7 @@ def test_collect_missing_ranges_handles_exclusive_end_without_gap():
     end = pd.Timestamp("2024-01-01T05:00:00Z")
     timestamps = _ts_range("2024-01-01T00:00:00Z", 5, "1h")
 
-    missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
+    missing = utils.collect_missing_ranges(timestamps, start, end, "1h")
 
     assert missing == []
 
@@ -32,7 +33,7 @@ def test_collect_missing_ranges_reports_trailing_gap_only_when_missing():
     end = pd.Timestamp("2024-01-01T05:00:00Z")
     timestamps = _ts_range("2024-01-01T00:00:00Z", 3, "1h")
 
-    missing = BaseDataProvider._collect_missing_ranges(timestamps, start, end, "1h")
+    missing = utils.collect_missing_ranges(timestamps, start, end, "1h")
 
     assert missing == [(pd.Timestamp("2024-01-01T03:00:00Z"), end)]
 
@@ -47,7 +48,7 @@ def test_subtract_ranges_removes_known_closures():
         (start + pd.Timedelta(hours=4), start + pd.Timedelta(hours=5)),
     ]
 
-    remaining = BaseDataProvider._subtract_ranges(ranges, closures)
+    remaining = utils.subtract_ranges(ranges, closures)
 
     assert remaining == [
         (start, start + pd.Timedelta(hours=1)),
@@ -63,6 +64,6 @@ def test_subtract_ranges_drops_fully_covered_segments():
     ranges = [(start, start + pd.Timedelta(hours=3))]
     closures = [(start - pd.Timedelta(minutes=30), start + pd.Timedelta(hours=3))]
 
-    remaining = BaseDataProvider._subtract_ranges(ranges, closures)
+    remaining = utils.subtract_ranges(ranges, closures)
 
     assert remaining == []

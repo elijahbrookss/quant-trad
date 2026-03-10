@@ -8,6 +8,7 @@ services:
       - ../:/app
     working_dir: /app
     env_file:
+      - ../secrets.env
       - ../.env.test
     environment:
       ALPACA_API_KEY: ${ALPACA_API_KEY}
@@ -15,19 +16,18 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
-    command: ["bash","-lc","python -m pip install --upgrade pip && /app/wait-for-db.sh pytest --cov=src --cov-report=term --cov-report=xml"]
+    command: ["bash","-lc","export PG_DSN=postgresql+psycopg2://$$POSTGRES_USER:$$POSTGRES_PASSWORD@timescaledb:5432/$$POSTGRES_DB && python -m pip install --upgrade pip && bash /app/scripts/wait-for-db.sh pytest --cov=src --cov-report=term --cov-report=xml"]
 
 
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+    env_file:
+      - ../secrets.env
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
       interval: 5s
       timeout: 3s
       retries: 10

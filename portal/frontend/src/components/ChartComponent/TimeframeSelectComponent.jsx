@@ -24,7 +24,7 @@ const options = [
  * @param {function} props.onChange - Callback when a timeframe is selected
  * @param {string} [props.placeholder='Select timeframe...'] - Placeholder text
  */
-export function TimeframeSelect({ selected, onChange, className = '' }) {
+export function TimeframeSelect({ selected, onChange, className = '', variant = 'card' }) {
   const [open, setOpen] = useState(false);
   const activeOption = useMemo(
     () => options.find(option => option.value === selected) ?? options[0],
@@ -36,6 +36,74 @@ export function TimeframeSelect({ selected, onChange, className = '' }) {
     onChange(value);
     setOpen(false);
   };
+
+  if (variant === 'dropdown') {
+    return (
+      <div className={`flex flex-col gap-2 ${className}`}>
+        <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-400">Timeframe</span>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={toggle}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            className={`flex w-full items-center justify-between rounded-lg border border-white/15 bg-[#141824]/85 px-3 py-2 text-sm font-medium text-slate-200 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+              open ? 'border-[color:var(--accent-alpha-40)] bg-[#1b263c] shadow-lg shadow-black/40' : 'hover:border-[color:var(--accent-alpha-30)] hover:bg-[#192236]'
+            }`}
+          >
+            <span className="text-slate-100">{activeOption?.label || activeOption?.value || 'Select timeframe'}</span>
+            <svg
+              className={`h-4 w-4 text-slate-300 transition-transform ${open ? 'rotate-180' : ''}`}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+
+          <div
+            role="listbox"
+            className={`absolute z-10 mt-2 w-full overflow-hidden rounded-xl border border-white/12 bg-[#0e111c]/95 shadow-[0_18px_48px_rgba(0,0,0,0.45)] backdrop-blur transition-all ${
+              open ? 'max-h-96 opacity-100' : 'pointer-events-none max-h-0 opacity-0'
+            }`}
+          >
+            <div className="divide-y divide-white/10">
+              {[{ label: null, options }].map((group, idx) => (
+                <div key={group.label ?? idx} className="flex flex-col p-2">
+                  {group.label ? (
+                    <span className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">
+                      {group.label}
+                    </span>
+                  ) : null}
+                  {group.options.map((option) => {
+                    const isActive = option.value === selected
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleSelect(option.value)}
+                        className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                          isActive
+                            ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]'
+                            : 'text-slate-200 hover:bg-[color:var(--accent-alpha-12)] hover:text-[color:var(--accent-text-soft)]'
+                        }`}
+                      >
+                        <span className="font-medium tracking-tight">{option.label}</span>
+                        <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">{option.value}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div

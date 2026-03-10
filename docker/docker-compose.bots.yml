@@ -1,0 +1,20 @@
+name: quant-trad-bots
+
+services:
+  bot-runtime:
+    build:
+      context: ..
+      dockerfile: portal/backend/Dockerfile
+    image: quanttrad-backend:dev
+    env_file:
+      - ../secrets.env
+    environment:
+      PYTHONPATH: /app/src:/app
+      BOT_CONTAINER_MODE: "1"
+    command: ["python", "-m", "portal.backend.service.bots.container_runtime"]
+    networks:
+      - quanttrad
+
+networks:
+  quanttrad:
+    external: true

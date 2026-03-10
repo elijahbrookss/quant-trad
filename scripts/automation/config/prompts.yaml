@@ -103,9 +103,9 @@ user_prompt_template: |
   <your social post>
 
   DEV_POST:
-  1) <idea>
-  2) <idea>
-  3) <idea>
+  1) <substack post idea>
+  2) <substack post idea>
+  3) <substack post idea>
 
   ABSOLUTE FORMAT REQUIREMENTS:
   - You must output ALL FOUR labels exactly once: TLDR:, SUMMARY:, SOCIAL_POST:, DEV_POST:
@@ -126,7 +126,7 @@ model_config:
   top_p: 0.9             # Nucleus sampling for better quality
 
 # Truncation settings
-max_diff_chars: 10000      # Maximum diff characters to send to model
+max_diff_chars: 7000    # Maximum diff characters to send to model
 
 # Output formatting hints
 formatting:

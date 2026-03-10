@@ -1,444 +1,268 @@
-# test_market_profile_indicator.py
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
-import pandas as pd
-from indicators.market_profile import MarketProfileIndicator
+
+pd = pytest.importorskip("pandas")
+
 from indicators.config import DataContext
-from data_providers.alpaca_provider import AlpacaProvider
+from indicators.market_profile import MarketProfileIndicator, Profile, ValueArea
+from indicators.market_profile.compute.internal.bin_size import infer_precision_from_step
+from indicators.market_profile.compute.internal.computation import (
+    build_tpo_histogram,
+    extract_value_area,
+)
+from indicators.market_profile.compute.internal.merging import calculate_overlap
+from indicators.market_profile.overlays import market_profile_overlay_transformer
 
 
-@pytest.mark.integration
-def test_market_profile_indicator_integration_plot():
-    """
-    Integration test for MarketProfileIndicator:
-    - Pulls 30m chart data for CL between 2025-06-01 and 2025-06-30
-    - Builds MarketProfileIndicator via from_context
-    - Relies on to_overlays to trigger value-area merging under the hood
-    - Generates overlays on the same 30m data
-    - Verifies overlays and legend entries exist
-    - Uses provider’s plot_ohlcv to write a file under integration_tests/market_profile
-    """
-    # Define a 30-minute context over two weeks
-    ctx = DataContext(
-        symbol="CL",
-        start="2025-06-01",
-        end="2025-06-30",
-        interval="30m"
+def _sample_df() -> pd.DataFrame:
+    idx = pd.to_datetime(
+        [
+            datetime(2025, 1, 1, 10, tzinfo=timezone.utc),
+            datetime(2025, 1, 1, 11, tzinfo=timezone.utc),
+            datetime(2025, 1, 2, 10, tzinfo=timezone.utc),
+            datetime(2025, 1, 2, 11, tzinfo=timezone.utc),
+        ],
+        utc=True,
     )
-
-    provider = AlpacaProvider()
-    # Fetch the same 30m data for plotting
-    plot_df = provider.get_ohlcv(ctx)
-    assert not plot_df.empty, "Integration: fetched plot_df is empty"
-
-    # Build MarketProfileIndicator (internally taps provider.get_ohlcv)
-    mpi = MarketProfileIndicator.from_context(
-        provider=provider,
-        ctx=ctx,
-        bin_size=0.5,      # can adjust bin size as desired
-        mode="tpo",
-        interval="30m"
-    )
-
-    # At least one daily profile should be computed
-    assert isinstance(mpi.daily_profiles, list)
-    assert mpi.daily_profiles, "Integration: daily_profiles is empty"
-
-    # Generate overlays on the plot_df index
-    overlays, legend_entries = mpi.to_overlays(plot_df, use_merged=True)
-
-    # At least one overlay should have been generated
-    assert overlays, "Integration: no overlays generated"
-    assert legend_entries, "Integration: no legend entries generated"
-    rect_overlays = [o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect"]
-    assert rect_overlays, "Integration: expected rectangle overlays for value areas"
-    assert all("end" in r for r in rect_overlays), "Integration: rectangle overlays should include 'end' timestamps"
-
-    # Finally, call provider.plot_ohlcv (integration) to save a chart
-    provider.plot_ohlcv(
-        plot_ctx=ctx,
-        title="Integration Test – Market Profile (CL 30m)",
-        overlays=overlays,
-        legend_entries=legend_entries,
-        show_volume=True,
-        output_subdir="integration_tests/market_profile"
-    )
-
-
-@pytest.fixture
-def dummy_df():
-    """
-    A small dummy DataFrame spanning two calendar dates, hourly bars.
-    Used to test TPO histogram, value area extraction, merging, and overlays.
-    """
-    idx = [
-        pd.Timestamp("2025-01-01 10:00", tz="UTC"),
-        pd.Timestamp("2025-01-01 11:00", tz="UTC"),
-        pd.Timestamp("2025-01-02 10:00", tz="UTC"),
-        pd.Timestamp("2025-01-02 11:00", tz="UTC"),
-    ]
-    data = {
-        "open":  [100, 101, 102, 103],
-        "high":  [101, 102, 103, 104],
-        "low":   [ 99, 100, 101, 102],
-        "close": [100, 101, 103, 103],
-        "volume":[1000,1100,1200,1300],
-    }
-    return pd.DataFrame(data, index=idx)
-
-@pytest.mark.unit
-def test_build_tpo_histogram_and_extract_value_area(dummy_df):
-    """
-    Unit test for _build_tpo_histogram & _extract_value_area on the first day's bars:
-      - Day 1 has two bars:
-          Bar A: low=99 → high=101  (buckets: 99, 100, 101)
-          Bar B: low=100→ high=102  (buckets: 100, 101, 102)
-        Combined TPO counts:
-          99 → 1, 100 → 2, 101 → 2, 102 → 1  (total = 6, threshold = 4.2)
-
-        sorted_buckets by count desc: [(100,2),(101,2),(99,1),(102,1)]
-        cumulative hits ≥4.2 only after including the third bucket (99).
-        → value‐area prices = [100, 101, 99]
-        → POC = 100.0, VAL = 99.0, VAH = 101.0
-    """
-    # Slice out exactly the two rows from 2025-01-01
-    df_day1 = dummy_df.loc["2025-01-01 10:00":"2025-01-01 11:00"]
-    mpi = MarketProfileIndicator(df_day1, bin_size=1.0, mode="tpo")
-
-    # 1) Build the histogram manually for those two bars:
-    hist = mpi._build_tpo_histogram(df_day1)
-    # Expect each bucket exactly as described:
-    #   99 → 1, 100 → 2, 101 → 2, 102 → 1
-    expected_hist = {99.0: 1, 100.0: 2, 101.0: 2, 102.0: 1}
-    assert hist == expected_hist
-
-    # Regression: ensure the buckets align exactly with integer price levels
-    int_bucket_hist = {int(price): count for price, count in hist.items()}
-    assert int_bucket_hist == {99: 1, 100: 2, 101: 2, 102: 1}
-
-    # 2) Extract the value area:
-    va = mpi._extract_value_area(hist)
-    assert va["POC"] == pytest.approx(100.0)
-    # Because cum at 100→2 (<4.2), then at 101→4 (<4.2), then including 99→5 (≥4.2),
-    # the VA prices = [100, 101, 99], so VAL = 99.0, VAH = 101.0
-    assert va["VAL"] == pytest.approx(99.0)
-    assert va["VAH"] == pytest.approx(101.0)
-
-
-@pytest.mark.unit
-def test_select_bin_size_accepts_string(dummy_df):
-    """String bin sizes coming from UI forms should coerce cleanly."""
-
-    indicator = MarketProfileIndicator(dummy_df, bin_size="0.5")
-    assert indicator.bin_size == pytest.approx(0.5)
-
-    fallback = MarketProfileIndicator(dummy_df, bin_size="")
-    assert fallback.bin_size > 0
-
-
-@pytest.mark.unit
-def test_calculate_overlap():
-    """
-    Unit test for _calculate_overlap:
-    - VA1=[100, 105], VA2=[103, 108] ⇒ overlap= min(105,108)-max(100,103)=2
-      range2=108-103=5 ⇒ 2/5=0.4
-    """
-    overlap = MarketProfileIndicator._calculate_overlap(100.0, 105.0, 103.0, 108.0)
-    assert pytest.approx(overlap, rel=1e-6) == 0.4
-
-@pytest.mark.unit
-def test_merge_value_areas_unit(dummy_df):
-    """
-    Unit test for merge_value_areas on manually crafted daily_profiles:
-    - Day1: VAL=99, VAH=101, POC=100   (covers 2025-01-01)
-    - Day2: VAL=100, VAH=102, POC=101  (covers 2025-01-02)
-    With threshold=0.5 ⇒ overlap ratio = (min(101,102)-max(99,100))=1 / (102-100)=0.5 ⇒ equals threshold ⇒ merge.
-    """
-    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
-
-    # Overwrite the automatically computed daily_profiles with two synthetic ones
-    day1_start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
-    day1_end   = pd.Timestamp("2025-01-01 11:00", tz="UTC")
-    day2_start = pd.Timestamp("2025-01-02 10:00", tz="UTC")
-    day2_end   = pd.Timestamp("2025-01-02 11:00", tz="UTC")
-
-    mpi.daily_profiles = [
+    return pd.DataFrame(
         {
-            "start_date": day1_start,
-            "end_date": day1_end,
-            "VAL": 99.0, "VAH": 101.0, "POC": 100.0
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.0, 101.0, 103.0, 103.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
         },
-        {
-            "start_date": day2_start,
-            "end_date": day2_end,
-            "VAL": 100.0, "VAH": 102.0, "POC": 101.0
-        }
-    ]
-
-    merged = mpi.merge_value_areas(threshold=0.5, min_merge=2)
-    # Expect a single merged entry:
-    assert len(merged) == 1
-    m = merged[0]
-    assert m["start"] == day1_start
-    assert m["end"]   == day2_end
-    assert m["VAL"] == pytest.approx(99.0)
-    assert m["VAH"] == pytest.approx(102.0)
-    assert m["POC"] == pytest.approx((100.0 + 101.0) / 2)
-
-@pytest.mark.unit
-def test_merge_value_areas_no_merge_due_to_threshold_unit(dummy_df):
-    """
-    Unit test for merge_value_areas when overlap < threshold:
-    - VA1=[99,100], VA2=[101,102] ⇒ no overlap ⇒ should return [].
-    """
-    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
-
-    day1_start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
-    day1_end   = pd.Timestamp("2025-01-01 11:00", tz="UTC")
-    day2_start = pd.Timestamp("2025-01-02 10:00", tz="UTC")
-    day2_end   = pd.Timestamp("2025-01-02 11:00", tz="UTC")
-
-    mpi.daily_profiles = [
-        {"start_date": day1_start, "end_date": day1_end, "VAL": 99.0, "VAH": 100.0, "POC": 99.5},
-        {"start_date": day2_start, "end_date": day2_end, "VAL": 101.0, "VAH": 102.0, "POC": 101.5}
-    ]
-
-    merged = mpi.merge_value_areas(threshold=0.1, min_merge=2)
-    assert merged == []
-
-@pytest.mark.unit
-def test_to_overlays_auto_merges_and_returns_rect_with_end(dummy_df):
-    """
-    Ensure to_overlays can trigger merge_value_areas internally and emits
-    rect overlays that respect the chart window end.
-    """
-    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
-
-    day1_start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
-    day1_end   = pd.Timestamp("2025-01-01 11:00", tz="UTC")
-    day2_start = pd.Timestamp("2025-01-02 10:00", tz="UTC")
-    day2_end   = pd.Timestamp("2025-01-02 11:00", tz="UTC")
-
-    mpi.daily_profiles = [
-        {
-            "start_date": day1_start,
-            "end_date":   day1_end,
-            "VAL":  99.0,
-            "VAH": 101.0,
-            "POC": 100.0
-        },
-        {
-            "start_date": day2_start,
-            "end_date":   day2_end,
-            "VAL": 100.0,
-            "VAH": 102.0,
-            "POC": 101.0
-        }
-    ]
-
-    plot_idx   = pd.date_range(start=day1_start, end=day2_end, freq="30min", tz="UTC")
-    plot_df    = pd.DataFrame({"open": [100]*len(plot_idx)}, index=plot_idx)
-
-    overlays, legend_entries = mpi.to_overlays(
-        plot_df,
-        use_merged=True,
-        merge_threshold=0.5,
-        min_merge=2,
+        index=idx,
     )
 
-    assert len(overlays) == 2, "Expected one rect + one POC overlay for merged profile"
-    rects = [o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect"]
-    assert rects, "Expected a rectangle overlay for merged value area"
-    rect = rects[0]
-    assert rect["start"] == plot_df.index.min()
-    assert rect["end"] == plot_df.index.max()
-    assert ("Value Area", "gray") in legend_entries
-    assert ("POC", "orange") in legend_entries
 
-
-@pytest.mark.unit
-def test_to_overlays_respects_extend_flag(dummy_df):
-    mpi = MarketProfileIndicator(
-        dummy_df,
-        bin_size=1.0,
-        mode="tpo",
-        extend_value_area_to_chart_end=False,
+def _profile(
+    *,
+    start: str,
+    end: str,
+    val: float,
+    vah: float,
+    poc: float,
+    session_count: int = 1,
+) -> Profile:
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize("UTC")
+    else:
+        start_ts = start_ts.tz_convert("UTC")
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.tz_localize("UTC")
+    else:
+        end_ts = end_ts.tz_convert("UTC")
+    return Profile(
+        start=start_ts,
+        end=end_ts,
+        value_area=ValueArea(val=val, vah=vah, poc=poc),
+        session_count=session_count,
+        precision=2,
     )
 
-    start = pd.Timestamp("2025-01-03 09:30", tz="UTC")
-    end = start + pd.Timedelta(hours=1)
-    chart_end = end + pd.Timedelta(hours=3)
 
-    mpi.daily_profiles = [
-        {
-            "start_date": start,
-            "end_date": end,
-            "VAL": 95.0,
-            "VAH": 105.0,
-            "POC": 100.0,
-        }
-    ]
+class _ProviderStub:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self.df = df
+        self.last_ctx: DataContext | None = None
 
-    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
-    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
-
-    overlays, _ = mpi.to_overlays(plot_df, use_merged=False)
-    rect = next(o for o in overlays if isinstance(o, dict) and o.get("kind") == "rect")
-    assert rect["end"] == end
-
-    overlays_extend, _ = mpi.to_overlays(plot_df, use_merged=False, extend_to_chart_end=True)
-    rect_extend = next(o for o in overlays_extend if isinstance(o, dict) and o.get("kind") == "rect")
-    assert rect_extend["end"] == plot_df.index.max()
+    def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
+        self.last_ctx = ctx
+        return self.df.copy()
 
 
-@pytest.mark.unit
-def test_to_lightweight_extends_boxes_to_chart_end_by_default(dummy_df):
-    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
-
-    start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
-    end = start + pd.Timedelta(hours=2)
-    chart_end = end + pd.Timedelta(hours=2)
-
-    mpi.daily_profiles = [
-        {
-            "start_date": start,
-            "end_date": end,
-            "VAL": 99.0,
-            "VAH": 101.0,
-            "POC": 100.0,
-        }
-    ]
-
-    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
-    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
-
-    payload = mpi.to_lightweight(
-        plot_df,
-        use_merged=False,
-        include_touches=False,
-    )
-
-    assert payload["boxes"], "Expected at least one value-area box"
-    box = payload["boxes"][0]
-    assert box["x2"] == int(chart_end.timestamp())
-
-
-@pytest.mark.unit
-def test_to_lightweight_can_limit_box_to_profile_end(dummy_df):
-    mpi = MarketProfileIndicator(dummy_df, bin_size=1.0, mode="tpo")
-
-    start = pd.Timestamp("2025-01-01 10:00", tz="UTC")
-    end = start + pd.Timedelta(hours=1)
-    chart_end = end + pd.Timedelta(hours=3)
-
-    mpi.daily_profiles = [
-        {
-            "start_date": start,
-            "end_date": end,
-            "VAL": 99.0,
-            "VAH": 101.0,
-            "POC": 100.0,
-        }
-    ]
-
-    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
-    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
-
-    payload = mpi.to_lightweight(
-        plot_df,
-        use_merged=False,
-        include_touches=False,
-        extend_boxes_to_chart_end=False,
-    )
-
-    assert payload["boxes"], "Expected at least one value-area box"
-    box = payload["boxes"][0]
-    assert box["x2"] == int(end.timestamp())
-
-
-@pytest.mark.unit
-def test_to_lightweight_inherits_extend_flag_from_indicator(dummy_df):
-    mpi = MarketProfileIndicator(
-        dummy_df,
-        bin_size=1.0,
-        mode="tpo",
-        extend_value_area_to_chart_end=False,
-    )
-
-    start = pd.Timestamp("2025-01-02 09:30", tz="UTC")
-    end = start + pd.Timedelta(hours=2)
-    chart_end = end + pd.Timedelta(hours=3)
-
-    mpi.daily_profiles = [
-        {
-            "start_date": start,
-            "end_date": end,
-            "VAL": 95.0,
-            "VAH": 105.0,
-            "POC": 100.0,
-        }
-    ]
-
-    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
-    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
-
-    payload = mpi.to_lightweight(
-        plot_df,
-        use_merged=False,
-        include_touches=False,
-    )
-
-    assert payload["boxes"], "Expected at least one value-area box"
-    box = payload["boxes"][0]
-    assert box["x2"] == int(end.timestamp())
-
-
-class _CacheProvider:
-    """In-memory provider stub used to verify MarketProfile caching."""
-
-    def __init__(self):
-        self.calls = 0
-
-    def get_ohlcv(self, ctx):  # pragma: no cover - trivial stub
-        self.calls += 1
-        start = pd.Timestamp(ctx.start)
-        end = pd.Timestamp(ctx.end)
-        if start.tzinfo is None:
-            start = start.tz_localize("UTC")
-        else:
-            start = start.tz_convert("UTC")
-        if end.tzinfo is None:
-            end = end.tz_localize("UTC")
-        else:
-            end = end.tz_convert("UTC")
-        idx = pd.date_range(start=start, end=end, freq="1h", tz="UTC")
-        data = {
-            "open": pd.Series(range(len(idx)), index=idx).astype(float),
-            "high": pd.Series(range(len(idx)), index=idx).astype(float) + 0.5,
-            "low": pd.Series(range(len(idx)), index=idx).astype(float) - 0.5,
-            "close": pd.Series(range(len(idx)), index=idx).astype(float),
-        }
-        return pd.DataFrame(data, index=idx)
-
-
-@pytest.mark.unit
-def test_fetch_with_cache_reuses_historical_window():
-    provider = _CacheProvider()
+def test_from_context_normalizes_boundaries_to_utc() -> None:
+    provider = _ProviderStub(_sample_df())
     ctx = DataContext(
         symbol="ES",
-        start="2025-01-10T00:00:00Z",
-        end="2025-01-12T00:00:00Z",
+        start="2025-01-01",
+        end="2025-01-02",
         interval="1h",
     )
 
-    MarketProfileIndicator._DATAFRAME_CACHE.clear()
-    try:
-        first = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2)
-        assert provider.calls == 1
-        assert not first.empty
+    indicator = MarketProfileIndicator.from_context(
+        provider=provider,
+        ctx=ctx,
+        bin_size=1.0,
+        days_back=2,
+    )
 
-        second = MarketProfileIndicator._fetch_with_cache(provider, ctx, days_back=2)
-        assert provider.calls == 1, "Expected cached dataframe to be reused"
-        pd.testing.assert_frame_equal(first, second)
-    finally:
-        MarketProfileIndicator._DATAFRAME_CACHE.clear()
+    assert provider.last_ctx is not None
+    assert pd.Timestamp(provider.last_ctx.start).tzinfo is not None
+    assert pd.Timestamp(provider.last_ctx.end).tzinfo is not None
+    assert all(profile.start.tzinfo is not None for profile in indicator.get_profiles())
+
+
+def test_build_tpo_histogram_and_extract_value_area() -> None:
+    df_day1 = _sample_df().loc["2025-01-01 10:00":"2025-01-01 11:00"]
+
+    hist = build_tpo_histogram(
+        df_day1,
+        bin_size=1.0,
+        bin_precision=infer_precision_from_step(1.0),
+    )
+    assert hist == {99.0: 1, 100.0: 2, 101.0: 2, 102.0: 1}
+
+    value_area = extract_value_area(hist, price_precision=2)
+    assert value_area is not None
+    assert value_area.poc == pytest.approx(100.0)
+    assert value_area.val == pytest.approx(99.0)
+    assert value_area.vah == pytest.approx(101.0)
+
+
+def test_select_bin_size_accepts_string() -> None:
+    indicator = MarketProfileIndicator(_sample_df(), bin_size="0.5")
+    assert indicator.bin_size == pytest.approx(0.5)
+
+    fallback = MarketProfileIndicator(_sample_df(), bin_size="")
+    assert fallback.bin_size > 0
+
+
+def test_calculate_overlap() -> None:
+    overlap = calculate_overlap(100.0, 105.0, 103.0, 108.0)
+    assert overlap == pytest.approx(0.4)
+
+
+def test_get_merged_profiles_returns_profile_dataclasses() -> None:
+    indicator = MarketProfileIndicator(
+        _sample_df(),
+        bin_size=1.0,
+        use_merged_value_areas=True,
+        merge_threshold=0.5,
+        min_merge_sessions=2,
+    )
+    indicator._profiles = [
+        _profile(
+            start="2025-01-01T10:00:00+00:00",
+            end="2025-01-01T11:00:00+00:00",
+            val=99.0,
+            vah=101.0,
+            poc=100.0,
+        ),
+        _profile(
+            start="2025-01-02T10:00:00+00:00",
+            end="2025-01-02T11:00:00+00:00",
+            val=100.0,
+            vah=102.0,
+            poc=101.0,
+        ),
+    ]
+
+    merged = indicator.get_merged_profiles(threshold=0.5, min_sessions=2)
+
+    assert len(merged) == 1
+    merged_profile = merged[0]
+    assert isinstance(merged_profile, Profile)
+    assert merged_profile.start == pd.Timestamp("2025-01-01T10:00:00+00:00")
+    assert merged_profile.end == pd.Timestamp("2025-01-02T11:00:00+00:00")
+    assert merged_profile.val == pytest.approx(99.0)
+    assert merged_profile.vah == pytest.approx(102.0)
+    assert merged_profile.poc == pytest.approx(100.5)
+    assert merged_profile.session_count == 2
+
+
+def test_to_lightweight_extends_boxes_to_chart_end_by_default() -> None:
+    indicator = MarketProfileIndicator(
+        _sample_df(),
+        bin_size=1.0,
+        use_merged_value_areas=False,
+    )
+    start = pd.Timestamp("2025-01-01T10:00:00+00:00")
+    end = start + timedelta(hours=2)
+    chart_end = end + timedelta(hours=2)
+    indicator._profiles = [
+        _profile(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            val=99.0,
+            vah=101.0,
+            poc=100.0,
+        )
+    ]
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    payload = indicator.to_lightweight(plot_df)
+
+    assert payload["boxes"]
+    assert payload["boxes"][0]["x2"] == int(chart_end.timestamp())
+
+
+def test_to_lightweight_respects_indicator_extend_flag() -> None:
+    indicator = MarketProfileIndicator(
+        _sample_df(),
+        bin_size=1.0,
+        use_merged_value_areas=False,
+        extend_value_area_to_chart_end=False,
+    )
+    start = pd.Timestamp("2025-01-02T09:30:00+00:00")
+    end = start + timedelta(hours=2)
+    chart_end = end + timedelta(hours=3)
+    indicator._profiles = [
+        _profile(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            val=95.0,
+            vah=105.0,
+            poc=100.0,
+        )
+    ]
+    plot_idx = pd.date_range(start=start, end=chart_end, freq="30min", tz="UTC")
+    plot_df = pd.DataFrame({"open": [100.0] * len(plot_idx)}, index=plot_idx)
+
+    payload = indicator.to_lightweight(plot_df)
+
+    assert payload["boxes"]
+    assert payload["boxes"][0]["x2"] == int(end.timestamp())
+
+
+def test_overlay_transformer_builds_boxes_from_runtime_payload() -> None:
+    indicator = MarketProfileIndicator(
+        _sample_df(),
+        bin_size=1.0,
+        use_merged_value_areas=False,
+        extend_value_area_to_chart_end=True,
+    )
+    start = pd.Timestamp("2025-01-01T10:00:00+00:00")
+    end = start + timedelta(hours=1)
+    chart_end = end + timedelta(hours=3)
+    indicator._profiles = [
+        _profile(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            val=99.0,
+            vah=101.0,
+            poc=100.0,
+        )
+    ]
+    payload = indicator.build_runtime_signal_payload(
+        indicator_id="ind-1",
+        params={
+            "use_merged_value_areas": False,
+            "extend_value_area_to_chart_end": True,
+            "start": int(start.timestamp()),
+            "end": int(chart_end.timestamp()),
+        },
+        symbol="ES",
+        chart_timeframe="30m",
+    )
+    overlay = {"type": "market-profile", "payload": payload, "symbol": "ES"}
+
+    transformed = market_profile_overlay_transformer(
+        overlay,
+        current_epoch=int(chart_end.timestamp()),
+    )
+
+    assert transformed is not None
+    boxes = transformed["payload"]["boxes"]
+    assert len(boxes) == 1
+    assert boxes[0]["x1"] == int(start.timestamp())
+    assert boxes[0]["x2"] == int(chart_end.timestamp())
+    assert boxes[0]["y1"] == pytest.approx(99.0)
+    assert boxes[0]["y2"] == pytest.approx(101.0)

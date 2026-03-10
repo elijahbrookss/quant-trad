@@ -1,4 +1,5 @@
 import { createLogger } from '../utils/logger.js'
+import { openSse, openWebSocket } from './realtime.adapter.js'
 
 const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 const log = createLogger('BotAdapter')
@@ -34,6 +35,10 @@ export async function listBots() {
   return request('/api/bots')
 }
 
+export async function fetchBotRuntimeCapacity() {
+  return request('/api/bots/runtime-capacity')
+}
+
 export async function createBot(payload) {
   log.info('create_bot', payload)
   return request('/api/bots', {
@@ -61,46 +66,75 @@ export async function stopBot(botId) {
   return request(`/api/bots/${botId}/stop`, { method: 'POST' })
 }
 
-export async function pauseBot(botId) {
-  return request(`/api/bots/${botId}/pause`, { method: 'POST' })
-}
 
-export async function resumeBot(botId) {
-  return request(`/api/bots/${botId}/resume`, { method: 'POST' })
-}
-
-export async function fetchBotStatus(botId) {
-  return request(`/api/bots/${botId}/status`)
-}
-
-export async function fetchBotPerformance(botId) {
-  return request(`/api/bots/${botId}/performance`)
-}
-
-export async function fetchBotLogs(botId, limit = 200) {
-  const params = new URLSearchParams()
-  if (limit) params.set('limit', String(limit))
-  const query = params.toString() ? `?${params.toString()}` : ''
-  return request(`/api/bots/${botId}/logs${query}`)
-}
-
-export function openBotStream(botId) {
-  if (!botId) return null
-  try {
-    const url = new URL(`/api/bots/${botId}/stream`, BASE)
-    return new EventSource(url, { withCredentials: false })
-  } catch (err) {
-    log.warn('bot_stream_init_failed', { botId }, err)
-    return null
-  }
-}
 
 export function openBotsStream() {
-  try {
-    const url = new URL('/api/bots/stream', BASE)
-    return new EventSource(url, { withCredentials: false })
-  } catch (err) {
-    log.warn('bots_stream_init_failed', err)
-    return null
+  const source = openSse('/api/bots/stream', { withCredentials: false, base: BASE })
+  if (!source) {
+    log.warn('bots_stream_init_failed')
   }
+  return source
+}
+
+
+
+export async function fetchBotSettingsCatalog() {
+  return request('/api/bots/settings-catalog')
+}
+
+
+export async function fetchBotActiveRun(botId) {
+  return request(`/api/bots/${encodeURIComponent(botId)}/active-run`)
+}
+
+export async function fetchBotRuns(botId, { limit = 25 } = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(Math.max(1, Number(limit) || 25)))
+  return request(`/api/bots/${encodeURIComponent(botId)}/runs?${params.toString()}`)
+}
+
+export async function fetchBotLensSeriesCatalog(runId) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series`)
+}
+
+
+
+export async function fetchBotRunLedgerEvents(botId, runId, { afterSeq = 0, limit = 500, eventNames } = {}) {
+  const params = new URLSearchParams()
+  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
+  params.set('limit', String(Math.max(1, Number(limit) || 500)))
+  if (Array.isArray(eventNames)) {
+    eventNames.forEach((name) => {
+      if (name === undefined || name === null) return
+      const normalized = String(name).trim()
+      if (!normalized) return
+      params.append('event_name', normalized)
+    })
+  }
+  const query = params.toString()
+  return request(
+    `/api/bots/${encodeURIComponent(botId)}/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ''}`,
+  )
+}
+
+
+export async function fetchBotLensSeriesWindow(runId, seriesKey, { to = 'now', limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  if (to) params.set('to', String(to))
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/window?${params.toString()}`)
+}
+
+export async function fetchBotLensSeriesHistory(runId, seriesKey, { beforeTs, limit = 320 } = {}) {
+  const params = new URLSearchParams()
+  if (beforeTs) params.set('before_ts', String(beforeTs))
+  params.set('limit', String(Math.max(1, Number(limit) || 320)))
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/history?${params.toString()}`)
+}
+
+export function openBotLensSeriesLiveStream(runId, seriesKey, { afterSeq = 0 } = {}) {
+  const params = new URLSearchParams()
+  params.set('after_seq', String(Math.max(0, Number(afterSeq) || 0)))
+  const path = `/api/bots/ws/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/live?${params.toString()}`
+  return openWebSocket(path, { base: BASE })
 }

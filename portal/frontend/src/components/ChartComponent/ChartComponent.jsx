@@ -1,131 +1,151 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { createChart, CandlestickSeries, createSeriesMarkers } from 'lightweight-charts';
-import { RotateCcw, Maximize2, Minimize2 } from 'lucide-react';
+import { createChart, CandlestickSeries } from 'lightweight-charts';
+import { RotateCcw } from 'lucide-react';
 import { TimeframeSelect, SymbolInput } from './TimeframeSelectComponent';
 import { DateRangePickerComponent } from './DateTimePickerComponent.jsx';
 import { options, seriesOptions } from './ChartOptions';
-import { fetchCandleData } from '../../adapters/candle.adapter';
+import { fetchInstrumentCandles } from '../../hooks/useInstrumentCandles.js';
 import { useChartState, useChartValue } from '../../contexts/ChartStateContext.jsx';
 import { createLogger } from '../../utils/logger.js';
 import { PaneViewManager } from '../../chart/paneViews/factory.js';
-import { adaptPayload, getPaneViewsFor } from '../../chart/indicators/registry.js';
-import LoadingOverlay from '../LoadingOverlay.jsx';
-import HotkeyHint from '../HotkeyHint.jsx';
-import SymbolPalette from '../SymbolPalette.jsx';
 import { useConnectionMonitor } from '../../hooks/useConnectionMonitor.js';
 import DropdownSelect from './DropdownSelect.jsx';
-import DataModeToggle from './DataModeToggle.jsx';
+import CredentialsModal from './CredentialsModal.jsx';
+import ChartSurface from './ChartSurface.jsx';
 import { useLiveDataMode } from './hooks/useLiveDataMode.js';
-import { HistoricalLookbackControl } from './LookbackControls.jsx';
-import {
-  DATASOURCE_OPTIONS,
-  DATASOURCE_IDS,
-  MARKET_PROVIDERS,
-  CRYPTO_EXCHANGES,
-  IB_EXCHANGES,
-  DEFAULT_DATASOURCE,
-  DEFAULT_MARKET_PROVIDER,
-  DEFAULT_CRYPTO_EXCHANGE,
-  DEFAULT_IB_EXCHANGE,
-} from '../../constants/datasources.js';
+import { useProviderManagement } from './hooks/useProviderManagement.js';
+import { useWindowConfiguration, HISTORICAL_WINDOW_MODES, clampLookbackDays } from './hooks/useWindowConfiguration.js';
+import { useOverlaySync } from './hooks/useOverlaySync.js';
+import { DATASOURCE_IDS, DEFAULT_DATASOURCE } from '../../constants/datasources.js';
 
 // File-level namespace.
 const LOG_NS = 'ChartComponent';
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_LOOKBACK_DAYS = 365;
 const DEFAULT_LOOKBACK_DAYS = 90;
 const LIVE_CRYPTO_EXCHANGES = new Set(['binanceus']);
-const HISTORICAL_WINDOW_MODES = {
-  LOOKBACK: 'lookback',
-  RANGE: 'range',
-};
 
-const clampLookbackDays = (value) => {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return DEFAULT_LOOKBACK_DAYS;
-  }
-  const rounded = Math.round(numeric);
-  return Math.max(1, Math.min(MAX_LOOKBACK_DAYS, rounded));
-};
+// localStorage helpers for chart preferences
+const CHART_PREFS_KEY = 'qt.chartPreferences';
 
-const deriveTimeScaleOptions = (rawInterval) => {
-  const interval = (rawInterval || '').toString().toLowerCase();
-  const base = { timeVisible: true, secondsVisible: false };
-
-  if (!interval) return base;
-
-  if (interval.endsWith('s')) {
-    return { ...base, secondsVisible: true };
-  }
-
-  if (interval.endsWith('m')) {
-    return base;
-  }
-
-  if (interval.endsWith('h')) {
-    return base;
-  }
-
-  if (interval.endsWith('d')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  if (interval.endsWith('w') || interval.endsWith('mo') || interval.endsWith('y')) {
-    return { timeVisible: false, secondsVisible: false };
-  }
-
-  return base;
-};
-
-const toRgba = (hex, alpha = 0.12) => {
-  if (typeof hex !== 'string') return null;
-  const trimmed = hex.trim().replace('#', '');
-  if (!(trimmed.length === 3 || trimmed.length === 6)) return null;
-
-  const expand = (value) => value.split('').map((c) => c + c).join('');
-  const normalized = trimmed.length === 3 ? expand(trimmed) : trimmed;
-
-  const r = Number.parseInt(normalized.slice(0, 2), 16);
-  const g = Number.parseInt(normalized.slice(2, 4), 16);
-  const b = Number.parseInt(normalized.slice(4, 6), 16);
-
-  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
-
-  const clampedAlpha = Math.min(Math.max(alpha, 0), 1);
-  return `rgba(${r},${g},${b},${clampedAlpha})`;
-};
-
-const coalesce = (...values) => {
-  for (const value of values) {
-    if (value !== undefined && value !== null) return value;
-  }
-  return undefined;
-};
-
-const toFiniteNumber = (value) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-};
-
-const toIsoFromSeconds = (value) => {
-  const numeric = toFiniteNumber(value);
-  if (numeric == null) return null;
+const hasLocalStorage = () => {
   try {
-    const date = new Date(numeric * 1000);
-    if (Number.isNaN(date.valueOf())) return null;
-    return date.toISOString();
+    return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+  } catch {
+    return false;
+  }
+};
+
+const loadChartPreferences = () => {
+  if (!hasLocalStorage()) return null;
+  try {
+    const raw = window.localStorage.getItem(CHART_PREFS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
   } catch {
     return null;
   }
 };
 
-const formatPriceDisplay = (value, precision = 2) => {
-  const numeric = toFiniteNumber(value);
-  if (numeric == null) return 'n/a';
-  const digits = Math.min(Math.max(Number(precision) || 2, 2), 8);
-  return numeric.toFixed(digits);
+const saveChartPreferences = (prefs) => {
+  if (!hasLocalStorage()) return;
+  try {
+    window.localStorage.setItem(CHART_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // Ignore persistence issues (private browsing, quota exceeded, etc.)
+  }
+};
+
+const parseTimeframeToSeconds = (rawTimeframe) => {
+  const text = (rawTimeframe || '').toString().trim().toLowerCase();
+  if (!text) return null;
+  const match = text.match(/^(\d+)\s*([a-z]+)$/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2];
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  if (unit === 's' || unit === 'sec' || unit === 'secs' || unit === 'second' || unit === 'seconds') {
+    return amount;
+  }
+  if (unit === 'm' || unit === 'min' || unit === 'mins' || unit === 'minute' || unit === 'minutes') {
+    return amount * 60;
+  }
+  if (unit === 'h' || unit === 'hr' || unit === 'hrs' || unit === 'hour' || unit === 'hours') {
+    return amount * 3600;
+  }
+  if (unit === 'd' || unit === 'day' || unit === 'days') {
+    return amount * 86400;
+  }
+  if (unit === 'w' || unit === 'wk' || unit === 'wks' || unit === 'week' || unit === 'weeks') {
+    return amount * 7 * 86400;
+  }
+  if (unit === 'mo' || unit === 'mon' || unit === 'month' || unit === 'months') {
+    return amount * 30 * 86400;
+  }
+  if (unit === 'y' || unit === 'yr' || unit === 'yrs' || unit === 'year' || unit === 'years') {
+    return amount * 365 * 86400;
+  }
+  return null;
+};
+
+const buildTickMarkFormatter = (timeframeSeconds) => {
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const minuteGranularity = Number.isFinite(timeframeSeconds) && timeframeSeconds < 3600;
+  const intradayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const dayFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const dateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'UTC',
+    month: 'short',
+    day: '2-digit',
+  });
+
+  return (timeValue) => {
+    const epoch = typeof timeValue === 'number'
+      ? timeValue
+      : typeof timeValue?.timestamp === 'function'
+        ? Number(timeValue.timestamp())
+        : Number.isFinite(timeValue?.timestamp)
+          ? Number(timeValue.timestamp)
+          : null;
+    if (!Number.isFinite(epoch)) return '';
+    const date = new Date(epoch * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+
+    if (!intraday) {
+      return dateFormatter.format(date);
+    }
+    if (minuteGranularity) {
+      return intradayFormatter.format(date);
+    }
+
+    const hour = date.getUTCHours();
+    const minute = date.getUTCMinutes();
+    if (hour === 0 && minute === 0) {
+      return dayFormatter.format(date);
+    }
+    return intradayFormatter.format(date);
+  };
+};
+
+const deriveTimeScaleOptions = (rawInterval) => {
+  const timeframeSeconds = parseTimeframeToSeconds(rawInterval);
+  const intraday = Number.isFinite(timeframeSeconds) && timeframeSeconds < 86400;
+  const showSeconds = Number.isFinite(timeframeSeconds) && timeframeSeconds < 60;
+  return {
+    timeVisible: intraday || !Number.isFinite(timeframeSeconds),
+    secondsVisible: showSeconds,
+    tickMarkFormatter: buildTickMarkFormatter(timeframeSeconds),
+  };
 };
 
 const normalizeExchangeId = (value) => (value ?? '').toString().trim().toLowerCase();
@@ -164,40 +184,6 @@ const deriveCcxtPriceFormat = (candles = []) => {
   return { type: 'price', precision, minMove };
 };
 
-const buildVaBoxSummaryText = ({
-  startSec,
-  endSec,
-  requestedEndSec,
-  val,
-  vah,
-  poc,
-  sessions,
-  valueAreaId,
-  precision,
-}) => {
-  const parts = [
-    `start=${toIsoFromSeconds(startSec) ?? 'n/a'}`,
-    `end=${toIsoFromSeconds(endSec) ?? 'n/a'}`,
-    `VAL=${formatPriceDisplay(val, precision)}`,
-    `VAH=${formatPriceDisplay(vah, precision)}`,
-  ];
-
-  if (poc != null) {
-    parts.push(`POC=${formatPriceDisplay(poc, precision)}`);
-  }
-  if (sessions != null) {
-    parts.push(`sessions=${sessions}`);
-  }
-  if (valueAreaId != null) {
-    parts.push(`id=${valueAreaId}`);
-  }
-  if (requestedEndSec != null && requestedEndSec !== endSec) {
-    parts.push('extended_to_last_bar=true');
-  }
-
-  return parts.join(' | ');
-};
-
 export const ChartComponent = ({ chartId }) => {
   // Logger for this file.
   const logger = useMemo(() => createLogger(LOG_NS, { chartId }), [chartId]);
@@ -207,68 +193,84 @@ export const ChartComponent = ({ chartId }) => {
   const { registerChart, updateChart, bumpRefresh } = useChartState();
   const chartState = useChartValue(chartId);
 
-  // Local UI state.
-  const [symbol, setSymbol] = useState('CL');
-  const [symbolDraft, setSymbolDraft] = useState('CL');
-  const [interval, setInterval] = useState('15m');
-  const [datasource, setDatasource] = useState(DEFAULT_DATASOURCE);
-  const [exchange, setExchange] = useState(DEFAULT_MARKET_PROVIDER);
-  const [marketProvider, setMarketProvider] = useState(DEFAULT_MARKET_PROVIDER);
+  // Load saved preferences on mount
+  const savedPrefs = useMemo(() => loadChartPreferences(), []);
+
+  // Local UI state with localStorage fallback
+  const [symbol, setSymbol] = useState(() => savedPrefs?.symbol || 'CL');
+  const [symbolDraft, setSymbolDraft] = useState(() => savedPrefs?.symbol || 'CL');
+  const [interval, setInterval] = useState(() => savedPrefs?.interval || '15m');
+  const [datasource, setDatasource] = useState(() => savedPrefs?.datasource || DEFAULT_DATASOURCE);
+  const [exchange, setExchange] = useState(() => savedPrefs?.exchange || '');
+
+  // Provider management hook
+  const providerMgmt = useProviderManagement({
+    savedPrefs,
+    logger,
+    onDatasourceChange: setDatasource,
+    onExchangeChange: setExchange,
+  });
+  const { providerBlocked } = providerMgmt;
+
   const [palOpen, setPalOpen] = useState(false);
-  const [dateRange, setDateRange] = useState([
-    new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
-    new Date(),
-  ]);
-  const [historicalWindowMode, setHistoricalWindowMode] = useState(
-    HISTORICAL_WINDOW_MODES.LOOKBACK,
-  );
-  const [historicalLookbackDays, setHistoricalLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
-  const [historicalLookbackInput, setHistoricalLookbackInput] = useState(
-    String(DEFAULT_LOOKBACK_DAYS),
-  );
-  const [liveLookbackDays, setLiveLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS);
-  const [liveLookbackInput, setLiveLookbackInput] = useState(String(DEFAULT_LOOKBACK_DAYS));
   const [dataLoading, setDataLoading] = useState(false);
   const [dataLoaderContext, setDataLoaderContext] = useState(null);
+  const [candleTimes, setCandleTimes] = useState([]);
   const [rangeWarning, setRangeWarning] = useState(null);
   const [connectionNotice, setConnectionNotice] = useState(null);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
+  const [chartStateNotice, setChartStateNotice] = useState({
+    state: 'idle',
+    message: 'Preparing chart…',
+  });
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [fullscreenHost, setFullscreenHost] = useState(null);
+  const markChartState = useCallback((state, message = null) => {
+    setChartStateNotice({ state, message });
+  }, []);
 
-  const chartShellClasses = useMemo(() => {
-    const base =
-      'relative overflow-hidden border border-white/12 bg-gradient-to-b from-[#1d2336] via-[#111827] to-[#070b14] shadow-[0_50px_160px_-90px_rgba(0,0,0,0.85)]';
-    const size = isFullscreen
-      ? 'h-full w-full rounded-none'
-      : 'h-[700px] rounded-[28px]';
-    return `${base} ${size}`;
-  }, [isFullscreen]);
+  const instrumentIdRef = useRef(null);
+  const instrumentKeyRef = useRef(null);
+  const modeRef = useRef('historical');
+  const dataLoadingRef = useRef(false);
+  const dateRangeRef = useRef([
+    new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * DAY_MS),
+    new Date(),
+  ]);
+  const lastOverlaysRef = useRef(null);
 
+  // Window configuration hook
+  const windowConfig = useWindowConfiguration({
+    savedPrefs,
+    modeRef,
+    dateRangeRef,
+  });
+
+
+  // Save chart preferences to localStorage whenever they change
   useEffect(() => {
-    if (!isFullscreen) return undefined;
-    if (typeof document === 'undefined') return undefined;
-
-    const node = document.createElement('div');
-    node.className = 'fixed inset-0 z-[9999] bg-[#01030e]';
-    document.body.appendChild(node);
-    setFullscreenHost(node);
-
-    return () => {
-      setFullscreenHost((current) => (current === node ? null : current));
-      if (node.parentNode) {
-        node.parentNode.removeChild(node);
-      }
+    const prefs = {
+      symbol,
+      interval,
+      datasource,
+      providerId: providerMgmt.providerId,
+      venueId: providerMgmt.venueId,
+      exchange,
+      historicalWindowMode: windowConfig.historicalWindowMode,
+      historicalLookbackDays: windowConfig.historicalLookbackDays,
+      liveLookbackDays: windowConfig.liveLookbackDays,
     };
-  }, [isFullscreen]);
-
-  useEffect(() => {
-    const normalizedHistorical = String(clampLookbackDays(historicalLookbackDays));
-    setHistoricalLookbackInput((prev) => (prev === normalizedHistorical ? prev : normalizedHistorical));
-
-    const normalized = String(clampLookbackDays(liveLookbackDays));
-    setLiveLookbackInput((prev) => (prev === normalized ? prev : normalized));
-  }, [historicalLookbackDays, liveLookbackDays]);
+    saveChartPreferences(prefs);
+  }, [
+    symbol,
+    interval,
+    datasource,
+    providerMgmt.providerId,
+    providerMgmt.venueId,
+    exchange,
+    windowConfig.historicalWindowMode,
+    windowConfig.historicalLookbackDays,
+    windowConfig.liveLookbackDays,
+  ]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
@@ -287,20 +289,15 @@ export const ChartComponent = ({ chartId }) => {
   }, [isFullscreen]);
 
   useEffect(() => {
-    if (!isFullscreen) return undefined;
-    if (typeof window === 'undefined') return undefined;
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        setIsFullscreen(false);
-      }
+    if (typeof document === 'undefined') return undefined;
+    const onFullscreenChange = () => {
+      const shell = chartShellRef.current;
+      const active = Boolean(shell && document.fullscreenElement === shell);
+      setIsFullscreen(active);
     };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isFullscreen, setIsFullscreen]);
-
-  const modeRef = useRef('historical');
-  const dataLoadingRef = useRef(false);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
 
   const connection = useConnectionMonitor({ name: 'QuantLab API' });
   const {
@@ -314,7 +311,7 @@ export const ChartComponent = ({ chartId }) => {
   const statusStyles = useMemo(() => {
     if (connectionStatus === 'online') {
       return {
-        text: 'text-emerald-200',
+        text: 'text-[color:var(--accent-text-soft)]',
       };
     }
 
@@ -337,6 +334,7 @@ export const ChartComponent = ({ chartId }) => {
 
   // Refs for chart and DOM.
   const chartContainerElRef = useRef(null);
+  const chartShellRef = useRef(null);
   const [chartMountNode, setChartMountNode] = useState(null);
   const attachChartContainerRef = useCallback((node) => {
     chartContainerElRef.current = node;
@@ -348,159 +346,50 @@ export const ChartComponent = ({ chartId }) => {
   const pvMgrRef = useRef(null);
   const lastBarRef = useRef(null);
   const barSpacingRef = useRef(null);
+  const signalDetailsRef = useRef([]);
   const timeframeWarningRef = useRef(null);
   const activeSeriesKeyRef = useRef({
     symbol: null,
     interval: null,
     datasource: null,
+    provider_id: null,
+    venue_id: null,
     exchange: null,
   });
   const symbolRef = useRef(symbol);
   const intervalRef = useRef(interval);
-  const dateRangeRef = useRef(dateRange);
   const datasourceRef = useRef(datasource);
   const exchangeRef = useRef(exchange);
-  const marketProviderRef = useRef(marketProvider);
-  const lastCryptoExchangeRef = useRef(DEFAULT_CRYPTO_EXCHANGE);
-  const lastMarketProviderRef = useRef(DEFAULT_MARKET_PROVIDER);
-  const lastIbExchangeRef = useRef(DEFAULT_IB_EXCHANGE);
-  const lastMarketDatasourceRef = useRef(DEFAULT_DATASOURCE);
+  const providerRef = useRef(providerMgmt.providerId);
+  const venueRef = useRef(providerMgmt.venueId);
 
-  const handleDatasourceChange = useCallback((nextId) => {
-    if (nextId === DATASOURCE_IDS.CCXT) {
-      if (datasourceRef.current !== DATASOURCE_IDS.CCXT) {
-        const previousMarketDatasource =
-          datasourceRef.current === DATASOURCE_IDS.CCXT
-            ? lastMarketDatasourceRef.current || DEFAULT_DATASOURCE
-            : datasourceRef.current || DEFAULT_DATASOURCE;
+  const toggleFullscreen = useCallback(async () => {
+    if (typeof document === 'undefined') return;
 
-        lastMarketDatasourceRef.current = previousMarketDatasource;
-        lastMarketProviderRef.current =
-          marketProviderRef.current || lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-        lastIbExchangeRef.current = exchangeRef.current || lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
+    if (!isFullscreen) {
+      const shell = chartShellRef.current;
+      if (!shell || typeof shell.requestFullscreen !== 'function') {
+        warn('fullscreen_unavailable', { reason: 'requestFullscreen_missing' });
+        return;
       }
-
-      setDatasource(DATASOURCE_IDS.CCXT);
-      setExchange(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
+      try {
+        await shell.requestFullscreen();
+      } catch (err) {
+        warn('fullscreen_enter_failed', { error: String(err?.message || err) });
+      }
       return;
     }
 
-    const storedDatasource =
-      datasourceRef.current === DATASOURCE_IDS.CCXT
-        ? lastMarketDatasourceRef.current || DEFAULT_DATASOURCE
-        : datasourceRef.current || DEFAULT_DATASOURCE;
-
-    const resolvedDatasource =
-      storedDatasource === DATASOURCE_IDS.CCXT ? DEFAULT_DATASOURCE : storedDatasource;
-
-    lastMarketDatasourceRef.current = resolvedDatasource;
-
-    let nextProvider = lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-    if (resolvedDatasource === DATASOURCE_IDS.IBKR) {
-      nextProvider = 'ibkr';
-    } else if (resolvedDatasource === DATASOURCE_IDS.YFINANCE) {
-      nextProvider = 'yfinance';
-    }
-
-    lastMarketProviderRef.current = nextProvider;
-
-    setDatasource(resolvedDatasource);
-    setMarketProvider(nextProvider);
-
-    if (resolvedDatasource === DATASOURCE_IDS.IBKR) {
-      const venue = lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
-      setExchange(venue);
-      lastIbExchangeRef.current = venue;
-    } else if (resolvedDatasource === DATASOURCE_IDS.YFINANCE) {
-      setExchange('yfinance');
-    } else {
-      const fallback = lastMarketProviderRef.current || DEFAULT_MARKET_PROVIDER;
-      setExchange(fallback);
-    }
-  }, []);
-
-  const handleExchangeChange = useCallback((nextId) => {
-    if (!nextId) return;
-
-    if (datasourceRef.current === DATASOURCE_IDS.CCXT) {
-      setExchange(nextId);
-      lastCryptoExchangeRef.current = nextId;
+    if (typeof document.exitFullscreen !== 'function') {
+      warn('fullscreen_unavailable', { reason: 'exitFullscreen_missing' });
       return;
     }
-
-    setMarketProvider(nextId);
-    lastMarketProviderRef.current = nextId;
-
-    if (nextId === 'ibkr') {
-      const venue = lastIbExchangeRef.current || DEFAULT_IB_EXCHANGE;
-      setDatasource(DATASOURCE_IDS.IBKR);
-      setExchange(venue);
-      lastMarketDatasourceRef.current = DATASOURCE_IDS.IBKR;
-      lastIbExchangeRef.current = venue;
-      return;
+    try {
+      await document.exitFullscreen();
+    } catch (err) {
+      warn('fullscreen_exit_failed', { error: String(err?.message || err) });
     }
-
-    if (nextId === 'yfinance') {
-      setDatasource(DATASOURCE_IDS.YFINANCE);
-      setExchange('yfinance');
-      lastMarketDatasourceRef.current = DATASOURCE_IDS.YFINANCE;
-      return;
-    }
-
-    const resolved = nextId || DEFAULT_MARKET_PROVIDER;
-    setDatasource(DATASOURCE_IDS.ALPACA);
-    setExchange(resolved);
-    lastMarketDatasourceRef.current = DATASOURCE_IDS.ALPACA;
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    setIsFullscreen((prev) => !prev);
-  }, [setIsFullscreen]);
-
-  const exchangeSelectOptions = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      const centralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'CEX').map((ex) => ({
-        value: ex.value,
-        label: ex.label,
-        badge: 'CEX',
-      }));
-
-      const decentralized = CRYPTO_EXCHANGES.filter((ex) => ex.category === 'DEX').map((ex) => ({
-        value: ex.value,
-        label: ex.label,
-        badge: 'DEX',
-      }));
-
-      return [
-        ...(centralized.length
-          ? [{ label: 'Centralized Exchanges', options: centralized }]
-          : []),
-        ...(decentralized.length
-          ? [{ label: 'Decentralized Exchanges', options: decentralized }]
-          : []),
-      ];
-    }
-
-    return MARKET_PROVIDERS.map((provider) => ({
-      value: provider.value,
-      label: provider.label,
-    }));
-  }, [datasource]);
-
-  const selectedExchangeValue = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      return exchange || DEFAULT_CRYPTO_EXCHANGE;
-    }
-    return marketProvider || DEFAULT_MARKET_PROVIDER;
-  }, [datasource, exchange, marketProvider]);
-
-  const exchangePlaceholder = datasource === DATASOURCE_IDS.CCXT ? 'Select exchange' : 'Select provider';
-
-  const handleIbVenueChange = useCallback((venue) => {
-    if (!venue) return;
-    setExchange(venue);
-    lastIbExchangeRef.current = venue;
-  }, []);
+  }, [isFullscreen, warn]);
 
   const normalizedExchange = useMemo(() => normalizeExchangeId(exchange), [exchange]);
   const supportsLive = useMemo(() => {
@@ -508,12 +397,11 @@ export const ChartComponent = ({ chartId }) => {
       return true;
     }
     if (datasource === DATASOURCE_IDS.CCXT) {
-      const fallback = normalizeExchangeId(lastCryptoExchangeRef.current || DEFAULT_CRYPTO_EXCHANGE);
-      const candidate = normalizedExchange || fallback;
-      return LIVE_CRYPTO_EXCHANGES.has(candidate);
+      const candidateSlug = normalizedExchange || providerMgmt.venueOptions.find((item) => item.value === providerMgmt.selectedVenueValue)?.slug;
+      return candidateSlug ? LIVE_CRYPTO_EXCHANGES.has(candidateSlug) : false;
     }
     return false;
-  }, [datasource, normalizedExchange]);
+  }, [datasource, normalizedExchange, providerMgmt.selectedVenueValue, providerMgmt.venueOptions]);
 
   const liveDisabledReason = useMemo(() => {
     if (supportsLive) return null;
@@ -539,8 +427,17 @@ export const ChartComponent = ({ chartId }) => {
     return 'Live updates poll the selected datasource roughly every 10s.';
   }, [supportsLive, datasource]);
 
-    // Overlay resource handles.
-  const overlayHandlesRef = useRef({ priceLines: [] });
+  // Overlay synchronization
+  const { syncOverlays, overlayHandlesRef } = useOverlaySync({
+    chartRef,
+    seriesRef,
+    pvMgrRef,
+    lastBarRef,
+    barSpacingRef,
+    logger,
+    setDataLoading,
+    signalDetailsRef,
+  });
 
   useEffect(() => {
     symbolRef.current = symbol;
@@ -555,10 +452,6 @@ export const ChartComponent = ({ chartId }) => {
   }, [interval]);
 
   useEffect(() => {
-    dateRangeRef.current = dateRange;
-  }, [dateRange]);
-
-  useEffect(() => {
     dataLoadingRef.current = dataLoading;
   }, [dataLoading]);
 
@@ -571,8 +464,12 @@ export const ChartComponent = ({ chartId }) => {
   }, [exchange]);
 
   useEffect(() => {
-    marketProviderRef.current = marketProvider;
-  }, [marketProvider]);
+    providerRef.current = providerMgmt.providerId;
+  }, [providerMgmt.providerId]);
+
+  useEffect(() => {
+    venueRef.current = providerMgmt.venueId;
+  }, [providerMgmt.venueId]);
 
   const showWarning = useCallback((message) => {
     setRangeWarning(message);
@@ -585,6 +482,8 @@ export const ChartComponent = ({ chartId }) => {
     targetInterval,
     targetRange,
     targetDatasource,
+    targetProvider,
+    targetVenue,
     targetExchange,
     behavior = 'auto',
     loaderReason,
@@ -593,6 +492,8 @@ export const ChartComponent = ({ chartId }) => {
     const effectiveInterval = targetInterval ?? intervalRef.current;
     const effectiveRange = targetRange ?? dateRangeRef.current;
     const effectiveDatasource = (targetDatasource ?? datasourceRef.current) || DEFAULT_DATASOURCE;
+    const effectiveProvider = targetProvider ?? providerRef.current;
+    const effectiveVenue = targetVenue ?? venueRef.current;
     const effectiveExchangeRaw = targetExchange ?? exchangeRef.current;
     const effectiveExchange = effectiveExchangeRaw ? effectiveExchangeRaw : null;
 
@@ -608,6 +509,16 @@ export const ChartComponent = ({ chartId }) => {
       behavior === 'append'
         || (behavior === 'auto' && modeRef.current === 'live' && Boolean(previousLastBar));
     const hasStreamingBaseline = canStreamAppend && previousLastBar?.time != null;
+    let hasNewData = false;
+    let loadOutcome = 'pending';
+    if (!hasStreamingBaseline) {
+      const loadingCopy = loaderReason === 'initial'
+        ? 'Preparing chart…'
+        : behavior === 'append'
+          ? 'Fetching live candles…'
+          : 'Loading chart window…';
+      markChartState('loading', loadingCopy);
+    }
 
     if (!effectiveSymbol || !effectiveInterval || !startDate || !endDate) {
       warn('chart_load_missing_inputs', {
@@ -618,12 +529,16 @@ export const ChartComponent = ({ chartId }) => {
         datasource: effectiveDatasource,
         exchange: effectiveExchange,
       });
+      markChartState('empty', 'Waiting for symbol, timeframe, and window before loading data.');
+      loadOutcome = 'blocked';
       return false;
     }
 
     if (effectiveDatasource === DATASOURCE_IDS.CCXT && !effectiveExchange) {
       warn('chart_load_missing_exchange', { symbol: effectiveSymbol, interval: effectiveInterval });
       showWarning('Select a crypto exchange before loading data.');
+      markChartState('empty', 'Choose an exchange to load crypto data.');
+      loadOutcome = 'blocked';
       return false;
     }
 
@@ -640,31 +555,73 @@ export const ChartComponent = ({ chartId }) => {
     }
     try {
       markAttempt();
+      const instrumentKey = [
+        effectiveDatasource,
+        effectiveExchange,
+        effectiveProvider,
+        effectiveVenue,
+        effectiveSymbol,
+      ]
+        .filter(Boolean)
+        .join('|');
+      let resolvedInstrumentId = instrumentIdRef.current;
+      if (!resolvedInstrumentId || instrumentKeyRef.current !== instrumentKey) {
+        instrumentIdRef.current = null;
+      }
+
       info('candles_fetch_start', {
+        instrument_id: instrumentIdRef.current,
         symbol: effectiveSymbol,
         interval: effectiveInterval,
         startISO,
         endISO,
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
       });
-      const resp = await fetchCandleData({
-        symbol: effectiveSymbol,
-        timeframe: effectiveInterval,
-        start: startISO,
-        end: endISO,
-        datasource: effectiveDatasource,
-        exchange: effectiveExchange ?? undefined,
-      });
+      let resp;
+      try {
+        const result = await fetchInstrumentCandles({
+          instrumentId: instrumentIdRef.current,
+          symbol: effectiveSymbol,
+          timeframe: effectiveInterval,
+          start: startISO,
+          end: endISO,
+          datasource: effectiveDatasource,
+          providerId: effectiveProvider ?? undefined,
+          venueId: effectiveVenue ?? undefined,
+          exchange: effectiveExchange ?? undefined,
+          resolveIfMissing: true,
+        });
+        resp = result.candles;
+        resolvedInstrumentId = result.instrumentId;
+        instrumentIdRef.current = resolvedInstrumentId;
+        instrumentKeyRef.current = instrumentKey;
+      } catch (resolveError) {
+        warn('instrument_resolve_failed', {
+          symbol: effectiveSymbol,
+          datasource: effectiveDatasource,
+          exchange: effectiveExchange,
+          provider_id: effectiveProvider,
+          venue_id: effectiveVenue,
+        });
+        showWarning(resolveError?.message || 'Failed to resolve instrument.');
+        markChartState('empty', resolveError?.message || 'Unable to resolve instrument for this symbol.');
+        loadOutcome = 'error';
+        return { ok: false, reason: 'instrument_resolve_failed' };
+      }
 
       if (!Array.isArray(resp) || resp.length === 0) {
         warn('no data', { symbol: effectiveSymbol, interval: effectiveInterval, behavior });
         markSuccess();
         if (!canStreamAppend) {
           showWarning('No candles found for the selected window. Try a different symbol, range, or datasource.');
+          markChartState('empty', 'No candles found for this window. Try a different symbol, range, or datasource.');
         } else {
           debug('live_refresh_empty_batch', { startISO, endISO });
         }
+        loadOutcome = 'empty';
         return { ok: false, reason: 'empty' };
       }
 
@@ -677,6 +634,7 @@ export const ChartComponent = ({ chartId }) => {
           low: c.low,
           close: c.close,
         }));
+      setCandleTimes(data.map((row) => row.time));
 
       if (!seriesRef.current) {
         warn('series missing');
@@ -698,6 +656,7 @@ export const ChartComponent = ({ chartId }) => {
       if (hasStreamingBaseline) {
         const prevTimeBaseline = previousLastBar.time;
         const incremental = data.filter((candle) => candle.time >= prevTimeBaseline);
+        if (incremental.length) hasNewData = true;
         if (incremental.length === 0) {
           debug('live_refresh_no_changes', { symbol: effectiveSymbol, interval: effectiveInterval, prevTime: prevTimeBaseline });
         }
@@ -721,6 +680,7 @@ export const ChartComponent = ({ chartId }) => {
       } else {
         seriesRef.current.setData(data);
         lastBarRef.current = data.at(-1) ?? null;
+        hasNewData = data.length > 0;
 
         if (data.length > 1) {
           for (let i = 1; i < data.length; i += 1) {
@@ -771,6 +731,7 @@ export const ChartComponent = ({ chartId }) => {
 
       const refreshAt = new Date();
       info('candles_fetch_success', {
+        instrument_id: instrumentIdRef.current,
         points: data.length,
         first: data[0]?.time,
         last: data.at(-1)?.time,
@@ -787,7 +748,10 @@ export const ChartComponent = ({ chartId }) => {
         interval: effectiveInterval,
         dateRange: [startDate, endDate],
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
+        instrument_id: instrumentIdRef.current,
         lastUpdatedAt: refreshAt.toISOString(),
       });
 
@@ -795,9 +759,13 @@ export const ChartComponent = ({ chartId }) => {
         symbol: effectiveSymbol,
         interval: effectiveInterval,
         datasource: effectiveDatasource,
+        provider_id: effectiveProvider,
+        venue_id: effectiveVenue,
         exchange: effectiveExchange,
+        instrument_id: instrumentIdRef.current,
       };
 
+      loadOutcome = 'success';
       return {
         ok: true,
         appended: appendedBars > 0,
@@ -808,6 +776,8 @@ export const ChartComponent = ({ chartId }) => {
     } catch (e) {
       markError(e);
       error('candles_fetch_failed', e);
+      markChartState('error', 'Unable to load chart data. Please retry or adjust inputs.');
+      loadOutcome = 'error';
       return { ok: false, reason: 'error' };
     } finally {
       dataLoadingRef.current = false;
@@ -815,8 +785,11 @@ export const ChartComponent = ({ chartId }) => {
         setDataLoading(false);
         setDataLoaderContext(null);
       }
+      if (loadOutcome === 'success' || hasNewData) {
+        markChartState('ready', null);
+      }
     }
-  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt]);
+  }, [info, warn, error, markAttempt, markSuccess, markError, updateChart, chartId, showWarning, debug, setLastRefreshAt, markChartState]);
 
   const refreshLive = useCallback(async () => {
     if (!supportsLive) {
@@ -829,7 +802,7 @@ export const ChartComponent = ({ chartId }) => {
     }
 
     const now = new Date();
-    const lookbackMs = clampLookbackDays(liveLookbackDays) * DAY_MS;
+    const lookbackMs = clampLookbackDays(windowConfig.liveLookbackDays) * DAY_MS;
     const fallbackStart = new Date(now.getTime() - lookbackMs);
 
     const [rangeStartRaw] = dateRangeRef.current || [];
@@ -857,13 +830,13 @@ export const ChartComponent = ({ chartId }) => {
       if (result?.appended) {
         debug('live_refresh_appended', { appended: result.appended, touched: result.touched });
       }
-      if (result?.replaced || result?.appended) {
+      if (result?.replaced || (result?.appended && modeRef.current !== 'live')) {
         bumpRefresh?.(chartId);
       }
     }
 
     return Boolean(result?.ok);
-  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId, liveLookbackDays]);
+  }, [supportsLive, loadChartData, debug, bumpRefresh, chartId, windowConfig.liveLookbackDays]);
 
   const { mode, setMode } = useLiveDataMode({ supportsLive, onRefresh: refreshLive, logger });
 
@@ -872,31 +845,48 @@ export const ChartComponent = ({ chartId }) => {
   }, [mode]);
 
   useEffect(() => {
-    if (mode === 'live') {
-      return;
-    }
-    if (historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) {
-      return;
-    }
+    if (mode === 'live') return;
+    if (windowConfig.historicalWindowMode !== HISTORICAL_WINDOW_MODES.LOOKBACK) return;
+
     const now = new Date();
-    const normalized = clampLookbackDays(historicalLookbackDays);
+    const normalized = clampLookbackDays(windowConfig.historicalLookbackDays);
     const start = new Date(now.getTime() - normalized * DAY_MS);
     const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    setDateRange(nextRange);
-  }, [mode, historicalLookbackDays, historicalWindowMode]);
+    const current = dateRangeRef.current || [];
+    const unchanged =
+      current[0] instanceof Date &&
+      current[1] instanceof Date &&
+      current[0].getTime() === nextRange[0].getTime() &&
+      current[1].getTime() === nextRange[1].getTime();
+    if (!unchanged) {
+      dateRangeRef.current = nextRange;
+      windowConfig.setDateRange(nextRange);
+    }
+  }, [
+    mode,
+    windowConfig.historicalWindowMode,
+    windowConfig.historicalLookbackDays,
+    windowConfig.setDateRange,
+  ]);
 
   useEffect(() => {
-    if (mode !== 'live') {
-      return;
-    }
+    if (mode !== 'live') return;
+
     const now = new Date();
-    const normalized = clampLookbackDays(liveLookbackDays);
+    const normalized = clampLookbackDays(windowConfig.liveLookbackDays);
     const start = new Date(now.getTime() - normalized * DAY_MS);
     const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    setDateRange(nextRange);
-  }, [mode, liveLookbackDays]);
+    const current = dateRangeRef.current || [];
+    const unchanged =
+      current[0] instanceof Date &&
+      current[1] instanceof Date &&
+      current[0].getTime() === nextRange[0].getTime() &&
+      current[1].getTime() === nextRange[1].getTime();
+    if (!unchanged) {
+      dateRangeRef.current = nextRange;
+      windowConfig.setDateRange(nextRange);
+    }
+  }, [mode, windowConfig.liveLookbackDays, windowConfig.setDateRange]);
 
   const lastModeRef = useRef('historical');
   useEffect(() => {
@@ -953,7 +943,10 @@ export const ChartComponent = ({ chartId }) => {
         interval: initialInterval,
         dateRange: initialRange,
         datasource: datasourceRef.current,
+        provider_id: providerRef.current,
+        venue_id: venueRef.current,
         exchange: exchangeRef.current || null,
+        overlayLoading: true, // hold loader until IndicatorTab finishes overlay refresh
       });
       bumpRefresh?.(chartId); // trigger initial indicator load
       seededRef.current = true;
@@ -972,7 +965,6 @@ export const ChartComponent = ({ chartId }) => {
             // ignore failures when price line already removed
           }
         });
-        overlayHandles?.markersApi?.setMarkers?.([]);
         pvMgrRef.current?.destroy();
         pvMgrRef.current = null;
         chartRef.current?.remove();
@@ -1050,359 +1042,23 @@ export const ChartComponent = ({ chartId }) => {
     setSymbolDraft(next);
   }, []);
 
-  const handleHistoricalLookbackChange = useCallback((days) => {
-    const normalized = clampLookbackDays(days);
-    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
-    setHistoricalLookbackDays(normalized);
-    setHistoricalLookbackInput(String(normalized));
-  }, []);
-
-  const handleHistoricalLookbackInputChange = useCallback((event) => {
-    const raw = event?.target?.value ?? '';
-    const sanitized = raw.replace(/[^0-9]/g, '');
-    setHistoricalLookbackInput(sanitized);
-  }, []);
-
-  const handleHistoricalLookbackCommit = useCallback(() => {
-    const parsed = Number.parseInt(historicalLookbackInput, 10);
-    const normalized = clampLookbackDays(
-      Number.isNaN(parsed) ? historicalLookbackDays : parsed,
-    );
-    if (normalized !== historicalLookbackDays) {
-      handleHistoricalLookbackChange(normalized);
-    } else {
-      setHistoricalLookbackInput(String(normalized));
-    }
-  }, [handleHistoricalLookbackChange, historicalLookbackInput, historicalLookbackDays]);
-
-  const handleLiveLookbackInputChange = useCallback((event) => {
-    const raw = event?.target?.value ?? '';
-    const sanitized = raw.replace(/[^0-9]/g, '');
-    setLiveLookbackInput(sanitized);
-  }, []);
-
-  const handleDateRangeSelection = useCallback((nextRange) => {
-    if (!Array.isArray(nextRange)) return;
-    const normalized = nextRange.map((value) => {
-      if (value instanceof Date) return value;
-      if (!value) return value;
-      const converted = new Date(value);
-      return Number.isNaN(converted.getTime()) ? null : converted;
-    });
-    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
-    dateRangeRef.current = normalized;
-    setDateRange(normalized);
-  }, []);
-
-  const handleHistoricalModeToggle = useCallback((nextMode) => {
-    if (nextMode === HISTORICAL_WINDOW_MODES.RANGE) {
-      setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.RANGE);
-      return;
-    }
-    setHistoricalWindowMode(HISTORICAL_WINDOW_MODES.LOOKBACK);
-  }, []);
-
-  // Overlay refs and syncer.
-  const syncOverlays = useCallback((overlays = []) => {
-    setDataLoading(true);
-    // Guard on required refs.
-    if (!seriesRef.current || !chartRef.current) return;
-
-    // Helper: normalize time to seconds.
-    const toSec = (t) => {
-      if (t == null) return t;
-      if (typeof t !== 'number') return t;
-      return t > 2e10 ? Math.floor(t / 1000) : t; 
-    };
-
-    // 1) Clear existing price lines.
-    overlayHandlesRef.current.priceLines.forEach(h => {
-      try {
-        seriesRef.current.removePriceLine(h);
-      } catch {
-        // ignore if price line already cleared
-      }
-    });
-    overlayHandlesRef.current.priceLines = [];
-
-    // Ensure markers plugin exists; clear existing markers.
-    if (!overlayHandlesRef.current.markersApi) {
-      overlayHandlesRef.current.markersApi = createSeriesMarkers(seriesRef.current, []);
-    } else {
-      overlayHandlesRef.current.markersApi.setMarkers([]);
-    }
-
-    pvMgrRef.current?.clearFrame();
-
-    // 2) Build fresh markers and touch points.
-    const markers = [];
-    const touchPoints = [];
-    const boxes = [];
-    const signalBubbles = [];
-    const allSegments = [];
-    const allPolylines = [];
-
-    // 3) Walk overlays and apply.
-    for (const ov of overlays) {
-      const { type, payload, color, ind_id: indicatorId } = ov || {};
-      if (!payload) continue;
-
-      const overlayLogger = logger.child({ indicatorId, indicatorType: type });
-      overlayLogger.debug('overlay_payload_received', {
-        priceLines: Array.isArray(payload.price_lines) ? payload.price_lines.length : 0,
-        markers: Array.isArray(payload.markers) ? payload.markers.length : 0,
-        boxes: Array.isArray(payload.boxes) ? payload.boxes.length : 0,
-        segments: Array.isArray(payload.segments) ? payload.segments.length : 0,
-        polylines: Array.isArray(payload.polylines) ? payload.polylines.length : 0,
-      });
-
-      const paneViews = getPaneViewsFor(type);
-      const norm = adaptPayload(type, payload, color);
-      overlayLogger.debug('overlay_adapted', {
-        priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,
-        markers: Array.isArray(norm.markers) ? norm.markers.length : 0,
-        touchPoints: Array.isArray(norm.touchPoints) ? norm.touchPoints.length : 0,
-        boxes: Array.isArray(norm.boxes) ? norm.boxes.length : 0,
-        segments: Array.isArray(norm.segments) ? norm.segments.length : 0,
-        polylines: Array.isArray(norm.polylines) ? norm.polylines.length : 0,
-        bubbles: Array.isArray(norm.bubbles) ? norm.bubbles.length : 0,
-      });
-
-      // 3a) Price lines.
-      if (Array.isArray(payload.price_lines)) {
-        for (const pl of payload.price_lines) {
-          const handle = seriesRef.current.createPriceLine({
-            price: pl.price,
-            color: pl.color ?? undefined,
-            lineWidth: pl.lineWidth ?? 1,
-            lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: pl.axisLabelVisible ?? false,
-            title: pl.title ?? type ?? '',
-          });
-          overlayHandlesRef.current.priceLines.push(handle);
-        }
-      }
-
-      // 3b) Markers.
-      markers.push(...norm.markers);
-
-      if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
-        if (color) {
-          signalBubbles.push(...norm.bubbles.map(b => {
-            const accentColor = color;
-            const backgroundColor = toRgba(accentColor, 0.16) ?? undefined;
-            return {
-              ...b,
-              accentColor,
-              backgroundColor,
-            };
-          }));
-        } else {
-          signalBubbles.push(...norm.bubbles);
-        }
-      }
-
-      // 3c) Touch points.
-      if (paneViews.includes('touch') && norm.touchPoints?.length) {
-        touchPoints.push(...norm.touchPoints.map(p => ({
-          ...p,
-          time: toSec(p.time),
-        })));
-      }
-
-      // 3d) VA Boxes.
-      if (paneViews.includes('va_box') && norm.boxes?.length) {
-        const lastCandleSec = toSec(lastBarRef.current?.time);
-        const baseIndex = boxes.length;
-        const summaryEntries = [];
-        const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
-          const x1 = toSec(box.x1);
-          const requestedX2 = toSec(box.x2);
-          const extendBox = box.extend !== undefined ? Boolean(box.extend) : false;
-          let x2 = requestedX2;
-
-          if (!Number.isFinite(x2)) {
-            if (extendBox && Number.isFinite(lastCandleSec)) {
-              x2 = lastCandleSec;
-            } else {
-              x2 = x1;
-            }
-          } else if (extendBox && Number.isFinite(lastCandleSec) && lastCandleSec > x2) {
-            overlayLogger.debug('va_box_span_extended', {
-              boxIndex: baseIndex + idxInGroup,
-              x1,
-              originalX2: requestedX2,
-              forcedX2: lastCandleSec,
-            });
-            x2 = lastCandleSec;
-          }
-
-          const pocValue = toFiniteNumber(
-            coalesce(
-              box.poc,
-              box.POC,
-              box?.meta?.poc,
-              box?.metadata?.poc,
-            ),
-          );
-          const sessions = coalesce(
-            box.session_count,
-            box.sessions,
-            box.sessionCount,
-            box?.meta?.session_count,
-            box?.metadata?.session_count,
-          );
-          const valueAreaId = coalesce(
-            box.value_area_id,
-            box.valueAreaId,
-            box.value_areaId,
-            box.id,
-            box?.meta?.value_area_id,
-            box?.metadata?.value_area_id,
-          );
-          const label = coalesce(
-            box.label,
-            box.session_label,
-            box.session,
-            box.profile_label,
-          );
-          const sourceStart = coalesce(box.start, box.start_date, box.startDate);
-          const sourceEnd = coalesce(box.end, box.end_date, box.endDate);
-
-          const y1 = Number(box.y1);
-          const y2 = Number(box.y2);
-          const precision = Number.isFinite(Number(box.precision))
-            ? Math.min(Math.max(Number(box.precision), 2), 8)
-            : undefined;
-
-          summaryEntries.push({
-            index: baseIndex + idxInGroup + 1,
-            startSec: x1,
-            endSec: x2,
-            requestedEndSec: requestedX2,
-            val: Number.isFinite(y1) ? y1 : null,
-            vah: Number.isFinite(y2) ? y2 : null,
-            poc: pocValue,
-            sessions,
-            valueAreaId,
-            label,
-            sourceStart,
-            sourceEnd,
-            precision,
-          });
-
-          return {
-            x1,
-            x2,
-            y1,
-            y2,
-            color: box.color,
-            border: box.border,
-            precision: box.precision,
-          };
-        }).filter(Boolean);
-        boxes.push(...normalizedBoxes);
-        normalizedBoxes.forEach((b, idx) => {
-          const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
-            ? Number(b.x2) - Number(b.x1)
-            : null;
-          overlayLogger.debug('va_box_applied', {
-            boxIndex: baseIndex + idx,
-            x1: b.x1,
-            x2: b.x2,
-            y1: b.y1,
-            y2: b.y2,
-            width,
-          });
-        });
-
-        if (summaryEntries.length) {
-          overlayLogger.info('va_box_summary', {
-            appended: summaryEntries.length,
-            total: boxes.length,
-          });
-          summaryEntries.forEach((entry) => {
-            overlayLogger.info('va_box_summary_entry', {
-              index: entry.index,
-              detail: buildVaBoxSummaryText(entry),
-              valueAreaId: entry.valueAreaId ?? null,
-              label: entry.label ?? null,
-              sourceStart: entry.sourceStart ?? null,
-              sourceEnd: entry.sourceEnd ?? null,
-            });
-          });
-        }
-      }
-
-      if (paneViews.includes('segment') && norm.segments?.length) {
-        allSegments.push(...norm.segments);
-      }
-      if (paneViews.includes('polyline') && norm.polylines?.length) {
-        allPolylines.push(...norm.polylines);
-      }
-    }
-
-    // Group touch points by time, strictly 1 item per time.
-    const grouped = new Map();
-    for (const p of touchPoints) {
-      if (p.time == null || Number.isNaN(p.time)) continue;
-      if (!grouped.has(p.time)) grouped.set(p.time, []);
-      grouped.get(p.time).push({
-        price:  p.originalData?.price ?? p.price,
-        color:  p.originalData?.color ?? p.color,
-        size:   (p.originalData?.size ?? p.size ?? 3),
-      });
-    }
-    
-    // 4) Sort markers for deterministic rendering.
-    markers.sort((a, b) => a.time - b.time);
-
-    // 5) Apply markers to the main series.
-    try {
-      // seriesRef.current.setMarkers(markers);
-      overlayHandlesRef.current.markersApi.setMarkers(markers);
-      
-
-      pvMgrRef.current?.setTouchPoints(touchPoints);
-      pvMgrRef.current?.setVABlocks(boxes, {
-        lastSeriesTime: lastBarRef.current?.time,
-        barSpacing: barSpacingRef.current,
-      });
-      pvMgrRef.current?.setSegments(allSegments);
-      pvMgrRef.current?.setPolylines(allPolylines);
-      pvMgrRef.current?.setSignalBubbles(signalBubbles);
-
-      // --- C: VWAP vs Candles coverage + coordinate check ---
-      // seriesRef.current.setData(touch)
-    } catch (e) {
-      error('overlays_apply_failed', e);
-    }
-
-    // 6) Log summary for quick tracing.
-    info('overlays_applied', {
-      priceLines: overlayHandlesRef.current.priceLines.length,
-      markers: markers.length,
-      touchPoints: touchPoints.length,
-      boxes: boxes.length,
-      bubbles: signalBubbles.length,
-      segments: allSegments.length,
-      polylines: allPolylines.length,
-    });
-
-    setDataLoading(false);
-  }, [info, error, logger]);
 
   // React to overlay changes.
   useEffect(() => {
-    if (!chartState) return;
-    syncOverlays(chartState.overlays || []);
-  }, [chartState, syncOverlays]);
+    const overlays = chartState?.overlays;
+    if (overlays === lastOverlaysRef.current) return;
+    lastOverlaysRef.current = overlays;
+    const list = overlays || [];
+    syncOverlays(list);
+  }, [chartState?.overlays, syncOverlays]);
 
   // Apply handler.
   const handleApply = useCallback(async (overrides = {}, options = {}) => {
     const nextSymbol = overrides.symbol ?? symbol;
     const nextInterval = overrides.interval ?? interval;
-    const fallbackRange = modeRef.current === 'live' ? dateRangeRef.current : dateRange;
+    const nextProvider = overrides.provider_id ?? providerMgmt.providerId;
+    const nextVenue = overrides.venue_id ?? providerMgmt.venueId;
+    const fallbackRange = modeRef.current === 'live' ? dateRangeRef.current : windowConfig.dateRange;
     const rawRange = overrides.dateRange ?? fallbackRange;
     const normalizedRange = Array.isArray(rawRange)
       ? rawRange.map((value) => (value instanceof Date ? value : value ? new Date(value) : value))
@@ -1418,6 +1074,7 @@ export const ChartComponent = ({ chartId }) => {
     if (nextDatasource === 'CCXT' && !nextExchange) {
       warn('apply_missing_exchange', { chartId, symbol: nextSymbol });
       showWarning('Select a crypto exchange before loading data.');
+      markChartState('empty', 'Pick an exchange to load this crypto pair.');
       return null;
     }
 
@@ -1434,6 +1091,8 @@ export const ChartComponent = ({ chartId }) => {
       interval: nextInterval,
       dateRange: effectiveRange,
       datasource: nextDatasource,
+      provider_id: nextProvider,
+      venue_id: nextVenue,
       exchange: nextExchange,
     });
     const prevKey = activeSeriesKeyRef.current;
@@ -1442,11 +1101,14 @@ export const ChartComponent = ({ chartId }) => {
       symbolChanged
       || prevKey.interval !== nextInterval
       || prevKey.datasource !== nextDatasource
+      || prevKey.provider_id !== nextProvider
+      || prevKey.venue_id !== nextVenue
       || prevKey.exchange !== nextExchange;
 
     if (isSeriesChange) {
       lastBarRef.current = null;
       barSpacingRef.current = null;
+      setCandleTimes([]);
       try {
         seriesRef.current?.setData?.([]);
       } catch {
@@ -1459,9 +1121,12 @@ export const ChartComponent = ({ chartId }) => {
       interval: nextInterval,
       dateRange: effectiveRange,
       datasource: nextDatasource,
+      provider_id: nextProvider,
+      venue_id: nextVenue,
       exchange: nextExchange || null,
       overlays: [],
-      overlayLoading: false,
+      // Overlay refresh is triggered after data load via bumpRefresh; keep loading visible.
+      overlayLoading: true,
     });
 
     const behavior = options.behavior ?? 'replace';
@@ -1470,17 +1135,24 @@ export const ChartComponent = ({ chartId }) => {
       targetInterval: nextInterval,
       targetRange: effectiveRange,
       targetDatasource: nextDatasource,
+      targetProvider: nextProvider,
+      targetVenue: nextVenue,
       targetExchange: nextExchange,
       behavior,
       loaderReason: symbolChanged ? 'symbol-change' : undefined,
     });
 
-    if (result?.ok && (result.replaced || result.appended)) {
+    if (result?.ok && (result.replaced || (result.appended && modeRef.current !== 'live'))) {
       bumpRefresh?.(chartId);
     }
 
     return result;
-  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, dateRange, datasource, exchange, warn, syncOverlays, showWarning]);
+  }, [info, loadChartData, updateChart, bumpRefresh, chartId, symbol, interval, windowConfig.dateRange, datasource, exchange, warn, syncOverlays, showWarning, providerMgmt.providerId, providerMgmt.venueId, markChartState]);
+
+  useEffect(() => {
+    if (!providerMgmt.credentialsSavedAt) return;
+    void handleApply({}, { behavior: 'replace', loaderReason: 'credentials-saved' });
+  }, [providerMgmt.credentialsSavedAt, handleApply]);
 
   const handleSymbolInputCommit = useCallback(() => {
     const sanitized = (symbolDraft ?? '').toString().trim().toUpperCase();
@@ -1553,39 +1225,18 @@ export const ChartComponent = ({ chartId }) => {
   }, [symbol, interval, datasource, exchange, handleApply]);
 
   const handleLiveLookbackCommit = useCallback(() => {
-    const parsed = Number.parseInt(liveLookbackInput, 10);
-    const normalized = clampLookbackDays(Number.isNaN(parsed) ? liveLookbackDays : parsed);
-    const changed = normalized !== liveLookbackDays;
-
-    setLiveLookbackDays(normalized);
-    setLiveLookbackInput(String(normalized));
-
-    const now = new Date();
-    const start = new Date(now.getTime() - normalized * DAY_MS);
-    const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    setDateRange(nextRange);
-
-    if (modeRef.current === 'live' && supportsLive && changed) {
-      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+    const result = windowConfig.handleLiveLookbackCommit();
+    if (modeRef.current === 'live' && supportsLive && result?.changed) {
+      void handleApply({ dateRange: result.nextRange }, { behavior: 'replace' });
     }
-  }, [liveLookbackInput, liveLookbackDays, supportsLive, handleApply]);
+  }, [windowConfig, supportsLive, handleApply]);
 
   const handleLiveLookbackPresetSelect = useCallback((days) => {
-    const normalized = clampLookbackDays(days);
-    setLiveLookbackDays(normalized);
-    setLiveLookbackInput(String(normalized));
-
-    const now = new Date();
-    const start = new Date(now.getTime() - normalized * DAY_MS);
-    const nextRange = [start, now];
-    dateRangeRef.current = nextRange;
-    setDateRange(nextRange);
-
+    const result = windowConfig.handleLiveLookbackPresetSelect(days);
     if (modeRef.current === 'live' && supportsLive) {
-      void handleApply({ dateRange: nextRange }, { behavior: 'replace' });
+      void handleApply({ dateRange: result.nextRange }, { behavior: 'replace' });
     }
-  }, [supportsLive, handleApply]);
+  }, [windowConfig, supportsLive, handleApply]);
 
   const lastAppliedParamsRef = useRef({ symbol, interval, datasource, exchange });
 
@@ -1609,7 +1260,7 @@ export const ChartComponent = ({ chartId }) => {
 
     const liveRange = Array.isArray(dateRangeRef.current) && dateRangeRef.current.length === 2
       ? dateRangeRef.current
-      : dateRange;
+      : windowConfig.dateRange;
 
     void handleApply({
       symbol,
@@ -1618,23 +1269,17 @@ export const ChartComponent = ({ chartId }) => {
       exchange,
       dateRange: liveRange,
     }, { behavior: 'replace' });
-  }, [mode, symbol, interval, datasource, exchange, handleApply, dateRange, supportsLive]);
+  }, [mode, symbol, interval, datasource, exchange, handleApply, windowConfig.dateRange, supportsLive]);
 
   useEffect(() => {
-    if (mode === 'live') {
-      return;
-    }
+    if (mode === 'live') return;
 
     const current = dateRangeRef.current;
-    if (!Array.isArray(current) || current.length !== 2) {
-      return;
-    }
+    if (!Array.isArray(current) || current.length !== 2) return;
     const [start, end] = current;
-    if (!(start instanceof Date) || !(end instanceof Date)) {
-      return;
-    }
+    if (!(start instanceof Date) || !(end instanceof Date)) return;
 
-    setDateRange((prev) => {
+    windowConfig.setDateRange((prev) => {
       const prevStart = prev?.[0] instanceof Date ? prev[0].getTime() : null;
       const prevEnd = prev?.[1] instanceof Date ? prev[1].getTime() : null;
       if (prevStart === start.getTime() && prevEnd === end.getTime()) {
@@ -1642,7 +1287,7 @@ export const ChartComponent = ({ chartId }) => {
       }
       return [start, end];
     });
-  }, [mode, setDateRange]);
+  }, [mode, windowConfig.setDateRange]);
 
   function useBusyDelay(busy, ms = 250) {
     const [show, setShow] = useState(false);
@@ -1706,50 +1351,18 @@ export const ChartComponent = ({ chartId }) => {
     }
   }, [dataLoading, lastRefreshAt, mode]);
 
-  const isLookbackMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.LOOKBACK;
-  const isRangeMode = historicalWindowMode === HISTORICAL_WINDOW_MODES.RANGE;
   const liveMode = mode === 'live';
   const symbolDisplay = (symbol || '—').toString().toUpperCase();
   const intervalDisplay = (interval ? interval.toString() : '—').toUpperCase();
   const datasourceDisplay = useMemo(() => {
-    const map = {
-      [DATASOURCE_IDS.ALPACA]: 'Markets data',
-      [DATASOURCE_IDS.YFINANCE]: 'Yahoo Finance',
-      [DATASOURCE_IDS.IBKR]: 'Interactive Brokers',
-      [DATASOURCE_IDS.CCXT]: 'Crypto data',
-    };
-    return map[datasource] || 'Markets data';
-  }, [datasource]);
+    const entry = providerMgmt.providerOptions.find((item) => item.value === providerMgmt.providerId);
+    return entry?.label || 'Markets data';
+  }, [providerMgmt.providerId, providerMgmt.providerOptions]);
 
   const venueDisplay = useMemo(() => {
-    if (datasource === DATASOURCE_IDS.CCXT) {
-      const entry = CRYPTO_EXCHANGES.find((ex) => ex.value === exchange);
-      if (entry?.label) {
-        return entry.category ? `${entry.label} (${entry.category})` : entry.label;
-      }
-      return 'Crypto venue';
-    }
-
-    if (datasource === DATASOURCE_IDS.IBKR) {
-      const entry = IB_EXCHANGES.find((ex) => ex.value === exchange);
-      return entry?.label || exchange || 'IBKR routing';
-    }
-
-    if (datasource === DATASOURCE_IDS.YFINANCE) {
-      return 'Yahoo Finance';
-    }
-
-    const providerEntry = MARKET_PROVIDERS.find((provider) => provider.value === marketProvider);
-    if (providerEntry?.label) {
-      return providerEntry.label;
-    }
-
-    if (typeof exchange === 'string' && exchange.trim()) {
-      return exchange.trim().toUpperCase();
-    }
-
-    return null;
-  }, [datasource, exchange, marketProvider]);
+    const entry = providerMgmt.venueOptions.find((item) => item.value === providerMgmt.selectedVenueValue);
+    return entry?.label || null;
+  }, [providerMgmt.selectedVenueValue, providerMgmt.venueOptions]);
 
   const instrumentMeta = useMemo(() => {
     const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
@@ -1757,53 +1370,32 @@ export const ChartComponent = ({ chartId }) => {
   }, [datasourceDisplay, venueDisplay]);
 
   const chartSurface = (
-    <div className={chartShellClasses}>
-      <div className="pointer-events-none absolute left-6 top-6 z-20 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
-        <div className="flex flex-wrap items-baseline gap-2">
-          <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
-          <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
-            {intervalDisplay}
-          </span>
-        </div>
-        {instrumentMeta ? (
-          <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
-            {instrumentMeta}
-          </div>
-        ) : null}
-      </div>
-      <button
-        type="button"
-        aria-pressed={isFullscreen}
-        onClick={toggleFullscreen}
-        className="pointer-events-auto absolute right-6 top-6 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
-      >
-        {isFullscreen ? (
-          <>
-            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Exit Fullscreen
-          </>
-        ) : (
-          <>
-            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Fullscreen
-          </>
-        )}
-      </button>
-      <div ref={attachChartContainerRef} className="h-full w-full" />
-
-      <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
-      <HotkeyHint />
-      <LoadingOverlay show={loaderActive} message={loaderMessage} />
-    </div>
+    <ChartSurface
+      shellRef={chartShellRef}
+      containerRef={attachChartContainerRef}
+      chartRef={chartRef}
+      pvMgrRef={pvMgrRef}
+      candleTimes={candleTimes}
+      isFullscreen={isFullscreen}
+      toggleFullscreen={toggleFullscreen}
+      symbolDisplay={symbolDisplay}
+      intervalDisplay={intervalDisplay}
+      instrumentMeta={instrumentMeta}
+      chartStateNotice={chartStateNotice}
+      windowSummary={windowConfig.windowSummary}
+      palOpen={palOpen}
+      setPalOpen={setPalOpen}
+      applySymbol={applySymbol}
+      loaderActive={loaderActive}
+      loaderMessage={loaderMessage}
+    />
   );
 
-  const renderedChartSurface = isFullscreen && fullscreenHost
-    ? createPortal(chartSurface, fullscreenHost)
-    : chartSurface;
+  const renderedChartSurface = chartSurface;
 
   return (
     <>
-      <div className="space-y-6">
+      <div className="space-y-4">
         {connectionNotice && (
           <div className="flex items-start gap-3 rounded-[22px] border border-rose-500/40 bg-rose-500/10 px-5 py-4 text-sm text-rose-100 shadow-lg shadow-rose-900/40">
             <span className="mt-0.5 text-lg">⚠️</span>
@@ -1821,211 +1413,245 @@ export const ChartComponent = ({ chartId }) => {
           </div>
         )}
 
-        <section className="rounded-[28px] border border-white/8 bg-gradient-to-br from-[#080b14]/95 via-[#070a13]/95 to-[#04060c]/95 p-6 shadow-[0_50px_150px_-90px_rgba(0,0,0,0.85)]">
-          <div className="flex flex-col gap-6">
-            <header className="flex flex-col gap-2.5 md:flex-row md:items-center md:justify-between">
-              <div>
-                <h2 className="text-base font-semibold tracking-tight text-slate-100">Workspace controls</h2>
-                <p className="text-sm text-slate-400">Set up your instrument, venue, and data horizon.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => { void handleApply(); }}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-25)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                aria-label="Reload chart data"
-                title="Reload chart data"
-              >
-                <RotateCcw className="size-4" />
-              </button>
-            </header>
-
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.75fr)_minmax(0,1.1fr)]">
-              <div className="space-y-5">
-                <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-4 shadow-lg shadow-black/25">
-                  <div className="flex items-start justify-between gap-2.5">
-                    <div>
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Instrument</span>
-                      <p className="text-sm text-slate-400">Choose the asset, timeframe, and streaming mode.</p>
-                    </div>
-                    <span className="hidden text-[11px] uppercase tracking-[0.3em] text-slate-500/80 sm:block">
-                      {symbolDisplay} · {intervalDisplay || '—'}
-                    </span>
-                  </div>
-                  <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    <SymbolInput
-                      value={symbolDraft}
-                      onChange={handleSymbolInputChange}
-                      onCommit={handleSymbolInputCommit}
-                      onRequestPick={() => setPalOpen(true)}
-                      className="md:col-span-2 xl:col-span-1"
-                    />
-                    <TimeframeSelect selected={interval} onChange={setInterval} className="xl:col-span-1" />
-                    <DataModeToggle
-                      mode={mode}
-                      onChange={setMode}
-                      supportsLive={supportsLive}
-                      disabledReason={liveDisabledReason}
-                      liveDescription={liveDescription}
-                      className="md:col-span-2 xl:col-span-1"
-                    />
-                  </div>
+        {/* Trading UI control bar */}
+        <div className="rounded-3xl border border-white/8 bg-gradient-to-r from-[#0d111c]/95 via-[#0f1626]/95 to-[#0d111c]/95 shadow-[0_30px_120px_-80px_rgba(0,0,0,0.8)]">
+          <div className="flex flex-wrap items-end gap-4 border-b border-white/5 px-5 pb-4 pt-4">
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="flex flex-col gap-1">
+                <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Symbol</span>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={symbolDraft}
+                    onChange={(e) => handleSymbolInputChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSymbolInputCommit();
+                      if (e.key === 'Escape') handleSymbolInputChange(symbol || '');
+                    }}
+                    placeholder="CL, ES, BTC..."
+                    className="w-40 rounded-xl border border-white/10 bg-[#0a0f1a]/80 px-3 py-2 font-mono text-sm font-semibold uppercase tracking-[0.22em] text-slate-100 placeholder-slate-600 shadow-[0_10px_30px_rgba(0,0,0,0.35)] outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setPalOpen(true)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-white/5 p-1.5 text-slate-400 transition hover:text-[color:var(--accent-text-soft)]"
+                    title="Symbol palette"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 13m-5.5 0a5.5 5.5 0 11-11 0 5.5 5.5 0 0111 0z" />
+                    </svg>
+                  </button>
                 </div>
               </div>
 
-              <div className="space-y-5">
-                <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-4 shadow-lg shadow-black/25">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Market access</span>
-                  <p className="mt-1 text-sm text-slate-400">
-                    Toggle between exchanges or providers to route historical and live data.
-                  </p>
-                  <div className="mt-3 flex flex-col gap-3.5">
-                    <div className="inline-flex flex-wrap gap-1.5 rounded-xl border border-white/10 bg-[#050912]/80 p-1">
-                      {DATASOURCE_OPTIONS.map((option) => {
-                        const isCryptoOption = option.value === DATASOURCE_IDS.CCXT;
-                        const isActive = isCryptoOption
-                          ? datasource === DATASOURCE_IDS.CCXT
-                          : datasource !== DATASOURCE_IDS.CCXT;
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => handleDatasourceChange(option.value)}
-                            className={`min-w-[5.5rem] rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.28em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
-                              isActive
-                                ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
-                                : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <DropdownSelect
-                      className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
-                      label="Exchange"
-                      value={selectedExchangeValue}
-                      onChange={handleExchangeChange}
-                      options={exchangeSelectOptions}
-                      placeholder={exchangePlaceholder}
-                    />
-
-                    {marketProvider === 'ibkr' ? (
-                      <DropdownSelect
-                        className="w-full rounded-2xl border border-white/12 bg-[#050912]/80 p-3.5 shadow-inner shadow-black/10"
-                        label="IB Venue"
-                        value={exchange || DEFAULT_IB_EXCHANGE}
-                        onChange={handleIbVenueChange}
-                        options={IB_EXCHANGES.map((entry) => ({
-                          value: entry.value,
-                          label: entry.label,
-                          description: entry.description,
-                        }))}
-                        placeholder="Select venue"
-                      />
-                    ) : null}
-                  </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Timeframe</span>
+                <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-black/30 p-1">
+                  {['1m', '5m', '15m', '1h', '4h', '1d', '1w'].map((tf) => (
+                    <button
+                      key={tf}
+                      onClick={() => setInterval(tf)}
+                      className={`rounded-xl px-3 py-1 text-xs font-semibold tracking-[0.22em] transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] ${
+                        interval === tf
+                          ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] shadow-inner ring-1 ring-[color:var(--accent-ring)]'
+                          : 'text-slate-400 hover:text-slate-100 hover:bg-white/5'
+                      }`}
+                    >
+                      {tf.toUpperCase()}
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>
 
-            <div className="rounded-2xl border border-white/12 bg-[#0b1324]/60 p-5 shadow-lg shadow-black/25">
-              <div className="flex flex-wrap items-center gap-2.5">
-                <div>
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Data window</span>
-                  <p className="text-sm text-slate-400">Control how much history to load for studies.</p>
-                </div>
-
-                {!liveMode ? (
-                  <div className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-[#050912]/80 p-1">
-                    <button
-                      type="button"
-                      onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE)}
-                      className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] transition ${
-                        isRangeMode
-                          ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
-                          : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
-                      }`}
-                    >
-                      Calendar range
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.LOOKBACK)}
-                      className={`rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.32em] transition ${
-                        isLookbackMode
-                          ? 'bg-[color:var(--accent-alpha-28)] text-[color:var(--accent-text-strong)] shadow-inner'
-                          : 'text-slate-300 hover:bg-[#111d34] hover:text-[color:var(--accent-text-soft)]'
-                      }`}
-                    >
-                      Days back
-                    </button>
-                  </div>
-                ) : (
-                  <span className="ml-auto text-[11px] uppercase tracking-[0.32em] text-slate-400">Live streaming</span>
-                )}
+            <div className="ml-auto flex flex-wrap items-end gap-3">
+              <div className="w-48 min-w-[12rem]">
+                <DropdownSelect
+                  label="Provider"
+                  value={providerMgmt.providerId}
+                  onChange={providerMgmt.handleProviderChange}
+                  options={providerMgmt.providerOptions}
+                  placeholder="Select provider"
+                  disabled={providerMgmt.providersLoading}
+                />
               </div>
-
-              <div className="mt-5 grid gap-4 lg:grid-cols-2">
-                <div
-                  className={`rounded-2xl border border-white/12 bg-[#050912]/80 p-4 transition ${
-                    isRangeMode && !liveMode
-                      ? 'ring-1 ring-[color:var(--accent-ring-strong)]'
-                      : 'opacity-65'
-                  } ${
-                    liveMode
-                      ? 'cursor-not-allowed'
-                      : 'cursor-pointer hover:border-[color:var(--accent-alpha-30)] hover:opacity-95'
-                  }`}
-                  onClick={() => {
-                    if (!isRangeMode && !liveMode) {
-                      handleHistoricalModeToggle(HISTORICAL_WINDOW_MODES.RANGE);
-                    }
-                  }}
-                >
-                  <DateRangePickerComponent
-                    dateRange={dateRange}
-                    setDateRange={handleDateRangeSelection}
-                    disabled={liveMode || !isRangeMode}
-                  />
-                </div>
-
-                <HistoricalLookbackControl
-                  value={liveMode ? liveLookbackDays : historicalLookbackDays}
-                  onSelect={liveMode ? handleLiveLookbackPresetSelect : handleHistoricalLookbackChange}
-                  maxDays={MAX_LOOKBACK_DAYS}
-                  active={liveMode ? true : isLookbackMode}
-                  onActivate={liveMode ? undefined : handleHistoricalModeToggle}
-                  inputValue={liveMode ? liveLookbackInput : historicalLookbackInput}
-                  onInputChange={liveMode ? handleLiveLookbackInputChange : handleHistoricalLookbackInputChange}
-                  onInputCommit={liveMode ? handleLiveLookbackCommit : handleHistoricalLookbackCommit}
-                  title={liveMode ? 'Live window' : 'Days back'}
-                  subtitle={
-                    liveMode
-                      ? 'Stream real-time candles with a trailing history buffer'
-                      : 'Rolling lookback presets'
-                  }
-                  footnote={
-                    liveMode
-                      ? `Streaming last ${clampLookbackDays(liveLookbackDays)} days`
-                      : undefined
-                  }
+              <div className="w-48 min-w-[12rem]">
+                <DropdownSelect
+                  label="Venue"
+                  value={providerMgmt.selectedVenueValue}
+                  onChange={providerMgmt.handleVenueChange}
+                  options={providerMgmt.venueOptions}
+                  placeholder="Select venue"
+                  disabled={!providerMgmt.providerId || providerMgmt.venueOptions.length === 0}
                 />
               </div>
             </div>
           </div>
-        </section>
 
-        <div className="flex flex-col gap-2 text-xs text-slate-400/80 sm:flex-row sm:items-center sm:justify-between">
-          <p>{lastRefreshCopy}</p>
-          {connectionStatus === 'error' && connectionMessage ? (
-            <p className={`${statusTextClass} sm:text-right`}>{connectionMessage}</p>
-          ) : null}
+          {(providerMgmt.selectedVenueStatus.state !== 'available' || providerMgmt.selectedProviderStatus.state !== 'available') && (
+            <div className="flex items-center justify-between gap-3 border-b border-white/5 bg-black/20 px-5 py-3 text-sm text-slate-200">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-amber-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200">Credentials</span>
+                <span>
+                  {providerMgmt.selectedVenueStatus.state === 'invalid_credentials'
+                    ? `Stored credentials for ${providerMgmt.selectedVenueValue || 'venue'} cannot be decrypted with the current key. Re-save API keys.`
+                    : providerMgmt.selectedProviderStatus.state === 'invalid_credentials'
+                    ? `Stored credentials for ${providerMgmt.providerId || 'provider'} cannot be decrypted with the current key. Re-save API keys.`
+                    : providerMgmt.selectedVenueStatus.state !== 'available'
+                    ? `Missing secrets for ${providerMgmt.selectedVenueValue || 'venue'}: ${(providerMgmt.selectedVenueStatus.missing || []).join(', ')}`
+                    : `Missing secrets for ${providerMgmt.providerId || 'provider'}: ${(providerMgmt.selectedProviderStatus.missing || []).join(', ')}`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => providerMgmt.openCredentialsModal(providerMgmt.providerId, providerMgmt.selectedVenueValue, providerMgmt.selectedVenueStatus.required?.length ? providerMgmt.selectedVenueStatus.required : providerMgmt.selectedProviderStatus.required)}
+                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-[color:var(--accent-text-soft)] transition hover:border-[color:var(--accent-alpha-60)] hover:bg-[color:var(--accent-alpha-10)]"
+              >
+                {providerMgmt.selectedVenueStatus.state === 'invalid_credentials' || providerMgmt.selectedProviderStatus.state === 'invalid_credentials'
+                  ? 'Re-save API keys'
+                  : 'Add API keys'}
+              </button>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-4 px-5 py-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-[#0b111e]/80 p-1">
+                <button
+                  onClick={() => setMode('historical')}
+                  className={`rounded-xl px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] transition ${
+                    mode === 'historical'
+                      ? 'bg-white/10 text-slate-100 ring-1 ring-[color:var(--accent-ring)]'
+                      : 'text-slate-500 hover:text-slate-200'
+                  }`}
+                >
+                  Hist
+                </button>
+                <button
+                  onClick={() => setMode('live')}
+                  disabled={!supportsLive}
+                  className={`rounded-xl px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] transition ${
+                    mode === 'live'
+                      ? 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring-strong)]'
+                      : 'text-slate-500 hover:text-slate-200 disabled:opacity-30'
+                  }`}
+                  title={liveDisabledReason || ''}
+                >
+                  Live
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-[#0b111e]/80 px-3 py-2">
+                <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/30 p-1">
+                  <button
+                    onClick={() => windowConfig.handleHistoricalModeToggle(windowConfig.HISTORICAL_WINDOW_MODES.LOOKBACK)}
+                    className={`rounded-lg px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] transition ${
+                      windowConfig.isLookbackMode || liveMode
+                        ? 'bg-[color:var(--accent-alpha-15)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring)]'
+                        : 'text-slate-400 hover:text-slate-100'
+                    }`}
+                  >
+                    Lookback
+                  </button>
+                  {!liveMode && (
+                    <button
+                      onClick={() => windowConfig.handleHistoricalModeToggle(windowConfig.HISTORICAL_WINDOW_MODES.RANGE)}
+                      className={`rounded-lg px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] transition ${
+                        windowConfig.isRangeMode && !liveMode
+                          ? 'bg-white/10 text-slate-100 ring-1 ring-[color:var(--accent-ring)]'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      Range
+                    </button>
+                  )}
+                </div>
+                <span className="text-xs font-semibold tracking-tight text-slate-200">{windowConfig.windowSummary}</span>
+              </div>
+
+              {(liveMode || windowConfig.isLookbackMode) && (
+                <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-[#0b111e]/80 px-3 py-2">
+                  <span className="text-[11px] uppercase tracking-[0.25em] text-slate-500">Presets</span>
+                  {windowConfig.quickLookbackPresets.slice(0, 5).map((preset) => (
+                    <button
+                      key={preset.label}
+                      onClick={() => (liveMode ? windowConfig.handleLiveLookbackPresetSelect(preset.days) : windowConfig.handleHistoricalLookbackChange(preset.days))}
+                      className={`rounded-lg px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] transition ${
+                        (liveMode ? windowConfig.liveLookbackDays : windowConfig.historicalLookbackDays) === preset.days
+                          ? 'bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)] ring-1 ring-[color:var(--accent-ring)]'
+                          : 'text-slate-400 hover:text-slate-100'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-2 py-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={liveMode ? windowConfig.liveLookbackInput : windowConfig.historicalLookbackInput}
+                      onChange={liveMode ? windowConfig.handleLiveLookbackInputChange : windowConfig.handleHistoricalLookbackInputChange}
+                      onBlur={liveMode ? windowConfig.handleLiveLookbackCommit : windowConfig.handleHistoricalLookbackCommit}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (liveMode ? windowConfig.handleLiveLookbackCommit : windowConfig.handleHistoricalLookbackCommit)();
+                      }}
+                      className="w-12 bg-transparent text-center text-xs font-semibold tracking-[0.22em] text-slate-100 outline-none placeholder-slate-600"
+                      placeholder="90"
+                    />
+                    <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Days</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="ml-auto flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/30 px-3 py-1.5 text-[11px] font-mono text-slate-400 shadow-inner">
+                <span className={`inline-block h-2 w-2 rounded-full ${dataLoading ? 'animate-pulse bg-amber-400' : 'bg-[color:var(--accent-base)]'}`} />
+                <span className={statusTextClass}>{lastRefreshCopy}</span>
+              </div>
+              <button
+                onClick={() => { void handleApply(); }}
+                disabled={providerBlocked}
+                className="inline-flex items-center gap-2 rounded-full bg-[color:var(--accent-alpha-25)] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] text-[color:var(--accent-text-bright)] shadow-[0_10px_40px_-12px_var(--accent-shadow-strong)] transition hover:bg-[color:var(--accent-alpha-30)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)] disabled:cursor-not-allowed disabled:opacity-50"
+                title="Refresh data"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Load window
+              </button>
+            </div>
+          </div>
+
+          {windowConfig.isRangeMode && !liveMode && (
+            <div className="border-t border-white/5 bg-[#0b101b]/80 px-5 py-3">
+              <DateRangePickerComponent
+                dateRange={windowConfig.dateRange}
+                setDateRange={windowConfig.handleDateRangeSelection}
+                disabled={liveMode || !windowConfig.isRangeMode}
+              />
+            </div>
+          )}
         </div>
+
+        {connectionStatus === 'error' && connectionMessage ? (
+          <div className="px-5 py-2 text-xs bg-rose-500/10 border-b border-rose-500/30 text-rose-300">
+            {connectionMessage}
+          </div>
+        ) : null}
 
         {renderedChartSurface}
       </div>
+      <CredentialsModal
+        isOpen={providerMgmt.credentialsModal.open}
+        providerId={providerMgmt.credentialsModal.providerId}
+        venueId={providerMgmt.credentialsModal.venueId}
+        requiredFields={providerMgmt.credentialsModal.required}
+        inputs={providerMgmt.credentialsInputs}
+        onInputChange={providerMgmt.setCredentialsInputs}
+        saving={providerMgmt.credentialsSaving}
+        error={providerMgmt.credentialsError}
+        onClose={providerMgmt.closeCredentialsModal}
+        onSave={providerMgmt.handleSaveCredentials}
+      />
     </>
   )
 };

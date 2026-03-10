@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("sqlalchemy", reason="SQLAlchemy required for instrument service tests")
 
-from portal.backend.service.instrument_service import _tick_from_market
+from portal.backend.service.market.instrument_service import _tick_from_market
 
 
 def test_tick_from_market_handles_integer_precision():

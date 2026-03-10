@@ -1,13 +1,27 @@
 """FastAPI entrypoint that wires routers and shared middleware."""
 
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+import logging
 import os
 from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .controller import bots, candles, indicators, instruments, strategies
+from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
+from .service.bots.bot_watchdog import get_watchdog
+from .service.db.postgres_extensions import ensure_postgres_extensions
+
+# Auto-discover indicators and signal rules via package imports
+# Indicators: pure computation, returns domain objects
+import indicators  # noqa: F401
+
+# Signals: auto-discovers all @signal_rule decorated functions
+# This triggers decorator execution and registration in _REGISTRY
+import signals  # noqa: F401
+from signals.overlays.builtins import ensure_builtin_overlays_registered
+from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
 
 
 def _allowed_origins() -> List[str]:
@@ -27,11 +41,56 @@ def _allowed_origins() -> List[str]:
         "http://127.0.0.1:5173",
     ]
 
+
+def _configure_logging() -> None:
+    """Configure basic logging once for the API server."""
+
+    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+def _startup_watchdog() -> None:
+    ensure_builtin_overlays_registered()
+    ensure_builtin_indicator_plugins_registered()
+    ensure_postgres_extensions()
+    watchdog = get_watchdog()
+    watchdog.recover_local_orphans()
+    watchdog.start_background_monitor()
+    logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
+
+
+def _shutdown_watchdog() -> None:
+    watchdog = get_watchdog()
+    watchdog.stop_background_monitor()
+    logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _startup_watchdog()
+    try:
+        yield
+    finally:
+        _shutdown_watchdog()
+
+
 app = FastAPI(
     title="Quant-Trad API",
     description="FastAPI for OHLCV and signal services",
     version="0.1.0",
+    lifespan=_lifespan,
 )
+
+
+# NOTE: Normalizing duplicate "/api/api" prefixes is a frontend/proxy
+# responsibility; middleware-based rewrites were removed to avoid hiding
+# client configuration issues.
+
+_configure_logging()
+logger = logging.getLogger(__name__)
 
 origins = _allowed_origins()
 allow_credentials = "*" not in origins
@@ -45,13 +104,15 @@ app.add_middleware(
 )
 
 app.include_router(candles.router, prefix="/api/candles")
-app.include_router(indicators.router, prefix="/api/indicators")
+app.include_router(ind_controller.router, prefix="/api/indicators")
 app.include_router(strategies.router, prefix="/api/strategies")
 app.include_router(instruments.router, prefix="/api/instruments")
 app.include_router(bots.router, prefix="/api/bots")
+app.include_router(providers.router, prefix="/api/providers")
+app.include_router(reports.router, prefix="/api/reports")
 
 
 @app.get("/api/health")
 def health() -> dict:
     """Simple health check endpoint for uptime probes."""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"status": "ok", "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z")}

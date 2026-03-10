@@ -1,0 +1,786 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Bar Step p95 (ms)",
+      "description": "p95 of step_series_state for the selected scope. This is your effective per-bar latency.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}');"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Bars/sec (selected scope)",
+      "description": "How fast bars are being processed for the selected scope. Lower is slower UX feedback.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH s AS ( SELECT count(*)::double precision AS bars, EXTRACT(EPOCH FROM (max(started_at) - min(started_at)))::double precision AS span_s FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}') ) SELECT CASE WHEN COALESCE(span_s, 0) <= 0 THEN NULL ELSE bars / span_s END AS value FROM s;"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Container Sleep p95 (ms)",
+      "description": "If this is near your snapshot interval, container cadence (not engine compute) is pacing visible updates.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'container_snapshot_sleep' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}');"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Overlay Projection p95 (ms)",
+      "description": "p95 overlay projection time from step_signal_eval context. High values indicate overlay-heavy bottlenecks.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'overlay_projection_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_signal_eval' AND (context->>'overlay_projection_ms') IS NOT NULL AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}');"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Per-Series Bar Latency p95 (ms)",
+      "description": "p95 step_series_state split by symbol/timeframe to expose hot series.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), concat(COALESCE(symbol,'?'),'|',COALESCE(timeframe,'?')) AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Selected Series Bar Latency Avg / p95 (ms)",
+      "description": "Trend of selected series latency. Use this to confirm drift over time.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'avg' AS metric, avg(duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') AND ('${timeframe:raw}' = '__all' OR timeframe = '${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Bar Pipeline Phase p95 (ms)",
+      "description": "p95 of internal phase timings extracted from step_series_state context.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'overlays_update_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'overlays_update_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'overlays_update_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'decision_flow_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_decision_flow_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'execution_decision_flow_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'execution_prime_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_prime_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'execution_prime_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'execution_settlement_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_settlement_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'execution_settlement_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "E",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'trade_event_processing_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'execution_trade_event_processing_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'execution_trade_event_processing_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "F",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'stream_emit_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'stream_emit_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND (context->>'stream_emit_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Pipeline Phase Contribution (selected scope)",
+      "description": "Average/p95/total share by internal phase. Optimize phases with both high p95 and high total_pct.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS ( SELECT context FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name = 'step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') ), phases AS ( SELECT p.phase, p.value FROM base b CROSS JOIN LATERAL ( VALUES ('overlays_update_ms', NULLIF(b.context->>'overlays_update_ms','')::double precision), ('decision_flow_ms', NULLIF(b.context->>'execution_decision_flow_ms','')::double precision), ('execution_prime_ms', NULLIF(b.context->>'execution_prime_ms','')::double precision), ('settlement_ms', NULLIF(b.context->>'execution_settlement_ms','')::double precision), ('trade_event_processing_ms', NULLIF(b.context->>'execution_trade_event_processing_ms','')::double precision), ('stats_update_ms', NULLIF(b.context->>'stats_update_ms','')::double precision), ('delta_build_ms', NULLIF(b.context->>'delta_build_ms','')::double precision), ('delta_serialize_ms', NULLIF(b.context->>'delta_serialize_ms','')::double precision), ('stream_emit_ms', NULLIF(b.context->>'stream_emit_ms','')::double precision), ('persistence_ms', NULLIF(b.context->>'persistence_ms','')::double precision) ) AS p(phase, value) WHERE p.value IS NOT NULL ) SELECT phase, count(*) AS calls, ROUND(avg(value)::numeric,2)::double precision AS avg_ms, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY value)::numeric,2)::double precision AS p95_ms, ROUND(sum(value)::numeric,2)::double precision AS total_ms, ROUND((sum(value) / NULLIF(sum(sum(value)) OVER (), 0) * 100.0)::numeric,2)::double precision AS total_pct FROM phases GROUP BY phase ORDER BY total_pct DESC NULLS LAST, p95_ms DESC;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Signal Eval Sub-Phases p95 (ms)",
+      "description": "Breakdown of signal/indicator/rule/projection timings from step_signal_eval context.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'strategy_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'strategy_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'strategy_eval_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'indicator_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'indicator_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'indicator_eval_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'rule_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'rule_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'rule_eval_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'indicator_state_update_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'indicator_state_update_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'indicator_state_update_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "E",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'signal_eval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'signal_eval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'signal_eval_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "F",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'overlay_projection_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'overlay_projection_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND (context->>'overlay_projection_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Container Snapshot Cycle Breakdown p95 (ms)",
+      "description": "Shows where container orchestration time is spent; key for perceived BotLens update cadence.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'cycle_total_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'queue_drain_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'queue_drain_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'queue_drain_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "C",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'merge_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'merge_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'merge_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "D",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'snapshot_write_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'snapshot_write_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'snapshot_write_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "E",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'telemetry_emit_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'telemetry_emit_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'telemetry_emit_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "F",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'status_write_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'status_write_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'status_write_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "G",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'sleep_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_sleep' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "H",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'target_interval_ms' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY NULLIF(context->>'target_interval_ms','')::double precision)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='container_snapshot_cycle' AND (context->>'target_interval_ms') IS NOT NULL AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Slowest Bars (selected scope)",
+      "description": "Top individual bars by total latency with internal phase columns for immediate bottleneck triage.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT run_id, symbol, timeframe, NULLIF(context->>'bar_index','')::int AS bar_index, context->>'bar_time' AS bar_time, ROUND(duration_ms::numeric,2)::double precision AS step_ms, ROUND(NULLIF(context->>'overlays_update_ms','')::numeric,2)::double precision AS overlays_update_ms, ROUND(NULLIF(context->>'execution_decision_flow_ms','')::numeric,2)::double precision AS decision_flow_ms, ROUND(NULLIF(context->>'execution_prime_ms','')::numeric,2)::double precision AS execution_prime_ms, ROUND(NULLIF(context->>'execution_settlement_ms','')::numeric,2)::double precision AS settlement_ms, ROUND(NULLIF(context->>'execution_trade_event_processing_ms','')::numeric,2)::double precision AS trade_event_processing_ms, ROUND(NULLIF(context->>'stream_emit_ms','')::numeric,2)::double precision AS stream_emit_ms, started_at FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_series_state' AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${symbol:raw}'='__all' OR symbol='${symbol:raw}') AND ('${timeframe:raw}'='__all' OR timeframe='${timeframe:raw}') ORDER BY duration_ms DESC LIMIT 200;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Step Error Hotspots",
+      "description": "Where failures occur by step + series. Useful when high latency is accompanied by retries/errors.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT step_name, symbol, timeframe, count(*) AS failures, ROUND(avg(duration_ms)::numeric,2)::double precision AS avg_ms, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric,2)::double precision AS p95_ms, max(started_at) AS last_seen FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ok = FALSE AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') GROUP BY step_name, symbol, timeframe ORDER BY failures DESC, p95_ms DESC LIMIT 100;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Step Throughput by Step (events/min)",
+      "description": "Step event throughput. Drops during elevated latency indicate stall/backpressure.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), step_name AS metric, (count(*)::double precision * 60.0) / GREATEST($__interval_ms / 1000.0, 1.0) AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') AND ('${step_name:raw}'='__all' OR step_name='${step_name:raw}') GROUP BY 1, 2 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Slow Steps by Series + Step",
+      "description": "Cross-cut to rank expensive step/series combinations by p95 and total time share.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH base AS ( SELECT step_name, symbol, timeframe, duration_ms FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND ('${bot_id:raw}'='__all' OR bot_id='${bot_id:raw}') AND ('${run_id:raw}'='__all' OR run_id='${run_id:raw}') ) SELECT step_name, COALESCE(symbol,'?') AS symbol, COALESCE(timeframe,'?') AS timeframe, count(*) AS calls, ROUND(avg(duration_ms)::numeric,2)::double precision AS avg_ms, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric,2)::double precision AS p95_ms, ROUND(sum(duration_ms)::numeric,2)::double precision AS total_ms, ROUND((sum(duration_ms) / NULLIF(sum(sum(duration_ms)) OVER (), 0) * 100.0)::numeric,2)::double precision AS total_pct FROM base GROUP BY step_name, symbol, timeframe ORDER BY total_pct DESC NULLS LAST, p95_ms DESC LIMIT 200;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "quant-trad",
+    "postgres",
+    "timescaledb",
+    "bot-profiler",
+    "runtime-v2"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "label": "Bot",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_run_steps WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT run_id AS __value, run_id AS __text FROM portal_bot_run_steps WHERE ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') ORDER BY run_id DESC LIMIT 1000;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "symbol",
+        "label": "Symbol",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT symbol AS __value, symbol AS __text FROM portal_bot_run_steps WHERE symbol IS NOT NULL AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "timeframe",
+        "label": "Timeframe",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT timeframe AS __value, timeframe AS __text FROM portal_bot_run_steps WHERE timeframe IS NOT NULL AND step_name = 'step_series_state' AND ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') AND ('${run_id:raw}' = '__all' OR run_id = '${run_id:raw}') AND ('${symbol:raw}' = '__all' OR symbol = '${symbol:raw}') ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "step_name",
+        "label": "Step",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT step_name AS __value, step_name AS __text FROM portal_bot_run_steps WHERE ('${bot_id:raw}' = '__all' OR bot_id = '${bot_id:raw}') ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Quant-Trad: Bot Run Profiler",
+  "uid": "quanttrad-bot-profiler",
+  "version": 5102,
+  "weekStart": ""
+}

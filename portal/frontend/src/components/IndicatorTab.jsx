@@ -1,5 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Switch, Popover, Transition, PopoverButton, PopoverPanel } from '@headlessui/react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Plus, X, RefreshCw } from 'lucide-react'
 import {
   fetchIndicators,
@@ -19,9 +18,9 @@ import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
 import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
+import DeleteIndicatorModal from './DeleteIndicatorModal.jsx';
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
 import { createLogger } from '../utils/logger.js';
-import LoadingOverlay from './LoadingOverlay.jsx';
 
 
 // Gold, Maroon, Orange, Purple, Lime, Gray
@@ -90,6 +89,32 @@ const normalizeParams = (params) => {
   return p;
 };
 
+const stripRuntimeParams = (params) => {
+  const cleaned = { ...params };
+  const runtimeKeys = [
+    'symbol',
+    'interval',
+    'timeframe',
+    'start',
+    'end',
+    'datasource',
+    'exchange',
+    'provider_id',
+    'venue_id',
+    'instrument_id',
+    'bot_id',
+    'strategy_id',
+    'bot_mode',
+    'run_id',
+  ];
+  for (const key of runtimeKeys) {
+    if (Object.prototype.hasOwnProperty.call(cleaned, key)) {
+      delete cleaned[key];
+    }
+  }
+  return cleaned;
+};
+
 const parseTimestamp = (value) => {
   if (!value) return 0;
   const ts = Date.parse(value);
@@ -109,6 +134,10 @@ const sortIndicators = (list = []) => {
 // Manages the list of indicators and syncs enabled ones to the chart context
 export const IndicatorSection = ({ chartId }) => {
   const [indicators, setIndicators] = useState([])
+  const indicatorsRef = useRef(indicators)
+  useEffect(() => {
+    indicatorsRef.current = indicators
+  }, [indicators])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -123,6 +152,10 @@ export const IndicatorSection = ({ chartId }) => {
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [duplicateBusyId, setDuplicateBusyId] = useState(null);
   const [refreshingList, setRefreshingList] = useState(false);
+  const [jobState, setJobState] = useState({ busy: false, indicatorId: null, type: null, label: '' });
+  const [notice, setNotice] = useState('');
+  const noticeTimerRef = useRef(null);
+  const [deleteModal, setDeleteModal] = useState({ open: false, indicatorId: null, indicatorName: '' });
 
 
   const { updateChart, getChart } = useChartState()
@@ -133,6 +166,68 @@ export const IndicatorSection = ({ chartId }) => {
   // Read current chart slice
   const chartState = getChart(chartId)
 
+  const mergeIndicatorLists = useCallback((incoming = [], previous = undefined) => {
+    const prevList = Array.isArray(previous) ? previous : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
+    const serverList = Array.isArray(incoming) ? incoming : [];
+    const serverIds = new Set(serverList.map((item) => item?.id).filter(Boolean));
+
+    const merged = serverList.map((item) => {
+      if (!item?.id) return item;
+      const existing = prevList.find((prev) => prev?.id === item.id);
+      if (!existing) return item;
+      const hydrated = { ...item };
+      if (existing._status) hydrated._status = existing._status;
+      if (existing._error) hydrated._error = existing._error;
+      if (existing._draft) hydrated._draft = existing._draft;
+      if (existing.color && !hydrated.color) hydrated.color = existing.color;
+      return hydrated;
+    });
+
+    const locals = prevList.filter((item) => item?._local && item?.id && !serverIds.has(item.id));
+    if (locals.length) {
+      merged.push(...locals);
+    }
+
+    const sorted = sortIndicators(merged);
+    updateChart(chartId, { indicators: sorted });
+    return sorted;
+  }, [chartId, updateChart]);
+
+  const showNotice = useCallback((message) => {
+    if (!message) return;
+    setNotice(message);
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    noticeTimerRef.current = setTimeout(() => setNotice(''), 3600);
+  }, []);
+
+  const startJob = useCallback((label, meta = {}) => {
+    setJobState({
+      busy: true,
+      label: label || 'Processing indicator changes…',
+      indicatorId: meta.indicatorId ?? null,
+      type: meta.type ?? null,
+    });
+  }, []);
+
+  const finishJob = useCallback(() => {
+    setJobState({ busy: false, indicatorId: null, type: null, label: '' });
+  }, []);
+
+  const guardBusy = useCallback((reason) => {
+    const blocked = jobState.busy || chartState?.overlayLoading;
+    if (blocked) {
+      showNotice('Already processing indicator changes.');
+      warn('indicator_action_blocked_busy', {
+        reason,
+        activeJob: jobState,
+        overlayLoading: chartState?.overlayLoading,
+      });
+    }
+    return blocked;
+  }, [chartState?.overlayLoading, jobState, showNotice, warn]);
+
   const fetchAndSyncIndicators = useCallback(async ({ silent = false } = {}) => {
     if (!silent) {
       setIsLoading(true);
@@ -140,10 +235,9 @@ export const IndicatorSection = ({ chartId }) => {
     try {
       const payload = await fetchIndicators();
       const list = Array.isArray(payload) ? payload : [];
-      const sorted = sortIndicators(list);
-      setIndicators(sorted);
-      updateChart(chartId, { indicators: sorted });
-      return sorted;
+      const merged = mergeIndicatorLists(list);
+      setIndicators(merged);
+      return merged;
     } catch (err) {
       const message = err?.message || 'Unable to load indicators';
       setError(message);
@@ -154,7 +248,7 @@ export const IndicatorSection = ({ chartId }) => {
         setIsLoading(false);
       }
     }
-  }, [chartId, updateChart, logError]);
+  }, [chartId, logError, mergeIndicatorLists]);
 
   useEffect(() => {
     fetchAndSyncIndicators();
@@ -176,6 +270,21 @@ export const IndicatorSection = ({ chartId }) => {
     });
   }, [chartState, debug]);
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimerRef.current) {
+        clearTimeout(noticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Defensive: prevent stuck loading overlays if nothing is actually busy
+  useEffect(() => {
+    if (!isLoading) return;
+    if (jobState.busy || chartState?.overlayLoading || refreshingList || bulkActionLoading) return;
+    setIsLoading(false);
+  }, [bulkActionLoading, chartState?.overlayLoading, isLoading, jobState.busy, refreshingList]);
+
   // Derive ISO start/end from dateRange
   const [startISO, endISO] = useMemo(() => {
     const [s, e] = chartState?.dateRange || []
@@ -184,16 +293,84 @@ export const IndicatorSection = ({ chartId }) => {
     return [sISO, eISO]
   }, [chartState?.dateRange?.[0], chartState?.dateRange?.[1]])
 
+  const contextPayload = useMemo(() => {
+    const interval = chartState?.interval || chartState?.timeframe || null;
+    const toISO = (value) => {
+      if (!value) return null;
+      if (typeof value === 'string') return value;
+      if (value?.toISOString) return value.toISOString();
+      return null;
+    };
+    const startVal = toISO(startISO || chartState?.start || chartState?.range?.[0]);
+    const endVal = toISO(endISO || chartState?.end || chartState?.range?.[1]);
+
+    return {
+      symbol: chartState?.symbol || null,
+      start: startVal,
+      end: endVal,
+      interval,
+      datasource: chartState?.datasource || chartState?.provider || null,
+      exchange: chartState?.exchange || null,
+      instrument_id: chartState?.instrument_id || null,
+      provider_id: chartState?.provider_id || null,
+      venue_id: chartState?.venue_id || null,
+    };
+  }, [
+    chartState?.symbol,
+    chartState?.interval,
+    chartState?.timeframe,
+    chartState?.datasource,
+    chartState?.provider,
+    chartState?.exchange,
+    chartState?.instrument_id,
+    chartState?.provider_id,
+    chartState?.venue_id,
+    chartState?.start,
+    chartState?.end,
+    chartState?.range,
+    startISO,
+    endISO,
+  ]);
+
+  const missingContext = useMemo(() => {
+    const required = ['symbol', 'interval', 'start', 'end'];
+    return required.filter((key) => !contextPayload[key]);
+  }, [contextPayload]);
+
+  const requireContextPayload = useCallback(
+    (reason = 'unknown') => {
+      if (missingContext.length) {
+        const msg = `Missing required context param${missingContext.length > 1 ? 's' : ''}: ${missingContext.join(', ')}`;
+        setError(msg);
+        warn('indicator_context_missing', {
+          reason,
+          chartId,
+          missing: missingContext,
+          context: contextPayload,
+        });
+        return null;
+      }
+      return contextPayload;
+    },
+    [missingContext, warn, chartId, contextPayload],
+  );
+
   useEffect(() => {
     if (!chartState || !chartState._version) {
       warn('indicator_refresh_skipped_version', { reason: 'no_version' });
       setIsLoading(false);
       return;
     }
-    if (!chartState.symbol || !chartState.interval) {
-      warn('indicator_refresh_skipped_inputs', {
+
+    // Wait for all required context fields before triggering overlay refresh
+    // This prevents race conditions where _version bumps before datasource is set
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval) {
+      warn('indicator_refresh_skipped_context', {
+        datasource: chartState.datasource,
+        exchange: chartState.exchange,
         symbol: chartState.symbol,
         interval: chartState.interval,
+        reason: !chartState.datasource ? 'no_datasource' : !chartState.symbol ? 'no_symbol' : 'no_interval',
       });
       setIsLoading(false);
       return;
@@ -219,7 +396,7 @@ export const IndicatorSection = ({ chartId }) => {
     })();
 
     return () => { isMounted = false; };
-  }, [chartId, chartState?._version]);
+  }, [chartId, chartState?._version, chartState?.datasource, chartState?.exchange]);
 
   // When indicator colors change, recolor overlays in chart context (post-render).
   useEffect(() => {
@@ -237,7 +414,8 @@ export const IndicatorSection = ({ chartId }) => {
   const refreshEnabledOverlays = async (list = indicators) => {
     updateChart(chartId, { overlayLoading: true }); // show loading state
 
-    if (!chartState) {
+    const ctx = requireContextPayload('overlay_refresh');
+    if (!chartState || !ctx) {
       updateChart(chartId, { overlays: [], overlayLoading: false });
       return;
     }
@@ -246,7 +424,7 @@ export const IndicatorSection = ({ chartId }) => {
     let working = Array.isArray(list) && list.length ? list : indicators;
     if (!Array.isArray(working) || working.length === 0) {
       try {
-        working = (await fetchIndicators({ symbol: chartState.symbol, interval: chartState.interval })) || [];
+        working = (await fetchIndicators()) || [];
         const sortedWorking = sortIndicators(working);
         working = sortedWorking;
         setIndicators(sortedWorking);
@@ -259,80 +437,48 @@ export const IndicatorSection = ({ chartId }) => {
     }
 
     // patch params for enabled indicators if symbol/interval mismatch
-    const enabled = working.filter(i => i?.enabled);
+    const enabled = working.filter(i => i?.enabled && !i?._local);
     info('overlay_refresh_start', {
       enabled: enabled.length,
-      symbol: chartState.symbol,
-      interval: chartState.interval,
+      symbol: ctx.symbol,
+      interval: ctx.interval,
     });
-    const patched = await Promise.all(enabled.map(async (ind) => {
-      const p = ind?.params || {};
-      const desiredSymbol = chartState.symbol;
-      const desiredInterval = chartState.interval;
-      const needPatch = p.symbol !== desiredSymbol || p.interval !== desiredInterval;
-
-      if (!needPatch) return ind;
-
-      try {
-        const nextParams = {
-          ...p,
-          symbol: desiredSymbol,
-          interval: desiredInterval,
-          start: startISO,
-          end: endISO,
-          datasource: chartState?.datasource,
-          exchange: chartState?.exchange,
-        };
-        const updated = await updateIndicator(ind.id, { type: ind.type, params: nextParams, name: ind.name });
-        return updated || { ...ind, params: nextParams };
-      } catch (e) {
-        warn('indicator_param_patch_failed', { indicatorId: ind.id, message: e?.message }, e);
-        // fall back locally so overlays still align this session
-        return {
-          ...ind,
-          params: {
-            ...p,
-            symbol: desiredSymbol,
-            interval: desiredInterval,
-            start: startISO,
-            end: endISO,
-            datasource: chartState?.datasource,
-            exchange: chartState?.exchange,
-          },
-        };
-      }
-    }));
-
-    // merge patched back into full list and persist
-    const byId = new Map(patched.map(p => [p.id, p]));
-    const merged = working.map(ind => byId.get(ind.id) || ind);
-    if (merged !== working) {
-      const sortedMerged = sortIndicators(merged);
-      working = sortedMerged;
-      setIndicators(sortedMerged);
-      updateChart(chartId, { indicators: sortedMerged });
-    }
+    const active = enabled;
 
     // compute overlays for enabled indicators using current chart window
-    const body = {
-      start: startISO,
-      end: endISO,
-      interval: chartState.interval,
-      symbol: chartState.symbol,
-      datasource: chartState?.datasource,
-      exchange: chartState?.exchange,
-    };
+    const body = { ...ctx };
 
     const results = await Promise.all(
-      patched.map(async (ind) => {
+      active.map(async (ind) => {
         try {
           const payload = await fetchIndicatorOverlays(ind.id, body);
+          const rawPayload = payload?.payload || payload
+          const count = (key) => (Array.isArray(rawPayload?.[key]) ? rawPayload[key].length : 0)
           info('overlay_fetch_success', {
             indicatorId: ind.id,
             indicatorType: ind.type,
+            instrument_id: chartState?.instrument_id,
             hasPayload: Boolean(payload),
+            overlay_type: payload?.type || ind.type,
+            boxes: count('boxes'),
+            markers: count('markers'),
+            price_lines: count('price_lines'),
+            segments: count('segments'),
+            polylines: count('polylines'),
+            profiles: count('profiles'),
           });
-          return payload ? { ind_id: ind.id, type: ind.type, payload } : null;
+          if (!payload) return null;
+          if (payload?.type && payload?.payload) {
+            return {
+              ...payload,
+              ind_id: ind.id,
+              type: payload.type || ind.type,
+              payload: payload.payload,
+              color: payload.color ?? ind.color,
+              source: payload.source ?? 'indicator',
+            };
+          }
+          return { ind_id: ind.id, type: ind.type, payload };
         } catch (e) {
           const msg = String(e?.message ?? e);
           if (
@@ -347,26 +493,27 @@ export const IndicatorSection = ({ chartId }) => {
             }
             return null;
           }
-          logError('overlay_fetch_failed', { indicatorId: ind.id }, e);
+          logError('overlay_fetch_failed', { indicatorId: ind.id, instrument_id: chartState?.instrument_id }, e);
           return null;
         }
       })
     );
 
     const overlaysPayload = results.filter(Boolean);
-    const nextColorMap = buildColorMap(merged);
+    const nextColorMap = buildColorMap(working);
     setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
 
     const colored = applyIndicatorColors(overlaysPayload, nextColorMap);
     updateChart(chartId, { overlays: colored, overlayLoading: false });
     info('overlay_refresh_complete', {
       overlays: colored.length,
-      indicatorsProcessed: patched.length,
+      indicatorsProcessed: active.length,
       enabledCount: enabled.length,
     });
   };
 
   const handleRefreshList = useCallback(async () => {
+    if (guardBusy('manual_refresh')) return;
     setRefreshingList(true);
     try {
       const latest = await fetchAndSyncIndicators({ silent: true });
@@ -377,11 +524,90 @@ export const IndicatorSection = ({ chartId }) => {
     } finally {
       setRefreshingList(false);
     }
-  }, [fetchAndSyncIndicators, refreshEnabledOverlays, logError]);
+  }, [fetchAndSyncIndicators, refreshEnabledOverlays, guardBusy, logError]);
+
+  const applySignalRules = useCallback((indicatorId, ruleSelection) => {
+    const selection = Array.isArray(ruleSelection) ? ruleSelection : null;
+    if (!indicatorId || !selection) return;
+    const currentConfig = getChart(chartId)?.signalsConfig || {};
+    const currentEnabled = currentConfig.enabledRules || {};
+    const nextEnabled = { ...currentEnabled };
+
+    nextEnabled[indicatorId] = selection;
+    const nextSignalsConfig = {
+      ...currentConfig,
+      enabledRules: nextEnabled,
+    };
+    updateChart(chartId, { signalsConfig: nextSignalsConfig });
+  }, [chartId, getChart, updateChart]);
+
+  const createIndicatorOptimistic = useCallback(async (meta, params, reuseId = null) => {
+    const tempId = reuseId || `temp-${Date.now()}`;
+    const optimisticIndicator = {
+      id: tempId,
+      name: meta.name,
+      type: meta.type,
+      params,
+      enabled: true,
+      color: meta.color || DEFAULT_INDICATOR_COLOR,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      _local: true,
+      _status: 'creating',
+      _draft: { type: meta.type, params, name: meta.name, color: meta.color || null },
+    };
+
+    setIndicators((prev) => {
+      const withoutTemp = prev.filter((ind) => ind.id !== tempId);
+      const merged = sortIndicators([...withoutTemp, optimisticIndicator]);
+      updateChart(chartId, { indicators: merged });
+      return merged;
+    });
+
+    startJob('Creating indicator…', { indicatorId: tempId, type: 'create' });
+    try {
+      const created = await createIndicator({ type: meta.type, params, name: meta.name });
+      const createdIndicator = {
+        ...created,
+        _status: 'computing',
+        _local: false,
+        color: created?.color || optimisticIndicator.color,
+      };
+
+      setIndicators((prev) => {
+        const filtered = prev.filter((ind) => ind.id !== tempId);
+        const merged = sortIndicators([...filtered, createdIndicator]);
+        updateChart(chartId, { indicators: merged });
+        return merged;
+      });
+
+      const latest = await fetchAndSyncIndicators({ silent: true });
+      await refreshEnabledOverlays(latest);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === createdIndicator.id ? { ...ind, _status: null } : ind
+      )));
+
+      return createdIndicator;
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_create_failed', e);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === tempId
+          ? { ...ind, _status: 'failed', _error: e.message }
+          : ind
+      )));
+      throw e;
+    } finally {
+      finishJob();
+    }
+  }, [chartId, finishJob, fetchAndSyncIndicators, logError, refreshEnabledOverlays, startJob, updateChart]);
 
   // Handlers for modal save/delete
   const handleSave = async (meta) => {
-    const core = normalizeParams(meta.params);
+    const core = stripRuntimeParams(normalizeParams(meta.params));
+    const ctx = requireContextPayload('save_indicator');
+    if (!ctx) return;
+    if (guardBusy('save_indicator')) return;
 
     if ('lookbacks' in core) {
       if (!Array.isArray(core.lookbacks) || core.lookbacks.length === 0) {
@@ -390,68 +616,97 @@ export const IndicatorSection = ({ chartId }) => {
       }
     }
 
-    const params = {
-      ...core,
-      start: startISO,
-      end: endISO,
-      symbol: chartState?.symbol,
-      interval: chartState?.interval,
-      datasource: chartState?.datasource,
-      exchange: chartState?.exchange,
-    };
+    const params = { ...core, ...ctx };
 
     setError(null);
     setModalOpen(false);
     setEditing(null);
-    setIsLoading(true);
-    updateChart(chartId, { overlays: [], overlayLoading: true });
 
     try {
       let indicatorId = meta.id ?? null;
+      let needsIndicatorUpdate = true;
 
       if (meta.id) {
-        const existing = indicators.find((i) => i.id === meta.id) || null;
-        const payload = await updateIndicator(meta.id, {
-          type: meta.type,
-          params,
-          name: meta.name,
-          color: existing?.color ?? null,
-        });
-        indicatorId = payload?.id ?? meta.id;
-      } else {
-        const created = await createIndicator({ type: meta.type, params, name: meta.name });
-        indicatorId = created?.id ?? null;
+        const existing = indicators.find((i) => i.id === meta.id);
+        if (existing) {
+          const existingCore = stripRuntimeParams(existing.params || {});
+          const coreParamsChanged = JSON.stringify(existingCore) !== JSON.stringify(core);
+          const nameChanged = meta.name !== existing.name;
+          needsIndicatorUpdate = coreParamsChanged || nameChanged;
+        }
       }
+
+      if (!needsIndicatorUpdate) {
+        if (meta.id) {
+          applySignalRules(meta.id, meta.signalRules);
+        }
+        return;
+      }
+
+      if (!meta.id) {
+        const created = await createIndicatorOptimistic(meta, params);
+        if (created?.id && meta.signalRules?.length) {
+          applySignalRules(created.id, meta.signalRules);
+        }
+        return;
+      }
+
+      if (guardBusy('indicator_update')) return;
+
+      startJob('Updating indicator…', { indicatorId: meta.id, type: 'update' });
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === meta.id ? { ...ind, _status: 'updating' } : ind
+      )));
+      updateChart(chartId, { overlays: [], overlayLoading: true });
+
+      const existing = indicators.find((i) => i.id === meta.id) || null;
+      const payload = await updateIndicator(meta.id, {
+        type: meta.type,
+        params,
+        name: meta.name,
+        color: existing?.color ?? null,
+      });
+      indicatorId = payload?.id ?? meta.id;
 
       if (indicatorId) {
-        const ruleSelection = Array.isArray(meta.signalRules) ? meta.signalRules : null;
-        const currentConfig = getChart(chartId)?.signalsConfig || {};
-        const currentEnabled = currentConfig.enabledRules || {};
-        const nextEnabled = { ...currentEnabled };
-        if (ruleSelection && ruleSelection.length) {
-          nextEnabled[indicatorId] = ruleSelection;
-        }
-        const nextSignalsConfig = {
-          ...currentConfig,
-          enabledRules: nextEnabled,
-        };
-        updateChart(chartId, { signalsConfig: nextSignalsConfig });
+        applySignalRules(indicatorId, meta.signalRules);
       }
 
-      const latest = await fetchAndSyncIndicators({ silent: true });
+      const latest = await fetchAndSyncIndicators({ silent: false });
       await refreshEnabledOverlays(latest);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === indicatorId ? { ...ind, _status: null } : ind
+      )));
     } catch (e) {
       setError(e.message);
       logError('indicator_save_failed', e);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === meta.id ? { ...ind, _status: 'failed', _error: e.message } : ind
+      )));
       updateChart(chartId, { overlayLoading: false });
     } finally {
       setIsLoading(false);
+      finishJob();
     }
   };
 
-  const handleDelete = async (id) => {
+  // Opens the delete confirmation modal instead of deleting directly
+  const openDeleteModal = (id) => {
     if (!id) return;
+    const indicator = indicators.find((ind) => ind.id === id);
+    setDeleteModal({
+      open: true,
+      indicatorId: id,
+      indicatorName: indicator?.name || indicator?.type || 'this indicator',
+    });
+  };
+
+  // Actual delete logic - called from modal confirmation
+  const confirmDelete = async (id) => {
+    if (!id) return;
+    if (guardBusy('delete_indicator')) return;
     setIsLoading(true);
+    startJob('Removing indicator…', { indicatorId: id, type: 'delete' });
     try {
       await deleteIndicator(id);
       setSelectedIds((prev) => {
@@ -486,13 +741,20 @@ export const IndicatorSection = ({ chartId }) => {
       }
       const latest = await fetchAndSyncIndicators({ silent: true });
       await refreshEnabledOverlays(latest);
+      setDeleteModal({ open: false, indicatorId: null, indicatorName: '' });
     } catch (e) {
       setError(e.message);
       logError('indicator_delete_failed', e);
+      throw e; // Re-throw so modal can handle error state
     } finally {
       setIsLoading(false);
+      finishJob();
     }
-  }
+  };
+
+  const handleDelete = (id) => {
+    openDeleteModal(id);
+  };
 
   const toggleIndicatorSelection = (id) => {
     if (!id) return
@@ -510,9 +772,11 @@ export const IndicatorSection = ({ chartId }) => {
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds || [])
     if (!ids.length) return
+    if (guardBusy('bulk_delete')) return;
     try {
       setBulkActionLoading(true)
       setIsLoading(true)
+      startJob('Deleting indicators…', { type: 'bulk-delete' });
       await bulkDeleteIndicators(ids)
       setSelectedIds(new Set())
       const latest = await fetchAndSyncIndicators({ silent: true })
@@ -523,14 +787,17 @@ export const IndicatorSection = ({ chartId }) => {
     } finally {
       setBulkActionLoading(false)
       setIsLoading(false)
+      finishJob();
     }
   }
 
   const handleBulkToggle = async (enabled) => {
     const ids = Array.from(selectedIds || [])
     if (!ids.length) return
+    if (guardBusy('bulk_toggle')) return;
     try {
       setBulkActionLoading(true)
+      startJob(enabled ? 'Showing overlays…' : 'Hiding overlays…', { type: 'bulk-toggle' });
       await bulkToggleIndicators(ids, enabled)
       const latest = await fetchAndSyncIndicators({ silent: true })
       await refreshEnabledOverlays(latest)
@@ -539,61 +806,115 @@ export const IndicatorSection = ({ chartId }) => {
       logError('indicator_bulk_toggle_failed', e)
     } finally {
       setBulkActionLoading(false)
+      finishJob();
     }
   }
 
-  const toggleEnable = (id) => {
+  const toggleEnable = async (id) => {
+    if (guardBusy('toggle_enable')) return;
     const target = indicators.find((indicator) => indicator.id === id)
     if (!target) return
     const previousEnabled = !!target.enabled
     const nextEnabled = !previousEnabled
 
+    startJob(nextEnabled ? 'Enabling overlay…' : 'Disabling overlay…', { indicatorId: id, type: 'toggle' });
+
     setIndicators((prev) => {
       const next = sortIndicators(
         prev.map((indicator) =>
-          indicator.id === id ? { ...indicator, enabled: nextEnabled } : indicator,
+          indicator.id === id ? { ...indicator, enabled: nextEnabled, _status: 'updating' } : indicator,
         ),
       )
       updateChart(chartId, { indicators: next })
-      queueMicrotask(() => { void refreshEnabledOverlays(next) })
       return next
     })
 
-    setIndicatorEnabled(id, nextEnabled)
-      .then(async () => {
-        const latest = await fetchAndSyncIndicators({ silent: true })
-        await refreshEnabledOverlays(latest)
+    try {
+      await setIndicatorEnabled(id, nextEnabled);
+      const latest = await fetchAndSyncIndicators({ silent: true })
+      await refreshEnabledOverlays(latest)
+      setIndicators((prev) => prev.map((indicator) => (
+        indicator.id === id ? { ...indicator, _status: null } : indicator
+      )));
+    } catch (err) {
+      setError(err.message)
+      logError('indicator_toggle_failed', err)
+      setIndicators((prev) => {
+        const next = sortIndicators(
+          prev.map((indicator) =>
+            indicator.id === id ? { ...indicator, enabled: previousEnabled, _status: null } : indicator,
+          ),
+        )
+        updateChart(chartId, { indicators: next })
+        return next
       })
-      .catch((err) => {
-        setError(err.message)
-        logError('indicator_toggle_failed', err)
-        setIndicators((prev) => {
-          const next = sortIndicators(
-            prev.map((indicator) =>
-              indicator.id === id ? { ...indicator, enabled: previousEnabled } : indicator,
-            ),
-          )
-          updateChart(chartId, { indicators: next })
-          return next
-        })
-      })
+    } finally {
+      finishJob();
+    }
   }
 
-  // Regenerate signals (not yet implemented)
+  // Regenerate signals
   const generateSignals = async (id) => {
-    const indicator = indicators.find((ind) => ind.id === id);
-    await runSignalGeneration({
-      indicator,
-      chartId,
-      chartState,
-      startISO,
-      endISO,
-      indColors,
-      getChart,
-      updateChart,
-      setError,
-      signalsAdapter: generateIndicatorSignals,
+    info('signal_generation_start', {
+      indicatorId: id,
+      chartState: {
+        datasource: chartState?.datasource,
+        exchange: chartState?.exchange,
+        symbol: chartState?.symbol,
+        interval: chartState?.interval,
+      },
     });
+
+    // Validate chart state has all required fields before generating signals
+    if (!chartState?.datasource || !chartState?.symbol || !chartState?.interval) {
+      const missing = !chartState?.datasource ? 'datasource' : !chartState?.symbol ? 'symbol' : 'interval';
+      const errorMsg = `Cannot generate signals: ${missing} is not set. Please ensure chart is fully loaded.`;
+      setError(errorMsg);
+      warn('signal_generation_blocked', {
+        indicatorId: id,
+        reason: `missing_${missing}`,
+        chartState: {
+          datasource: chartState?.datasource,
+          exchange: chartState?.exchange,
+          symbol: chartState?.symbol,
+          interval: chartState?.interval,
+        },
+      });
+      return;
+    }
+
+    const indicator = indicators.find((ind) => ind.id === id);
+
+    // Get fresh chart state right before calling runSignalGeneration
+    // to avoid stale closure issues
+    const freshChartState = getChart(chartId);
+    info('signal_generation_fresh_state', {
+      indicatorId: id,
+      freshChartState: {
+        datasource: freshChartState?.datasource,
+        exchange: freshChartState?.exchange,
+        symbol: freshChartState?.symbol,
+        interval: freshChartState?.interval,
+      },
+    });
+
+    try {
+      await runSignalGeneration({
+        indicator,
+        chartId,
+        chartState: freshChartState,
+        startISO,
+        endISO,
+        indColors,
+        getChart,
+        updateChart,
+        setError,
+        signalsAdapter: generateIndicatorSignals,
+      });
+    } catch (e) {
+      setError(e.message);
+      logError('signal_generation_failed', e);
+    }
   };
 
 
@@ -609,6 +930,7 @@ export const IndicatorSection = ({ chartId }) => {
   }
 
   const handleSelectColor = async (indicatorId, color) => {
+    if (guardBusy('select_color')) return;
     const indicator = indicators.find((ind) => ind.id === indicatorId);
     if (!indicator) return;
 
@@ -616,27 +938,20 @@ export const IndicatorSection = ({ chartId }) => {
       ? color.trim()
       : DEFAULT_INDICATOR_COLOR;
 
-    const patchedParams = {
-      ...indicator.params,
-      symbol: indicator.params?.symbol ?? chartState?.symbol ?? undefined,
-      interval: indicator.params?.interval ?? chartState?.interval ?? undefined,
-      start: indicator.params?.start ?? startISO ?? undefined,
-      end: indicator.params?.end ?? endISO ?? undefined,
-    };
-
     setIndColors((prev) => ({ ...prev, [indicatorId]: normalizedColor }));
 
     const optimisticIndicators = indicators.map((ind) =>
-      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null, params: patchedParams } : ind,
+      ind.id === indicatorId ? { ...ind, color: normalizedColor ?? null } : ind,
     );
     setIndicators(optimisticIndicators);
     updateChart(chartId, { indicators: optimisticIndicators });
 
     try {
+      // Only send color, don't modify params to avoid triggering expensive recomputation
       const updated = await updateIndicator(indicatorId, {
         type: indicator.type,
         name: indicator.name,
-        params: patchedParams,
+        params: indicator.params,
         color: normalizedColor,
       });
       if (updated) {
@@ -675,8 +990,10 @@ export const IndicatorSection = ({ chartId }) => {
 
   const handleDuplicate = async (id) => {
     if (!id) return
+    if (guardBusy('duplicate_indicator')) return;
     try {
       setDuplicateBusyId(id)
+      startJob('Duplicating indicator…', { indicatorId: id, type: 'duplicate' });
       await duplicateIndicator(id)
       const latest = await fetchAndSyncIndicators({ silent: true })
       await refreshEnabledOverlays(latest)
@@ -685,11 +1002,80 @@ export const IndicatorSection = ({ chartId }) => {
       logError('indicator_duplicate_failed', e)
     } finally {
       setDuplicateBusyId(null)
+      finishJob();
     }
   }
 
-  const isSignalsLoading = !!chartState?.signalsLoading
-  const signalsLoadingFor = chartState?.signalsLoadingFor
+  // Recompute overlays for a single indicator
+  const handleRecomputeOverlays = async (id) => {
+    if (!id) return;
+    if (guardBusy('recompute_overlays')) return;
+    const indicator = indicators.find((ind) => ind.id === id);
+    if (!indicator) return;
+
+    const ctx = requireContextPayload('recompute_overlays');
+    if (!ctx) return;
+
+    startJob('Recomputing overlays…', { indicatorId: id, type: 'recompute' });
+    setIndicators((prev) => prev.map((ind) => (
+      ind.id === id ? { ...ind, _status: 'computing' } : ind
+    )));
+
+    try {
+      const payload = await fetchIndicatorOverlays(id, ctx);
+      if (payload) {
+        const currentOverlays = getChart(chartId)?.overlays || [];
+        // Remove old overlays for this indicator and add new ones
+        const filtered = currentOverlays.filter((o) => o.ind_id !== id);
+        const newOverlay = { ind_id: id, type: indicator.type, payload };
+        const merged = [...filtered, newOverlay];
+        const colored = applyIndicatorColors(merged, indColors);
+        updateChart(chartId, { overlays: colored });
+      }
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === id ? { ...ind, _status: null } : ind
+      )));
+      info('overlay_recompute_success', { indicatorId: id });
+    } catch (e) {
+      setError(e.message);
+      logError('overlay_recompute_failed', { indicatorId: id }, e);
+      setIndicators((prev) => prev.map((ind) => (
+        ind.id === id ? { ...ind, _status: null } : ind
+      )));
+    } finally {
+      finishJob();
+    }
+  };
+
+  const retryCreate = async (indicator) => {
+    if (!indicator?._local || !indicator?._draft) return;
+    const ctx = requireContextPayload('retry_indicator');
+    if (!ctx || guardBusy('retry_indicator')) return;
+    const draftParams = stripRuntimeParams(indicator._draft.params || {});
+    const params = { ...draftParams, ...ctx };
+    try {
+      await createIndicatorOptimistic(
+        { type: indicator._draft.type, name: indicator._draft.name, signalRules: indicator.signalRules || [], color: indicator._draft.color },
+        params,
+        indicator.id
+      );
+    } catch {
+      // errors are surfaced via setError; no-op here
+    }
+  };
+
+  const removeLocalIndicator = (id) => {
+    if (!id) return;
+    setIndicators((prev) => {
+      const next = prev.filter((ind) => ind.id !== id || !ind._local);
+      updateChart(chartId, { indicators: next });
+      return next;
+    });
+  };
+
+  const signalsLoadingByIndicator = chartState?.signalsLoadingByIndicator && typeof chartState.signalsLoadingByIndicator === 'object'
+    ? chartState.signalsLoadingByIndicator
+    : {}
 
   const typeOptions = useMemo(() => {
     const unique = new Set();
@@ -804,20 +1190,29 @@ export const IndicatorSection = ({ chartId }) => {
     return 'No indicators match your filters yet. Try adjusting the filters or search terms.';
   }, [totalCount, showEnabledOnly, trimmedSearchQuery, typeFilter]);
 
+  const sectionBusy = Boolean(
+    jobState.busy ||
+    chartState?.overlayLoading ||
+    refreshingList ||
+    bulkActionLoading
+  );
+
+  const actionLocked = sectionBusy || isLoading;
+
   if (!chartState || !chartId) return <div className="text-red-500">Error: No chart state found</div>
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {error && (
-        <div className="relative rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100 shadow-inner">
+        <div className="relative rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
           <div className="pr-6">
-            <p className="font-medium text-red-200">Request failed</p>
-            <p className="mt-1 text-red-100">{error}</p>
+            <p className="font-semibold text-red-200">Error</p>
+            <p className="mt-1 text-red-100/90">{error}</p>
           </div>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="absolute right-3 top-3 text-red-200/80 hover:text-red-100"
+            className="absolute right-3 top-3 text-red-200/70 hover:text-red-100"
             aria-label="Dismiss error"
           >
             <X className="size-4" />
@@ -825,184 +1220,142 @@ export const IndicatorSection = ({ chartId }) => {
         </div>
       )}
 
-      {/* List of indicators */}
-      <section className="relative rounded-[28px] border border-white/8 bg-gradient-to-br from-[#080b14]/95 via-[#070a13]/95 to-[#04060c]/95 p-6 shadow-[0_50px_150px_-90px_rgba(0,0,0,0.85)]">
-        <LoadingOverlay show={isLoading} message="Loading indicators…" />
-        <div
-          className={`flex flex-col gap-6 transition ${
-            isLoading ? 'pointer-events-none select-none blur-sm opacity-40' : 'opacity-100'
-          }`}
-        >
-          <header className="flex flex-col gap-4 border-b border-white/8 pb-5 md:flex-row md:items-start md:justify-between">
-            <div className="space-y-1.5">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-500/80">Indicators</span>
-              <h3 className="text-base font-semibold tracking-tight text-slate-100">Manage overlay configurations</h3>
-              <p className="text-sm text-slate-400">
-                Review saved indicators, toggle availability, and open edits without leaving the console.
-              </p>
+      {notice && !error && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-100">
+          <span className="h-2 w-2 rounded-full bg-amber-300" aria-hidden="true" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      <section className="relative overflow-visible rounded-2xl border border-white/10 bg-[#0d1422]/90 shadow-[0_22px_80px_-60px_rgba(0,0,0,0.85)]">
+        <div className="relative space-y-4 p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-[11px] uppercase tracking-[0.32em] text-slate-400">Indicators / overlays & signals</p>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+                <span className="font-semibold text-slate-100">{indicatorSummary}</span>
+                <span className="h-4 w-px bg-white/10" aria-hidden="true" />
+                <span className="text-slate-500">Enabled</span>
+                <span className="font-semibold text-[color:var(--accent-text-soft)]">{enabledCount}</span>
+                <span className="h-4 w-px bg-white/10" aria-hidden="true" />
+                <span className="text-slate-500">Total</span>
+                <span className="font-semibold text-slate-100">{totalCount}</span>
+              </div>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={handleRefreshList}
-                disabled={refreshingList}
-                className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
-                  refreshingList
-                    ? 'border-white/10 bg-white/5 text-slate-400 cursor-wait'
-                    : 'border-white/15 bg-white/5 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-15)]'
+                disabled={actionLocked}
+                className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
+                  actionLocked
+                    ? 'cursor-not-allowed border-white/10 text-slate-500'
+                    : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
                 }`}
               >
-                <RefreshCw className={`size-4 ${refreshingList ? 'animate-spin' : ''}`} aria-hidden="true" />
-                Refresh
+                <RefreshCw className={`size-4 ${refreshingList ? 'animate-spin' : ''}`} />
+                Sync list
               </button>
               <button
                 type="button"
+                disabled={actionLocked}
                 onClick={() => openEditModal()}
-                className="inline-flex items-center gap-2 rounded-full border border-[color:var(--accent-alpha-40)] bg-[color:var(--accent-alpha-18)] px-4 py-2 text-sm font-semibold text-[color:var(--accent-text-strong)] shadow-[0_22px_60px_-28px_var(--accent-shadow-strong)] transition hover:border-[color:var(--accent-alpha-55)] hover:bg-[color:var(--accent-alpha-28)] hover:text-[color:var(--accent-text-bright)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
+                className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] shadow-[0_12px_35px_-18px_var(--accent-shadow-strong)] transition ${
+                  actionLocked
+                    ? 'cursor-not-allowed bg-[color:var(--accent-alpha-10)] text-slate-500'
+                    : 'bg-[color:var(--accent-alpha-25)] text-[color:var(--accent-text-bright)] hover:bg-[color:var(--accent-alpha-35)]'
+                }`}
               >
-                <Plus className="size-4" aria-hidden="true" />
+                <Plus className="size-3.5" />
                 Add indicator
               </button>
             </div>
-          </header>
+          </div>
 
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.45fr)]">
-            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400/80">Filters</span>
-                <span className="text-[11px] uppercase tracking-[0.26em] text-slate-500/70">
-                  {enabledCount} enabled · {totalCount} total
-                </span>
-              </div>
-              <div className="mt-3 grid w-full gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                <div className="flex flex-col gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Visibility</span>
-                  <label className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 text-sm font-medium text-slate-200 shadow-inner shadow-black/20">
-                    <span className="tracking-tight text-slate-200">Show enabled only</span>
-                    <input
-                      type="checkbox"
-                      className="size-4 shrink-0 rounded border border-slate-600/70 bg-slate-900 accent-[color:var(--accent-base)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-outline)]"
-                      checked={showEnabledOnly}
-                      onChange={(event) => setShowEnabledOnly(event.target.checked)}
-                    />
-                  </label>
-                </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1.2fr)_0.8fr_0.7fr_0.6fr]">
+            <label className="relative block">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">⌕</span>
+              <input
+                type="text"
+                placeholder="Search by name, type, or parameter"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full rounded-lg border border-white/10 bg-[#0b111d] px-8 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none transition focus:border-[color:var(--accent-alpha-40)] focus:ring-2 focus:ring-[color:var(--accent-ring-strong)]"
+              />
+            </label>
 
-                <DropdownSelect
-                  label="Type"
-                  value={typeFilter}
-                  onChange={(next) => setTypeFilter(next)}
-                  options={[
-                    { value: 'all', label: 'All types' },
-                    ...typeOptions.map((type) => ({ value: type, label: formatIndicatorType(type) })),
-                  ]}
-                  className="min-w-[12rem]"
-                />
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="w-full rounded-lg border border-white/10 bg-[#0b111d] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200 outline-none transition hover:border-[color:var(--accent-alpha-40)] focus:border-[color:var(--accent-alpha-60)]"
+            >
+              <option value="all">All types</option>
+              {typeOptions.map((type) => (
+                <option key={type} value={type}>{formatIndicatorType(type)}</option>
+              ))}
+            </select>
 
-                <div className="flex min-w-[15rem] flex-col gap-2 sm:max-w-none">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400/80">Search</span>
-                  <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0b1324]/75 px-3 py-2 shadow-inner shadow-black/18">
-                    <input
-                      type="search"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder="Name, ID, type, or param"
-                      className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
+            <label className="flex items-center gap-3 rounded-lg border border-white/10 bg-[#0b111d] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-200">
+              <input
+                type="checkbox"
+                className="size-4 accent-[color:var(--accent-base)]"
+                checked={showEnabledOnly}
+                onChange={(event) => setShowEnabledOnly(event.target.checked)}
+              />
+              <span>Enabled only</span>
+            </label>
 
-            <div className="rounded-2xl border border-white/12 bg-[#050912]/80 p-4 shadow-inner shadow-black/15">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-400/80">Overview</span>
-              <p className="mt-2 text-sm leading-relaxed text-slate-300">{indicatorSummary}</p>
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                <span className="uppercase tracking-[0.24em] text-slate-500">Page size</span>
-                <select
-                  className="rounded-lg border border-white/10 bg-[#0b1324]/60 px-3 py-1.5 text-sm text-slate-100 focus:border-[color:var(--accent-alpha-60)] focus:outline-none"
-                  value={pageSize}
-                  onChange={(event) => {
-                    const next = Number(event.target.value) || DEFAULT_PAGE_SIZE;
-                    setPageSize(next);
-                  }}
-                >
-                  {PAGE_SIZE_OPTIONS.map((size) => (
-                    <option key={size} value={size}>
-                      {size} per page
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex items-center justify-end gap-2 rounded-lg border border-white/5 bg-[#0b111d] px-3 py-2 text-xs text-slate-300">
+              <span className="text-slate-500">Page size</span>
+              <DropdownSelect
+                value={pageSize}
+                onChange={setPageSize}
+                options={PAGE_SIZE_OPTIONS.map((size) => ({ value: size, label: String(size) }))}
+              />
             </div>
           </div>
 
-          {selectedIds?.size > 0 && (
-            <div className="flex flex-col gap-3 rounded-2xl border border-[color:var(--accent-alpha-20)] bg-[color:var(--accent-alpha-8)]/80 p-4 text-sm text-slate-200 shadow-inner shadow-black/30 md:flex-row md:items-center md:justify-between">
-              <div className="space-y-1">
-                <p className="text-base font-semibold text-slate-100">{selectedIds.size} selected</p>
-                <div className="flex flex-wrap gap-3 text-xs text-slate-400">
-                  <button
-                    type="button"
-                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
-                    onClick={() => {
-                      const pageIds = paginatedIndicators.map((ind) => ind.id);
-                      const pageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
-                      setSelectedIds((prev) => {
-                        const next = new Set(prev);
-                        if (pageSelected) {
-                          pageIds.forEach((id) => next.delete(id));
-                        } else {
-                          pageIds.forEach((id) => next.add(id));
-                        }
-                        return next;
-                      });
-                    }}
-                  >
-                    {paginatedIndicators.length > 0 && paginatedIndicators.every((ind) => selectedIds.has(ind.id)) ? 'Clear page' : 'Select page'}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] uppercase tracking-[0.2em] text-slate-200 transition hover:border-white/25"
-                    onClick={() => setSelectedIds(new Set())}
-                  >
-                    Clear all
-                  </button>
-                </div>
+          {selectedIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[color:var(--accent-alpha-30)] bg-[color:var(--accent-alpha-08)] px-4 py-3">
+              <div className="flex items-center gap-3 text-xs font-semibold text-[color:var(--accent-text-soft)]">
+                <span>{selectedIds.size} selected</span>
+                <span className="text-[11px] text-slate-500">Signals run per-indicator and replace only that indicator&apos;s prior signals.</span>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
                 <button
                   type="button"
-                  disabled={bulkActionLoading}
+                  disabled={actionLocked}
                   onClick={() => handleBulkToggle(true)}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-emerald-500/40 text-emerald-200 hover:border-emerald-400/60 hover:text-emerald-100'
+                  className={`rounded border px-3 py-1.5 transition ${
+                    actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-white/10 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
                   }`}
                 >
-                  Enable
+                  Show overlays
                 </button>
                 <button
                   type="button"
-                  disabled={bulkActionLoading}
+                  disabled={actionLocked}
                   onClick={() => handleBulkToggle(false)}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-amber-400/40 text-amber-200 hover:border-amber-300/60 hover:text-amber-100'
+                  className={`rounded border px-3 py-1.5 transition ${
+                    actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-white/10 text-slate-100 hover:border-[color:var(--accent-alpha-40)] hover:text-white'
                   }`}
                 >
-                  Disable
+                  Hide overlays
                 </button>
                 <button
                   type="button"
-                  disabled={bulkActionLoading}
+                  disabled
+                  className="rounded border border-dashed border-white/10 px-3 py-1.5 text-slate-500"
+                  title="Disabled: indicator jobs run one at a time."
+                >
+                  Bulk signals (queued)
+                </button>
+                <button
+                  type="button"
+                  disabled={actionLocked}
                   onClick={handleBulkDelete}
-                  className={`rounded-full border px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                    bulkActionLoading
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-rose-500/50 text-rose-200 hover:border-rose-400/70 hover:text-rose-100'
+                  className={`rounded border px-3 py-1.5 transition ${
+                    actionLocked ? 'cursor-not-allowed border-white/10 text-slate-500' : 'border-rose-400/40 text-rose-100 hover:border-rose-300/60 hover:text-rose-50'
                   }`}
                 >
                   Delete
@@ -1011,10 +1364,10 @@ export const IndicatorSection = ({ chartId }) => {
             </div>
           )}
 
-          <div className="space-y-4">
+          <div className="space-y-2">
             {paginatedIndicators.map(indicator => {
-              const isGenerating = isSignalsLoading && signalsLoadingFor === indicator.id
-              const disableSignals = isSignalsLoading && signalsLoadingFor !== indicator.id
+              const isGenerating = Boolean(signalsLoadingByIndicator?.[indicator.id])
+              const disableSignals = actionLocked || isGenerating
               const isSelected = selectedIds.has(indicator.id)
               return (
                 <IndicatorCard
@@ -1027,70 +1380,74 @@ export const IndicatorSection = ({ chartId }) => {
                   onDuplicate={handleDuplicate}
                   onGenerateSignals={generateSignals}
                   onSelectColor={handleSelectColor}
+                  onRecompute={handleRecomputeOverlays}
                   colorSwatches={COLOR_SWATCHES}
                   isGeneratingSignals={isGenerating}
                   disableSignalAction={disableSignals}
                   selected={isSelected}
                   onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
                   duplicatePending={duplicateBusyId === indicator.id}
+                  busy={actionLocked}
+                  activeJobId={jobState.indicatorId}
+                  onRetryCreate={() => retryCreate(indicator)}
+                  onRemoveLocal={() => removeLocalIndicator(indicator.id)}
                 />
               )
             })}
 
-            {!isLoading && paginatedIndicators.length === 0 && (
-              <div className="rounded-lg border border-dashed border-neutral-800/70 bg-neutral-900/40 px-4 py-6 text-center text-sm text-neutral-400">
+            {!paginatedIndicators.length && !isLoading && (
+              <div className="rounded-lg border border-dashed border-slate-800 bg-slate-900/30 px-4 py-6 text-center text-sm text-slate-500">
                 {noIndicatorsMessage}
               </div>
             )}
           </div>
 
           {filteredCount > pageSize && (
-            <nav className="flex flex-col gap-2 rounded-lg border border-white/10 bg-[#11131b] px-4 py-3 text-xs text-slate-300 md:flex-row md:items-center md:justify-between" aria-label="Indicator pagination">
-              <span>
-                Page {currentPage} of {totalPages}
-              </span>
+            <nav className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-300" aria-label="Pagination">
+              <span className="font-medium">Page <span className="text-[color:var(--accent-text-soft)]">{currentPage}</span> of {totalPages}</span>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
                   disabled={currentPage === 1}
-                  className={`rounded-full border px-3 py-1 transition ${
+                  className={`rounded px-3 py-1 transition ${
                     currentPage === 1
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                      ? 'cursor-not-allowed text-slate-600'
+                      : 'text-slate-200 hover:bg-slate-800'
                   }`}
                 >
-                  Previous
+                  Prev
                 </button>
-                <div className="flex items-center gap-1">
-                  {Array.from({ length: totalPages }).map((_, index) => {
-                    const pageNumber = index + 1;
-                    const isActive = pageNumber === currentPage;
-                    return (
-                      <button
-                        key={pageNumber}
-                        type="button"
-                        onClick={() => setCurrentPage(pageNumber)}
-                        className={`size-8 rounded-full border text-xs font-medium transition ${
-                          isActive
-                            ? 'border-[color:var(--accent-alpha-60)] bg-[color:var(--accent-alpha-20)] text-[color:var(--accent-text-strong)]'
-                            : 'border-white/10 text-slate-300 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
-                        }`}
-                        aria-current={isActive ? 'page' : undefined}
-                      >
-                        {pageNumber}
-                      </button>
-                    );
-                  })}
-                </div>
+                {Array.from({ length: Math.min(totalPages, 5) }).map((_, index) => {
+                  let pageNumber = index + 1;
+                  if (totalPages > 5 && currentPage > 3) {
+                    pageNumber = currentPage - 2 + index;
+                  }
+                  if (pageNumber > totalPages) return null;
+                  const isActive = pageNumber === currentPage;
+                  return (
+                    <button
+                      key={pageNumber}
+                      type="button"
+                      onClick={() => setCurrentPage(pageNumber)}
+                      className={`rounded px-2.5 py-1 transition ${
+                        isActive
+                          ? 'bg-[color:var(--accent-alpha-18)] text-[color:var(--accent-text-soft)]'
+                          : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                      }`}
+                    >
+                      {pageNumber}
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
                   onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
                   disabled={currentPage === totalPages}
-                  className={`rounded-full border px-3 py-1 transition ${
+                  className={`rounded px-3 py-1 transition ${
                     currentPage === totalPages
-                      ? 'cursor-not-allowed border-white/10 text-slate-500'
-                      : 'border-white/15 text-slate-200 hover:border-[color:var(--accent-alpha-40)] hover:text-[color:var(--accent-text-strong)]'
+                      ? 'cursor-not-allowed text-slate-600'
+                      : 'text-slate-200 hover:bg-slate-800'
                   }`}
                 >
                   Next
@@ -1107,6 +1464,14 @@ export const IndicatorSection = ({ chartId }) => {
         initial={editing}
         onSave={handleSave}
         error={error}
+      />
+
+      <DeleteIndicatorModal
+        open={deleteModal.open}
+        indicatorId={deleteModal.indicatorId}
+        indicatorName={deleteModal.indicatorName}
+        onClose={() => setDeleteModal({ open: false, indicatorId: null, indicatorName: '' })}
+        onConfirm={confirmDelete}
       />
     </div>
   )

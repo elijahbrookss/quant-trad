@@ -1,11 +1,12 @@
 
 import pytest
+pytest.importorskip("pandas")
 import pandas as pd
 import numpy as np
 
 # New API: TrendlineIndicator now exposes .lines and .to_lightweight()
 from indicators.trendline import TrendlineIndicator
-from data_providers.alpaca_provider import AlpacaProvider
+from data_providers import AlpacaProvider
 from indicators.config import DataContext
 
 

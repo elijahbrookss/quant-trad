@@ -1,0 +1,564 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Sessions",
+      "description": "Current active queries. Sustained growth usually means query latency or app-side concurrency pressure.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM pg_stat_activity WHERE datname = '${db}' AND state = 'active';"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Lock Waiters",
+      "description": "Sessions waiting on locks. Non-zero for more than a brief spike indicates blocking or long transactions.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM pg_stat_activity WHERE datname = '${db}' AND wait_event_type = 'Lock';"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DB Size",
+      "description": "Current database size. Track trend for storage planning and sudden jumps from bulk writes or bloat.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT pg_database_size('${db}')::double precision AS value;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cache Hit Ratio",
+      "description": "Buffer cache effectiveness. Consistently below ~95% often means more disk reads and slower query response.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ROUND(100 * SUM(blks_hit)::numeric / NULLIF(SUM(blks_hit + blks_read), 0), 2)::double precision AS value FROM pg_stat_database WHERE datname = '${db}';"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Sessions by State",
+      "description": "Breakdown of backend states (active, idle, idle in transaction). High idle-in-transaction is a red flag.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(state, 'unknown') AS state, count(*) AS sessions FROM pg_stat_activity WHERE datname = '${db}' GROUP BY 1 ORDER BY sessions DESC;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Current Wait Events",
+      "description": "Where sessions are waiting right now. Dominant lock or I/O waits point directly to contention hotspots.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(wait_event_type, 'CPU') AS wait_type, COALESCE(wait_event, 'running') AS wait_event, count(*) AS sessions FROM pg_stat_activity WHERE datname = '${db}' AND pid <> pg_backend_pid() GROUP BY 1,2 ORDER BY sessions DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Database Counters Snapshot",
+      "description": "Core DB counters. Watch deadlocks/temp files/temp bytes for regressions and memory/work_mem pressure.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT numbackends, xact_commit, xact_rollback, blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted, deadlocks, temp_files, pg_size_pretty(temp_bytes) AS temp_bytes FROM pg_stat_database WHERE datname = '${db}';"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Top SQL by Total Time (pg_stat_statements)",
+      "description": "Heaviest statements by cumulative execution time. Prioritize high total_ms plus high mean_ms or io_wait_ms.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 11 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT queryid::text AS query_id, calls, ROUND(total_exec_time::numeric, 2) AS total_ms, ROUND(mean_exec_time::numeric, 2) AS mean_ms, ROUND((blk_read_time + blk_write_time)::numeric, 2) AS io_wait_ms, rows, LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 180) AS query_sample FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Top Tables by Buffer Read Pressure",
+      "description": "Tables with most physical reads. High heap_blks_read and low hit% suggest index, cache, or query-shape issues.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT relname AS table_name, heap_blks_read, heap_blks_hit, ROUND(100 * heap_blks_hit::numeric / NULLIF(heap_blks_hit + heap_blks_read, 0), 2) AS heap_hit_pct, idx_blks_read, idx_blks_hit FROM pg_statio_user_tables ORDER BY heap_blks_read DESC NULLS LAST LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Checkpoint / Writer Activity",
+      "description": "Background writer/checkpoint load. Rising checkpoint times or backend fsyncs indicate write I/O stress.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc FROM pg_stat_bgwriter;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Blocking Tree (Who Blocks Whom)",
+      "description": "Shows exactly which session is blocked by which blocker. If rows persist beyond short spikes, users are waiting and throughput is being throttled by lock contention.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 30 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT blocked.pid AS blocked_pid, blocked.usename AS blocked_user, age(now(), blocked.query_start) AS blocked_for, blocker.pid AS blocker_pid, blocker.usename AS blocker_user, age(now(), blocker.query_start) AS blocker_running_for, LEFT(blocked.query, 140) AS blocked_query, LEFT(blocker.query, 140) AS blocker_query FROM pg_stat_activity blocked JOIN pg_stat_activity blocker ON blocker.pid = ANY(pg_blocking_pids(blocked.pid)) WHERE blocked.datname = '${db}' ORDER BY blocked_for DESC;"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Long-Running Transactions",
+      "description": "Active transactions sorted by age. Older transactions delay vacuum cleanup and can hold locks longer than expected.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 30 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT pid, usename, state, age(now(), xact_start) AS tx_age, wait_event_type, wait_event, LEFT(query, 160) AS query FROM pg_stat_activity WHERE datname = '${db}' AND xact_start IS NOT NULL AND state <> 'idle' ORDER BY xact_start ASC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Idle-in-Transaction Offenders",
+      "description": "Sessions that opened a transaction and then went idle. These are high-risk for hidden lock contention and transaction bloat.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT pid, usename, age(now(), xact_start) AS idle_tx_age, LEFT(query, 160) AS query FROM pg_stat_activity WHERE datname = '${db}' AND state = 'idle in transaction' ORDER BY xact_start ASC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Vacuum Debt (Dead Tuple Pressure)",
+      "description": "Tables accumulating dead rows. High dead_pct or large dead tuple counts indicate cleanup debt and possible performance decay.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT schemaname || '.' || relname AS table_name, n_live_tup, n_dead_tup, ROUND(100 * n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup, 0), 2) AS dead_pct, last_autovacuum, last_vacuum FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 15,
+      "type": "table",
+      "title": "Autovacuum Staleness",
+      "description": "How long each table has gone without vacuum maintenance. Long staleness with rising dead tuples usually predicts write/read slowdown.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 47 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT schemaname || '.' || relname AS table_name, now() - COALESCE(last_autovacuum, last_vacuum, 'epoch'::timestamp) AS since_maintenance, n_dead_tup, autovacuum_count, vacuum_count FROM pg_stat_user_tables ORDER BY since_maintenance DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 16,
+      "type": "table",
+      "title": "Top SQL by I/O Wait Ratio",
+      "description": "Queries with the largest share of execution time spent waiting on disk I/O. High io_pct points to storage/index/query-shape bottlenecks.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 47 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT queryid::text AS query_id, calls, ROUND(total_exec_time::numeric, 2) AS total_ms, ROUND((blk_read_time + blk_write_time)::numeric, 2) AS io_ms, ROUND((100::numeric * (blk_read_time + blk_write_time)::numeric) / NULLIF(total_exec_time::numeric, 0), 2) AS io_pct, LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 180) AS query_sample FROM pg_stat_statements WHERE calls > 20 ORDER BY io_pct DESC, total_exec_time DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "Top SQL by Temp Spill",
+      "description": "Statements spilling to temporary files. Large temp_mb usually means memory pressure (sort/hash spill) and extra disk churn.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 55 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT queryid::text AS query_id, calls, ROUND(((temp_blks_read + temp_blks_written) * 8) / 1024.0, 2) AS temp_mb, ROUND(mean_exec_time::numeric, 2) AS mean_ms, LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 180) AS query_sample FROM pg_stat_statements WHERE (temp_blks_read + temp_blks_written) > 0 ORDER BY (temp_blks_read + temp_blks_written) DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 18,
+      "type": "table",
+      "title": "Timescale Compression Backlog",
+      "description": "Old chunks that should be compressed but are still uncompressed. A growing backlog means higher storage cost and slower historical scans.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 55 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT hypertable_schema || '.' || hypertable_name AS hypertable, COUNT(*) FILTER (WHERE range_end < now() - interval '7 days') AS old_chunks, COUNT(*) FILTER (WHERE range_end < now() - interval '7 days' AND NOT is_compressed) AS old_uncompressed, ROUND(100 * COUNT(*) FILTER (WHERE range_end < now() - interval '7 days' AND is_compressed)::numeric / NULLIF(COUNT(*) FILTER (WHERE range_end < now() - interval '7 days'), 0), 2) AS compression_pct FROM timescaledb_information.chunks GROUP BY 1 ORDER BY old_uncompressed DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 19,
+      "type": "table",
+      "title": "Timescale Job Health (Failures + Overdue)",
+      "description": "Background job health for compression/retention/maintenance. Failures or long overdue_sec values mean policy drift and mounting maintenance debt.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 63 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT j.job_id, j.application_name, js.last_run_status, js.total_failures, js.last_run_started_at, js.last_successful_finish, js.next_start, GREATEST(EXTRACT(EPOCH FROM (now() - js.next_start)), 0)::bigint AS overdue_sec FROM timescaledb_information.jobs j LEFT JOIN timescaledb_information.job_stats js ON js.job_id = j.job_id ORDER BY js.total_failures DESC NULLS LAST, overdue_sec DESC LIMIT ${topn};"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Deadlock / ERROR Log Rate (Loki)",
+      "description": "Live deadlock and ERROR/FATAL rates from Postgres logs. Sustained deadlocks above zero or rising ERROR rate is an immediate reliability warning.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 63 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate({service=\"tsdb\"} |= \"deadlock detected\" [5m])) * 60",
+          "queryType": "range",
+          "legendFormat": "deadlocks/min"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate({service=\"tsdb\"} |~ \"ERROR:|FATAL:\" [5m])) * 60",
+          "queryType": "range",
+          "legendFormat": "errors/min"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["postgres", "database", "io", "operations"],
+  "templating": {
+    "list": [
+      {
+        "name": "db",
+        "label": "Database",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "query": "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+        "current": {
+          "selected": true,
+          "text": "quanttrad",
+          "value": "quanttrad"
+        }
+      },
+      {
+        "name": "topn",
+        "label": "Top N",
+        "type": "custom",
+        "query": "5,10,20,50",
+        "current": {
+          "selected": true,
+          "text": "10",
+          "value": "10"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Quant-Trad: IO + DB Observability",
+  "uid": "qt-io-db-observability",
+  "version": 5
+}

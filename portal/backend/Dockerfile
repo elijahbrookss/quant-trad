@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
@@ -22,4 +22,4 @@ RUN ls -la /app && ls -la /app/src || true
 
 EXPOSE 8000
 
-CMD ["uvicorn", "portal.backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "portal.backend.run_backend"]
