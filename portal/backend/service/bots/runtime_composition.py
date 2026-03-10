@@ -53,7 +53,9 @@ class RuntimeComposition:
     watchdog: Any
 
 
-def _normalize_mode(value: Optional[str]) -> RuntimeMode:
+def _normalize_mode(value: RuntimeMode | str | None) -> RuntimeMode:
+    if isinstance(value, RuntimeMode):
+        return value
     raw = str(value or RuntimeMode.BACKTEST.value).strip().lower()
     try:
         return RuntimeMode(raw)
@@ -182,7 +184,7 @@ def build_runtime_composition(
 ) -> RuntimeComposition:
     """Build runtime composition for production or tests."""
 
-    resolved_mode = _normalize_mode(mode if isinstance(mode, str) or mode is None else mode.value)
+    resolved_mode = _normalize_mode(mode)
     if resolved_mode == RuntimeMode.BACKTEST:
         return build_backtest_runtime_composition(**kwargs)
     if resolved_mode == RuntimeMode.PAPER:
@@ -198,7 +200,7 @@ _RUNTIME_COMPOSITIONS: Dict[RuntimeMode, RuntimeComposition] = {}
 def get_runtime_composition(*, mode: RuntimeMode | str | None = None) -> RuntimeComposition:
     """Return process-level runtime composition singleton per mode."""
 
-    resolved_mode = _normalize_mode(mode if isinstance(mode, str) or mode is None else mode.value)
+    resolved_mode = _normalize_mode(mode)
     if resolved_mode not in _RUNTIME_COMPOSITIONS:
         _RUNTIME_COMPOSITIONS[resolved_mode] = build_runtime_composition(mode=resolved_mode)
     return _RUNTIME_COMPOSITIONS[resolved_mode]
