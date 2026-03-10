@@ -44,13 +44,13 @@ run_suite() {
 
 case "$SUITE" in
   core)
-    run_suite "pytest -q tests/test_signals/test_signal_contract.py tests/test_signals/test_signal_generator_runtime_contract.py tests/test_portal/test_snapshot_signal_evaluator.py tests/test_smoke/test_import_boundaries.py"
+    run_suite "pytest -q tests/test_signals/test_signal_contract.py tests/test_signals/test_signal_generator_runtime_contract.py tests/test_portal/test_snapshot_signal_evaluator.py tests/smoke/test_import_boundaries.py"
     ;;
   provider)
     run_suite "pytest -q tests/test_data_providers/test_base_provider.py tests/test_data_providers/test_ccxt_provider.py tests/test_data_providers/test_interactive_brokers.py tests/test_data_providers/test_provider_factory_routing.py tests/test_data_providers/test_registry_provider_inference.py"
     ;;
   web)
-    run_suite "pytest -q tests/test_smoke/test_import_boundaries.py tests/test_portal/test_strategy_service.py"
+    run_suite "pytest -q tests/smoke/test_import_boundaries.py tests/test_portal/test_strategy_service.py"
     ;;
   integration)
     run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_report_exports.py --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
