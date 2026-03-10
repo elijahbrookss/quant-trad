@@ -54,7 +54,10 @@ services:
       BOT_RUNTIME_NETWORK: ${BOT_RUNTIME_NETWORK:-quant-trad_quanttrad}
     ports:
       - "8000:8000"
-    command: ["python", "-m", "portal.backend.run_backend"]
+    command:
+      - /bin/bash
+      - -lc
+      - export PG_DSN="postgresql+psycopg2://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@tsdb:5432/$${POSTGRES_DB}" && python -m portal.backend.run_backend
     depends_on:
       - tsdb
     volumes:

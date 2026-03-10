@@ -10,7 +10,6 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-
 logger = logging.getLogger(__name__)
 
 _EXTENSIONS = ("pg_stat_statements", "pg_buffercache", "system_stats")

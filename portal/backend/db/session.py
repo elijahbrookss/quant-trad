@@ -32,7 +32,6 @@ class Database:
     @staticmethod
     def _resolve_dsn() -> str:
         """Return the configured PostgreSQL DSN."""
-
         value = os.getenv("PG_DSN")
         if value:
             return value
