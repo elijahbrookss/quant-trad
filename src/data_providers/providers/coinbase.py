@@ -139,13 +139,10 @@ class CoinbaseProvider(BaseDataProvider):
                 "CoinbaseProvider requires coinbase-advanced-py to be installed."
             )
 
-        self._api_key, self._api_secret = self._resolve_credentials()
-        self._client = RESTClient(
-            api_key=self._api_key,
-            api_secret=self._api_secret,
-            timeout=timeout,
-        )
-
+        self._timeout = timeout
+        self._api_key: Optional[str] = None
+        self._api_secret: Optional[str] = None
+        self._client: Optional[RESTClient] = None
         self._last_product_payload: Dict[str, Any] = {}
 
     # Credentials / helpers -------------------------------------------------
@@ -175,6 +172,17 @@ class CoinbaseProvider(BaseDataProvider):
             )
         return api_key, api_secret
 
+    def _ensure_client(self) -> RESTClient:
+        if self._client is not None:
+            return self._client
+        self._api_key, self._api_secret = self._resolve_credentials()
+        self._client = RESTClient(
+            api_key=self._api_key,
+            api_secret=self._api_secret,
+            timeout=self._timeout,
+        )
+        return self._client
+
     @staticmethod
     def _response_to_dict(response: Any) -> Dict[str, Any]:
         if response is None:
@@ -190,11 +198,9 @@ class CoinbaseProvider(BaseDataProvider):
     def _load_product(self, symbol: str) -> CoinbaseProduct:
         if not symbol:
             raise ValueError("Symbol is required for Coinbase lookup.")
-        if not self._api_key or not self._api_secret:
-            raise ValueError("Coinbase API credentials are missing. Add API keys to continue.")
-
+        client = self._ensure_client()
         try:
-            response = self._client.get_product(product_id=symbol)
+            response = client.get_product(product_id=symbol)
         except Exception as exc:
             logger.warning("coinbase_product_lookup_failed | symbol=%s | error=%s", symbol, exc)
             raise ValueError(f"Coinbase product lookup failed: {exc}") from exc
@@ -358,7 +364,7 @@ class CoinbaseProvider(BaseDataProvider):
         maker_fee_rate = None
         taker_fee_rate = None
         try:
-            summary_response = self._client.get_transaction_summary(
+            summary_response = self._ensure_client().get_transaction_summary(
                 product_type=product_type or None
             )
             summary_payload = self._response_to_dict(summary_response)
@@ -527,7 +533,7 @@ class CoinbaseProvider(BaseDataProvider):
         window_start = start_ts
         while window_start < end_ts:
             window_end = min(end_ts, window_start + chunk_seconds)
-            response = self._client.get_candles(
+            response = self._ensure_client().get_candles(
                 product_id=symbol,
                 start=str(window_start),
                 end=str(window_end),
