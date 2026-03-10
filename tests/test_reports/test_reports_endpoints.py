@@ -3,10 +3,16 @@ import uuid
 import pytest
 
 pytest.importorskip("fastapi")
+pytestmark = pytest.mark.db
 from fastapi.testclient import TestClient
 
 from portal.backend.main import app
 from portal.backend.service.storage import storage
+from tests.helpers.builders.report_storage_builder import (
+    build_run_payload,
+    build_trade_payload,
+    ensure_report_bot,
+)
 
 
 def _iso(ts: str) -> str:
@@ -23,60 +29,48 @@ def test_reports_list_and_fetch():
         "sharpe": 1.1,
         "total_trades": 2,
     }
+    ensure_report_bot(bot_id, name="Test Bot", strategy_id="strategy-1")
     storage.upsert_bot_run(
-        {
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "bot_name": "Test Bot",
-            "strategy_id": "strategy-1",
-            "strategy_name": "Momentum",
-            "run_type": "backtest",
-            "status": "completed",
-            "timeframe": "1h",
-            "symbols": ["BTCUSD"],
-            "backtest_start": _iso("2024-01-01T00:00:00Z"),
-            "backtest_end": _iso("2024-01-31T00:00:00Z"),
-            "started_at": _iso("2024-01-01T00:00:00Z"),
-            "ended_at": _iso("2024-01-31T00:00:00Z"),
-            "summary": summary,
-            "config_snapshot": {
-                "wallet_start": {"balances": {"USDC": 1000}},
-                "date_range": {"start": "2024-01-01T00:00:00Z", "end": "2024-01-31T00:00:00Z"},
-                "symbols": ["BTCUSD"],
-                "timeframe": "1h",
-                "strategies": [],
-            },
-        }
+        build_run_payload(
+            run_id=run_id,
+            bot_id=bot_id,
+            bot_name="Test Bot",
+            strategy_id="strategy-1",
+            strategy_name="Momentum",
+            symbol="BTCUSD",
+            timeframe="1h",
+            backtest_start=_iso("2024-01-01T00:00:00Z"),
+            backtest_end=_iso("2024-01-31T00:00:00Z"),
+            summary=summary,
+        )
     )
     storage.record_bot_trade(
-        {
-            "trade_id": f"trade-{uuid.uuid4().hex[:8]}",
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "symbol": "BTCUSD",
-            "direction": "long",
-            "entry_time": "2024-01-05T00:00:00Z",
-            "exit_time": "2024-01-06T00:00:00Z",
-            "gross_pnl": 15.0,
-            "fees_paid": 1.0,
-            "net_pnl": 14.0,
-            "status": "closed",
-        }
+        build_trade_payload(
+            trade_id=f"trade-{uuid.uuid4().hex[:8]}",
+            run_id=run_id,
+            bot_id=bot_id,
+            symbol="BTCUSD",
+            direction="long",
+            entry_time="2024-01-05T00:00:00Z",
+            exit_time="2024-01-06T00:00:00Z",
+            gross_pnl=15.0,
+            fees_paid=1.0,
+            net_pnl=14.0,
+        )
     )
     storage.record_bot_trade(
-        {
-            "trade_id": f"trade-{uuid.uuid4().hex[:8]}",
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "symbol": "BTCUSD",
-            "direction": "short",
-            "entry_time": "2024-01-10T00:00:00Z",
-            "exit_time": "2024-01-11T00:00:00Z",
-            "gross_pnl": 12.0,
-            "fees_paid": 1.0,
-            "net_pnl": 11.0,
-            "status": "closed",
-        }
+        build_trade_payload(
+            trade_id=f"trade-{uuid.uuid4().hex[:8]}",
+            run_id=run_id,
+            bot_id=bot_id,
+            symbol="BTCUSD",
+            direction="short",
+            entry_time="2024-01-10T00:00:00Z",
+            exit_time="2024-01-11T00:00:00Z",
+            gross_pnl=12.0,
+            fees_paid=1.0,
+            net_pnl=11.0,
+        )
     )
 
     client = TestClient(app)

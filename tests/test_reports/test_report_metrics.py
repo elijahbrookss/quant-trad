@@ -50,7 +50,6 @@ def test_compute_monthly_returns():
         (date(2024, 2, 28), 121.0),
     ]
     monthly = compute_monthly_returns(daily_equity)
-    assert monthly == [
-        {"month": "2024-01", "return": 0.1},
-        {"month": "2024-02", "return": 0.1},
-    ]
+    assert [entry["month"] for entry in monthly] == ["2024-01", "2024-02"]
+    assert monthly[0]["return"] == pytest.approx(0.1)
+    assert monthly[1]["return"] == pytest.approx(0.1)
