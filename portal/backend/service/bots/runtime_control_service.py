@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol
 
 from .bot_stream import BotStreamManager
@@ -46,7 +46,7 @@ class BotRuntimeControlService:
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def _broadcast(self, event: str, payload: Mapping[str, Any]) -> None:
         self._stream_manager.broadcast(event, payload)

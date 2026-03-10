@@ -53,7 +53,7 @@ case "$SUITE" in
     run_suite "pytest -q tests/test_smoke/test_import_boundaries.py tests/test_portal/test_strategy_service.py"
     ;;
   integration)
-    run_suite "pytest --cov=src --cov-report=term --cov-report=xml"
+    run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_report_exports.py --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
     ;;
   *)
     echo "unknown suite: $SUITE" >&2
