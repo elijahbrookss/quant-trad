@@ -23,3 +23,4 @@ Reporting remains a downstream collaborator of runtime execution.
 - Runtime orchestration emits canonical runtime artifacts/events first.
 - Reporting derives from persisted runtime outputs and should not drive runtime decisions.
 - Wiring points for report persistence should be explicit at composition/runtime orchestration boundaries, not hidden in unrelated imports.
+- Report exports and report views depend on the persisted bot/run/trade graph; they should not rely on best-effort writes or silently dropped trade events.

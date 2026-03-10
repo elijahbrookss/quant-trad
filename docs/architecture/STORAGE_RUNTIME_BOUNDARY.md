@@ -10,6 +10,7 @@ tags:
   - boundary
 code_paths:
   - portal/backend/service/storage/storage.py
+  - portal/backend/service/storage/repos/trades.py
   - portal/backend/service/bots/runtime_composition.py
   - portal/backend/service/bots/runtime_control_service.py
 ---
@@ -28,3 +29,5 @@ Runtime services consume storage through explicit service boundaries.
 - Storage behavior must be injectable for tests.
 - Runtime services should avoid deep importing storage internals at module scope.
 - `PG_DSN` remains the only persistence DSN.
+- Persistence required for reports/runtime audit trails must fail loud with actionable context.
+- FK-constrained write paths are authoritative; tests should build a valid parent graph instead of bypassing the contract with partial rows.
