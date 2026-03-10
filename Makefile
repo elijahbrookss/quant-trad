@@ -7,7 +7,8 @@ SHELL := /bin/bash
 PYTHONPATH ?= .:src
 PY          ?= python3
 VENV        ?= .venv
-PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV)/bin/python
+VENV_PYTHON := $(VENV)/bin/python
+PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV_PYTHON)
 PIP         := $(VENV)/bin/pip
 REQ         ?= requirements.txt
 DEV_REQ     ?= requirements-dev.txt
@@ -114,10 +115,10 @@ sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSI
 sync-logs: sync-docs ## Alias for docs sync (backward-compatible target name)
 
 ## ============================ BOOTSTRAP ================================= ##
-.PHONY: deps _deps_hash _ensure_python _ensure_dirs
+.PHONY: deps venv _deps_hash _ensure_python _ensure_dirs
 
 deps: _ensure_python _deps_hash ## Install Python dependencies
-	@if [ ! -x "$(PYTHON)" ]; then \
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
 		echo "► Creating venv at $(VENV)"; \
 		$(PY) -m venv $(VENV); \
 	fi
@@ -131,6 +132,8 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 		echo "✓ Dependencies unchanged"; \
 		rm -f $(REQS_HASH).new; \
 	fi
+
+venv: deps ## Ensure virtualenv and Python dependencies
 
 _deps_hash:
 	@{ cat $(REQ) 2>/dev/null || true; echo; cat $(DEV_REQ) 2>/dev/null || true; } \
