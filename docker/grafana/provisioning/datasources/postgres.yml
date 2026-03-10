@@ -7,11 +7,11 @@ datasources:
     access: proxy
     orgId: 1
     url: tsdb.quanttrad:5432
-    user: quanttrad
+    user: ${POSTGRES_USER}
     secureJsonData:
-      password: quanttrad
+      password: ${POSTGRES_PASSWORD}
     jsonData:
-      database: quanttrad
+      database: ${POSTGRES_DB}
       sslmode: disable
       postgresVersion: 1500
       timescaledb: true

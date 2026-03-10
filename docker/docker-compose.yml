@@ -41,7 +41,6 @@ services:
       - ../secrets.env
     environment:
       PYTHONPATH: /app/src:/app
-      PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
       CANDLES_RAW_TABLE: market_candles_raw
       CANDLE_STATS_TABLE: candle_stats
       DERIVATIVES_STATE_TABLE: derivatives_market_state
@@ -76,10 +75,8 @@ services:
     labels:
       loki.job: quanttrad
       loki.service: tsdb
-    environment:
-      POSTGRES_DB: quanttrad
-      POSTGRES_USER: quanttrad
-      POSTGRES_PASSWORD: quanttrad
+    env_file:
+      - ../secrets.env
     command:
       - postgres
       - -c
@@ -124,9 +121,10 @@ services:
     labels:
       loki.job: quanttrad
       loki.service: pgadmin
+    env_file:
+      - ../secrets.env
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_LISTEN_ADDRESS: 0.0.0.0
     ports:
       - "8080:80"
@@ -176,9 +174,10 @@ services:
       loki.service: grafana
     ports:
       - "3000:3000"
+    env_file:
+      - ../secrets.env
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: grafana-piechart-panel
     depends_on:

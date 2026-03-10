@@ -47,7 +47,7 @@ case "$SUITE" in
     run_suite "pytest -q tests/test_signals/test_signal_contract.py tests/test_signals/test_signal_generator_runtime_contract.py tests/test_portal/test_snapshot_signal_evaluator.py tests/smoke/test_import_boundaries.py"
     ;;
   provider)
-    run_suite "pytest -q tests/test_data_providers/test_base_provider.py tests/test_data_providers/test_ccxt_provider.py tests/test_data_providers/test_interactive_brokers.py tests/test_data_providers/test_provider_factory_routing.py tests/test_data_providers/test_registry_provider_inference.py"
+    run_suite "pytest -q tests/test_data_providers/test_base_provider.py tests/test_data_providers/test_ccxt_provider.py tests/test_data_providers/test_interactive_brokers.py tests/contract/providers/test_provider_factory_routing.py tests/contract/providers/test_registry_provider_inference.py"
     ;;
   web)
     run_suite "pytest -q tests/smoke/test_import_boundaries.py tests/test_portal/test_strategy_service.py"
