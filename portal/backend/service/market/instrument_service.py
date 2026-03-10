@@ -345,6 +345,34 @@ def _step_from_precision(value: object) -> Optional[float]:
     return None
 
 
+def _tick_from_market(market: Mapping[str, Any]) -> Optional[float]:
+    """Return a tick size derived from CCXT-style market metadata."""
+
+    precision = market.get("precision") if isinstance(market.get("precision"), Mapping) else {}
+    limits = market.get("limits") if isinstance(market.get("limits"), Mapping) else {}
+    price_limits = limits.get("price") if isinstance(limits.get("price"), Mapping) else {}
+
+    precision_price = precision.get("price")
+    precision_tick: Optional[float] = None
+    if precision_price is not None:
+        if isinstance(precision_price, int):
+            precision_tick = float(10 ** (-precision_price)) if precision_price >= 0 else None
+        else:
+            numeric = _coerce_float(precision_price)
+            if numeric not in (None, 0):
+                if float(numeric).is_integer() and numeric >= 1:
+                    precision_tick = float(10 ** (-int(numeric)))
+                elif numeric < 1:
+                    precision_tick = float(numeric)
+
+    tick = market.get("tickSize")
+    if tick is None:
+        tick = price_limits.get("min")
+    if tick is None:
+        tick = precision_tick
+    return _coerce_float(tick)
+
+
 def _spot_issues_from_record(record: Mapping[str, Any]) -> List[str]:
     issues: List[str] = []
     if not record.get("tick_size"):

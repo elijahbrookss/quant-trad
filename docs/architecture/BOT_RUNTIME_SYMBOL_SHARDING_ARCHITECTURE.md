@@ -1,3 +1,15 @@
+---
+component: bot-runtime-symbol-sharding
+subsystem: portal-runtime
+layer: service
+doc_type: architecture
+status: active
+tags:
+  - runtime
+  - sharding
+code_paths:
+  - portal/backend/service/bots/container_runtime.py
+---
 # Bot Runtime Symbol Sharding Architecture
 
 ## Documentation Header

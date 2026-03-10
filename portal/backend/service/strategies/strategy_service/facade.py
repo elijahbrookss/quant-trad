@@ -6,7 +6,7 @@ import logging
 from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
@@ -29,7 +29,7 @@ _RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
 def _utcnow() -> datetime:
     """Return a naive UTC timestamp for metadata fields."""
 
-    return datetime.utcnow()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _parse_timestamp(value: Any) -> datetime:

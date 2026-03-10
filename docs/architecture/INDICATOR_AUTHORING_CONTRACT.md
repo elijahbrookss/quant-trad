@@ -1,3 +1,16 @@
+---
+component: indicator-authoring-contract
+subsystem: indicators
+layer: contract
+doc_type: architecture
+status: active
+tags:
+  - indicators
+  - contract
+code_paths:
+  - src/indicators
+  - src/signals
+---
 # Indicator Authoring Contract
 
 This document defines how to add or modify indicators without creating drift.

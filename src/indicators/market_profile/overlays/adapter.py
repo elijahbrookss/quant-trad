@@ -796,7 +796,7 @@ def market_profile_overlay_adapter(
     return [build_overlay(MarketProfileIndicator.NAME, payload)]
 
 
-__all__ = ["market_profile_overlay_adapter"]
+__all__ = ["market_profile_overlay_adapter", "market_profile_overlay_transformer"]
 
 
 @overlay_transformer(["market-profile", "market_profile", "mpf"])

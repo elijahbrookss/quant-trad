@@ -22,7 +22,7 @@ def _sample_df() -> pd.DataFrame:
 
 
 def test_build_runtime_signal_payload_injects_merge_defaults_for_partial_params() -> None:
-    indicator = MarketProfileIndicator(_sample_df(), bin_size=0.5, mode="tpo")
+    indicator = MarketProfileIndicator(_sample_df(), bin_size=0.5)
     payload = indicator.build_runtime_signal_payload(
         indicator_id="ind-1",
         params={"days_back": 30},

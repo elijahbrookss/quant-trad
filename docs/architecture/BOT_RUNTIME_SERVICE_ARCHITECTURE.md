@@ -1,3 +1,18 @@
+---
+component: bot-runtime-service-orchestration
+subsystem: portal-runtime
+layer: service
+doc_type: architecture
+status: active
+tags:
+  - runtime
+  - service
+  - orchestration
+code_paths:
+  - portal/backend/service/bots/bot_service.py
+  - portal/backend/service/bots/runtime_control_service.py
+  - portal/backend/service/bots/container_runtime.py
+---
 # Bot Runtime Service Architecture
 
 ## Documentation Header
@@ -49,6 +64,18 @@ Current entrypoints:
 
 Current target support:
 - only `BOT_RUNTIME_TARGET=docker` is implemented.
+
+
+## 3.1) Runtime composition root
+
+Runtime API-facing service wiring now flows through `portal/backend/service/bots/runtime_composition.py`.
+
+- `RuntimeComposition` assembles stream manager, config service, runtime control service, storage gateway, and watchdog.
+- `RuntimeMode` (default from `BOT_RUNTIME_MODE`) selects a composition branch so backtest/paper/live can evolve without pushing mode switches into service leaf modules.
+- `bot_service.py` consumes this composition lazily via `get_runtime_composition()` instead of module-level singleton construction.
+- Runtime control storage writes (`upsert_bot`) are injected as a collaborator boundary, reducing hidden deep imports in service methods.
+
+This keeps start/stop behavior stable while making runtime wiring explicit and testable.
 
 ## 4) Start flow
 

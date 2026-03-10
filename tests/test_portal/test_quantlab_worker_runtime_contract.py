@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
     SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,

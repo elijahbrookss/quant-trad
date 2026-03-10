@@ -1,3 +1,16 @@
+---
+component: signal-pipeline-architecture
+subsystem: signals
+layer: service
+doc_type: architecture
+status: active
+tags:
+  - signals
+  - pipeline
+code_paths:
+  - src/signals
+  - portal/backend/service/strategies
+---
 # Signal Pipeline Architecture
 
 ## Documentation Header

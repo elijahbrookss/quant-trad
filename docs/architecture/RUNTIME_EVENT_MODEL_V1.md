@@ -1,3 +1,16 @@
+---
+component: runtime-event-model-v1
+subsystem: portal-runtime
+layer: contract
+doc_type: architecture
+status: active
+tags:
+  - runtime
+  - events
+  - contract
+code_paths:
+  - src/engines/bot_runtime/core/runtime_events.py
+---
 # Runtime Event Model V1
 
 ## Documentation Header

@@ -183,3 +183,28 @@ Performance, polish, and optimization come second.
   - `SYNC_DOCS_DEST`
   - or `OBSIDIAN_SYNC_DOCS_DEST`
   - optional local override file: `.sync-docs.mk`
+
+## Architecture Docs Tagging + Index Workflow
+
+When a change materially affects runtime/service/provider/storage/reporting architecture, docs updates are required in the same pass.
+
+Required workflow:
+1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
+2. Update/create relevant component docs under `docs/architecture/`.
+3. Ensure each affected architecture doc has frontmatter metadata with at least:
+   - `component`
+   - `subsystem`
+   - `layer`
+   - `tags`
+   - `code_paths`
+   - `doc_type`
+   - `status`
+4. Refresh the architecture index with:
+   - `python scripts/docs/build_architecture_index.py`
+5. Run `make sync-docs` after doc updates.
+
+Agent expectation:
+- Prefer component-targeted doc updates over broad vague edits.
+- Runtime composition/wiring changes must keep docs and index in sync.
+- Runtime composition changes should preserve mode-aware seams (`backtest`/`paper`/`live`) even when only backtest is implemented today.
+- If you touch code paths listed in `code_paths`, verify corresponding docs remain accurate.

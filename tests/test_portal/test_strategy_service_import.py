@@ -1,6 +1,5 @@
 """Regression tests for lazy DB session wiring."""
 
-from __future__ import annotations
 
 import pytest
 

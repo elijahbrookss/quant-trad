@@ -49,7 +49,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run full tests with coverage
+      - name: Run hermetic tests with coverage
+        env:
+          RUN_DB_TESTS: '0'
         run: ./scripts/ci/run_test_suite.sh integration
 
       - name: Upload coverage report

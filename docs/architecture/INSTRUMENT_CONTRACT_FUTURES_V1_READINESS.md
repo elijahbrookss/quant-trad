@@ -1,3 +1,17 @@
+---
+component: instrument-contract-futures-v1
+subsystem: market
+layer: contract
+doc_type: architecture
+status: active
+tags:
+  - instrument
+  - futures
+  - contract
+code_paths:
+  - portal/backend/service/market
+  - src/engines/bot_runtime/core/execution_profile.py
+---
 # Instrument Contract and Futures-Only Runtime (v1)
 
 ## Documentation Header

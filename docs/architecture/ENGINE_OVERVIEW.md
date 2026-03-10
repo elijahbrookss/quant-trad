@@ -1,3 +1,15 @@
+---
+component: engine-overview
+subsystem: engine
+layer: reference
+doc_type: architecture
+status: active
+tags:
+  - engine
+  - overview
+code_paths:
+  - src/engines
+---
 # Quant-Trad Engine Overview (Plain Language)
 
 This document explains the "engines" in Quant-Trad as simply as possible.

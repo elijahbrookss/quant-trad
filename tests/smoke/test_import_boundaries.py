@@ -1,6 +1,5 @@
 """Smoke tests guarding import boundaries between portal and provider stacks."""
 
-from __future__ import annotations
 
 import importlib
 

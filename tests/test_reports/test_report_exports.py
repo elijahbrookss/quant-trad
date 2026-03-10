@@ -8,6 +8,7 @@ from datetime import datetime
 import pytest
 
 pytest.importorskip("fastapi")
+pytestmark = pytest.mark.db
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
@@ -16,6 +17,12 @@ from portal.backend.main import app
 from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
 from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 from portal.backend.service.storage import storage
+from tests.helpers.builders.report_storage_builder import (
+    build_run_payload,
+    build_trade_payload,
+    ensure_report_bot,
+    ensure_report_instrument,
+)
 
 
 def _ensure_export_tables(dsn: str) -> None:
@@ -100,6 +107,149 @@ def _load_csv(payload: bytes, name: str):
             return list(csv.DictReader(text_stream))
 
 
+def _upsert_export_candle(
+    conn,
+    *,
+    instrument_id: str,
+    timeframe_seconds: int,
+    candle_time: str,
+    close_time: str,
+    close: float,
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO market_candles_raw (
+                instrument_id,
+                timeframe_seconds,
+                candle_time,
+                close_time,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                trade_count,
+                is_closed,
+                source_time
+            ) VALUES (
+                :instrument_id,
+                :timeframe_seconds,
+                :candle_time,
+                :close_time,
+                :open,
+                :high,
+                :low,
+                :close,
+                :volume,
+                :trade_count,
+                :is_closed,
+                :source_time
+            )
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "instrument_id": instrument_id,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_time": candle_time,
+            "close_time": close_time,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": 0.0,
+            "trade_count": 0,
+            "is_closed": True,
+            "source_time": close_time,
+        },
+    )
+
+
+def _upsert_candle_stats(
+    conn,
+    *,
+    instrument_id: str,
+    timeframe_seconds: int,
+    candle_time: str,
+    stats_version: str,
+    computed_at: str,
+    stats: str,
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO candle_stats (
+                instrument_id,
+                timeframe_seconds,
+                candle_time,
+                stats_version,
+                computed_at,
+                stats
+            ) VALUES (
+                :instrument_id,
+                :timeframe_seconds,
+                :candle_time,
+                :stats_version,
+                :computed_at,
+                :stats
+            )
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "instrument_id": instrument_id,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_time": candle_time,
+            "stats_version": stats_version,
+            "computed_at": computed_at,
+            "stats": stats,
+        },
+    )
+
+
+def _upsert_regime_stats(
+    conn,
+    *,
+    instrument_id: str,
+    timeframe_seconds: int,
+    candle_time: str,
+    regime_version: str,
+    computed_at: str,
+    regime: str,
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO regime_stats (
+                instrument_id,
+                timeframe_seconds,
+                candle_time,
+                regime_version,
+                computed_at,
+                regime
+            ) VALUES (
+                :instrument_id,
+                :timeframe_seconds,
+                :candle_time,
+                :regime_version,
+                :computed_at,
+                :regime
+            )
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "instrument_id": instrument_id,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_time": candle_time,
+            "regime_version": regime_version,
+            "computed_at": computed_at,
+            "regime": regime,
+        },
+    )
+
+
 def test_report_export_contains_trades_and_events(monkeypatch):
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     bot_id = f"bot-{uuid.uuid4().hex[:6]}"
@@ -108,40 +258,24 @@ def test_report_export_contains_trades_and_events(monkeypatch):
     monkeypatch.setenv("PG_DSN", db.dsn)
     _ensure_export_tables(db.dsn)
 
-    instrument = storage.upsert_instrument(
-        {
-            "symbol": "BTCUSD",
-            "datasource": "local",
-            "exchange": "test",
-        }
-    )
+    ensure_report_bot(bot_id, name="Export Bot", strategy_id="strategy-1")
+    instrument = ensure_report_instrument("BTCUSD", datasource="local", exchange="test")
     instrument_id = instrument.get("id")
     storage.upsert_bot_run(
-        {
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "bot_name": "Export Bot",
-            "strategy_id": "strategy-1",
-            "strategy_name": "Momentum",
-            "run_type": "backtest",
-            "status": "completed",
-            "timeframe": "1h",
-            "datasource": "local",
-            "exchange": "test",
-            "symbols": ["BTCUSD"],
-            "backtest_start": "2024-01-01T00:00:00Z",
-            "backtest_end": "2024-01-02T00:00:00Z",
-            "started_at": "2024-01-01T00:00:00Z",
-            "ended_at": "2024-01-02T00:00:00Z",
-            "summary": {"net_pnl": 10.0},
-            "config_snapshot": {
-                "wallet_start": {"balances": {"USDC": 1000}},
-                "date_range": {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"},
-                "symbols": ["BTCUSD"],
-                "timeframe": "1h",
-                "strategies": [],
-            },
-        }
+        build_run_payload(
+            run_id=run_id,
+            bot_id=bot_id,
+            bot_name="Export Bot",
+            strategy_id="strategy-1",
+            strategy_name="Momentum",
+            symbol="BTCUSD",
+            timeframe="1h",
+            backtest_start="2024-01-01T00:00:00Z",
+            backtest_end="2024-01-02T00:00:00Z",
+            datasource="local",
+            exchange="test",
+            summary={"net_pnl": 10.0},
+        )
     )
     engine = create_engine(db.dsn, future=True)
     candle_stats_json = json.dumps(
@@ -166,63 +300,31 @@ def test_report_export_contains_trades_and_events(monkeypatch):
         }
     )
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO candle_stats (
-                    instrument_id,
-                    timeframe_seconds,
-                    candle_time,
-                    stats_version,
-                    computed_at,
-                    stats
-                ) VALUES (
-                    :instrument_id,
-                    :timeframe_seconds,
-                    :candle_time,
-                    :stats_version,
-                    :computed_at,
-                    :stats
-                )
-                """
-            ),
-            {
-                "instrument_id": instrument_id,
-                "timeframe_seconds": 3600,
-                "candle_time": "2024-01-01T02:00:00Z",
-                "stats_version": STATS_VERSION,
-                "computed_at": "2024-01-01T02:01:00Z",
-                "stats": candle_stats_json,
-            },
+        _upsert_export_candle(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            candle_time="2024-01-01T02:00:00Z",
+            close_time="2024-01-01T03:00:00Z",
+            close=40000.0,
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO regime_stats (
-                    instrument_id,
-                    timeframe_seconds,
-                    candle_time,
-                    regime_version,
-                    computed_at,
-                    regime
-                ) VALUES (
-                    :instrument_id,
-                    :timeframe_seconds,
-                    :candle_time,
-                    :regime_version,
-                    :computed_at,
-                    :regime
-                )
-                """
-            ),
-            {
-                "instrument_id": instrument_id,
-                "timeframe_seconds": 3600,
-                "candle_time": "2024-01-01T02:00:00Z",
-                "regime_version": REGIME_VERSION,
-                "computed_at": "2024-01-01T02:01:00Z",
-                "regime": regime_json,
-            },
+        _upsert_candle_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            candle_time="2024-01-01T02:00:00Z",
+            stats_version=STATS_VERSION,
+            computed_at="2024-01-01T02:01:00Z",
+            stats=candle_stats_json,
+        )
+        _upsert_regime_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            candle_time="2024-01-01T02:00:00Z",
+            regime_version=REGIME_VERSION,
+            computed_at="2024-01-01T02:01:00Z",
+            regime=regime_json,
         )
 
     entry_time = datetime.fromisoformat("2024-01-01T02:00:00+00:00")
@@ -235,23 +337,24 @@ def test_report_export_contains_trades_and_events(monkeypatch):
     )
     metrics = build_entry_metrics(entry_context)
     storage.record_bot_trade(
-        {
-            "trade_id": trade_id,
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "symbol": "BTCUSD",
-            "direction": "long",
-            "entry_time": entry_time.isoformat().replace("+00:00", "Z"),
-            "exit_time": "2024-01-01T03:00:00Z",
-            "gross_pnl": 12.0,
-            "fees_paid": 1.0,
-            "net_pnl": 11.0,
-            "status": "closed",
-            "timeframe": "1h",
-            "timeframe_seconds": 3600,
-            "instrument_id": instrument_id,
-            "metrics": metrics,
-        }
+        build_trade_payload(
+            trade_id=trade_id,
+            run_id=run_id,
+            bot_id=bot_id,
+            symbol="BTCUSD",
+            direction="long",
+            entry_time=entry_time.isoformat().replace("+00:00", "Z"),
+            exit_time="2024-01-01T03:00:00Z",
+            gross_pnl=12.0,
+            fees_paid=1.0,
+            net_pnl=11.0,
+            extra={
+                "timeframe": "1h",
+                "timeframe_seconds": 3600,
+                "instrument_id": instrument_id,
+                "metrics": metrics,
+            },
+        )
     )
     storage.record_bot_trade_event(
         {
@@ -309,40 +412,34 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
     monkeypatch.setenv("PG_DSN", db.dsn)
     _ensure_export_tables(db.dsn)
 
-    instrument = storage.upsert_instrument(
-        {
-            "symbol": "ETHUSD",
-            "datasource": "local",
-            "exchange": "test",
-        }
-    )
+    ensure_report_bot(bot_id, name="Regime Fallback", strategy_id="strategy-2")
+    instrument = ensure_report_instrument("ETHUSD", datasource="local", exchange="test")
     instrument_id = instrument.get("id")
     storage.upsert_bot_run(
-        {
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "bot_name": "Regime Fallback",
-            "strategy_id": "strategy-2",
-            "strategy_name": "RegimeOnly",
-            "run_type": "backtest",
-            "status": "completed",
-            "timeframe": "1h",
-            "datasource": "local",
-            "exchange": "test",
-            "symbols": ["ETHUSD"],
-            "backtest_start": "2024-01-01T00:00:00Z",
-            "backtest_end": "2024-01-02T00:00:00Z",
-            "started_at": "2024-01-01T00:00:00Z",
-            "ended_at": "2024-01-02T00:00:00Z",
-            "summary": {"net_pnl": 15.0},
-            "config_snapshot": {
+        build_run_payload(
+            run_id=run_id,
+            bot_id=bot_id,
+            bot_name="Regime Fallback",
+            strategy_id="strategy-2",
+            strategy_name="RegimeOnly",
+            symbol="ETHUSD",
+            timeframe="1h",
+            backtest_start="2024-01-01T00:00:00Z",
+            backtest_end="2024-01-02T00:00:00Z",
+            datasource="local",
+            exchange="test",
+            summary={"net_pnl": 15.0},
+            config_snapshot={
                 "wallet_start": {"balances": {"USDC": 2000}},
-                "date_range": {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"},
+                "date_range": {
+                    "start": "2024-01-01T00:00:00Z",
+                    "end": "2024-01-02T00:00:00Z",
+                },
                 "symbols": ["ETHUSD"],
                 "timeframe": "1h",
                 "strategies": [],
             },
-        }
+        )
     )
     regime_json = json.dumps(
         {
@@ -360,34 +457,22 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
     )
     engine = create_engine(db.dsn, future=True)
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO regime_stats (
-                    instrument_id,
-                    timeframe_seconds,
-                    candle_time,
-                    regime_version,
-                    computed_at,
-                    regime
-                ) VALUES (
-                    :instrument_id,
-                    :timeframe_seconds,
-                    :candle_time,
-                    :regime_version,
-                    :computed_at,
-                    :regime
-                )
-                """
-            ),
-            {
-                "instrument_id": instrument_id,
-                "timeframe_seconds": 3600,
-                "candle_time": "2024-01-01T02:00:00Z",
-                "regime_version": REGIME_VERSION,
-                "computed_at": "2024-01-01T02:01:30Z",
-                "regime": regime_json,
-            },
+        _upsert_export_candle(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            candle_time="2024-01-01T02:00:00Z",
+            close_time="2024-01-01T03:00:00Z",
+            close=2750.0,
+        )
+        _upsert_regime_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            candle_time="2024-01-01T02:00:00Z",
+            regime_version=REGIME_VERSION,
+            computed_at="2024-01-01T02:01:30Z",
+            regime=regime_json,
         )
 
     entry_time = datetime.fromisoformat("2024-01-01T02:00:00+00:00")
@@ -400,23 +485,24 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
     )
     metrics = build_entry_metrics(entry_context)
     storage.record_bot_trade(
-        {
-            "trade_id": trade_id,
-            "run_id": run_id,
-            "bot_id": bot_id,
-            "symbol": "ETHUSD",
-            "direction": "long",
-            "entry_time": entry_time.isoformat().replace("+00:00", "Z"),
-            "exit_time": "2024-01-01T03:00:00Z",
-            "gross_pnl": 14.0,
-            "fees_paid": 0.9,
-            "net_pnl": 13.1,
-            "status": "closed",
-            "timeframe": "1h",
-            "timeframe_seconds": 3600,
-            "instrument_id": instrument_id,
-            "metrics": metrics,
-        }
+        build_trade_payload(
+            trade_id=trade_id,
+            run_id=run_id,
+            bot_id=bot_id,
+            symbol="ETHUSD",
+            direction="long",
+            entry_time=entry_time.isoformat().replace("+00:00", "Z"),
+            exit_time="2024-01-01T03:00:00Z",
+            gross_pnl=14.0,
+            fees_paid=0.9,
+            net_pnl=13.1,
+            extra={
+                "timeframe": "1h",
+                "timeframe_seconds": 3600,
+                "instrument_id": instrument_id,
+                "metrics": metrics,
+            },
+        )
     )
     storage.record_bot_trade_event(
         {

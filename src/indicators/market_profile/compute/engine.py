@@ -29,6 +29,13 @@ if TYPE_CHECKING:
     from indicators.runtime.incremental_cache import IncrementalCache
 
 
+def _to_utc_timestamp(value: Any) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
 class MarketProfileIndicator(ComputeIndicator):
     """
     Computes daily market profiles using Time Price Opportunity (TPO) methodology.
@@ -130,7 +137,7 @@ class MarketProfileIndicator(ComputeIndicator):
         min_merge_sessions: int = DEFAULT_MIN_MERGE_SESSIONS,
         extend_value_area_to_chart_end: bool = True,
         days_back: int = DEFAULT_DAYS_BACK,
-        **kwargs  # Accept and ignore extra kwargs like 'mode', 'interval' for compatibility
+        **kwargs
     ):
         """
         Instantiate from a DataContext and data provider.
@@ -147,7 +154,7 @@ class MarketProfileIndicator(ComputeIndicator):
             min_merge_sessions: Minimum sessions required for merge (default: 3)
             extend_value_area_to_chart_end: Extend value area boxes to chart end (default: True)
             days_back: Number of days of historical data to fetch (default: 180)
-            **kwargs: Additional parameters (ignored for compatibility)
+            **kwargs: Additional parameters (bot_id, strategy_id)
 
         Returns:
             MarketProfileIndicator instance
@@ -157,15 +164,15 @@ class MarketProfileIndicator(ComputeIndicator):
         """
         from datetime import timedelta
 
-        # Override DataContext: use chart's end date, but calculate start from days_back
-        # Always use 30m interval for Market Profile computation
-        end_date = pd.Timestamp(ctx.end)
+        # Normalize the request window once at the indicator boundary so provider
+        # data and computed profiles stay on a single UTC timeline.
+        end_date = ctx.end_utc()
         start_date = end_date - timedelta(days=days_back)
 
         mp_ctx = DataContext(
             symbol=ctx.symbol,
             start=start_date.isoformat(),
-            end=ctx.end,
+            end=end_date.isoformat(),
             interval="30m",  # Always use 30min for Market Profile
             instrument_id=ctx.instrument_id,
         )
@@ -175,34 +182,34 @@ class MarketProfileIndicator(ComputeIndicator):
             ctx.symbol,
             days_back,
             start_date.isoformat(),
-            ctx.end,
+            end_date.isoformat(),
         )
 
         df = provider.get_ohlcv(mp_ctx)
         if df is None or df.empty:
             raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {ctx.end}"
+                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {end_date.isoformat()}"
             )
 
         # Log the actual data range obtained
-        actual_start = df.index.min()
-        actual_end = df.index.max()
+        actual_start = _to_utc_timestamp(df.index.min())
+        actual_end = _to_utc_timestamp(df.index.max())
 
         logger.info(
             "✓ Market Profile instantiated | symbol=%s | requested_start=%s | actual_start=%s | end=%s | rows=%d | interval=30m",
             ctx.symbol,
             start_date.strftime("%Y-%m-%d %H:%M:%S"),
-            pd.Timestamp(actual_start).strftime("%Y-%m-%d %H:%M:%S"),
-            pd.Timestamp(actual_end).strftime("%Y-%m-%d %H:%M:%S"),
+            actual_start.strftime("%Y-%m-%d %H:%M:%S"),
+            actual_end.strftime("%Y-%m-%d %H:%M:%S"),
             len(df),
         )
 
-        if pd.Timestamp(actual_start) > start_date:
+        if actual_start > start_date:
             logger.warning(
                 "⚠ Market Profile: Requested data from %s but oldest available is %s (symbol=%s). "
                 "Historical data limited by provider.",
                 start_date.strftime("%Y-%m-%d"),
-                pd.Timestamp(actual_start).strftime("%Y-%m-%d"),
+                actual_start.strftime("%Y-%m-%d"),
                 ctx.symbol,
             )
 
@@ -259,7 +266,7 @@ class MarketProfileIndicator(ComputeIndicator):
         """
         from datetime import timedelta
 
-        end_date = pd.Timestamp(ctx.end)
+        end_date = ctx.end_utc()
         start_date = end_date - timedelta(days=days_back)
 
         # Build date keys for cache lookup
@@ -353,7 +360,7 @@ class MarketProfileIndicator(ComputeIndicator):
         mp_ctx = DataContext(
             symbol=ctx.symbol,
             start=start_date.isoformat(),
-            end=ctx.end,
+            end=end_date.isoformat(),
             interval="30m",
             instrument_id=ctx.instrument_id,
         )
@@ -368,7 +375,7 @@ class MarketProfileIndicator(ComputeIndicator):
         df = provider.get_ohlcv(mp_ctx)
         if df is None or df.empty:
             raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {ctx.end}"
+                f"Missing OHLCV for {ctx.symbol} from {start_date.isoformat()} to {end_date.isoformat()}"
             )
 
         # Create instance normally
@@ -552,19 +559,19 @@ class MarketProfileIndicator(ComputeIndicator):
         profiles_payload: List[Dict[str, Any]] = []
 
         # Get chart boundaries for visual clamping
-        chart_start = pd.Timestamp(plot_df.index.min()).tz_localize(None) if plot_df.index.min().tz is None else pd.Timestamp(plot_df.index.min())
-        chart_end = pd.Timestamp(plot_df.index.max()).tz_localize(None) if plot_df.index.max().tz is None else pd.Timestamp(plot_df.index.max())
+        chart_start = _to_utc_timestamp(plot_df.index.min())
+        chart_end = _to_utc_timestamp(plot_df.index.max())
 
         for idx, profile in enumerate(profiles):
             # Clamp box start to chart start (visual only - don't skip profiles)
-            profile_start = pd.Timestamp(profile.start).tz_localize(None) if pd.Timestamp(profile.start).tz is None else pd.Timestamp(profile.start)
+            profile_start = _to_utc_timestamp(profile.start)
             box_start = max(profile_start, chart_start)
 
             # Extend to chart end if configured, otherwise use profile end
             if self.extend_value_area_to_chart_end:
                 box_end = chart_end
             else:
-                box_end = profile.end
+                box_end = _to_utc_timestamp(profile.end)
 
             # Convert timestamps to Unix seconds
             x1 = int(pd.Timestamp(box_start).timestamp())
@@ -599,8 +606,8 @@ class MarketProfileIndicator(ComputeIndicator):
         for profile in raw_profiles:
             profiles_payload.append(
                 {
-                    "start": int(pd.Timestamp(profile.start).timestamp()),
-                    "end": int(pd.Timestamp(profile.end).timestamp()),
+                    "start": int(_to_utc_timestamp(profile.start).timestamp()),
+                    "end": int(_to_utc_timestamp(profile.end).timestamp()),
                     "VAH": float(profile.vah),
                     "VAL": float(profile.val),
                     "POC": float(profile.poc),
@@ -670,8 +677,8 @@ class MarketProfileIndicator(ComputeIndicator):
         profile_params["profiles_premerged"] = bool(use_merged)
         payload_profiles: List[Dict[str, Any]] = []
         for profile in runtime_profiles:
-            start_ts = pd.Timestamp(profile.start)
-            end_ts = pd.Timestamp(profile.end)
+            start_ts = _to_utc_timestamp(profile.start)
+            end_ts = _to_utc_timestamp(profile.end)
             payload_profiles.append(
                 {
                     "start": int(start_ts.timestamp()),
@@ -748,16 +755,8 @@ class MarketProfileIndicator(ComputeIndicator):
             return list(profiles)
         normalized: List[Profile] = []
         for profile in profiles:
-            start = pd.Timestamp(profile.start)
-            end = pd.Timestamp(profile.end)
-            if start.tzinfo is None:
-                start = start.tz_localize("UTC")
-            else:
-                start = start.tz_convert("UTC")
-            if end.tzinfo is None:
-                end = end.tz_localize("UTC")
-            else:
-                end = end.tz_convert("UTC")
+            start = _to_utc_timestamp(profile.start)
+            end = _to_utc_timestamp(profile.end)
             try:
                 norm_start = start.floor(tf)
             except Exception:

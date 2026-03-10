@@ -39,11 +39,11 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
     """Insert or update a stored trade snapshot for dashboarding."""
 
     if not db.available:
-        return
+        raise RuntimeError("Database not available for trade persistence")
     trade_id = snapshot.get("trade_id") or snapshot.get("id")
     bot_id = snapshot.get("bot_id")
     if not trade_id or not bot_id:
-        return
+        raise ValueError("trade persistence requires both trade_id and bot_id")
     try:
         with db.session() as session:
             record = session.get(BotTradeRecord, trade_id)
@@ -103,18 +103,25 @@ def record_bot_trade(snapshot: Dict[str, Any]) -> None:
             if record.created_at is None:
                 record.created_at = now
     except SQLAlchemyError as exc:
-        logger.warning("bot_trade_persist_failed | trade=%s | error=%s", trade_id, exc)
+        logger.error(
+            "bot_trade_persist_failed | trade=%s | bot_id=%s | run_id=%s | error=%s",
+            trade_id,
+            bot_id,
+            snapshot.get("run_id"),
+            exc,
+        )
+        raise
 
 
 def record_bot_trade_event(event: Dict[str, Any]) -> None:
     """Persist a stop/target event for a stored trade."""
 
     if not db.available:
-        return
+        raise RuntimeError("Database not available for trade event persistence")
     trade_id = event.get("trade_id")
     bot_id = event.get("bot_id")
     if not trade_id or not bot_id:
-        return
+        raise ValueError("trade event persistence requires both trade_id and bot_id")
     event_id = event.get("id") or str(uuid.uuid4())
     event_time = _parse_optional_timestamp(event.get("event_time") or event.get("time"))
     try:
@@ -134,8 +141,14 @@ def record_bot_trade_event(event: Dict[str, Any]) -> None:
             )
             session.add(record)
     except SQLAlchemyError as exc:
-        logger.warning("bot_trade_event_persist_failed | trade=%s | error=%s", trade_id, exc)
-
+        logger.error(
+            "bot_trade_event_persist_failed | event=%s | trade=%s | bot_id=%s | error=%s",
+            event_id,
+            trade_id,
+            bot_id,
+            exc,
+        )
+        raise
 
 
 

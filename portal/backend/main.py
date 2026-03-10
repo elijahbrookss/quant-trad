@@ -1,13 +1,13 @@
 """FastAPI entrypoint that wires routers and shared middleware."""
 
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import logging
 import os
 from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.requests import Request
 
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots.bot_watchdog import get_watchdog
@@ -52,10 +52,36 @@ def _configure_logging() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
+def _startup_watchdog() -> None:
+    ensure_builtin_overlays_registered()
+    ensure_builtin_indicator_plugins_registered()
+    ensure_postgres_extensions()
+    watchdog = get_watchdog()
+    watchdog.recover_local_orphans()
+    watchdog.start_background_monitor()
+    logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
+
+
+def _shutdown_watchdog() -> None:
+    watchdog = get_watchdog()
+    watchdog.stop_background_monitor()
+    logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _startup_watchdog()
+    try:
+        yield
+    finally:
+        _shutdown_watchdog()
+
+
 app = FastAPI(
     title="Quant-Trad API",
     description="FastAPI for OHLCV and signal services",
     version="0.1.0",
+    lifespan=_lifespan,
 )
 
 
@@ -85,25 +111,8 @@ app.include_router(bots.router, prefix="/api/bots")
 app.include_router(providers.router, prefix="/api/providers")
 app.include_router(reports.router, prefix="/api/reports")
 
-@app.on_event("startup")
-def _startup_watchdog() -> None:
-    ensure_builtin_overlays_registered()
-    ensure_builtin_indicator_plugins_registered()
-    ensure_postgres_extensions()
-    watchdog = get_watchdog()
-    watchdog.recover_local_orphans()
-    watchdog.start_background_monitor()
-    logger.info("bot_watchdog_ready | runner_id=%s", watchdog.runner_id)
-
-
-@app.on_event("shutdown")
-def _shutdown_watchdog() -> None:
-    watchdog = get_watchdog()
-    watchdog.stop_background_monitor()
-    logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
-
 
 @app.get("/api/health")
 def health() -> dict:
     """Simple health check endpoint for uptime probes."""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}
+    return {"status": "ok", "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z")}

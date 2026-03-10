@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
-from typing import Any, Dict, Mapping
+from datetime import UTC, datetime
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol
 
 from .bot_stream import BotStreamManager
 from .bot_state_projection import project_bot_state
@@ -17,14 +17,36 @@ from .runner import DockerBotRunner
 logger = logging.getLogger(__name__)
 
 
+class BotControlStorage(Protocol):
+    def upsert_bot(self, payload: Mapping[str, Any]) -> None: ...
+
+
+def _default_upsert_bot(payload: Mapping[str, Any]) -> None:
+    from ..storage.storage import upsert_bot
+
+    upsert_bot(dict(payload))
+
+
+
 class BotRuntimeControlService:
-    def __init__(self, config_service: BotConfigService, stream_manager: BotStreamManager) -> None:
+    def __init__(
+        self,
+        config_service: BotConfigService,
+        stream_manager: BotStreamManager,
+        *,
+        storage: Optional[BotControlStorage] = None,
+        watchdog: Optional[Any] = None,
+        runner_factory: Optional[Callable[[], BotRunner]] = None,
+    ) -> None:
         self._config = config_service
         self._stream_manager = stream_manager
+        self._storage = storage
+        self._watchdog = watchdog
+        self._runner_factory = runner_factory
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def _broadcast(self, event: str, payload: Mapping[str, Any]) -> None:
         self._stream_manager.broadcast(event, payload)
@@ -34,6 +56,8 @@ class BotRuntimeControlService:
         return str(os.getenv("BOT_RUNTIME_TARGET", "docker") or "docker").strip().lower()
 
     def _resolve_runner(self) -> BotRunner:
+        if self._runner_factory is not None:
+            return self._runner_factory()
         target = self._runner_target()
         if target == "docker":
             return DockerBotRunner.from_env()
@@ -41,6 +65,15 @@ class BotRuntimeControlService:
             f"Unsupported bot runtime target: {target}. "
             "Set BOT_RUNTIME_TARGET=docker."
         )
+
+    def _upsert_bot(self, payload: Mapping[str, Any]) -> None:
+        if self._storage is not None:
+            self._storage.upsert_bot(payload)
+            return
+        _default_upsert_bot(payload)
+
+    def _watchdog_instance(self):
+        return self._watchdog if self._watchdog is not None else get_watchdog()
 
     def start_bot(self, bot_id: str) -> Dict[str, object]:
         bots = {bot["id"]: bot for bot in self._config.list_bots()}
@@ -56,12 +89,11 @@ class BotRuntimeControlService:
         self._config.validate_runtime_readiness(bot)
 
         runner = self._resolve_runner()
-        from ..storage.storage import upsert_bot
-        watchdog = get_watchdog()
+        watchdog = self._watchdog_instance()
         bot["status"] = "starting"
         bot["runner_id"] = watchdog.runner_id
         bot["last_run_at"] = self._now_iso()
-        upsert_bot(bot)
+        self._upsert_bot(bot)
         self._broadcast("bot", {"bot": project_bot_state(bot)})
 
         try:
@@ -76,7 +108,7 @@ class BotRuntimeControlService:
             bot["status"] = "error"
             bot["runner_id"] = None
             bot["last_run_artifact"] = {"error": error_payload}
-            upsert_bot(bot)
+            self._upsert_bot(bot)
             projected = project_bot_state(bot)
             projected["runtime"] = {
                 **dict(projected.get("runtime") or {}),
@@ -107,7 +139,7 @@ class BotRuntimeControlService:
     def stop_bot(self, bot_id: str) -> Dict[str, object]:
         runner = self._resolve_runner()
         runner.stop_bot(bot_id=bot_id)
-        get_watchdog().unregister_bot(bot_id)
+        self._watchdog_instance().unregister_bot(bot_id)
 
         bots = {bot["id"]: bot for bot in self._config.list_bots()}
         if bot_id not in bots:
@@ -115,9 +147,7 @@ class BotRuntimeControlService:
         bot = bots[bot_id]
         bot["status"] = "stopped"
         bot["runner_id"] = None
-        from ..storage.storage import upsert_bot
-
-        upsert_bot(bot)
+        self._upsert_bot(bot)
         logger.info("bot_container_stopped | bot_id=%s", bot_id)
         projected = project_bot_state(bot)
         self._broadcast("bot", {"bot": projected})
@@ -127,9 +157,8 @@ class BotRuntimeControlService:
     def bots_stream(self):
         return self._stream_manager.subscribe_all(self._config.list_bots)
 
-    @staticmethod
-    def watchdog_status() -> Dict[str, Any]:
-        watchdog = get_watchdog()
+    def watchdog_status(self) -> Dict[str, Any]:
+        watchdog = self._watchdog_instance()
         stale = watchdog.scan_stale_heartbeats()
         containers = watchdog.verify_container_ownership()
         status = watchdog.status()

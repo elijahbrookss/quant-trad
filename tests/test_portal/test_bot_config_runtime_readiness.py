@@ -10,10 +10,20 @@ from portal.backend.service.bots.config_service import BotConfigService
 
 
 def _strategy_with_instrument(snapshot: dict) -> SimpleNamespace:
+    runtime_snapshot = {
+        "tick_size": 0.5,
+        "contract_size": 1.0,
+        "tick_value": 0.5,
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "min_order_size": 0.001,
+        "qty_step": 0.001,
+    }
+    runtime_snapshot.update(snapshot)
     link = SimpleNamespace(
-        symbol=snapshot.get("symbol", "BTC-PERP"),
-        instrument_id=snapshot.get("id", "instrument-1"),
-        instrument_snapshot=dict(snapshot),
+        symbol=runtime_snapshot.get("symbol", "BTC-PERP"),
+        instrument_id=runtime_snapshot.get("id", "instrument-1"),
+        instrument_snapshot=dict(runtime_snapshot),
     )
     return SimpleNamespace(
         datasource="COINBASE",

@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots.config_service import BotConfigService
 
