@@ -52,8 +52,8 @@ def _as_list(value: str | list[str] | None) -> list[str]:
 
 def main() -> int:
     entries: list[dict[str, object]] = []
-    for path in sorted(ARCH_DIR.glob("*.md")):
-        if path.name == INDEX_PATH.name:
+    for path in sorted(ARCH_DIR.rglob("*.md")):
+        if path == INDEX_PATH or path.name == "README.md":
             continue
         meta = _parse_frontmatter(path)
         if not meta:

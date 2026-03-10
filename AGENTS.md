@@ -5,7 +5,7 @@ This file is the **entry point for all agents and contributors**.
 It defines the expectations, principles, and engineering discipline required
 to work safely inside the Quant-Trad codebase.
 
-If behavior conflicts with this document or the docs under `docs/agents/`,
+If behavior conflicts with this document or the docs under `docs/contracts/`,
 the code is wrong.
 
 ---
@@ -32,10 +32,10 @@ the code is wrong.
 
 Agents MUST understand these documents before making architectural or behavioral changes:
 
-- `docs/agents/00_system_contract.md`
-- `docs/agents/01_runtime_contract.md`
-- `docs/agents/02_execution_playback_contract.md`
-- `docs/agents/03_engineering_contract.md`
+- `docs/contracts/platform/00_system_contract.md`
+- `docs/contracts/platform/01_runtime_contract.md`
+- `docs/contracts/platform/02_execution_playback_contract.md`
+- `docs/contracts/platform/03_engineering_contract.md`
 
 These define the system contract.
 
@@ -190,7 +190,7 @@ When a change materially affects runtime/service/provider/storage/reporting arch
 
 Required workflow:
 1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
-2. Update/create relevant component docs under `docs/architecture/`.
+2. Update/create relevant component docs under `docs/architecture/<subsystem>/`.
 3. Ensure each affected architecture doc has frontmatter metadata with at least:
    - `component`
    - `subsystem`

@@ -14,12 +14,12 @@ REQUIRED_KEYS = {
 
 
 def test_architecture_docs_have_required_frontmatter_tags():
-    architecture_docs = list(Path("docs/architecture").glob("*.md"))
+    architecture_docs = list(Path("docs/architecture").rglob("*.md"))
     assert architecture_docs, "expected architecture docs"
 
     missing: list[str] = []
     for path in architecture_docs:
-        if path.name == "ARCHITECTURE_COMPONENT_INDEX.md":
+        if path.name in {"ARCHITECTURE_COMPONENT_INDEX.md", "README.md"}:
             continue
         text = path.read_text(encoding="utf-8")
         if not text.startswith("---\n"):

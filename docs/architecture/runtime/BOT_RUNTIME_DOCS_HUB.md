@@ -8,7 +8,7 @@ tags:
   - runtime
   - docs-hub
 code_paths:
-  - docs/architecture/BOT_RUNTIME_DOCS_HUB.md
+  - docs/architecture/runtime/BOT_RUNTIME_DOCS_HUB.md
 ---
 # Bot Runtime Docs Hub
 

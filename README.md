@@ -26,7 +26,7 @@ These are the semantics the repo is built around:
 - Single runtime path: `initialize -> apply_bar -> snapshot`
 - Playback is an audit surface, not a demo layer
 
-If code conflicts with these semantics, the contracts in [`docs/agents/`](docs/agents/) are the source of truth.
+If code conflicts with these semantics, the contracts in [`docs/contracts/`](docs/contracts/) are the source of truth.
 
 ## Main Components
 
@@ -122,6 +122,7 @@ Common integrations in this repo include:
 - Grafana / Loki
 
 See [`secrets.env.example`](secrets.env.example) for the available settings and operational knobs. The platform uses a single database DSN: `PG_DSN`.
+Runtime services are expected to run in Docker and connect to the database over the internal `tsdb:5432` network path. Host port `localhost:15432` is for operator access.
 
 ## Repository Map
 
@@ -148,19 +149,20 @@ quant-trad/
 
 Start here if you are new to the repo:
 
-1. [`docs/agents/README.md`](docs/agents/README.md)
-2. [`docs/agents/00_system_contract.md`](docs/agents/00_system_contract.md)
-3. [`docs/agents/01_runtime_contract.md`](docs/agents/01_runtime_contract.md)
-4. [`docs/agents/02_execution_playback_contract.md`](docs/agents/02_execution_playback_contract.md)
-5. [`docs/agents/03_engineering_contract.md`](docs/agents/03_engineering_contract.md)
+1. [`docs/README.md`](docs/README.md)
+2. [`docs/contracts/README.md`](docs/contracts/README.md)
+3. [`docs/contracts/platform/00_system_contract.md`](docs/contracts/platform/00_system_contract.md)
+4. [`docs/contracts/platform/01_runtime_contract.md`](docs/contracts/platform/01_runtime_contract.md)
+5. [`docs/contracts/platform/02_execution_playback_contract.md`](docs/contracts/platform/02_execution_playback_contract.md)
+6. [`docs/contracts/platform/03_engineering_contract.md`](docs/contracts/platform/03_engineering_contract.md)
 
 Then use these architecture docs for current implementation details:
 
-- [`docs/architecture/ENGINE_OVERVIEW.md`](docs/architecture/ENGINE_OVERVIEW.md)
-- [`docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md`](docs/architecture/SIGNAL_PIPELINE_ARCHITECTURE.md)
-- [`docs/architecture/BOT_RUNTIME_DOCS_HUB.md`](docs/architecture/BOT_RUNTIME_DOCS_HUB.md)
-- [`docs/architecture/RUNTIME_EVENT_MODEL_V1.md`](docs/architecture/RUNTIME_EVENT_MODEL_V1.md)
-- [`docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md`](docs/architecture/WALLET_GATEWAY_ARCHITECTURE.md)
+- [`docs/architecture/engine/ENGINE_OVERVIEW.md`](docs/architecture/engine/ENGINE_OVERVIEW.md)
+- [`docs/architecture/signals/SIGNAL_PIPELINE_ARCHITECTURE.md`](docs/architecture/signals/SIGNAL_PIPELINE_ARCHITECTURE.md)
+- [`docs/architecture/runtime/BOT_RUNTIME_DOCS_HUB.md`](docs/architecture/runtime/BOT_RUNTIME_DOCS_HUB.md)
+- [`docs/architecture/runtime/RUNTIME_EVENT_MODEL_V1.md`](docs/architecture/runtime/RUNTIME_EVENT_MODEL_V1.md)
+- [`docs/architecture/runtime/WALLET_GATEWAY_ARCHITECTURE.md`](docs/architecture/runtime/WALLET_GATEWAY_ARCHITECTURE.md)
 
 ## Current State
 
@@ -179,7 +181,7 @@ Use caution before pointing this at real capital. The repo is built to be explai
 
 Before making non-trivial changes:
 
-1. Read the system and runtime contracts in [`docs/agents/`](docs/agents/)
+1. Read the system and runtime contracts in [`docs/contracts/`](docs/contracts/)
 2. Preserve the layer boundaries between research, strategy, execution, and playback
 3. Prefer extending canonical snapshot/runtime contracts over adding alternate reconstruction paths
 4. Add tests or targeted verification when behavior changes
