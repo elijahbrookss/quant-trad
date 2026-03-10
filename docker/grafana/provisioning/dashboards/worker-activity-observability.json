@@ -1,0 +1,538 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How To Use",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Use this dashboard to track worker utilization and current async jobs.\\n\\n- Running job rows show live `worker_id` with `worker_type:host:pid` split-out columns.\\n- `job_type` filter supports `quantlab_overlay`, `quantlab_signals`, and `stats_compute`.\\n- Use the logs panel to trail worker execution and overlay lifecycle events."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Running Jobs (Now)",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_async_jobs WHERE status = 'running' AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring});"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Queued + Retry (Now)",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_async_jobs WHERE status IN ('queued', 'retry') AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring});"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Busy QuantLab Workers",
+      "description": "Workers currently holding running quantlab jobs.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(DISTINCT lock_owner)::double precision AS value FROM portal_async_jobs WHERE status = 'running' AND lock_owner IS NOT NULL AND job_type IN ('quantlab_overlay', 'quantlab_signals');"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Busy Stats Workers",
+      "description": "Workers currently holding running stats jobs.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(DISTINCT lock_owner)::double precision AS value FROM portal_async_jobs WHERE status = 'running' AND lock_owner IS NOT NULL AND job_type = 'stats_compute';"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Workers With Active Job",
+      "description": "Live view of workers currently processing jobs with parsed PID.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT split_part(lock_owner, ':', 1) AS worker_type, split_part(lock_owner, ':', 2) AS worker_host, NULLIF(split_part(lock_owner, ':', 3), '')::int AS worker_pid, count(*) AS running_jobs, string_agg(DISTINCT job_type, ', ' ORDER BY job_type) AS job_types, min(started_at) AS oldest_started_at, round(EXTRACT(EPOCH FROM (NOW() - min(started_at)))::numeric, 1) AS oldest_running_seconds FROM portal_async_jobs WHERE status = 'running' AND lock_owner IS NOT NULL AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring}) GROUP BY 1,2,3 ORDER BY worker_type, worker_host, worker_pid;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Current Running Jobs",
+      "description": "Current async jobs and payload identity fields for drilldown.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT id AS job_id, job_type, status, lock_owner AS worker_id, split_part(lock_owner, ':', 1) AS worker_type, NULLIF(split_part(lock_owner, ':', 3), '')::int AS worker_pid, payload->>'inst_id' AS indicator_id, payload->>'instrument_id' AS instrument_id, payload->>'symbol' AS symbol, payload->>'interval' AS interval, payload->>'datasource' AS datasource, payload->>'exchange' AS exchange, attempts, max_attempts, started_at, round(EXTRACT(EPOCH FROM (NOW() - started_at))::numeric, 1) AS running_seconds FROM portal_async_jobs WHERE status = 'running' AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring}) ORDER BY started_at ASC;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Queue / Retry Pressure",
+      "description": "Backlog by type and status. `oldest_age_s` helps spot starvation.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT job_type, status, count(*) AS jobs, min(created_at) AS oldest_created_at, round(EXTRACT(EPOCH FROM (NOW() - min(created_at)))::numeric, 1) AS oldest_age_s FROM portal_async_jobs WHERE status IN ('queued', 'retry', 'running') AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring}) GROUP BY 1,2 ORDER BY job_type, status;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Workers Seen Recently",
+      "description": "Workers that touched jobs in the selected recent window.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT lock_owner AS worker_id, split_part(lock_owner, ':', 1) AS worker_type, split_part(lock_owner, ':', 2) AS worker_host, NULLIF(split_part(lock_owner, ':', 3), '')::int AS worker_pid, count(*) AS jobs_touched, count(*) FILTER (WHERE status = 'succeeded') AS succeeded, count(*) FILTER (WHERE status = 'failed') AS failed, count(*) FILTER (WHERE status = 'running') AS currently_running, max(updated_at) AS last_update_at FROM portal_async_jobs WHERE lock_owner IS NOT NULL AND updated_at >= NOW() - ((${recent_minutes:raw} || ' minutes')::interval) AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring}) GROUP BY 1,2,3,4 ORDER BY last_update_at DESC;"
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Job Throughput (Succeeded/Failed)",
+      "description": "Completion events over time by job_type and terminal status.",
+      "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(updated_at, $__interval), (job_type || ':' || status) AS metric, count(*)::double precision AS value FROM portal_async_jobs WHERE $__timeFilter(updated_at) AND status IN ('succeeded', 'failed') AND (${job_type:sqlstring} = '__all' OR job_type = ${job_type:sqlstring}) GROUP BY 1,2 ORDER BY 1;"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Worker + Overlay Logs",
+      "description": "Trail worker lifecycle and overlay pipeline events.",
+      "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "$stream |~ \"quantlab_worker_|stats_worker_|async_job_|overlay_request_received|overlay_build_start|overlay_build_complete|overlay_runtime_state_projection_\" |~ \"$contains\"",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Per-Indicator Runtime Phases",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "panels": [
+        {
+          "id": 13,
+          "type": "text",
+          "title": "How To Use",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "Phase path tracked: `overlay_request_received` -> `overlay_build_start` -> `overlay_runtime_state_projection_start/done` -> `overlay_visibility_applied` -> `overlay_build_complete`.\\n\\nUse `indicator_id` for SQL job metrics and `indicator_re` for Loki phase/log drilldown."
+          }
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "Overlay Job P95 (ms)",
+          "description": "P95 end-to-end worker execution time from async job claim to finish for overlay jobs.",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 3 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY (EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000.0))::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'succeeded' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring});"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+          "options": {
+            "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "Overlay Failure Rate (%)",
+          "description": "Failed overlays out of terminal overlay jobs in the selected range.",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 3 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT COALESCE(round((100.0 * sum(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)::numeric / NULLIF(count(*), 0)), 2), 0)::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status IN ('succeeded', 'failed') AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring});"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+          "options": {
+            "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 16,
+          "type": "stat",
+          "title": "Overlay Succeeded Jobs",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 3 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT count(*)::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'succeeded' AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring});"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 17,
+          "type": "stat",
+          "title": "Overlay Failed Jobs",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 3 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT count(*)::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'failed' AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring});"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "values": false, "calcs": ["lastNotNull"], "fields": "" },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Runtime Phase Throughput (events)",
+          "description": "Phase event counts over time from Loki logs.",
+          "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (event) (count_over_time($stream | logfmt | event=~\"overlay_request_received|overlay_build_start|overlay_runtime_state_projection_start|overlay_runtime_state_projection_done|overlay_visibility_applied|overlay_build_complete|overlay_visibility_empty\" | indicator_id=~\"$indicator_re\" [$__interval]))",
+              "queryType": "range",
+              "editorMode": "code",
+              "legendFormat": "{{event}}"
+            }
+          ],
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Overlay Job P95 Duration Trend (ms)",
+          "description": "P95 async overlay job duration by indicator_id.",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT $__timeGroupAlias(updated_at, $__interval), COALESCE(payload->>'inst_id', 'unknown') AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY (EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000.0))::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'succeeded' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring}) GROUP BY 1,2 ORDER BY 1;"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "id": 20,
+          "type": "table",
+          "title": "Indicators With Overlay Failures",
+          "description": "Failure concentration and most recent error payload.",
+          "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT payload->>'inst_id' AS indicator_id, count(*) AS failed_jobs, max(updated_at) AS last_failed_at, left(max(error), 220) AS sample_error FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'failed' AND $__timeFilter(updated_at) AND (${indicator_id:sqlstring} = '__all' OR payload->>'inst_id' = ${indicator_id:sqlstring}) GROUP BY 1 ORDER BY failed_jobs DESC, last_failed_at DESC LIMIT 100;"
+            }
+          ],
+          "options": { "showHeader": true }
+        },
+        {
+          "id": 21,
+          "type": "logs",
+          "title": "Per-Indicator Runtime Logs",
+          "description": "Drilldown for one indicator across request/build/projection/visibility and worker failures.",
+          "datasource": { "type": "loki", "uid": "quanttrad-loki" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "$stream | logfmt | indicator_id=~\"$indicator_re\" | event=~\"overlay_request_received|overlay_build_start|overlay_runtime_state_projection_start|overlay_runtime_state_projection_done|overlay_visibility_applied|overlay_visibility_empty|overlay_build_complete|quantlab_worker_job_failed|async_job_failed\" |~ \"$contains\"",
+              "queryType": "range",
+              "editorMode": "code"
+            }
+          ],
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["workers", "async-jobs", "observability", "quantlab", "stats"],
+  "templating": {
+    "list": [
+      {
+        "name": "job_type",
+        "label": "Job Type",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT job_type AS __value, job_type AS __text FROM portal_async_jobs ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "indicator_id",
+        "label": "Indicator ID",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "quanttrad-postgres" },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT payload->>'inst_id' AS __value, payload->>'inst_id' AS __text FROM portal_async_jobs WHERE payload ? 'inst_id' AND payload->>'inst_id' <> '' ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "indicator_re",
+        "label": "Indicator Regex",
+        "type": "textbox",
+        "query": ".+",
+        "current": {
+          "selected": true,
+          "text": ".+",
+          "value": ".+"
+        }
+      },
+      {
+        "name": "recent_minutes",
+        "label": "Recent Window (min)",
+        "type": "custom",
+        "query": "5,15,30,60,180",
+        "current": {
+          "selected": true,
+          "text": "30",
+          "value": "30"
+        }
+      },
+      {
+        "name": "stream",
+        "label": "Log Stream Selector",
+        "type": "textbox",
+        "query": "{service=\"backend\"}",
+        "current": {
+          "selected": true,
+          "text": "{service=\"backend\"}",
+          "value": "{service=\"backend\"}"
+        }
+      },
+      {
+        "name": "contains",
+        "label": "Logs Contains Regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Workers: Active Jobs & Drilldown",
+  "uid": "qt-worker-activity",
+  "version": 1,
+  "weekStart": ""
+}

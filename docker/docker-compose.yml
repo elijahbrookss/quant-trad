@@ -1,17 +1,25 @@
+name: quant-trad
+
 services:
   frontend:
     profiles: [core]
     build:
       context: ..
       dockerfile: portal/frontend/Dockerfile
+      target: dev
     hostname: frontend.quanttrad
     labels:
       loki.job: quanttrad
       loki.service: frontend
     environment:
-      - VITE_API_BASE_URL=http://backend.quanttrad:8000
+      - VITE_API_BASE_URL=/api
+      - VITE_API_PROXY_TARGET=http://backend.quanttrad:8000
+      - VITE_BOTLENS_DEBUG=true
     ports:
-      - "5173:80"
+      - "5173:5173"
+    volumes:
+      - ../portal/frontend/src:/app/src:ro
+      - ../portal/frontend/index.html:/app/index.html:ro
     depends_on:
       - backend
     networks:
@@ -24,6 +32,7 @@ services:
     build:
       context: ..
       dockerfile: portal/backend/Dockerfile
+    image: quanttrad-backend:dev
     hostname: backend.quanttrad
     labels:
       loki.job: quanttrad
@@ -32,15 +41,25 @@ services:
       - ../secrets.env
     environment:
       PYTHONPATH: /app/src:/app
-      PG_DSN: postgresql+psycopg2://quanttrad:quanttrad@tsdb.quanttrad:5432/quanttrad
-      OHLC_TABLE: ohlc_raw
+      CANDLES_RAW_TABLE: market_candles_raw
+      CANDLE_STATS_TABLE: candle_stats
+      DERIVATIVES_STATE_TABLE: derivatives_market_state
+      CANDLE_CLOSURES_TABLE: portal_candle_closures
       LOKI_URL: ${LOKI_URL:-http://loki:3100}
+      DEBUG: ${DEBUG:-true}
+      ENV: ${ENV:-dev}
+      QUANTLAB_WORKER_PROCESSES: ${QUANTLAB_WORKER_PROCESSES:-3}
+      STATS_WORKER_PROCESSES: ${STATS_WORKER_PROCESSES:-2}
+      BOT_RUNTIME_IMAGE: ${BOT_RUNTIME_IMAGE:-quanttrad-backend:dev}
+      BOT_RUNTIME_NETWORK: ${BOT_RUNTIME_NETWORK:-quant-trad_quanttrad}
     ports:
       - "8000:8000"
+    command: ["python", "-m", "portal.backend.run_backend"]
     depends_on:
       - tsdb
     volumes:
       - ../secrets.env:/app/secrets.env:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       quanttrad:
         aliases:
@@ -48,19 +67,49 @@ services:
 
   tsdb:
     profiles: [database]
-    image: timescale/timescaledb:2.14.2-pg15
+    build:
+      context: ..
+      dockerfile: docker/postgres/Dockerfile
+    image: quanttrad-postgres:pg15
     hostname: tsdb.quanttrad
     labels:
       loki.job: quanttrad
       loki.service: tsdb
-    environment:
-      POSTGRES_DB: quanttrad
-      POSTGRES_USER: quanttrad
-      POSTGRES_PASSWORD: quanttrad
+    env_file:
+      - ../secrets.env
+    command:
+      - postgres
+      - -c
+      - logging_collector=on
+      - -c
+      - log_destination=stderr,csvlog
+      - -c
+      - log_directory=/var/log/postgresql
+      - -c
+      - log_filename=postgresql-%Y-%m-%d_%H%M%S.log
+      - -c
+      - log_rotation_age=1d
+      - -c
+      - log_rotation_size=0
+      - -c
+      - log_line_prefix=%m [%p] app=%a user=%u db=%d client=%h
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - log_file_mode=0644
+      - -c
+      - shared_preload_libraries=timescaledb,pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.save=on
     ports:
       - "${TSDB_PORT:-15432}:5432"
     volumes:
       - tsdb-data:/var/lib/postgresql/data
+      - pg-logs:/var/log/postgresql
     networks:
       quanttrad:
         aliases:
@@ -68,18 +117,20 @@ services:
 
   pgadmin:
     profiles: [database]
-    image: dpage/pgadmin4:latest
+    image: dpage/pgadmin4:9.12
     labels:
       loki.job: quanttrad
       loki.service: pgadmin
+    env_file:
+      - ../secrets.env
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_LISTEN_ADDRESS: 0.0.0.0
     ports:
       - "8080:80"
     volumes:
       - pgadmin-data:/var/lib/pgadmin
+      - pg-logs:/var/log/postgresql:ro
     depends_on:
       - tsdb
     networks:
@@ -123,9 +174,10 @@ services:
       loki.service: grafana
     ports:
       - "3000:3000"
+    env_file:
+      - ../secrets.env
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: grafana-piechart-panel
     depends_on:
@@ -136,10 +188,55 @@ services:
     networks:
       - quanttrad
 
+  ibkr-gateway:
+    profiles: [brokers]
+    build:
+      context: ..
+      dockerfile: docker/ibkr-gateway/Dockerfile
+      args:
+        IBC_VERSION: ${IBKR_IBC_VERSION:-3.23.0}
+        IBC_DOWNLOAD_URL: ${IBKR_IBC_DOWNLOAD_URL:-https://github.com/IbcAlpha/IBC/releases/download/3.23.0/IBCLinux-3.23.0.zip}
+        IB_GATEWAY_VERSION: ${IBKR_GATEWAY_VERSION:-1037} # 10.37.1l is the latest as of June 2024 - 1037 is how the script refers to it
+        IB_GATEWAY_DOWNLOAD_URL: ${IBKR_GATEWAY_DOWNLOAD_URL:-https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/ibgateway-stable-standalone-linux-x64.sh}
+    hostname: ibkr-gateway.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: ibkr-gateway
+    env_file:
+      - ../secrets.env
+    environment:
+      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME}
+      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD}
+      IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
+      IBC_READONLY_API: ${IBKR_READONLY_API:-yes}
+      IBC_ACCEPT_INCOMING_ACTION: ${IBKR_ACCEPT_INCOMING_ACTION:-accept}
+      IBC_EXISTING_SESSION_ACTION: ${IBKR_EXISTING_SESSION_ACTION:-primary}
+      IBC_LOG_LEVEL: ${IBKR_LOG_LEVEL:-info}
+      IBC_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-4002}
+      IBC_GATEWAY_LIVE_PORT: ${IBKR_GATEWAY_LIVE_PORT:-4001}
+      TWS_CONFIG_PATH: /config/jts.ini
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    ports:
+      - "${IBKR_GATEWAY_PORT:-4002}:4002"
+      - "${IBKR_GATEWAY_LIVE_PORT:-4001}:4001"
+      - "5900:5900"  # VNC port
+    volumes:
+      - ibkr-gateway-config:/config
+      - ibkr-gateway-logs:/var/log/ibgateway
+      - ../secrets.env:/app/secrets.env:ro
+    networks:
+      quanttrad:
+        aliases:
+          - ibkr-gateway.quanttrad
+
 volumes:
   tsdb-data:
+  pg-logs:
   pgadmin-data:
   grafana-data:
+  ibkr-gateway-config:
+  ibkr-gateway-logs:
 
 networks:
   quanttrad:

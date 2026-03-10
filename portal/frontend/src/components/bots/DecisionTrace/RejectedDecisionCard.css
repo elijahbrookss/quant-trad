@@ -1,0 +1,23 @@
+.decision-card.rejected {
+  border-left: 3px solid rgba(148, 163, 184, 0.5); /* slate-400 */
+  opacity: 0.75;
+}
+
+.decision-card.rejected:hover {
+  opacity: 1;
+}
+
+.rejection-reason {
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  margin-top: 0.25rem;
+}
+
+.rejection-reason .reason {
+  color: rgba(203, 213, 225, 1); /* slate-300 */
+  font-style: italic;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}

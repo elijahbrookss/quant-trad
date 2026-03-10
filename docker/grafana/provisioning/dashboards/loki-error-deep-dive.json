@@ -1,0 +1,393 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How To Use",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Use this dashboard for fast error triage from Loki.\n\n- `stream`: Loki label selector (default `{service=~\".+\"}` for all services)\n- `error_re`: what counts as an error\n- `contains`: optional free-text filter\n\nExamples for `stream`: `{service=\"backend\"}` or `{service=~\"backend|worker\"}`\n\nNote: avoid empty-compatible regex label matchers like `app=~\".*\"`; use `.+` when you mean \"any non-empty value\"."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total Errors (Range)",
+      "description": "Total matching error logs in selected time range.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time($stream |~ \"$error_re\" |~ \"$contains\" [$__range]))",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Errors / Min (5m Avg)",
+      "description": "Current average error rate over the last 5 minutes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate($stream |~ \"$error_re\" |~ \"$contains\" [5m])) * 60",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Distinct Error Streams",
+      "description": "How many unique streams are currently emitting matched errors.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(count by (service) (count_over_time($stream |~ \"$error_re\" |~ \"$contains\" [$__range])))",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Errors Over Time (By Service)",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (count_over_time($stream |~ \"$error_re\" |~ \"$contains\" [$__interval]))",
+          "queryType": "range",
+          "editorMode": "code",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Errors Over Time (By Event)",
+      "description": "Requires structured `event` field in logfmt logs.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk($topn, sum by (event) (count_over_time($stream | logfmt | event!=\"\" |~ \"$error_re\" |~ \"$contains\" [$__interval])))",
+          "queryType": "range",
+          "editorMode": "code",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Top Services (Error Count)",
+      "description": "Fast ownership view. Use this to identify which service to drill into first.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk($topn, sum by (service) (count_over_time($stream |~ \"$error_re\" |~ \"$contains\" [$__range])))",
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Top Events (Error Count)",
+      "description": "Groups errors by structured `event` when present.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk($topn, sum by (event) (count_over_time($stream | logfmt | event!=\"\" |~ \"$error_re\" |~ \"$contains\" [$__range])))",
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Raw Error Logs",
+      "description": "Primary deep-dive surface. Filter with variables and click into log details.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "$stream |~ \"$error_re\" |~ \"$contains\"",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "loki",
+    "errors",
+    "triage",
+    "observability"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "stream",
+        "label": "Stream Selector",
+        "type": "textbox",
+        "query": "{service=~\".+\"}",
+        "current": {
+          "selected": true,
+          "text": "{service=~\".+\"}",
+          "value": "{service=~\".+\"}"
+        }
+      },
+      {
+        "name": "error_re",
+        "label": "Error Regex",
+        "type": "textbox",
+        "query": "(?i)(error|exception|traceback|fatal|critical|panic)",
+        "current": {
+          "selected": true,
+          "text": "(?i)(error|exception|traceback|fatal|critical|panic)",
+          "value": "(?i)(error|exception|traceback|fatal|critical|panic)"
+        }
+      },
+      {
+        "name": "contains",
+        "label": "Contains Regex (Optional)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "topn",
+        "label": "Top N",
+        "type": "custom",
+        "query": "5,10,20,50",
+        "current": {
+          "selected": true,
+          "text": "10",
+          "value": "10"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Loki: Error Deep Dive",
+  "uid": "qt-loki-error-deep-dive",
+  "version": 1,
+  "weekStart": ""
+}

@@ -56,6 +56,18 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     };
   });
 
+const normalizeSignalOverlays = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value.entries)) return value.entries;
+  if (Array.isArray(value.items)) return value.items;
+  if (value.payload && typeof value.payload === 'object') {
+    if (Array.isArray(value.payload.entries)) return value.payload.entries;
+    if (Array.isArray(value.payload.items)) return value.payload.items;
+  }
+  return [];
+};
+
 export async function runSignalGeneration({
   indicator,
   chartId,
@@ -99,7 +111,18 @@ export async function runSignalGeneration({
     exchange: chartState.exchange,
   });
 
-  updateChart(chartId, { signalsLoading: true, signalsLoadingFor: indicator.id });
+  const loadingState = getChart(chartId) || {};
+  const prevLoadingMap = loadingState?.signalsLoadingByIndicator && typeof loadingState.signalsLoadingByIndicator === 'object'
+    ? loadingState.signalsLoadingByIndicator
+    : {};
+  const nextLoadingMap = { ...prevLoadingMap, [indicator.id]: true };
+  const nextActiveIds = Object.keys(nextLoadingMap);
+  updateChart(chartId, {
+    signalsLoading: nextActiveIds.length > 0,
+    signalsLoadingFor: nextActiveIds[0] || indicator.id,
+    signalsLoadingByIndicator: nextLoadingMap,
+    signalsLoadingCount: nextActiveIds.length,
+  });
 
   try {
     const confirmationBars = chartState?.signalsConfig?.pivotBreakoutConfirmationBars
@@ -115,6 +138,8 @@ export async function runSignalGeneration({
     if (Array.isArray(enabledRules) && enabledRules.length) {
       config.enabled_rules = enabledRules;
     }
+    // Signals tab expects overlay artifacts for visual inspection.
+    config.include_overlays = true;
 
     scopedLogger.debug('signal_generation_request', { config });
 
@@ -136,7 +161,7 @@ export async function runSignalGeneration({
     const response = await signalsAdapter(indicator.id, requestPayload);
 
     const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
-    const signalOverlays = Array.isArray(response?.overlays) ? response.overlays : [];
+    const signalOverlays = normalizeSignalOverlays(response?.overlays);
 
     const annotatedSignals = signalOverlays.map(ov => ({
       ...ov,
@@ -169,6 +194,18 @@ export async function runSignalGeneration({
     setError?.(msg);
     return false;
   } finally {
-    updateChart(chartId, { signalsLoading: false, signalsLoadingFor: null });
+    const latest = getChart(chartId) || {};
+    const currentLoadingMap = latest?.signalsLoadingByIndicator && typeof latest.signalsLoadingByIndicator === 'object'
+      ? latest.signalsLoadingByIndicator
+      : {};
+    const reducedLoadingMap = { ...currentLoadingMap };
+    delete reducedLoadingMap[indicator.id];
+    const activeIds = Object.keys(reducedLoadingMap);
+    updateChart(chartId, {
+      signalsLoading: activeIds.length > 0,
+      signalsLoadingFor: activeIds[0] || null,
+      signalsLoadingByIndicator: activeIds.length ? reducedLoadingMap : null,
+      signalsLoadingCount: activeIds.length,
+    });
   }
 }

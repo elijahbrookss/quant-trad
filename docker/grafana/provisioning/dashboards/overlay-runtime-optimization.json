@@ -1,0 +1,452 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "QuantLab Overlay Jobs Completed",
+      "description": "Count of completed QuantLab overlay async jobs in the selected window.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND status = 'succeeded' AND $__timeFilter(COALESCE(finished_at, created_at));"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "QuantLab Job p95 Duration (s)",
+      "description": "p95 wall-clock duration for quantlab_overlay jobs.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND $__timeFilter(started_at);"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "QuantLab Queue Wait p95 (s)",
+      "description": "p95 wait from enqueue to start for quantlab_overlay jobs.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_at - created_at)))::double precision AS value FROM portal_async_jobs WHERE job_type = 'quantlab_overlay' AND started_at IS NOT NULL AND created_at IS NOT NULL AND $__timeFilter(created_at);"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "QuantLab Projection Candles/s p50",
+      "description": "Median candles-per-second from overlay_runtime_state_projection_done log events.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "quantile_over_time(0.50, {service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap candles_per_second [$__interval])"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "QuantLab Job Duration p50 / p95 (s)",
+      "description": "Trend of quantlab_overlay job durations over time.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p50' AS metric, percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision AS value FROM portal_async_jobs WHERE job_type='quantlab_overlay' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND $__timeFilter(started_at) GROUP BY 1 ORDER BY 1;"
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), 'p95' AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at)))::double precision AS value FROM portal_async_jobs WHERE job_type='quantlab_overlay' AND started_at IS NOT NULL AND finished_at IS NOT NULL AND $__timeFilter(started_at) GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "QuantLab Runtime Projection p95 (ms)",
+      "description": "Projection runtime p95 from backend logs, filterable by indicator_type and indicator_id.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "quantile_over_time(0.95, {service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap duration_ms [$__interval])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "QuantLab Projection Internals (avg ms)",
+      "description": "Per-phase averages from overlay_runtime_state_projection_done logs.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "avg_over_time({service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap projector_ms [$__interval])"
+        },
+        {
+          "refId": "B",
+          "queryType": "range",
+          "expr": "avg_over_time({service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap delta_ms [$__interval])"
+        },
+        {
+          "refId": "C",
+          "queryType": "range",
+          "expr": "avg_over_time({service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap normalize_ms [$__interval])"
+        },
+        {
+          "refId": "D",
+          "queryType": "range",
+          "expr": "avg_over_time({service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | __error__=\"\" | unwrap fingerprint_ms [$__interval])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "QuantLab Optimization Hints (Recent)",
+      "description": "Data-backed hints from recent projection logs.",
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "range",
+          "expr": "{service=\"backend\"} |= \"event=overlay_runtime_state_projection_done\" | logfmt | indicator_type=~\"${indicator_type_filter}\" | indicator_id=~\"${indicator_id_filter}\" | line_format \"indicator={{.indicator_type}} id={{.indicator_id}} candles={{.candles}} cps={{.candles_per_second}} reused={{.reused_bars}} norm_hit={{.normalize_cache_hits}} norm_miss={{.normalize_cache_misses}} duration_ms={{.duration_ms}}\""
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Bot step_signal_eval p95 (ms)",
+      "description": "Bot runtime comparison baseline for step_signal_eval.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Bot Normalize Cache Hit Rate (%)",
+      "description": "Derived from step_signal_eval context counters.",
+      "datasource": {
+        "type": "postgres",
+        "uid": "quanttrad-postgres"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(started_at, $__interval), (100.0 * sum(COALESCE((context->>'overlay_projection_normalize_cache_hits')::double precision, 0.0)) / NULLIF(sum(COALESCE((context->>'overlay_projection_normalize_cache_hits')::double precision, 0.0) + COALESCE((context->>'overlay_projection_normalize_cache_misses')::double precision, 0.0)), 0.0))::double precision AS value FROM portal_bot_run_steps WHERE $__timeFilter(started_at) AND step_name='step_signal_eval' AND ('${bot_id}' = '__all' OR bot_id = '${bot_id}') AND ('${run_id}' = '__all' OR run_id = '${run_id}') GROUP BY 1 ORDER BY 1;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["quant-trad", "overlay", "runtime", "performance", "quantlab"],
+  "templating": {
+    "list": [
+      {
+        "name": "bot_id",
+        "label": "Bot",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT DISTINCT bot_id AS __value, bot_id AS __text FROM portal_bot_runs WHERE bot_id IS NOT NULL ORDER BY 1;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "run_id",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "quanttrad-postgres"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "__all",
+        "multi": false,
+        "query": "SELECT run_id AS __value, run_id AS __text FROM portal_bot_runs WHERE ('${bot_id}' = '__all' OR bot_id = '${bot_id}') ORDER BY started_at DESC LIMIT 500;",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "__all"
+        }
+      },
+      {
+        "name": "indicator_type_filter",
+        "label": "Indicator Type Regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "indicator_id_filter",
+        "label": "Indicator ID Regex",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "selected": true,
+          "text": ".*",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Overlay Runtime Optimization (QuantLab + Bot)",
+  "uid": "qt-overlay-runtime-opt",
+  "version": 2,
+  "weekStart": ""
+}

@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple, Union
+from collections import Counter
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
+
+from engines.indicator_engine.plugins import (
+    ensure_builtin_indicator_plugins_registered,
+    plugin_registry,
+)
 
 from signals.base import BaseSignal
+from signals.overlays.registry import get_overlay_spec
+from signals.overlays.schema import normalize_overlays
 
 
 import time
@@ -22,19 +29,20 @@ logger = logging.getLogger(__name__)
 
 RuleCallable = Callable[[Mapping[str, Any], Any], Optional[Sequence[Mapping[str, Any]]]]
 OverlayAdapter = Callable[[Sequence[BaseSignal], "DataFrame"], Sequence[Mapping[str, Any]]]
-
-
-@dataclass(frozen=True)
-class IndicatorRegistration:
-    """Container describing how to process rules for an indicator."""
-
-    rules: Sequence[RuleCallable]
-    overlay_adapter: Optional[OverlayAdapter] = None
-
-
-_REGISTRY: MutableMapping[str, IndicatorRegistration] = {}
 _RESERVED_CONFIG_KEYS = {"rule_payloads", "enabled_rules"}
 _TRACE_CONFIG_KEYS = {"trace", "log_context", "validate_only"}
+
+
+def _registration_from_plugin(indicator_type: str) -> Optional[Tuple[Sequence[RuleCallable], Optional[OverlayAdapter]]]:
+    key = str(indicator_type or "").strip().lower()
+    ensure_builtin_indicator_plugins_registered()
+    try:
+        manifest = plugin_registry().resolve(key)
+    except RuntimeError:
+        return None
+    rules: tuple[RuleCallable, ...] = ()
+    return rules, manifest.signal_overlay_adapter
+
 
 def _df_summary(df: "DataFrame") -> Mapping[str, Any]:
     try:
@@ -59,44 +67,13 @@ def enable_diagnostic_logging(level: int = logging.DEBUG) -> None:
     root.setLevel(level)
     logger.debug("Diagnostic logging enabled at level=%s", logging.getLevelName(level))
 
-def register_indicator_rules(
-    indicator_type: str,
-    rules: Sequence[RuleCallable],
-    overlay_adapter: Optional[OverlayAdapter] = None,
-) -> None:
-    """Register ordered rule callables for an indicator type."""
-
-    if not indicator_type:
-        raise ValueError("indicator_type must be provided for registration")
-
-    if indicator_type in _REGISTRY:
-        raise ValueError(f"Rules for indicator '{indicator_type}' are already registered")
-
-    normalized_rules = tuple(rules or ())
-    if not normalized_rules:
-        raise ValueError("At least one rule callable must be provided")
-
-    for idx, rule in enumerate(normalized_rules):
-        if not callable(rule):
-            raise TypeError(f"Rule at position {idx} for '{indicator_type}' is not callable")
-
-    _REGISTRY[indicator_type] = IndicatorRegistration(
-        rules=normalized_rules,
-        overlay_adapter=overlay_adapter,
-    )
-    logger.debug(
-        "Registered %d rule(s) for indicator '%s': %s | overlay_adapter=%s",
-        len(normalized_rules),
-        indicator_type,
-        [getattr(r, "__name__", repr(r)) for r in normalized_rules],
-        getattr(overlay_adapter, "__name__", None),
-    )
-
 
 def _normalise_indicator_type(indicator: Union[str, Any]) -> str:
     if isinstance(indicator, str):
-        return indicator
-    return getattr(indicator, "NAME", indicator.__class__.__name__)
+        return str(indicator).strip().lower()
+    if isinstance(indicator, type):
+        return str(getattr(indicator, "NAME", indicator.__name__)).strip().lower()
+    return str(getattr(indicator, "NAME", indicator.__class__.__name__)).strip().lower()
 
 
 def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
@@ -125,23 +102,84 @@ def _rule_identifiers(rule: RuleCallable) -> Tuple[str, ...]:
     return normalised if normalised else (repr(rule),)
 
 
+
+def _resolve_dependencies(
+    all_rules: Sequence[RuleCallable],
+    explicitly_requested: Set[str],
+) -> Tuple[List[RuleCallable], Set[str]]:
+    """Resolve rule dependencies and return (rules_to_execute, explicitly_requested_ids).
+
+    Args:
+        all_rules: All available rules
+        explicitly_requested: Set of rule_ids that were explicitly requested
+
+    Returns:
+        - rules_to_execute: List of rules to execute (includes dependencies)
+        - explicitly_requested_ids: Set of rule_ids that were explicitly requested (unchanged)
+    """
+    # Build a map of rule_id -> rule
+    rules_by_id: Dict[str, RuleCallable] = {}
+    for rule in all_rules:
+        rule_id = getattr(rule, "signal_id", None)
+        if rule_id:
+            rules_by_id[rule_id] = rule
+
+    # Track which rules to execute (start with explicitly requested)
+    rules_to_execute_ids: Set[str] = set(explicitly_requested)
+
+    # Recursively add dependencies
+    to_process = list(explicitly_requested)
+    while to_process:
+        current_rule_id = to_process.pop()
+        current_rule = rules_by_id.get(current_rule_id)
+        if not current_rule:
+            continue
+
+        dependencies = getattr(current_rule, "_rule_depends_on", [])
+        for dep_id in dependencies:
+            if dep_id not in rules_to_execute_ids:
+                logger.debug("Adding dependency: %s (required by %s)", dep_id, current_rule_id)
+                rules_to_execute_ids.add(dep_id)
+                to_process.append(dep_id)
+
+    # Build final list of rules to execute (preserve original order)
+    final_rules = [rule for rule in all_rules if getattr(rule, "signal_id", None) in rules_to_execute_ids]
+
+    return final_rules, explicitly_requested
+
+
 def _filter_enabled_rules(
     rules: Sequence[RuleCallable],
     enabled_rules: Optional[Iterable[Any]],
     indicator_type: str,
-) -> Sequence[RuleCallable]:
+) -> Tuple[Sequence[RuleCallable], Set[str]]:
+    """Filter rules based on enabled_rules config and resolve dependencies.
+
+    Returns:
+        - filtered_rules: List of rules to execute (includes dependencies)
+        - explicitly_requested: Set of rule_ids that were explicitly requested (for signal filtering)
+    """
     if not enabled_rules:
-        return rules
+        # No filter specified - all rules are explicitly requested
+        explicitly_requested = {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
+        return rules, explicitly_requested
 
     desired: Set[str] = {str(rule_id).lower() for rule_id in enabled_rules if rule_id is not None}
     if not desired:
-        return rules
+        explicitly_requested = {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
+        return rules, explicitly_requested
 
+    # Find explicitly requested rules
     filtered: List[RuleCallable] = []
+    explicitly_requested: Set[str] = set()
+
     for rule in rules:
         identifiers = {ident.lower() for ident in _rule_identifiers(rule)}
         if identifiers & desired:
             filtered.append(rule)
+            rule_id = getattr(rule, "signal_id", None)
+            if rule_id:
+                explicitly_requested.add(rule_id)
 
     if not filtered:
         logger.warning(
@@ -150,9 +188,12 @@ def _filter_enabled_rules(
             sorted(desired),
             [tuple(_rule_identifiers(rule))[0] for rule in rules],
         )
-        return rules
+        return rules, {getattr(r, "signal_id", None) for r in rules if getattr(r, "signal_id", None)}
 
-    return tuple(filtered)
+    # Resolve dependencies
+    final_rules, explicitly_requested = _resolve_dependencies(rules, explicitly_requested)
+
+    return tuple(final_rules), explicitly_requested
 
 
 def _resolve_payloads(config: Mapping[str, Any]) -> List[Any]:
@@ -177,6 +218,8 @@ def _build_context(
         context[key] = value
     if "symbol" not in context and hasattr(indicator, "symbol"):
         context["symbol"] = getattr(indicator, "symbol")
+    if indicator_type not in context and not isinstance(indicator, str):
+        context[indicator_type] = indicator
     return context
 
 
@@ -202,108 +245,78 @@ def _metadata_to_signal(meta: Mapping[str, Any], default_confidence: float = 1.0
         metadata=metadata,
     )
 
+
+def _validate_and_process_signal(
+    meta: Mapping[str, Any],
+    rule_name: str,
+    rule_id: Optional[str],
+    context: Mapping[str, Any],
+    validate_only: bool,
+    signals: List[BaseSignal],
+    explicitly_requested: Set[str],
+    payload_idx: Optional[int] = None,
+) -> bool:
+    """Validate signal metadata and add to signals list. Returns True if successful.
+
+    Args:
+        rule_id: The rule_id of the rule that generated this signal
+        explicitly_requested: Set of rule_ids that were explicitly requested by the user
+
+    Note:
+        Signals are only emitted if the rule_id is in explicitly_requested.
+        This allows dependency rules to run without polluting the signal output.
+    """
+    # Validate minimal fields before conversion
+    missing = {"type", "time"} - set(meta.keys())
+    if missing:
+        logger.warning(
+            "Result missing required keys %s | rule=%s%s | meta=%r",
+            missing,
+            rule_name,
+            f" | payload_idx={payload_idx}" if payload_idx is not None else "",
+            meta
+        )
+        return False
+
+    # Ensure symbol is set
+    meta_with_symbol = meta
+    if "symbol" not in meta and "symbol" in context:
+        meta_with_symbol = dict(meta)
+        meta_with_symbol.setdefault("symbol", context["symbol"])
+
+    if validate_only:
+        logger.debug("VALIDATE-ONLY: would emit %r", meta_with_symbol)
+        return True
+
+    # Filter signals: only emit from explicitly requested rules
+    if rule_id and rule_id not in explicitly_requested:
+        logger.debug(
+            "Skipping signal from dependency rule | rule=%s | rule_id=%s | signal=%r",
+            rule_name, rule_id, meta_with_symbol.get("type")
+        )
+        return True  # Still return True (valid signal, just filtered)
+
+    try:
+        sig = _metadata_to_signal(meta_with_symbol)
+        signals.append(sig)
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to convert metadata to BaseSignal | rule=%s | meta=%r",
+            rule_name, meta_with_symbol
+        )
+        return False
+
 def run_indicator_rules(
     indicator: Union[str, Any],
     market_df: "DataFrame",
     **config: Any,
 ) -> List[BaseSignal]:
     indicator_type = _normalise_indicator_type(indicator)
-    registration = _REGISTRY.get(indicator_type)
-    if registration is None:
-        # Extra hint when the name doesn't match
-        logger.warning(
-            "No rules found for indicator '%s'. Registered types: %s",
-            indicator_type, list(_REGISTRY.keys())
-        )
-        raise ValueError(f"No rules registered for indicator '{indicator_type}'")
-
-    context = _build_context(indicator, indicator_type, market_df, config)
-    payloads = _resolve_payloads(config)
-
-    trace = bool(config.get("trace") or config.get("log_context"))
-    validate_only = bool(config.get("validate_only"))
-
-    if trace:
-        logger.debug(
-            "Signal run start | indicator=%s | df=%s | payload_count=%d",
-            indicator_type, _df_summary(market_df), len(payloads)
-        )
-        # Safe context preview (without df)
-        ctx_preview = {k: v for k, v in context.items() if k not in {"df"}}
-        logger.debug("Context keys=%s", sorted(ctx_preview.keys()))
-        logger.debug("Context preview=\n%s", pformat(ctx_preview))
-
-    enabled_rules = config.get("enabled_rules")
-    active_rules = _filter_enabled_rules(registration.rules, enabled_rules, indicator_type)
-
-    signals: List[BaseSignal] = []
-    total_rules = len(active_rules)
-    for r_idx, rule in enumerate(active_rules):
-        rule_name = getattr(rule, "__name__", repr(rule))
-        t_rule_start = time.perf_counter()
-        logger.debug("Rule[%d/%d] %s -> payloads=%d", r_idx+1, total_rules, rule_name, len(payloads))
-
-        for p_idx, payload in enumerate(payloads):
-            t_payload_start = time.perf_counter()
-            try:
-                results = rule(context, payload)
-            except Exception:
-                logger.exception(
-                    "Rule error | rule=%s | payload_idx=%d | payload=%r",
-                    rule_name, p_idx, payload
-                )
-                continue
-
-            took_ms = int((time.perf_counter() - t_payload_start) * 1000)
-            count = 0 if not results else len(results)
-            logger.debug(
-                "Rule payload done | rule=%s | payload_idx=%d | results=%d | %dms",
-                rule_name, p_idx, count, took_ms
-            )
-
-            if not results:
-                continue
-
-            for meta_idx, meta in enumerate(results):
-                # Validate minimal fields before conversion
-                missing = {"type", "time"} - set(meta.keys())
-                if missing:
-                    logger.warning(
-                        "Result missing required keys %s | rule=%s | payload_idx=%d | meta=%r",
-                        missing, rule_name, p_idx, meta
-                    )
-                    continue
-
-                # Ensure symbol is set
-                if "symbol" not in meta and "symbol" in context:
-                    meta = dict(meta)
-                    meta.setdefault("symbol", context["symbol"])
-
-                if validate_only:
-                    logger.debug("VALIDATE-ONLY: would emit %r", meta)
-                    continue
-
-                try:
-                    sig = _metadata_to_signal(meta)
-                except Exception:
-                    logger.exception(
-                        "Failed to convert metadata to BaseSignal | rule=%s | meta_idx=%d | meta=%r",
-                        rule_name, meta_idx, meta
-                    )
-                    continue
-
-                signals.append(sig)
-
-        logger.debug(
-            "Rule complete | rule=%s | emitted_so_far=%d | rule_time_ms=%d",
-            rule_name, len(signals), int((time.perf_counter() - t_rule_start) * 1000)
-        )
-
-    logger.debug(
-        "Generated %d signal(s) for indicator '%s' using %d payload(s)",
-        len(signals), indicator_type, len(payloads)
+    raise RuntimeError(
+        "legacy_signal_batch_path_disabled: runtime snapshot per-bar signal emission is the only supported path "
+        f"(indicator_type={indicator_type})"
     )
-    return signals
 
 
 def build_signal_overlays(
@@ -313,61 +326,55 @@ def build_signal_overlays(
     **kwargs: Any,
 ) -> List[Mapping[str, Any]]:
     indicator_type = _normalise_indicator_type(indicator)
-    registration = _REGISTRY.get(indicator_type)
-    if registration is None:
-        logger.warning(
-            "No rules registered for indicator '%s' (overlay build requested). Registered: %s",
-            indicator_type, list(_REGISTRY.keys())
+    if not get_overlay_spec(indicator_type):
+        raise ValueError(
+            f"overlay spec missing for type '{indicator_type}'. Register with overlay_type/register_overlay_type."
         )
+    registration = _registration_from_plugin(indicator_type)
+    if registration is None:
+        logger.warning("signal_plugin_missing_for_overlay | indicator_type=%s", indicator_type)
         raise ValueError(f"No rules registered for indicator '{indicator_type}'")
 
-    adapter = registration.overlay_adapter
+    _, adapter = registration
     if adapter is None:
-        logger.debug("No overlay adapter registered for '%s' -> returning []", indicator_type)
-        return []
+        logger.error("signal_overlay_adapter_missing | indicator_type=%s", indicator_type)
+        raise ValueError(f"No overlay adapter registered for indicator '{indicator_type}'")
 
     logger.debug(
         "Building overlays | indicator=%s | signals=%d | plot_df=%s | kwargs=%s",
         indicator_type, len(signals), _df_summary(plot_df), list(kwargs.keys())
     )
     try:
-        overlays = list(adapter(signals, plot_df, **kwargs))
+        raw_overlays = list(adapter(signals, plot_df, **kwargs))
     except Exception:
         logger.exception("Overlay adapter error | indicator=%s", indicator_type)
         return []
 
+    overlays = normalize_overlays(indicator_type, raw_overlays)
+    if overlays:
+        logger.debug(
+            "Built %d overlay artefact(s) for indicator '%s'",
+            len(overlays), indicator_type
+        )
+        return overlays
+
     logger.debug(
-        "Built %d overlay artefact(s) for indicator '%s'",
-        len(overlays), indicator_type
+        "signal_overlay_adapter_empty | indicator_type=%s signals=%d",
+        indicator_type,
+        len(signals),
     )
-    return overlays
+    return []
 
 
 
 def describe_indicator_rules(indicator_type: str) -> List[Mapping[str, Any]]:
-    """Return friendly metadata about registered rules for an indicator."""
-
-    registration = _REGISTRY.get(indicator_type)
-    if registration is None:
-        return []
-
-    descriptions: List[Mapping[str, Any]] = []
-    for rule in registration.rules:
-        identifiers = _rule_identifiers(rule)
-        rule_id = identifiers[0]
-        label = getattr(rule, "signal_label", None) or rule_id.replace("_", " ").title()
-        description = getattr(rule, "signal_description", None)
-        descriptions.append({
-            "id": rule_id,
-            "label": label,
-            "description": description,
-        })
-
-    return descriptions
+    raise RuntimeError(
+        "legacy_signal_rule_catalog_disabled: runtime snapshot per-bar signal emission is the only supported path "
+        f"(indicator_type={indicator_type})"
+    )
 
 
 __all__ = [
-    "register_indicator_rules",
     "run_indicator_rules",
     "build_signal_overlays",
     "describe_indicator_rules",

@@ -1,4 +1,4 @@
-name: Dockerized Tests with Coverage
+name: Tests with Coverage
 
 on:
   push:
@@ -6,46 +6,27 @@ on:
   pull_request:
     branches: [develop, test, main]
 
-env:
-  ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
-  ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-
 jobs:
-  integration-tests:
+  targeted-suites:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, provider, web]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run tests with coverage inside Docker
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
         run: |
-          docker compose -f docker/docker-compose.test.yml run --rm \
-            -e ALPACA_API_KEY="${ALPACA_API_KEY}" \
-            -e ALPACA_SECRET_KEY="${ALPACA_SECRET_KEY}" \
-            test bash -c "
-              pytest --cov=src --cov-report=term --cov-report=xml &&
-              echo '' &&
-              echo '========== Coverage Summary ==========' &&
-              coverage report &&
-              echo '======================================='
-            "
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Tear down containers
-        if: always()
-        run: docker compose -f docker/docker-compose.test.yml down
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-xml
-          path: coverage.xml
-          if-no-files-found: ignore
-
-      - name: Upload indicator chart artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: indicator-charts
-          path: output/integration_tests/**/*.png
-          if-no-files-found: ignore
+      - name: Run ${{ matrix.suite }} suite
+        run: ./scripts/ci/run_test_suite.sh "${{ matrix.suite }}"
