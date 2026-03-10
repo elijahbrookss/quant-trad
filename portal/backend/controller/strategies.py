@@ -431,6 +431,8 @@ async def delete_strategy(strategy_id: str) -> Response:
         strategy_service.delete_strategy(strategy_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     return Response(status_code=204)
 

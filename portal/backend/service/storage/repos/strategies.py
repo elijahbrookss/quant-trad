@@ -102,6 +102,24 @@ def delete_strategy(strategy_id: str) -> None:
         return
     try:
         with db.session() as session:
+            dependent_bots = session.execute(
+                select(BotRecord.id, BotRecord.name).where(BotRecord.strategy_id == strategy_id)
+            ).all()
+            if dependent_bots:
+                bot_refs = [
+                    f"{str(bot_id)}({str(bot_name or bot_id)})"
+                    for bot_id, bot_name in dependent_bots
+                ]
+                joined = ", ".join(bot_refs)
+                logger.error(
+                    "strategy_delete_blocked_by_bots | strategy_id=%s | bot_ids=%s",
+                    strategy_id,
+                    ",".join(str(bot_id) for bot_id, _bot_name in dependent_bots),
+                )
+                raise ValueError(
+                    f"Cannot delete strategy {strategy_id}: dependent bots exist. "
+                    f"Delete or reassign these bots first: {joined}"
+                )
             record = session.get(StrategyRecord, strategy_id)
             if record:
                 session.delete(record)
@@ -445,7 +463,6 @@ def delete_rule_filter(filter_id: str) -> None:
                 session.delete(record)
     except SQLAlchemyError as exc:
         logger.warning("rule_filter_delete_failed | filter=%s | error=%s", filter_id, exc)
-
 
 
 
