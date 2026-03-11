@@ -18,6 +18,7 @@ from ..storage.storage import (
     get_latest_bot_runtime_run_id,
     upsert_bot_run_view_state,
 )
+from .botlens_projection import canonicalize_projection, overlay_projection_delta
 from .botlens_series_service import build_live_tail_messages
 
 logger = logging.getLogger(__name__)
@@ -77,33 +78,6 @@ def _tail_limit(entries: Any, limit: int) -> list[Any]:
     return values
 
 
-def _overlay_identity(overlay: Any, index: int) -> str:
-    if not isinstance(overlay, AbcMapping):
-        return f"index:{index}"
-    for key in ("id", "overlay_id", "name", "key", "slug", "indicator_id", "type"):
-        value = str(overlay.get(key) or "").strip()
-        if value:
-            return f"{key}:{value}"
-    return f"index:{index}"
-
-
-def _overlay_fingerprint(overlay: Any) -> str:
-    if not isinstance(overlay, AbcMapping):
-        return ""
-    return json.dumps(_sanitize_json(dict(overlay)), sort_keys=True, separators=(",", ":"))
-
-
-def _series_identity(series: Any, index: int) -> str:
-    if not isinstance(series, AbcMapping):
-        return f"series_index:{index}"
-    strategy_id = str(series.get("strategy_id") or "").strip()
-    symbol = str(series.get("symbol") or "").strip()
-    timeframe = str(series.get("timeframe") or "").strip()
-    if strategy_id or symbol or timeframe:
-        return f"{strategy_id}|{symbol}|{timeframe}"
-    return f"series_index:{index}"
-
-
 def _compact_overlay_geometry(value: Any, *, max_points: int) -> Any:
     if isinstance(value, AbcMapping):
         compact: Dict[str, Any] = {}
@@ -124,62 +98,6 @@ def _compact_overlay_window(overlays: Any) -> list[Dict[str, Any]]:
             continue
         compacted.append(dict(_compact_overlay_geometry(dict(overlay), max_points=_MAX_OVERLAY_POINTS)))
     return compacted
-
-
-def _build_overlay_delta_snapshot(*, previous: Any, current: Dict[str, Any]) -> Dict[str, Any]:
-    previous_snapshot = previous if isinstance(previous, AbcMapping) else {}
-    previous_series_raw = previous_snapshot.get("series")
-    previous_series = previous_series_raw if isinstance(previous_series_raw, list) else []
-    previous_by_id: Dict[str, Dict[str, Any]] = {}
-    for series_index, series_entry in enumerate(previous_series):
-        if not isinstance(series_entry, AbcMapping):
-            continue
-        previous_by_id[_series_identity(series_entry, series_index)] = dict(series_entry)
-
-    current_series_raw = current.get("series")
-    current_series = current_series_raw if isinstance(current_series_raw, list) else []
-    next_series: list[Dict[str, Any]] = []
-    for series_index, series_entry in enumerate(current_series):
-        if not isinstance(series_entry, AbcMapping):
-            continue
-        series_row = dict(series_entry)
-        current_overlays_raw = series_row.get("overlays")
-        current_overlays = list(current_overlays_raw) if isinstance(current_overlays_raw, list) else []
-
-        previous_series_entry = previous_by_id.get(_series_identity(series_entry, series_index))
-        if previous_series_entry is None:
-            series_row["overlay_delta"] = {"mode": "replace", "removed": []}
-            next_series.append(series_row)
-            continue
-
-        previous_overlays_raw = previous_series_entry.get("overlays")
-        previous_overlays = list(previous_overlays_raw) if isinstance(previous_overlays_raw, list) else []
-        previous_map: Dict[str, Dict[str, Any]] = {}
-        for overlay_index, overlay in enumerate(previous_overlays):
-            if not isinstance(overlay, AbcMapping):
-                continue
-            previous_map[_overlay_identity(overlay, overlay_index)] = dict(overlay)
-
-        current_ids: list[str] = []
-        changed: list[Dict[str, Any]] = []
-        for overlay_index, overlay in enumerate(current_overlays):
-            if not isinstance(overlay, AbcMapping):
-                continue
-            overlay_id = _overlay_identity(overlay, overlay_index)
-            current_ids.append(overlay_id)
-            previous_overlay = previous_map.get(overlay_id)
-            if previous_overlay is None or _overlay_fingerprint(previous_overlay) != _overlay_fingerprint(overlay):
-                changed.append(dict(overlay))
-
-        current_id_set = set(current_ids)
-        removed = [overlay_id for overlay_id in previous_map.keys() if overlay_id not in current_id_set]
-        series_row["overlays"] = changed
-        series_row["overlay_delta"] = {"mode": "delta", "removed": removed}
-        next_series.append(series_row)
-
-    next_snapshot = dict(current)
-    next_snapshot["series"] = next_series
-    return next_snapshot
 
 
 _MAX_CANDLES = _resolve_limit("BOTLENS_MAX_CANDLES", 320)
@@ -581,7 +499,7 @@ class BotTelemetryHub:
             )
             return
         raw_chart = view_envelope.get("payload") if isinstance(view_envelope, AbcMapping) else {}
-        full_snapshot = _trim_chart_snapshot(raw_chart)
+        full_snapshot = canonicalize_projection(_trim_chart_snapshot(raw_chart))
         snapshot_runtime = dict(full_snapshot.get("runtime") or {}) if isinstance(full_snapshot.get("runtime"), AbcMapping) else {}
         snapshot_at = view_envelope.get("at") or payload.get("at")
         snapshot_known_at = view_envelope.get("known_at") or payload.get("known_at") or snapshot_at
@@ -613,7 +531,7 @@ class BotTelemetryHub:
                 view_seq,
                 seq_gap,
             )
-        stream_snapshot = _build_overlay_delta_snapshot(previous=previous_snapshot, current=full_snapshot)
+        overlay_delta = overlay_projection_delta(previous=previous_snapshot, current=full_snapshot)
 
         view_state_row = {
             "run_id": run_id,
@@ -709,7 +627,7 @@ class BotTelemetryHub:
             "event_time": snapshot_at,
             "known_at": snapshot_known_at,
             "payload": {
-                "snapshot": stream_snapshot,
+                "projection": full_snapshot,
                 "summary": {
                     "series_count": len(full_snapshot.get("series") or []),
                     "trade_count": trade_count,
@@ -720,13 +638,14 @@ class BotTelemetryHub:
                     "persist_seq_lag": persist_seq_lag,
                     "persist_lag_ms": persist_lag_ms,
                 },
-                "snapshot_meta": {
+                "projection_meta": {
                     "schema_version": snapshot_schema_version,
                     "known_at": snapshot_known_at,
                     "previous_seq": previous_seq,
                     "seq_gap_from_previous": seq_gap,
                     "resync_required": bool(resync_required),
                 },
+                "overlay_projection_delta": overlay_delta,
                 "stream_metrics": {
                     "payload_bytes": payload_bytes,
                     "ingest_queue_depth": ingest_queue_depth,

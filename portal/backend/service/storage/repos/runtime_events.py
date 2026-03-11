@@ -146,7 +146,7 @@ def record_bot_run_steps_batch(payloads: Sequence[Dict[str, Any]]) -> int:
 
 
 def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Persist the latest BotLens materialized state for a run scope."""
+    """Persist the latest derived BotLens materialization for a run scope."""
 
     if not db.available:
         raise RuntimeError("database is required for bot view-state persistence")
@@ -199,8 +199,8 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
                 session.add(row)
                 session.flush()
                 return row.to_dict()
-            # Ignore stale updates to preserve monotonic materialized state.
-            if int(row.seq or 0) > seq:
+            # Ignore stale or duplicate updates to preserve monotonic derived state.
+            if int(row.seq or 0) >= seq:
                 return row.to_dict()
             row.seq = seq
             row.schema_version = schema_version
@@ -233,7 +233,7 @@ def get_latest_bot_run_view_state(
     )
     if run_id is not None:
         query = query.where(BotRunViewStateRecord.run_id == str(run_id))
-    query = query.order_by(BotRunViewStateRecord.id.desc()).limit(1)
+    query = query.order_by(BotRunViewStateRecord.seq.desc(), BotRunViewStateRecord.id.desc()).limit(1)
     with db.session() as session:
         row = session.execute(query).scalars().first()
         return row.to_dict() if row else None
@@ -287,7 +287,7 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
                 schema_version=schema_version,
                 payload=_json_safe(dict(payload.get("payload") or {})),
                 event_time=_parse_optional_timestamp(payload.get("event_time")),
-                known_at=_utcnow(),
+                known_at=_parse_optional_timestamp(payload.get("known_at")) or _utcnow(),
                 created_at=_utcnow(),
             )
             session.add(row)

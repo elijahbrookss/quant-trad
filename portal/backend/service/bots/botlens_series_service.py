@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..storage.storage import get_bot_run, get_latest_bot_run_view_state, list_bot_runtime_events
+from .botlens_projection import (
+    bounded_projection,
+    canonical_series_key_from_entry,
+    canonicalize_projection,
+    find_series,
+    merge_candle_streams,
+    normalize_candle_time,
+)
 
 _SCHEMA_VERSION = 1
 _MAX_SCAN_EVENTS = 5000
@@ -35,22 +43,7 @@ def _to_datetime(value: Any) -> Optional[datetime]:
 
 
 def _series_identity(entry: Mapping[str, Any]) -> str:
-    symbol = str(entry.get("symbol") or "").strip().upper()
-    timeframe = str(entry.get("timeframe") or "").strip().lower()
-    return f"{symbol}|{timeframe}"
-
-
-def _find_series(snapshot: Mapping[str, Any], series_key: str) -> Optional[Dict[str, Any]]:
-    series = snapshot.get("series")
-    if not isinstance(series, list):
-        return None
-    target = str(series_key or "").strip().upper()
-    for entry in series:
-        if not isinstance(entry, Mapping):
-            continue
-        if _series_identity(entry).upper() == target:
-            return dict(entry)
-    return None
+    return canonical_series_key_from_entry(entry)
 
 
 def _event_rows_for_run(*, run_id: str, limit: int = _MAX_SCAN_EVENTS) -> Tuple[str, List[Dict[str, Any]]]:
@@ -68,46 +61,45 @@ def _view_state_for_run(*, run_id: str) -> Tuple[str, Optional[Dict[str, Any]], 
     if not bot_id:
         raise ValueError(f"bot_id missing for run_id={run_id}")
     view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=str(run_id), series_key="bot")
-    snapshot = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
-    return bot_id, dict(view_row) if isinstance(view_row, Mapping) else None, snapshot
+    projection = canonicalize_projection(dict(view_row.get("payload") or {})) if isinstance(view_row, Mapping) else {}
+    return bot_id, dict(view_row) if isinstance(view_row, Mapping) else None, projection
 
 
-def _extract_snapshot(row: Mapping[str, Any]) -> Dict[str, Any]:
+def _extract_projection(row: Mapping[str, Any]) -> Dict[str, Any]:
     payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
-    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), Mapping) else {}
-    return dict(snapshot)
+    projection = payload.get("projection") if isinstance(payload.get("projection"), Mapping) else {}
+    if not projection:
+        projection = payload.get("snapshot") if isinstance(payload.get("snapshot"), Mapping) else {}
+    return canonicalize_projection(dict(projection))
 
 
 def _extract_series_point(candle: Mapping[str, Any]) -> Optional[Tuple[int, Dict[str, Any]]]:
-    t = candle.get("time")
-    try:
-        key = int(t)
-    except (TypeError, ValueError):
+    key = normalize_candle_time(candle.get("time"))
+    if key is None:
         return None
-    return key, dict(candle)
+    normalized = merge_candle_streams([dict(candle)])
+    if not normalized:
+        return None
+    return key, dict(normalized[-1])
 
 
-def _window_from_snapshot(
+def _window_from_projection(
     *,
     run_id: str,
     series_key: str,
-    snapshot: Mapping[str, Any],
+    projection: Mapping[str, Any],
     seq: int,
     event_time: Any,
     limit: int,
 ) -> Dict[str, Any]:
-    series = _find_series(snapshot, series_key) or {}
-    candles = series.get("candles") if isinstance(series.get("candles"), list) else []
-    bounded = [dict(c) for c in candles[-max(1, int(limit)): ] if isinstance(c, Mapping)]
-    symbol = str(series.get("symbol") or "").strip().upper()
-
-    trades = []
-    for trade in snapshot.get("trades") if isinstance(snapshot.get("trades"), list) else []:
-        if not isinstance(trade, Mapping):
-            continue
-        if symbol and str(trade.get("symbol") or "").strip().upper() != symbol:
-            continue
-        trades.append(dict(trade))
+    bounded = bounded_projection(projection, candle_limit=limit)
+    selected_series = find_series(bounded, series_key) or {}
+    candles = list(selected_series.get("candles") or []) if isinstance(selected_series.get("candles"), list) else []
+    trades = [dict(trade) for trade in bounded.get("trades") if isinstance(trade, Mapping)] if isinstance(bounded.get("trades"), list) else []
+    logs = list(bounded.get("logs") or []) if isinstance(bounded.get("logs"), list) else []
+    decisions = list(bounded.get("decisions") or []) if isinstance(bounded.get("decisions"), list) else []
+    warnings = list(bounded.get("warnings") or []) if isinstance(bounded.get("warnings"), list) else []
+    runtime = dict(bounded.get("runtime") or {}) if isinstance(bounded.get("runtime"), Mapping) else {}
 
     return {
         "run_id": str(run_id),
@@ -116,15 +108,21 @@ def _window_from_snapshot(
         "seq": int(seq),
         "event_time": event_time,
         "window": {
-            "candles": bounded,
+            "projection": bounded,
+            "selected_series": dict(selected_series) if isinstance(selected_series, Mapping) else {},
+            "candles": candles,
             "trades": trades[-max(1, int(limit)):],
+            "logs": logs,
+            "decisions": decisions,
+            "warnings": warnings,
+            "runtime": runtime,
             "markers": [],
-            "status": str((snapshot.get("runtime") or {}).get("status") or "running"),
+            "status": str(runtime.get("status") or "running"),
         },
     }
 
 
-def _series_keys_from_snapshot(snapshot: Mapping[str, Any]) -> List[str]:
+def _series_keys_from_projection(snapshot: Mapping[str, Any]) -> List[str]:
     series = snapshot.get("series") if isinstance(snapshot.get("series"), list) else []
     keys: List[str] = []
     for entry in series:
@@ -143,7 +141,7 @@ def _merge_snapshot_candles(
     series_key: str,
     before_dt: Optional[datetime],
 ) -> None:
-    series = _find_series(snapshot, series_key) or {}
+    series = find_series(snapshot, series_key) or {}
     candles = series.get("candles") if isinstance(series.get("candles"), list) else []
     for candle in candles:
         if not isinstance(candle, Mapping):
@@ -162,12 +160,12 @@ def _merge_snapshot_candles(
 def get_series_window(*, run_id: str, series_key: str, to: Optional[str], limit: int) -> Dict[str, Any]:
     _bot_id, rows = _event_rows_for_run(run_id=run_id)
     if not rows:
-        _view_bot_id, view_row, snapshot = _view_state_for_run(run_id=run_id)
-        if snapshot:
-            return _window_from_snapshot(
+        _view_bot_id, view_row, projection = _view_state_for_run(run_id=run_id)
+        if projection:
+            return _window_from_projection(
                 run_id=run_id,
                 series_key=series_key,
-                snapshot=snapshot,
+                projection=projection,
                 seq=_coerce_int((view_row or {}).get("seq"), 0),
                 event_time=(view_row or {}).get("event_time") or (view_row or {}).get("known_at"),
                 limit=limit,
@@ -191,21 +189,13 @@ def get_series_window(*, run_id: str, series_key: str, to: Optional[str], limit:
     if selected_row is None:
         selected_row = dict(rows[0])
 
-    snapshot = _extract_snapshot(selected_row)
-    if not _find_series(snapshot, series_key):
-        _bot_id, view_row, fallback_snapshot = _view_state_for_run(run_id=run_id)
-        if fallback_snapshot:
-            snapshot = fallback_snapshot
-            selected_row = {
-                **selected_row,
-                "seq": _coerce_int((view_row or {}).get("seq"), _coerce_int(selected_row.get("seq"), 0)),
-                "event_time": (view_row or {}).get("event_time") or (view_row or {}).get("known_at") or selected_row.get("event_time"),
-                "known_at": (view_row or {}).get("known_at") or selected_row.get("known_at"),
-            }
-    return _window_from_snapshot(
+    projection = _extract_projection(selected_row)
+    if not find_series(projection, series_key):
+        raise ValueError(f"series {series_key!r} was not found for run_id={run_id}")
+    return _window_from_projection(
         run_id=run_id,
         series_key=series_key,
-        snapshot=snapshot,
+        projection=projection,
         seq=_coerce_int(selected_row.get("seq"), 0),
         event_time=selected_row.get("event_time") or selected_row.get("known_at"),
         limit=limit,
@@ -216,18 +206,18 @@ def get_series_history(*, run_id: str, series_key: str, before_ts: Optional[str]
     _bot_id, rows = _event_rows_for_run(run_id=run_id)
     before_dt = _to_datetime(before_ts)
     candle_map: Dict[int, Dict[str, Any]] = {}
-    _view_bot_id, _view_row, fallback_snapshot = _view_state_for_run(run_id=run_id)
-
-    if fallback_snapshot:
-        _merge_snapshot_candles(
-            candle_map=candle_map,
-            snapshot=fallback_snapshot,
-            series_key=series_key,
-            before_dt=before_dt,
-        )
+    if not rows:
+        _view_bot_id, _view_row, fallback_projection = _view_state_for_run(run_id=run_id)
+        if fallback_projection:
+            _merge_snapshot_candles(
+                candle_map=candle_map,
+                snapshot=fallback_projection,
+                series_key=series_key,
+                before_dt=before_dt,
+            )
 
     for row in rows:
-        snapshot = _extract_snapshot(row)
+        snapshot = _extract_projection(row)
         _merge_snapshot_candles(
             candle_map=candle_map,
             snapshot=snapshot,
@@ -263,8 +253,8 @@ def build_live_tail_messages(
     current_snapshot: Mapping[str, Any],
     known_at: Any,
 ) -> List[Dict[str, Any]]:
-    prev_series = _find_series(previous_snapshot or {}, series_key) if previous_snapshot else None
-    curr_series = _find_series(current_snapshot, series_key)
+    prev_series = find_series(canonicalize_projection(previous_snapshot or {}), series_key) if previous_snapshot else None
+    curr_series = find_series(canonicalize_projection(current_snapshot), series_key)
     if not curr_series:
         return []
 
@@ -308,8 +298,8 @@ def build_live_tail_messages(
 def list_series_keys(*, run_id: str) -> Dict[str, Any]:
     _bot_id, rows = _event_rows_for_run(run_id=run_id)
     if rows:
-        keys = _series_keys_from_snapshot(_extract_snapshot(rows[-1]))
+        keys = _series_keys_from_projection(_extract_projection(rows[-1]))
         if keys:
             return {"run_id": str(run_id), "series": keys}
-    _view_bot_id, _view_row, snapshot = _view_state_for_run(run_id=run_id)
-    return {"run_id": str(run_id), "series": _series_keys_from_snapshot(snapshot)}
+    _view_bot_id, _view_row, projection = _view_state_for_run(run_id=run_id)
+    return {"run_id": str(run_id), "series": _series_keys_from_projection(projection)}
