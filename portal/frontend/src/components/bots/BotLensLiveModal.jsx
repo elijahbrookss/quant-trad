@@ -15,8 +15,17 @@ import {
   openBotLensSeriesLiveStream,
 } from '../../adapters/bot.adapter.js'
 import { describeBotLifecycle, getBotRunId, getBotStatus, normalizeBotStatus } from './botStatusModel.js'
-import { shouldForceResyncForSeqGap } from './botlensStreamContract.js'
 import { BOTLENS_PHASES, botlensReducer, initialBotLensState } from './botlensStateMachine.js'
+import {
+  applyHistoryPage,
+  applyLiveTail,
+  assessLiveContinuity,
+  buildProjectionFromWindow,
+  canonicalSeriesKey,
+  findProjectionSeries,
+  normalizeProjection,
+  normalizeSeriesKey,
+} from './botlensProjection.js'
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -37,32 +46,10 @@ function normalizeEventPayload(message) {
   if (String(message.type || '') !== 'botlens_live_tail') return null
   return {
     runId: message?.run_id ? String(message.run_id) : null,
+    seriesKey: normalizeSeriesKey(message?.series_key || ''),
     seq: Number(message?.seq || 0),
     messageType: String(message?.message_type || ''),
     payload: message?.payload && typeof message.payload === 'object' ? message.payload : {},
-  }
-}
-
-function buildWindowSnapshot({ seriesKey, candles, status = 'running' }) {
-  const [symbolRaw, timeframeRaw] = String(seriesKey || '').split('|')
-  const symbol = String(symbolRaw || '').toUpperCase()
-  const timeframe = String(timeframeRaw || '').toLowerCase()
-  return {
-    series: [
-      {
-        strategy_id: 'botlens',
-        symbol,
-        timeframe,
-        candles: Array.isArray(candles) ? candles : [],
-        overlays: [],
-        stats: {},
-      },
-    ],
-    trades: [],
-    logs: [],
-    decisions: [],
-    warnings: [],
-    runtime: { status },
   }
 }
 
@@ -92,63 +79,42 @@ const LEDGER_POLL_INTERVAL_MS = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_MS', 8
 const LEDGER_POLL_LIMIT = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_LIMIT', 500)
 const LEDGER_MAX_EVENTS = readPositiveInt('VITE_BOTLENS_LEDGER_MAX_EVENTS', 3000)
 
-function primarySeries(snapshot) {
+function selectedProjectionSeries(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null
+  const selected = findProjectionSeries(snapshot, snapshot?.series_key || '')
+  if (selected) return selected
   const series = Array.isArray(snapshot.series) ? snapshot.series : null
   if (!series || !series.length) return null
   const entry = series[0]
   return entry && typeof entry === 'object' ? entry : null
 }
 
-function primarySeriesKey(snapshot) {
-  const primary = primarySeries(snapshot)
+function selectedProjectionSeriesKey(snapshot) {
+  const explicit = normalizeSeriesKey(snapshot?.series_key || '')
+  if (explicit) return explicit
+  const primary = selectedProjectionSeries(snapshot)
   if (!primary) return null
-  const symbol = String(primary.symbol || '').trim()
-  const timeframe = String(primary.timeframe || '').trim()
-  if (!symbol || !timeframe) return null
-  return `${symbol}|${timeframe}`
+  return canonicalSeriesKey(primary.symbol, primary.timeframe)
 }
 
-function primaryCandles(snapshot) {
-  const primary = primarySeries(snapshot)
+function selectedProjectionCandles(snapshot) {
+  const primary = selectedProjectionSeries(snapshot)
   const candles = primary?.candles
   return Array.isArray(candles) ? candles : null
 }
 
-function primaryCandleCount(snapshot) {
-  const candles = primaryCandles(snapshot)
+function selectedProjectionCandleCount(snapshot) {
+  const candles = selectedProjectionCandles(snapshot)
   return Array.isArray(candles) ? candles.length : 0
 }
 
 function candleLag(renderedSnapshot, canonicalSnapshot) {
   if (!renderedSnapshot || !canonicalSnapshot) return 0
-  if (primarySeriesKey(renderedSnapshot) !== primarySeriesKey(canonicalSnapshot)) return 0
-  const renderedCount = primaryCandleCount(renderedSnapshot)
-  const canonicalCount = primaryCandleCount(canonicalSnapshot)
+  if (selectedProjectionSeriesKey(renderedSnapshot) !== selectedProjectionSeriesKey(canonicalSnapshot)) return 0
+  const renderedCount = selectedProjectionCandleCount(renderedSnapshot)
+  const canonicalCount = selectedProjectionCandleCount(canonicalSnapshot)
   if (!Number.isFinite(renderedCount) || !Number.isFinite(canonicalCount)) return 0
   return Math.max(0, canonicalCount - renderedCount)
-}
-
-function snapshotWithPrimaryCandles(snapshot, candles) {
-  if (!snapshot || typeof snapshot !== 'object') return snapshot
-  const series = Array.isArray(snapshot.series) ? snapshot.series : []
-  if (!series.length) return snapshot
-  const clonedSeries = series.slice()
-  const first = clonedSeries[0]
-  if (!first || typeof first !== 'object') return snapshot
-  clonedSeries[0] = { ...first, candles: Array.isArray(candles) ? candles : [] }
-  const next = { ...snapshot, series: clonedSeries }
-  if (snapshot.runtime && typeof snapshot.runtime === 'object') {
-    const runtime = { ...snapshot.runtime }
-    if (Array.isArray(candles) && candles.length > 0) {
-      const last = candles[candles.length - 1]
-      if (last && typeof last === 'object') {
-        runtime.last_bar = { ...last }
-      }
-    }
-    next.runtime = runtime
-  }
-  return next
 }
 
 function nowMs() {
@@ -206,12 +172,14 @@ function normalizeSymbolKey(value) {
   return String(value || '').trim().toUpperCase()
 }
 
-function selectedSeriesKeyFor(entry, index) {
-  if (!entry || typeof entry !== 'object') return `series-${index}`
-  const strategyId = String(entry.strategy_id || '').trim()
-  const symbol = normalizeSymbolKey(entry.symbol)
-  const timeframe = String(entry.timeframe || '').trim().toUpperCase()
-  return `${strategyId}|${symbol}|${timeframe}|${index}`
+function seriesOptionFromKey(key) {
+  const canonical = normalizeSeriesKey(key)
+  const [symbol, timeframe] = canonical.split('|')
+  return {
+    key: canonical,
+    symbol: String(symbol || '—'),
+    timeframe: String(timeframe || '—'),
+  }
 }
 
 function isOpenTrade(trade) {
@@ -304,13 +272,13 @@ function buildLensStages({ botLifecycle, selectedRun, snapshotReady, streamState
             ? 'current'
             : 'done'
           : 'done',
-      detail: liveTarget ? botLifecycle.label : selectedRun?.view_state_available ? 'Persisted snapshot found' : 'Snapshot not persisted yet',
+      detail: liveTarget ? botLifecycle.label : 'Reading BotLens runtime records',
     },
     {
       key: 'snapshot',
-      label: 'Snapshot',
+      label: 'Baseline',
       status: hasSnapshot ? 'done' : hasRun ? 'current' : 'upcoming',
-      detail: hasSnapshot ? 'Chart bootstrapped' : liveTarget ? 'Waiting for first BotLens frame' : 'Loading persisted window',
+      detail: hasSnapshot ? 'Canonical baseline established' : liveTarget ? 'Waiting for first BotLens frame' : 'Loading historical baseline',
     },
     {
       key: 'bridge',
@@ -343,6 +311,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const [overlayPanelCollapsed, setOverlayPanelCollapsed] = useState(false)
   const [followLive, setFollowLive] = useState(true)
   const [fullScreen, setFullScreen] = useState(false)
+  const [availableSeriesKeys, setAvailableSeriesKeys] = useState([])
   const [selectedSeriesKey, setSelectedSeriesKey] = useState(null)
   const [hoveredTradeId, setHoveredTradeId] = useState(null)
   const [renderMetrics, setRenderMetrics] = useState({
@@ -379,7 +348,6 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     () => runCatalog.find((entry) => String(entry?.run_id || '') === String(selectedRunId || '')) || null,
     [runCatalog, selectedRunId],
   )
-  const selectedRunViewStateAvailable = Boolean(selectedRun?.view_state_available)
   const selectedRunStatus = normalizeBotStatus(selectedRun?.runtime_status || selectedRun?.status || botStatus)
   const selectedRunIsTerminal = ['completed', 'stopped', 'failed', 'crashed', 'error'].includes(selectedRunStatus)
   const selectedRunIsLiveTarget = Boolean(selectedRunId) && (
@@ -425,6 +393,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     pendingFramesRef.current = []
     renderedSnapshotRef.current = null
     canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+    setAvailableSeriesKeys([])
     setSnapshot(null)
     setError(null)
   }, [open, selectedRunId])
@@ -624,7 +593,11 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const connectSocket = useCallback(
     ({ botId, runId, seq, token }) => {
       closeSocket()
-      const socket = openBotLensSeriesLiveStream(runId, activeSeriesKeyRef.current || primarySeriesKey(renderedSnapshotRef.current) || 'UNKNOWN|1m', { afterSeq: seq })
+      const socket = openBotLensSeriesLiveStream(
+        runId,
+        activeSeriesKeyRef.current || selectedProjectionSeriesKey(renderedSnapshotRef.current) || 'UNKNOWN|1m',
+        { afterSeq: seq },
+      )
       if (!socket) {
         setStreamState('stale')
         setStaleMode(true)
@@ -651,35 +624,32 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           const next = normalizeEventPayload(message)
           if (!next || !next.runId || next.seq <= 0) return
 
-          const prev = cursorRef.current
-          if (prev.runId && next.runId === prev.runId) {
-            if (next.seq <= prev.seq) return
-            if (shouldForceResyncForSeqGap({ previousSeq: prev.seq, nextSeq: next.seq, maxAllowedGap: 1 })) {
-              pendingFramesRef.current = []
-              renderedSnapshotRef.current = null
-              canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
-              setStaleMode(true)
-              setStreamState('resyncing')
-              setStatusMessage(`Stream gap detected (${prev.seq} -> ${next.seq}). Re-syncing snapshot...`)
-              dispatchLens({ type: 'SEQ_GAP' })
-              logger.warn('botlens_stream_seq_gap', {
-                bot_id: botId,
-                run_id: next.runId,
-                expected_seq: prev.seq + 1,
-                actual_seq: next.seq,
-              })
-              syncTokenRef.current += 1
-              closeSocket()
-              return
-            }
-          } else if (prev.runId && next.runId !== prev.runId) {
+          const baseProjection = (
+            pendingFramesRef.current.length > 0
+              ? pendingFramesRef.current[pendingFramesRef.current.length - 1]?.snapshot
+              : renderedSnapshotRef.current
+          ) || canonicalFrameRef.current?.snapshot
+          const continuity = assessLiveContinuity({
+            projection: baseProjection,
+            message: next,
+            seriesKey: activeSeriesKeyRef.current,
+            maxAllowedGap: 1,
+          })
+          if (continuity.action === 'ignore') return
+          if (continuity.action === 'resync') {
             pendingFramesRef.current = []
             renderedSnapshotRef.current = null
             canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
             setStaleMode(true)
             setStreamState('resyncing')
-            setStatusMessage(`Run changed (${prev.runId} -> ${next.runId}). Auto-attaching to latest run...`)
+            setStatusMessage(`BotLens continuity lost (${continuity.reason}). Re-syncing canonical baseline...`)
             dispatchLens({ type: 'SEQ_GAP' })
+            logger.warn('botlens_stream_resync_required', {
+              bot_id: botId,
+              run_id: next.runId,
+              seq: next.seq,
+              reason: continuity.reason,
+            })
             syncTokenRef.current += 1
             closeSocket()
             return
@@ -690,28 +660,16 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           const baseSnapshot = queue.length > 0
             ? queue[queue.length - 1]?.snapshot || null
             : renderedSnapshotRef.current
-          const base = baseSnapshot && typeof baseSnapshot === 'object' ? baseSnapshot : buildWindowSnapshot({
-            seriesKey: activeSeriesKeyRef.current || 'UNKNOWN|1m',
-            candles: [],
-            status: 'running',
+          const base = normalizeProjection(baseSnapshot, {
+            runId: next.runId,
+            seq: Number((baseSnapshot && baseSnapshot.seq) || 0),
+            seriesKey: activeSeriesKeyRef.current,
           })
-          const bars = primaryCandles(base) || []
-          let nextBars = bars
-          if (next.messageType === 'bar_append' && next.payload?.bar) {
-            nextBars = [...bars, next.payload.bar]
-          } else if (next.messageType === 'bar_update' && next.payload?.bar) {
-            const bar = next.payload.bar
-            const tail = bars.length ? bars[bars.length - 1] : null
-            if (tail && Number(tail.time) === Number(bar.time)) {
-              nextBars = [...bars.slice(0, -1), bar]
-            } else {
-              nextBars = [...bars, bar]
-            }
-          }
-          const mergedSnapshot = snapshotWithPrimaryCandles(base, nextBars)
-          if (next.messageType === 'status') {
-            mergedSnapshot.runtime = { ...(mergedSnapshot.runtime || {}), status: String(next.payload?.status || 'running') }
-          }
+          const mergedSnapshot = applyLiveTail({
+            projection: base,
+            message: next,
+            seriesKey: activeSeriesKeyRef.current,
+          })
           const frames = [{
             runId: next.runId,
             seq: next.seq,
@@ -773,7 +731,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       } else {
         setStreamState('bootstrapping')
         if (!selectedRunIsLiveTarget) setStaleMode(false)
-        setStatusMessage(selectedRunIsLiveTarget ? 'Loading BotLens snapshot…' : 'Loading historical BotLens snapshot…')
+        setStatusMessage(selectedRunIsLiveTarget ? 'Loading BotLens baseline…' : 'Loading historical BotLens baseline…')
       }
       while (!cancelled && mountedRef.current && token === syncTokenRef.current) {
         try {
@@ -781,36 +739,28 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           if (!runId) {
             dispatchLens({ type: 'WAITING_FOR_RUN' })
             setStreamState('waiting')
+            setAvailableSeriesKeys([])
             setStatusMessage(selectedRunIsLiveTarget ? botLifecycle.detail : 'Select a run to open BotLens.')
-            syncInFlightRef.current = false
-            return
-          }
-          if (!selectedRunIsLiveTarget && selectedRunId && !selectedRunViewStateAvailable) {
-            dispatchLens({ type: 'WAITING_FOR_SNAPSHOT' })
-            setStreamState('historical')
-            setStaleMode(false)
-            setSnapshot(null)
-            setStatusMessage('This historical run did not persist BotLens snapshot data.')
             syncInFlightRef.current = false
             return
           }
           pendingFramesRef.current = []
           lastApplyAtRef.current = nowMs()
           const catalog = await fetchBotLensSeriesCatalog(runId)
-          const availableSeries = Array.isArray(catalog?.series) ? catalog.series : []
+          const availableSeries = (Array.isArray(catalog?.series) ? catalog.series : []).map((value) => normalizeSeriesKey(value)).filter(Boolean)
+          setAvailableSeriesKeys(availableSeries)
           const retainedSeriesKey = activeSeriesKeyRef.current
           const bootSeriesKey = retainedSeriesKey && availableSeries.includes(retainedSeriesKey) ? retainedSeriesKey : availableSeries[0] || null
           if (!bootSeriesKey) {
             dispatchLens({ type: 'WAITING_FOR_SNAPSHOT' })
             setStreamState(selectedRunIsLiveTarget ? 'waiting' : 'historical')
             if (!selectedRunIsLiveTarget) setStaleMode(false)
+            setAvailableSeriesKeys([])
             activeSeriesKeyRef.current = null
             setStatusMessage(
               selectedRunIsLiveTarget
                 ? 'Run is active, but BotLens has not published the first series catalog yet. Retrying…'
-                : selectedRunViewStateAvailable
-                  ? 'Persisted snapshot contains no chart series for this run.'
-                  : 'No BotLens series were persisted for this run.',
+                : 'No BotLens series were found for this run.',
             )
             if (selectedRunIsLiveTarget) {
               await delay(1200)
@@ -821,22 +771,21 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           }
           activeSeriesKeyRef.current = bootSeriesKey
           const window = await fetchBotLensSeriesWindow(runId, bootSeriesKey, { to: 'now', limit: 320 })
-          const windowCandles = Array.isArray(window?.window?.candles) ? window.window.candles : []
-          const seeded = buildWindowSnapshot({
+          const startSeq = Number(window?.seq || 0)
+          const seeded = buildProjectionFromWindow({
+            runId,
+            seq: startSeq,
             seriesKey: bootSeriesKey,
-            candles: windowCandles,
-            status: window?.window?.status || (selectedRunIsLiveTarget ? 'running' : selectedRunStatus),
+            window: window?.window,
           })
           setSnapshot(seeded)
           renderedSnapshotRef.current = seeded
-          const startSeq = Number(window?.seq || 0)
           canonicalFrameRef.current = { runId, seq: startSeq, snapshot: seeded }
           dispatchLens({
             type: 'BOOTSTRAP_SUCCESS',
             runId,
             seriesKey: bootSeriesKey,
             seq: startSeq,
-            candles: windowCandles,
             live: selectedRunIsLiveTarget,
           })
           lastSnapCursorRef.current = { runId: null, seq: 0 }
@@ -855,11 +804,11 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           setError(null)
           setStaleMode(false)
           if (selectedRunIsLiveTarget) {
-            setStatusMessage('Snapshot loaded. Connecting live stream…')
+            setStatusMessage('Baseline loaded. Connecting live stream…')
             connectSocket({ botId: bot.id, runId, seq: startSeq, token })
           } else {
             setStreamState('historical')
-            setStatusMessage('Historical run loaded. Live stream is disabled for archived runs.')
+            setStatusMessage('Historical run loaded from BotLens runtime records. Live stream is disabled for archived runs.')
           }
           syncInFlightRef.current = false
           return
@@ -883,7 +832,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       if (!selectedRunId) return
       if (selectedRunIsLiveTarget && streamStateRef.current === 'open') return
       if (!selectedRunIsLiveTarget && renderedSnapshotRef.current) return
-      bootstrapAndConnect('Re-syncing BotLens snapshot…')
+      bootstrapAndConnect('Re-syncing BotLens baseline…')
     }, 2500)
 
     return () => {
@@ -903,7 +852,6 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     selectedRunId,
     selectedRunIsLiveTarget,
     selectedRunStatus,
-    selectedRunViewStateAvailable,
   ])
 
   const activeRunId = selectedRunId || cursor.runId || renderCursor.runId || null
@@ -995,13 +943,13 @@ export function BotLensLiveModal({ bot, open, onClose }) {
 
   const series = useMemo(() => (Array.isArray(snapshot?.series) ? snapshot.series : []), [snapshot])
   const seriesSelectorOptions = useMemo(
-    () =>
-      series.map((entry, index) => ({
-        key: selectedSeriesKeyFor(entry, index),
-        symbol: String(entry?.symbol || '—'),
-        timeframe: String(entry?.timeframe || '—'),
-      })),
-    [series],
+    () => {
+      const sourceKeys = availableSeriesKeys.length
+        ? availableSeriesKeys
+        : series.map((entry) => canonicalSeriesKey(entry?.symbol, entry?.timeframe)).filter(Boolean)
+      return sourceKeys.map((key) => seriesOptionFromKey(key))
+    },
+    [availableSeriesKeys, series],
   )
   useEffect(() => {
     setSelectedSeriesKey((current) => {
@@ -1012,9 +960,8 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   }, [seriesSelectorOptions])
   const selectedSeries = useMemo(() => {
     if (!series.length) return {}
-    const selectedIndex = series.findIndex((entry, index) => selectedSeriesKeyFor(entry, index) === selectedSeriesKey)
-    return selectedIndex >= 0 ? series[selectedIndex] : series[0]
-  }, [selectedSeriesKey, series])
+    return findProjectionSeries(snapshot, selectedSeriesKey) || series[0]
+  }, [selectedSeriesKey, series, snapshot])
   const candles = useMemo(() => (Array.isArray(selectedSeries?.candles) ? selectedSeries.candles : []), [selectedSeries])
   const overlays = useMemo(() => (Array.isArray(selectedSeries?.overlays) ? selectedSeries.overlays : []), [selectedSeries])
   const trades = useMemo(() => (Array.isArray(snapshot?.trades) ? snapshot.trades : []), [snapshot])
@@ -1070,8 +1017,8 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const selectedSeriesLabel = `${selectedSeries?.symbol || '—'} ${selectedSeries?.timeframe || ''}`.trim()
 
   useEffect(() => {
-    if (!selectedSeries || !selectedSeries.symbol || !selectedSeries.timeframe) return
-    const nextSeriesKey = `${String(selectedSeries.symbol || '').toUpperCase()}|${String(selectedSeries.timeframe || '').toLowerCase()}`
+    const nextSeriesKey = normalizeSeriesKey(selectedSeriesKey || '')
+    if (!nextSeriesKey) return
     if (activeSeriesKeyRef.current === nextSeriesKey) return
     activeSeriesKeyRef.current = nextSeriesKey
     if (cursorRef.current?.runId) {
@@ -1085,12 +1032,12 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       setStreamState('resyncing')
       setStatusMessage(`Switching series to ${nextSeriesKey}...`)
     }
-  }, [closeSocket, selectedSeries])
+  }, [closeSocket, selectedSeriesKey])
 
 
   const loadOlderHistory = useCallback(async () => {
     const runId = cursorRef.current?.runId
-    const sk = selectedSeries ? `${String(selectedSeries.symbol || '').toUpperCase()}|${String(selectedSeries.timeframe || '').toLowerCase()}` : null
+    const sk = normalizeSeriesKey(selectedSeriesKey || activeSeriesKeyRef.current || '')
     if (!runId || !sk) return
     const oldest = candles.length ? candles[0] : null
     const beforeTs = oldest?.time ? new Date(Number(oldest.time) * 1000).toISOString() : undefined
@@ -1101,13 +1048,36 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       if (!pageCandles.length) return
       dispatchLens({ type: 'HISTORY_PAGE_SUCCESS', candles: pageCandles })
       setSnapshot((current) => {
-        const merged = [...pageCandles, ...(primaryCandles(current) || [])]
-        return snapshotWithPrimaryCandles(current, merged)
+        const nextProjection = applyHistoryPage({
+          projection: current,
+          seriesKey: sk,
+          candles: pageCandles,
+        })
+        renderedSnapshotRef.current = nextProjection
+        if (canonicalFrameRef.current?.snapshot) {
+          canonicalFrameRef.current = {
+            ...canonicalFrameRef.current,
+            snapshot: applyHistoryPage({
+              projection: canonicalFrameRef.current.snapshot,
+              seriesKey: sk,
+              candles: pageCandles,
+            }),
+          }
+        }
+        pendingFramesRef.current = pendingFramesRef.current.map((frame) => ({
+          ...frame,
+          snapshot: applyHistoryPage({
+            projection: frame.snapshot,
+            seriesKey: sk,
+            candles: pageCandles,
+          }),
+        }))
+        return nextProjection
       })
     } catch (err) {
       logger.warn('botlens_history_page_failed', { run_id: runId, series_key: sk }, err)
     }
-  }, [candles, logger, selectedSeries])
+  }, [candles, logger, selectedSeriesKey])
 
   useEffect(() => {
     if (!hoveredTradeId) return

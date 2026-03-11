@@ -27,28 +27,6 @@ export const coalesce = (...values) => {
   return undefined
 }
 
-export const normalizeCandles = (candles = []) => {
-  if (!Array.isArray(candles)) return []
-  const normalized = candles
-    .map((candle) => ({
-      time: toSec(candle?.time),
-      open: toFiniteNumber(candle?.open),
-      high: toFiniteNumber(candle?.high),
-      low: toFiniteNumber(candle?.low),
-      close: toFiniteNumber(candle?.close),
-    }))
-    .filter(
-      (entry) =>
-        Number.isFinite(entry.time) &&
-        Number.isFinite(entry.open) &&
-        Number.isFinite(entry.high) &&
-        Number.isFinite(entry.low) &&
-        Number.isFinite(entry.close),
-    )
-
-  return normalized.sort((a, b) => a.time - b.time)
-}
-
 export const buildCandleLookup = (candles = []) => {
   const map = new Map()
   for (const candle of candles || []) {

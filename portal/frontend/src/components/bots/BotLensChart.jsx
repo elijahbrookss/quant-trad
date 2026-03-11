@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useChartState } from '../../contexts/ChartStateContext.jsx'
-import { BOTLENS_DEBUG, buildCandleLookup, normalizeCandles } from './chartDataUtils.js'
+import { BOTLENS_DEBUG, buildCandleLookup } from './chartDataUtils.js'
 import { useCameraLock } from './hooks/useCameraLock.js'
 import { useOverlaySync } from './hooks/useOverlaySync.js'
 import { useTradeMarkers } from './hooks/useTradeMarkers.js'
@@ -19,6 +19,7 @@ import {
   buildRegimeBlockSnapshots,
   findNearestCandleTime,
 } from './regimeReadoutUtils.js'
+import { validateCanonicalCandles } from './botlensProjection.js'
 
 const AUTO_FIT_OVERLAY_EXTENTS = String(import.meta.env?.VITE_BOTLENS_AUTO_FIT_OVERLAY_EXTENTS || '')
   .trim()
@@ -223,8 +224,8 @@ export function BotLensChart({
     }
   }, [logger, resolvedOverlays])
 
-  const candleLookup = useMemo(() => buildCandleLookup(resolvedCandles), [resolvedCandles])
-  const candleData = useMemo(() => normalizeCandles(resolvedCandles), [resolvedCandles])
+  const candleData = resolvedCandles
+  const candleLookup = useMemo(() => buildCandleLookup(candleData), [candleData])
   const candleLookupRef = useRef(candleLookup)
 
   useEffect(() => {
@@ -240,19 +241,7 @@ export function BotLensChart({
       diagLoggedRef.current = false
       return
     }
-    let previous = null
-    let violation = null
-    for (let idx = 0; idx < candleData.length; idx += 1) {
-      const current = candleData[idx]
-      if (!Number.isFinite(current?.time)) {
-        continue
-      }
-      if (previous !== null && current.time < previous) {
-        violation = { index: idx, prev: previous, current: current.time }
-        break
-      }
-      previous = current.time
-    }
+    const violation = validateCanonicalCandles(candleData)
     if (violation) {
       console.error('[BotLensChart] Candle order violation', {
         chartId,
@@ -271,16 +260,15 @@ export function BotLensChart({
         last,
       })
       if (debugRanges) {
-        logger.info('candles_normalized', {
-          raw: resolvedCandles.length,
-          normalized: candleData.length,
+        logger.info('candles_validated', {
+          count: candleData.length,
           first,
           last,
         })
       }
       diagLoggedRef.current = true
     }
-  }, [candleData, chartId, debugRanges, logger, resolvedCandles.length])
+  }, [candleData, chartId, debugRanges, logger])
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, priceLines: tradePriceLines } =
     useTradeMarkers(resolvedTrades, candleLookup, candleData)

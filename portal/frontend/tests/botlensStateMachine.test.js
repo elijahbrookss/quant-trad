@@ -9,24 +9,22 @@ test('bootstrap initializes bounded state for selected series', () => {
     runId: 'run-1',
     seriesKey: 'BTC|1m',
     seq: 20,
-    candles: [{ time: 1 }, { time: 2 }],
   })
   assert.equal(next.phase, BOTLENS_PHASES.LIVE)
   assert.equal(next.seq, 20)
-  assert.equal(next.candles.length, 2)
+  assert.equal(next.seriesKey, 'BTC|1m')
 })
 
-test('history page prepends and dedupes overlaps', () => {
+test('history page preserves live/historical phase without owning candle state', () => {
   const seeded = {
     ...initialBotLensState,
     phase: BOTLENS_PHASES.LIVE,
-    candles: [{ time: 2 }, { time: 3 }],
   }
   const next = botlensReducer(seeded, {
     type: 'HISTORY_PAGE_SUCCESS',
     candles: [{ time: 1 }, { time: 2 }],
   })
-  assert.deepEqual(next.candles.map((x) => x.time), [1, 2, 3])
+  assert.equal(next.phase, BOTLENS_PHASES.LIVE)
 })
 
 test('seq gap enters resyncing instead of replaying backlog', () => {
@@ -48,8 +46,7 @@ test('re-bootstrap replaces queued/live state instead of replaying backlog', () 
     runId: 'run-1',
     seriesKey: 'BTC|1m',
     seq: 60,
-    candles: [{ time: 58 }, { time: 59 }, { time: 60 }],
   })
-  assert.deepEqual(next.candles.map((x) => x.time), [58, 59, 60])
   assert.equal(next.seq, 60)
+  assert.equal(next.seriesKey, 'BTC|1m')
 })
