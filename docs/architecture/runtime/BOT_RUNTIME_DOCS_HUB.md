@@ -18,6 +18,7 @@ This note is the entry point for bot runtime architecture in Obsidian.
 
 - [[BOT_RUNTIME_ENGINE_ARCHITECTURE]]: runtime package layout, lifecycle, runtime state, and read models.
 - [[BOT_RUNTIME_SERVICE_ARCHITECTURE]]: API start/stop flow, docker runner, container runtime, and persistence boundaries.
+- [[BOTLENS_DEBUGGER_ARCHITECTURE]]: BotLens purpose, promises, candle/read-model contract, and backend/frontend ownership.
 - [[RUNTIME_COMPOSITION_ROOT]]: explicit portal runtime composition root and injected collaborator seams.
 - [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]]: symbol workers, shared wallet proxy, merged `view_state`, and degrade behavior.
 
