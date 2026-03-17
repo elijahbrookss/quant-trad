@@ -6,15 +6,21 @@ import logging
 import os
 import threading
 import time
-import uuid
 from collections import deque
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from queue import Queue
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
+from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import normalize_epoch
+from engines.bot_runtime.runtime.reporting import (
+    TRADE_OVERLAY_SOURCE,
+    TRADE_RAY_MIN_SECONDS,
+    TRADE_RAY_SPAN_MULTIPLIER,
+    TRADE_STOP_COLOR,
+    TRADE_TARGET_COLOR,
+)
+from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 from engines.indicator_engine import (
     OverlayProjectionInput,
     ensure_builtin_indicator_plugins_registered,
@@ -26,14 +32,6 @@ from signals.overlays.schema import build_overlay, normalize_overlays
 from utils.log_context import build_log_context, merge_log_context, series_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms, get_obs_step_sample_rate, should_sample
 
-from portal.backend.service.bots.bot_runtime.reporting.reporting import (
-    TRADE_OVERLAY_SOURCE,
-    TRADE_STOP_COLOR,
-    TRADE_TARGET_COLOR,
-    TRADE_RAY_MIN_SECONDS,
-    TRADE_RAY_SPAN_MULTIPLIER,
-)
-
 from ..components import (
     ChartStateBuilder,
     InMemoryEventSink,
@@ -42,6 +40,7 @@ from ..components import (
     RuntimeEventSink,
     RuntimeModePolicy,
     RunContext,
+    SeriesStatePersistenceBuffer,
     SeriesRunnerContext,
     SettlementApplier,
     SignalConsumption,
@@ -63,34 +62,19 @@ from ..core import (
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from portal.backend.service.bots.bot_runtime.strategy.series_builder import StrategySeries
-
-
-def _series_builder_cls():
-    from portal.backend.service.bots.bot_runtime.strategy.series_builder import SeriesBuilder
-
-    return SeriesBuilder
-
-
-class _FallbackPluginRegistry:
-    def list_types(self) -> List[str]:
-        return []
-
-    def resolve(self, indicator_type: str):
-        raise RuntimeError(f"indicator plugin registry unavailable: indicator_type={indicator_type}")
-
 
 class RuntimeSetupPrepareMixin:
     def __init__(
         self,
         bot_id: str,
         config: Dict[str, object],
+        deps: BotRuntimeDeps,
         state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         ensure_builtin_overlays_registered()
         self.bot_id = bot_id
         self.config = dict(config)
+        self._deps = deps
         self.mode = (self.config.get("mode") or "instant").lower()
         self.run_type = (self.config.get("run_type") or "backtest").lower()
         self.playback_speed = 0.0
@@ -149,40 +133,16 @@ class RuntimeSetupPrepareMixin:
         self._overlay_dirty = threading.Event()
         self._overlay_aggregator_stop = threading.Event()
         self._overlay_aggregator_thread: Optional[threading.Thread] = None
-        try:
-            ensure_builtin_indicator_plugins_registered()
-            self._indicator_plugin_registry = plugin_registry()
-        except Exception as exc:
-            logger.warning(
-                "bot_runtime_indicator_registry_unavailable | bot_id=%s | error=%s",
-                self.bot_id,
-                exc,
-            )
-            self._indicator_plugin_registry = _FallbackPluginRegistry()
+        ensure_builtin_indicator_plugins_registered()
+        self._indicator_plugin_registry = plugin_registry()
         overlay_cache = default_overlay_cache()
         for indicator_type in self._indicator_plugin_registry.list_types():
             overlay_cache.enable_type(indicator_type)
         self._overlay_cache = overlay_cache
-        indicator_context_cls = None
-        try:
-            from portal.backend.service.indicators.indicator_service.context import IndicatorServiceContext
-
-            indicator_context_cls = IndicatorServiceContext
-        except Exception:
-            indicator_context_cls = None
-        if indicator_context_cls is not None:
-            runtime_indicator_ctx = indicator_context_cls.for_bot_runtime(
-                cache_scope_id=f"{self.bot_id}:{uuid.uuid4()}"
-            )
-            self._indicator_ctx = indicator_context_cls.fork_with_overlay_cache(
-                runtime_indicator_ctx,
-                overlay_cache,
-            )
-        else:
-            self._indicator_ctx = SimpleNamespace(
-                cache_owner="runtime_fallback",
-                cache_scope_id=f"{self.bot_id}:{uuid.uuid4()}",
-            )
+        self._indicator_ctx = self._deps.build_indicator_context(
+            self.bot_id,
+            overlay_cache,
+        )
         logger.info(
             "bot_runtime_indicator_context | bot_id=%s | cache_owner=%s | cache_scope_id=%s",
             self.bot_id,
@@ -199,11 +159,21 @@ class RuntimeSetupPrepareMixin:
         )
         self._persistence_buffer = TradePersistenceBuffer.from_config(
             self.config,
-            self._runtime_log_context,
+            log_context_fn=self._runtime_log_context,
+            record_trade=self._deps.record_bot_trade,
+            record_trade_event=self._deps.record_bot_trade_event,
         )
-        self._step_trace_buffer = StepTracePersistenceBuffer.from_config(self.config)
+        self._series_state_buffer = SeriesStatePersistenceBuffer.from_config(
+            self.config,
+            record_batch=self._deps.record_bot_runtime_events_batch,
+        )
+        self._step_trace_buffer = StepTracePersistenceBuffer.from_config(
+            self.config,
+            record_batch=self._deps.record_bot_run_steps_batch,
+        )
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
+            fetcher=self._deps.fetch_ohlcv,
             build_candles=self._build_candles,
             timeframe_seconds=_timeframe_to_seconds,
             strategy_key_fn=self._strategy_key,
@@ -239,11 +209,12 @@ class RuntimeSetupPrepareMixin:
 
     def _ensure_series_builder(self):
         if self._series_builder is None:
-            self._series_builder = _series_builder_cls()(
+            self._series_builder = SeriesBuilder(
                 self.bot_id,
                 self.config,
                 self.run_type,
-                self._log_candle_sequence,
+                deps=self._deps,
+                log_candle_sequence=self._log_candle_sequence,
                 indicator_ctx=self._indicator_ctx,
                 warning_sink=self._record_runtime_warning,
             )
@@ -654,13 +625,11 @@ class RuntimeSetupPrepareMixin:
         if not indicator_links and isinstance(indicator_ids, list):
             indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
 
-        from portal.backend.service.indicators import indicator_service
-
         for link in indicator_links:
             indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
             if not indicator_id:
                 continue
-            meta = indicator_service.get_instance_meta(indicator_id, ctx=self._indicator_ctx)
+            meta = self._deps.indicator_get_instance_meta(indicator_id, ctx=self._indicator_ctx)
             indicator_type = str(meta.get("type") or "").strip().lower()
             if not indicator_type:
                 raise RuntimeError(f"indicator_state_setup_failed: missing indicator type | indicator_id={indicator_id}")
@@ -1032,6 +1001,7 @@ class RuntimeSetupPrepareMixin:
             timeframe=series.timeframe,
             strategy_id=series.strategy_id,
             symbol=series.symbol,
+            runtime_derived_state=getattr(series, "runtime_derived_state", None),
         )
 
     @staticmethod
@@ -1305,6 +1275,7 @@ class RuntimeSetupPrepareMixin:
 
     def _finalize_bar_step(self, state: SeriesExecutionState, candle: Candle) -> Dict[str, Optional[float]]:
         finalize_started_perf = time.perf_counter()
+        current_bar_index = max(int(state.bar_index or 0), 0)
         update_state_ms: Optional[float] = None
         stats_update_ms: Optional[float] = None
         push_update_ms: Optional[float] = None
@@ -1334,6 +1305,11 @@ class RuntimeSetupPrepareMixin:
             update_started = datetime.now(timezone.utc)
             try:
                 update_metrics = self._update_state(self._state_candle_for(state.series, candle))
+                update_metrics["series_state_enqueue_ms"] = self._persist_series_state_snapshot(
+                    series=state.series,
+                    candle=candle,
+                    bar_index=current_bar_index,
+                )
                 stats_update_ms = update_metrics.get("stats_update_ms")
                 persist_ms = self._record_step_trace(
                     "step_update_state",
@@ -1403,6 +1379,7 @@ class RuntimeSetupPrepareMixin:
             "delta_build_ms": push_metrics.get("delta_build_ms"),
             "delta_serialize_ms": push_metrics.get("delta_serialize_ms"),
             "stream_emit_ms": push_metrics.get("stream_emit_ms"),
+            "series_state_enqueue_ms": update_metrics.get("series_state_enqueue_ms"),
             "subscribers_count": push_metrics.get("subscribers_count"),
             "overlay_points_changed": push_metrics.get("overlay_points"),
             "step_trace_queue_depth": step_trace_metrics.get("step_trace_queue_depth"),

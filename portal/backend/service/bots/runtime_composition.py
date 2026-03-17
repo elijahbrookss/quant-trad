@@ -9,12 +9,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
 from .bot_stream import BotStreamManager
-
-if TYPE_CHECKING:
-    from .bot_watchdog import BotWatchdog
+from .bot_watchdog import get_watchdog
+from .config_service import BotConfigService
+from .runtime_control_service import BotRuntimeControlService
+from ..storage import storage as storage_module
 
 
 class RuntimeMode(str, Enum):
@@ -71,9 +72,7 @@ def _runtime_mode_from_env() -> RuntimeMode:
 
 
 def _build_storage_gateway() -> BotStorageGateway:
-    """Build the default storage gateway with lazy import-time wiring."""
-
-    from ..storage import storage as storage_module
+    """Build the default storage gateway."""
 
     class _Gateway:
         def upsert_bot(self, payload: Mapping[str, Any]) -> None:
@@ -112,21 +111,15 @@ def _build_common_composition(
 ) -> RuntimeComposition:
     resolved_stream = stream_manager or BotStreamManager()
     if config_service is None:
-        from .config_service import BotConfigService
-
         resolved_config = BotConfigService()
     else:
         resolved_config = config_service
 
     resolved_storage = storage or _build_storage_gateway()
     if watchdog is None:
-        from .bot_watchdog import get_watchdog
-
         resolved_watchdog = get_watchdog()
     else:
         resolved_watchdog = watchdog
-
-    from .runtime_control_service import BotRuntimeControlService
 
     runtime_control = BotRuntimeControlService(
         resolved_config,

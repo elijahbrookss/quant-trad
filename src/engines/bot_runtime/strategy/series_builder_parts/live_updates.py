@@ -6,7 +6,9 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from engines.bot_runtime.core.domain import timeframe_duration
 from signals.contract import assert_no_execution_fields, assert_signal_contract
+from strategies import evaluator, markers
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log
 
@@ -16,9 +18,6 @@ logger = logging.getLogger(__name__)
 
 class SeriesBuilderLiveUpdatesMixin:
     def append_series_updates(self, series: StrategySeries, start_iso: str, end_iso: str) -> bool:
-        from .....market.candle_service import fetch_ohlcv
-        from .....strategies import strategy_service
-
         series_context = self._series_log_context(series)
         with perf_log(
             "bot_runtime_fetch_ohlcv",
@@ -29,13 +28,14 @@ class SeriesBuilderLiveUpdatesMixin:
             start_iso=start_iso,
             end_iso=end_iso,
         ) as perf:
-            df = fetch_ohlcv(
+            df = self._deps.fetch_ohlcv(
                 series.symbol,
                 start_iso,
                 end_iso,
                 series.timeframe,
                 datasource=series.datasource,
                 exchange=series.exchange,
+                schedule_stats=False,
             )
             perf.add_fields(rows_returned=len(df) if df is not None else 0)
         if df is None or getattr(df, "empty", False):
@@ -57,6 +57,20 @@ class SeriesBuilderLiveUpdatesMixin:
         if not new_candles:
             return False
         series.candles.extend(new_candles)
+        instrument_id = None
+        if isinstance(series.instrument, Mapping):
+            instrument_id = series.instrument.get("id")
+        timeframe_seconds = None
+        try:
+            timeframe_seconds = int(timeframe_duration(series.timeframe).total_seconds())
+        except Exception:
+            timeframe_seconds = None
+        if instrument_id and timeframe_seconds and timeframe_seconds > 0:
+            series.runtime_derived_state = self._build_runtime_series_derived_state(
+                candles=series.candles,
+                instrument_id=str(instrument_id),
+                timeframe_seconds=int(timeframe_seconds),
+            )
         try:
             config = {"mode": self.run_type}
             context = self._series_log_context(series, has_meta=series.meta is not None)
@@ -94,7 +108,7 @@ class SeriesBuilderLiveUpdatesMixin:
                     slow_ms=self._obs_slow_ms,
                     strategy_id=series.strategy_id,
                 ) as perf:
-                    evaluation = strategy_service.evaluate(
+                    evaluation = self._deps.strategy_evaluate(
                         strategy_id=series.strategy_id,
                         start=series.window_start or start_iso,
                         end=end_iso,
@@ -122,15 +136,13 @@ class SeriesBuilderLiveUpdatesMixin:
                         series.exchange,
                     )
                 )
-            instrument_id = None
-            if isinstance(series.instrument, Mapping):
-                instrument_id = series.instrument.get("id")
             regime_overlays = self._build_regime_overlays(
                 instrument_id=instrument_id or "",
                 candles=series.candles,
                 timeframe=series.timeframe,
                 strategy_id=series.strategy_id,
                 symbol=series.symbol,
+                runtime_derived_state=series.runtime_derived_state,
             )
             overlays.extend(regime_overlays)
             series.overlays = overlays
@@ -170,7 +182,6 @@ class SeriesBuilderLiveUpdatesMixin:
         strategy_id: Optional[str] = None,
     ):
         """Fetch and validate OHLCV dataframe for strategy."""
-        from .....market.candle_service import fetch_ohlcv
 
         try:
             runtime_context = self._runtime_log_context(
@@ -189,13 +200,14 @@ class SeriesBuilderLiveUpdatesMixin:
                 start_iso=start_iso,
                 end_iso=end_iso,
             ) as perf:
-                df = fetch_ohlcv(
+                df = self._deps.fetch_ohlcv(
                     symbol,
                     start_iso,
                     end_iso,
                     timeframe,
                     datasource=datasource,
                     exchange=exchange,
+                    schedule_stats=False,
                 )
                 perf.add_fields(rows_returned=len(df) if df is not None else 0)
         except Exception as exc:
@@ -296,8 +308,6 @@ class SeriesBuilderLiveUpdatesMixin:
         evaluation_config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evaluate strategy and generate signals."""
-        from .....strategies import strategy_service
-
         try:
             config = {"mode": self.run_type}
             if isinstance(evaluation_config, Mapping):
@@ -328,7 +338,7 @@ class SeriesBuilderLiveUpdatesMixin:
             )
             logger.info(with_log_context("evaluate_strategy_call", call_context))
 
-            evaluation = strategy_service.generate_strategy_signals(
+            evaluation = self._deps.strategy_generate_signals(
                 strategy_id=strategy.id,
                 start=start_iso,
                 end=end_iso,
@@ -373,7 +383,6 @@ class SeriesBuilderLiveUpdatesMixin:
     ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
         if not isinstance(indicator_payloads, Mapping):
             return None
-        from strategies import evaluator, markers
 
         signals_by_indicator: Dict[str, List[Dict[str, Any]]] = {}
         all_epochs: Set[int] = set()
@@ -486,8 +495,6 @@ class SeriesBuilderLiveUpdatesMixin:
         rule_payload: Any,
         indicator_payloads: Mapping[str, Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        from strategies import evaluator
-
         if hasattr(rule_payload, "evaluate"):
             return rule_payload.evaluate(indicator_payloads)
         if not isinstance(rule_payload, Mapping):
@@ -561,8 +568,6 @@ class SeriesBuilderLiveUpdatesMixin:
 
     @staticmethod
     def _signal_known_at_epoch(signal: Mapping[str, Any]) -> int:
-        from strategies import evaluator
-
         metadata = signal.get("metadata") if isinstance(signal, Mapping) else None
         candidates = []
         if isinstance(metadata, Mapping):

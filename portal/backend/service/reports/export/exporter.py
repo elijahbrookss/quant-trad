@@ -12,8 +12,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import create_engine
 from data_providers.utils.ohlcv import interval_to_timedelta
+from engines.bot_runtime.runtime.event_types import SERIES_STATE_SNAPSHOT
+from sqlalchemy import create_engine
 
 from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 
@@ -182,6 +183,67 @@ def _regime_metrics_from_row(regime_row: Optional[Dict[str, Any]]) -> Dict[str, 
         "entry_directional_efficiency": structure.get("directional_efficiency"),
         "entry_range_position": structure.get("range_position"),
     }
+
+
+def _build_series_state_export_rows(
+    events: Sequence[Dict[str, Any]],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    stats_versions: Sequence[str],
+    regime_versions: Sequence[str],
+    stats_key_limit: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    stats_rows: List[Dict[str, Any]] = []
+    regime_rows: List[Dict[str, Any]] = []
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        candle_time = _parse_iso(payload.get("bar_time"))
+        if candle_time is None or candle_time < window_start or candle_time > window_end:
+            continue
+        instrument_id = payload.get("instrument_id")
+        timeframe_seconds = payload.get("timeframe_seconds")
+        symbol = payload.get("symbol")
+        timeframe = payload.get("timeframe")
+        if not instrument_id or not timeframe_seconds:
+            continue
+
+        stats = dict(payload.get("stats") or {})
+        stats_version = str(payload.get("stats_version") or "")
+        if stats_version and stats_version in stats_versions:
+            row = {
+                "instrument_id": instrument_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timeframe_seconds": timeframe_seconds,
+                "candle_time": payload.get("bar_time"),
+                "stats_version": stats_version,
+                "computed_at": event.get("known_at") or event.get("event_time"),
+                "stats_json": _json_dumps(stats),
+                **stats,
+            }
+            stats_rows.append(_select_fields(row, CANDLE_STATS_BASE_COLUMNS, stats_key_limit))
+
+        regime = dict(payload.get("regime") or {})
+        regime_version = str(payload.get("regime_version") or "")
+        if regime_version and regime_version in regime_versions:
+            row = {
+                "instrument_id": instrument_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timeframe_seconds": timeframe_seconds,
+                "candle_time": payload.get("bar_time"),
+                "regime_version": regime_version,
+                "computed_at": event.get("known_at") or event.get("event_time"),
+                "regime_json": _json_dumps(regime),
+                "volatility_state": (regime.get("volatility") or {}).get("state"),
+                "structure_state": (regime.get("structure") or {}).get("state"),
+                "expansion_state": (regime.get("expansion") or {}).get("state"),
+                "liquidity_state": (regime.get("liquidity") or {}).get("state"),
+                "confidence": regime.get("confidence"),
+            }
+            regime_rows.append(_select_fields(row, REGIME_STATS_BASE_COLUMNS))
+    return stats_rows, regime_rows
 
 
 def _build_trade_rows(
@@ -521,9 +583,9 @@ def _build_readme(
         "- ledger_events: Decision ledger events captured during the run (if any).",
         "- candles_raw: Raw OHLCV candles bounded to the requested window.",
         "- derivatives_state: Per-instrument funding/derivatives state (bounded).",
-        "- candle_stats_flat: Flattened candle stats for selected versions (optional).",
-        "- regime_stats_flat: Flattened regime stats for selected versions (optional).",
-        "- decision_ledger: Cleaned decision ledger events for the run (optional).",
+        "- candle_stats_flat: Runtime-owned per-series stats snapshots from the bot ledger.",
+        "- regime_stats_flat: Runtime-owned per-series regime snapshots from the bot ledger.",
+        "- decision_ledger: Canonical runtime.* decision/execution events from the bot ledger.",
         "",
         "Time window:",
         f"- backtest_start={_isoformat(start)}",
@@ -630,7 +692,8 @@ def build_run_export(
     trades = report_data.list_trades_for_run(run_id)
     trade_ids = [trade.get("id") for trade in trades if trade.get("id")]
     trade_events = report_data.list_trade_events_for_trades(trade_ids)
-    decision_ledger = list(run.get("decision_ledger") or [])
+    decision_ledger = report_data.list_decision_ledger(run_id)
+    series_state_events = report_data.list_run_events(run_id, event_types=[SERIES_STATE_SNAPSHOT])
     stats_versions_param = stats_versions_param_list
     regime_versions_param = regime_versions_param_list
 
@@ -664,8 +727,6 @@ def build_run_export(
         ExportTables(
             candles_raw=runtime_config.persistence.candles_raw_table,
             derivatives_state=runtime_config.persistence.derivatives_state_table,
-            candle_stats=runtime_config.persistence.candle_stats_table,
-            regime_stats=runtime_config.persistence.regime_stats_table,
         ),
     )
     timeframe = run.get("timeframe")
@@ -675,8 +736,6 @@ def build_run_export(
     timeframe_seconds = int(interval_to_timedelta(timeframe).total_seconds())
     candles_rows: List[Dict[str, Any]] = []
     derivatives_rows: List[Dict[str, Any]] = []
-    stats_rows: List[Dict[str, Any]] = []
-    regime_rows: List[Dict[str, Any]] = []
     for instrument in instruments:
         instrument_id = instrument.get("id")
         symbol = instrument.get("symbol")
@@ -692,29 +751,15 @@ def build_run_export(
             for row in derivatives:
                 row["symbol"] = symbol
             derivatives_rows.extend(derivatives)
-        stats = repo.fetch_candle_stats(
-            instrument_id,
-            timeframe_seconds,
-            window_start,
-            window_end,
-            stats_versions_param,
-            stats_key_limit,
-        )
-        for row in stats:
-            row["symbol"] = symbol
-            row["timeframe"] = timeframe
-            stats_rows.append(_select_fields(row, CANDLE_STATS_BASE_COLUMNS, stats_key_limit))
-        regime = repo.fetch_regime_stats(
-            instrument_id,
-            timeframe_seconds,
-            window_start,
-            window_end,
-            regime_versions_param,
-        )
-        for row in regime:
-            row["symbol"] = symbol
-            row["timeframe"] = timeframe
-            regime_rows.append(_select_fields(row, REGIME_STATS_BASE_COLUMNS))
+
+    stats_rows, regime_rows = _build_series_state_export_rows(
+        series_state_events,
+        window_start=window_start,
+        window_end=window_end,
+        stats_versions=stats_versions_param,
+        regime_versions=regime_versions_param,
+        stats_key_limit=stats_key_limit,
+    )
 
     export_rows["candle_stats_flat"] = stats_rows
     export_rows["regime_stats_flat"] = regime_rows

@@ -7,8 +7,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle, normalize_epoch
-from portal.backend.service.market.regime_blocks import RegimeBlockConfig, build_regime_blocks
-from portal.backend.service.market.regime_config import default_regime_runtime_config
+from signals.overlays.schema import build_overlay
+from .regime_blocks import RegimeBlockConfig, build_regime_blocks
+from .regime_config import default_regime_runtime_config
 logger = logging.getLogger(__name__)
 
 STATE_COLORS = {
@@ -314,7 +315,6 @@ def build_regime_marker_overlay(
     markers = build_regime_markers(points, candles)
     if not markers:
         return None
-    from signals.overlays.schema import build_overlay
 
     return build_overlay("regime_markers", {"markers": markers})
 
@@ -532,8 +532,6 @@ def build_regime_overlay(
         include_regime_points=include_regime_points,
     )
 
-    from signals.overlays.schema import build_overlay
-
     return build_overlay("regime_overlay", payload)
 
 
@@ -570,7 +568,6 @@ def build_regime_overlays(
             len(change_epochs),
             change_epochs[:12],
         )
-    from signals.overlays.schema import build_overlay
 
     overlays = [build_overlay("regime_overlay", payload)]
 

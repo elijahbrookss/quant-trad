@@ -18,11 +18,12 @@ from engines.bot_runtime.core.domain import (
     isoformat,
     timeframe_duration,
 )
+from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, SeriesExecutionProfile
-from portal.backend.service.bots.bot_runtime.strategy.models import Strategy
-from portal.backend.service.risk.atm import merge_templates
+from atm import merge_templates
 from utils.log_context import with_log_context
 
+from ..models import Strategy
 from .models import StrategySeries
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,12 @@ class SeriesBuilderConstructionMixin:
         # No precomputed signals/overlays in runtime path. These are evaluated incrementally per bar.
         overlays: List[Dict[str, Any]] = []
         signals = deque()
+        timeframe_seconds = int(timeframe_duration(timeframe).total_seconds())
+        runtime_derived_state = self._build_runtime_series_derived_state(
+            candles=candles,
+            instrument_id=str(instrument.get("id") or "") if isinstance(instrument, Mapping) else "",
+            timeframe_seconds=timeframe_seconds,
+        )
         return StrategySeries(
             strategy_id=strategy.id,
             name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
@@ -357,6 +364,7 @@ class SeriesBuilderConstructionMixin:
             atm_template=atm_template,
             replay_start_index=replay_start_index,
             execution_profile=execution_profile,
+            runtime_derived_state=runtime_derived_state,
         )
 
     def _build_backtest_candles_with_warmup(
@@ -590,8 +598,6 @@ class SeriesBuilderConstructionMixin:
         if not self._indicator_incremental_eval:
             return {}
 
-        from .....indicators import indicator_service
-
         strategy_meta = series.meta or {}
         links = list(strategy_meta.get("indicator_links") or [])
         if not links and strategy_meta.get("indicator_ids"):
@@ -606,23 +612,14 @@ class SeriesBuilderConstructionMixin:
             if not indicator_id:
                 continue
             try:
-                if self._indicator_ctx is None:
-                    indicator_meta = indicator_service.get_instance_meta(indicator_id)
-                    runtime_plan = indicator_service.runtime_input_plan_for_instance(
-                        indicator_id,
-                        strategy_interval=str(series.timeframe),
-                        start=start_iso,
-                        end=end_iso,
-                    )
-                else:
-                    indicator_meta = indicator_service.get_instance_meta(indicator_id, ctx=self._indicator_ctx)
-                    runtime_plan = indicator_service.runtime_input_plan_for_instance(
-                        indicator_id,
-                        strategy_interval=str(series.timeframe),
-                        start=start_iso,
-                        end=end_iso,
-                        ctx=self._indicator_ctx,
-                    )
+                indicator_meta = self._deps.indicator_get_instance_meta(indicator_id, ctx=self._indicator_ctx)
+                runtime_plan = self._deps.indicator_runtime_input_plan_for_instance(
+                    indicator_id,
+                    strategy_interval=str(series.timeframe),
+                    start=start_iso,
+                    end=end_iso,
+                    ctx=self._indicator_ctx,
+                )
             except Exception as exc:
                 logger.warning(
                     with_log_context(
@@ -742,8 +739,6 @@ class SeriesBuilderConstructionMixin:
         min_notional: Optional[float],
         contract_size: float,
     ):
-        from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
-
         if self.run_type == "backtest":
             return BacktestAdapter(
                 tick_size=tick_size,

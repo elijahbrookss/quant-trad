@@ -7,14 +7,13 @@ import time
 from typing import Any, Dict, Mapping, Optional
 
 from engines.bot_runtime.core.domain import normalize_epoch
+from engines.bot_runtime.runtime.components.chart_state import ChartStateBuilder
 from indicators.config import DataContext
-from portal.backend.service.bots.bot_runtime.runtime.chart_state import ChartStateBuilder
 from utils.log_context import build_log_context, with_log_context
 from utils.perf_log import get_obs_enabled
 
 from .context import IndicatorServiceContext, _context
 from .overlay_pipeline import OverlayProjectionContext, project_indicator_overlays
-from ...market import instrument_service
 from .utils import (
     get_indicator_entry,
     normalize_datasource,
@@ -22,6 +21,7 @@ from .utils import (
     resolve_data_provider,
     scrub_runtime_params,
 )
+from ...market import instrument_service
 
 logger = logging.getLogger(__name__)
 

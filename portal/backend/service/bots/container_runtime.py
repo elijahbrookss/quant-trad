@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
 import multiprocessing as mp
@@ -13,10 +14,19 @@ from datetime import datetime, timedelta, timezone
 import math
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
 
+try:
+    import websockets  # type: ignore
+    from websockets.sync.client import connect as sync_connect  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    websockets = None
+    sync_connect = None
+
+from engines.bot_runtime.runtime.runtime import BotRuntime
 from engines.bot_runtime.core.runtime_events import RuntimeEventName, build_correlation_id, new_runtime_event
 from portal.backend.db.session import db
-from portal.backend.service.bots.bot_runtime import BotRuntime
-from portal.backend.service.bots.bot_runtime.strategy.strategy_loader import StrategyLoader
+from portal.backend.service.bots.botlens_projection import canonical_series_key_from_entry, normalize_series_key
+from portal.backend.service.bots.runtime_dependencies import build_bot_runtime_deps
+from portal.backend.service.bots.strategy_loader import StrategyLoader
 from portal.backend.service.storage.storage import (
     list_bot_runtime_events,
     load_bots,
@@ -211,9 +221,7 @@ def _compact_view_state_payload(
 def _emit_telemetry_ephemeral_message(url: str, message: str) -> bool:
     if not url:
         return False
-    try:
-        import websockets  # type: ignore
-    except Exception:
+    if websockets is None:
         logger.warning("bot_telemetry_library_missing | package=websockets")
         return False
 
@@ -229,24 +237,43 @@ def _emit_telemetry_ephemeral_message(url: str, message: str) -> bool:
     return True
 
 
+def _telemetry_message_context(message: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(str(message or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    return {
+        "kind": str(payload.get("kind") or ""),
+        "bot_id": str(payload.get("bot_id") or ""),
+        "run_id": str(payload.get("run_id") or ""),
+        "run_seq": _coerce_int(payload.get("run_seq"), 0),
+        "series_seq": _coerce_int(payload.get("series_seq"), 0),
+        "series_key": str(payload.get("series_key") or ""),
+        "payload_bytes": _coerce_int(summary.get("payload_bytes"), 0),
+        "known_at": payload.get("known_at"),
+    }
+
+
+_TELEMETRY_EMIT_QUEUE_MAX = max(8, _coerce_int(os.getenv("BOT_TELEMETRY_EMIT_QUEUE_MAX"), 256))
+_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS = max(10, _coerce_int(os.getenv("BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS"), 1000))
+_TELEMETRY_EMIT_RETRY_MS = max(50, _coerce_int(os.getenv("BOT_TELEMETRY_EMIT_RETRY_MS"), 250))
+
+
 class _TelemetryEmitter:
     def __init__(self, url: str) -> None:
         self.url = str(url or "").strip()
         self._sync_connect = None
         self._sync_ws = None
         self._state_lock = threading.Condition()
-        self._latest_message: str | None = None
+        self._pending_messages: deque[Dict[str, Any]] = deque()
         self._stop = False
-        self._dropped_messages = 0
         self._worker_thread: threading.Thread | None = None
         if not self.url:
             return
-        try:
-            from websockets.sync.client import connect as sync_connect  # type: ignore
-
-            self._sync_connect = sync_connect
-        except Exception:
-            self._sync_connect = None
+        self._sync_connect = sync_connect
         self._worker_thread = threading.Thread(target=self._worker_loop, name="bot-telemetry-emitter", daemon=True)
         self._worker_thread.start()
 
@@ -260,52 +287,149 @@ class _TelemetryEmitter:
         except Exception:
             pass
 
-    def _send_sync_message(self, message: str) -> bool:
+    def _send_sync_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
         if self._sync_connect is None:
             return False
         for attempt in range(2):
             try:
                 if self._sync_ws is None:
                     self._sync_ws = self._sync_connect(self.url, open_timeout=2, close_timeout=1)
+                started = time.monotonic()
                 self._sync_ws.send(message)
+                elapsed_ms = max((time.monotonic() - started) * 1000.0, 0.0)
+                logger.debug(
+                    "bot_telemetry_send_succeeded | mode=sync | attempt=%s | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | send_ms=%.3f",
+                    attempt + 1,
+                    (context or {}).get("kind"),
+                    (context or {}).get("bot_id"),
+                    (context or {}).get("run_id"),
+                    (context or {}).get("run_seq"),
+                    (context or {}).get("series_key"),
+                    (context or {}).get("series_seq"),
+                    (context or {}).get("payload_bytes"),
+                    elapsed_ms,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
-                logger.warning("bot_telemetry_send_failed | mode=sync | attempt=%s | error=%s", attempt + 1, exc)
+                logger.warning(
+                    "bot_telemetry_send_failed | mode=sync | attempt=%s | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | error=%s",
+                    attempt + 1,
+                    (context or {}).get("kind"),
+                    (context or {}).get("bot_id"),
+                    (context or {}).get("run_id"),
+                    (context or {}).get("run_seq"),
+                    (context or {}).get("series_key"),
+                    (context or {}).get("series_seq"),
+                    (context or {}).get("payload_bytes"),
+                    exc,
+                )
                 self._close_sync_ws()
         return False
 
-    def _deliver_message(self, message: str) -> bool:
+    def _deliver_message(self, message: str, context: Optional[Mapping[str, Any]] = None) -> bool:
         if self._sync_connect is not None:
-            return self._send_sync_message(message)
+            return self._send_sync_message(message, context=context)
         return _emit_telemetry_ephemeral_message(self.url, message)
 
     def _worker_loop(self) -> None:
         while True:
-            message = None
-            dropped = 0
+            entry = None
             with self._state_lock:
-                while not self._stop and self._latest_message is None:
+                while not self._stop and not self._pending_messages:
                     self._state_lock.wait(timeout=0.25)
-                if self._stop:
+                if self._stop and not self._pending_messages:
                     break
-                message = self._latest_message
-                self._latest_message = None
-                dropped = int(self._dropped_messages)
-                self._dropped_messages = 0
-            if not message:
+                entry = dict(self._pending_messages[0]) if self._pending_messages else None
+            if not isinstance(entry, Mapping):
                 continue
-            if dropped > 0:
-                logger.warning("bot_telemetry_emit_compacted | dropped_messages=%s", dropped)
-            self._deliver_message(message)
+            message = str(entry.get("message") or "")
+            context = entry.get("context") if isinstance(entry.get("context"), Mapping) else {}
+            enqueued_at = float(entry.get("enqueued_monotonic") or time.monotonic())
+            delivered = self._deliver_message(message, context=context)
+            if delivered:
+                queue_wait_ms = max((time.monotonic() - enqueued_at) * 1000.0, 0.0)
+                with self._state_lock:
+                    if self._pending_messages:
+                        self._pending_messages.popleft()
+                    queue_depth = len(self._pending_messages)
+                    self._state_lock.notify_all()
+                logger.debug(
+                    "bot_telemetry_emit_dequeued | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | queue_wait_ms=%.3f | queue_depth=%s",
+                    context.get("kind"),
+                    context.get("bot_id"),
+                    context.get("run_id"),
+                    context.get("run_seq"),
+                    context.get("series_key"),
+                    context.get("series_seq"),
+                    context.get("payload_bytes"),
+                    queue_wait_ms,
+                    queue_depth,
+                )
+                continue
+
+            with self._state_lock:
+                queue_depth = len(self._pending_messages)
+            logger.warning(
+                "bot_telemetry_emit_retry_scheduled | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | queue_depth=%s | retry_ms=%s",
+                context.get("kind"),
+                context.get("bot_id"),
+                context.get("run_id"),
+                context.get("run_seq"),
+                context.get("series_key"),
+                context.get("series_seq"),
+                context.get("payload_bytes"),
+                queue_depth,
+                _TELEMETRY_EMIT_RETRY_MS,
+            )
+            time.sleep(_TELEMETRY_EMIT_RETRY_MS / 1000.0)
 
     def send_message(self, message: str) -> bool:
         if not self.url:
             return False
+        context = _telemetry_message_context(message)
+        deadline = time.monotonic() + (_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS / 1000.0)
         with self._state_lock:
-            if self._latest_message is not None:
-                self._dropped_messages += 1
-            self._latest_message = str(message)
+            while len(self._pending_messages) >= _TELEMETRY_EMIT_QUEUE_MAX and not self._stop:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "bot_telemetry_emit_queue_backpressure | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | queue_depth=%s | queue_max=%s | enqueue_timeout_ms=%s",
+                        context.get("kind"),
+                        context.get("bot_id"),
+                        context.get("run_id"),
+                        context.get("run_seq"),
+                        context.get("series_key"),
+                        context.get("series_seq"),
+                        context.get("payload_bytes"),
+                        len(self._pending_messages),
+                        _TELEMETRY_EMIT_QUEUE_MAX,
+                        _TELEMETRY_EMIT_QUEUE_TIMEOUT_MS,
+                    )
+                    return False
+                self._state_lock.wait(timeout=remaining)
+            if self._stop:
+                return False
+            self._pending_messages.append(
+                {
+                    "message": str(message),
+                    "context": context,
+                    "enqueued_monotonic": time.monotonic(),
+                }
+            )
+            queue_depth = len(self._pending_messages)
             self._state_lock.notify_all()
+        logger.debug(
+            "bot_telemetry_emit_enqueued | kind=%s | bot_id=%s | run_id=%s | run_seq=%s | series_key=%s | series_seq=%s | payload_bytes=%s | queue_depth=%s | queue_max=%s",
+            context.get("kind"),
+            context.get("bot_id"),
+            context.get("run_id"),
+            context.get("run_seq"),
+            context.get("series_key"),
+            context.get("series_seq"),
+            context.get("payload_bytes"),
+            queue_depth,
+            _TELEMETRY_EMIT_QUEUE_MAX,
+        )
         return True
 
     def send(self, payload: Mapping[str, Any]) -> bool:
@@ -315,7 +439,7 @@ class _TelemetryEmitter:
     def close(self) -> None:
         with self._state_lock:
             self._stop = True
-            self._latest_message = None
+            self._pending_messages.clear()
             self._state_lock.notify_all()
         thread = self._worker_thread
         self._worker_thread = None
@@ -367,6 +491,33 @@ def _build_shared_wallet_proxy(
         "reservations": manager.dict(),
         "lock": manager.RLock(),
     }
+
+
+def _next_run_event_seq(shared_wallet_proxy: Mapping[str, Any]) -> int:
+    seq_counter = shared_wallet_proxy.get("runtime_event_seq")
+    if seq_counter is None:
+        raise RuntimeError("shared runtime_event_seq counter is required for bot runtime event sequencing")
+    proxy_lock = shared_wallet_proxy.get("lock")
+    if proxy_lock is not None:
+        proxy_lock.acquire()
+    try:
+        if hasattr(seq_counter, "get"):
+            current_value = int(seq_counter.get())
+        elif hasattr(seq_counter, "value"):
+            current_value = int(getattr(seq_counter, "value"))
+        else:
+            raise RuntimeError(f"shared runtime_event_seq counter is unsupported | type={type(seq_counter)!r}")
+        next_value = current_value + 1
+        if hasattr(seq_counter, "set"):
+            seq_counter.set(next_value)
+        elif hasattr(seq_counter, "value"):
+            setattr(seq_counter, "value", next_value)
+        else:
+            raise RuntimeError(f"shared runtime_event_seq counter is unsupported | type={type(seq_counter)!r}")
+        return int(next_value)
+    finally:
+        if proxy_lock is not None:
+            proxy_lock.release()
 
 
 def _load_strategy_symbols(strategy_id: str) -> List[str]:
@@ -660,7 +811,6 @@ def _series_worker(
             1,
             _coerce_int(os.getenv("BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"), 10),
         )
-    runtime: BotRuntime
     runtime_error: Dict[str, str] = {}
     stream_max_series = max(1, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_SERIES"), 12))
     stream_max_candles = max(50, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_CANDLES"), 320))
@@ -670,101 +820,67 @@ def _series_worker(
     stream_max_logs = max(50, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_LOGS"), 300))
     stream_max_decisions = max(100, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_DECISIONS"), 600))
     stream_max_warnings = max(20, _coerce_int(os.getenv("BOTLENS_STREAM_MAX_WARNINGS"), 120))
-    emit_state_lock = threading.RLock()
-    emit_wakeup = threading.Event()
-    emit_stop = threading.Event()
-    pending_emit_generation = 0
-    emitted_generation = 0
-    latest_status = "running"
-    latest_bar_marker = ""
-    latest_trade_count = -1
-
-    def _emit_view_state() -> str:
-        nonlocal latest_status
-        chart_snapshot = runtime.chart_payload()
-        compact_snapshot = _compact_view_state_payload(
-            chart_snapshot if isinstance(chart_snapshot, Mapping) else {},
-            max_series=stream_max_series,
-            max_candles=stream_max_candles,
-            max_overlays=stream_max_overlays,
-            max_overlay_points=stream_max_overlay_points,
-            max_closed_trades=stream_max_closed_trades,
-            max_logs=stream_max_logs,
-            max_decisions=stream_max_decisions,
-            max_warnings=stream_max_warnings,
-        )
-        runtime_snapshot = compact_snapshot.get("runtime") if isinstance(compact_snapshot, Mapping) else {}
-        status_value = str((runtime_snapshot or {}).get("status") or "").lower() or "running"
-        with emit_state_lock:
-            latest_status = status_value
-        event_queue.put(
-            {
-                "kind": "view_state",
-                "worker_id": worker_id,
-                "symbols": list(symbols),
-                "status": status_value,
-                "view_state": compact_snapshot,
-                "at": _utc_now_iso(),
-            }
-        )
-        return status_value
-
-    def _state_callback(payload: Dict[str, Any]) -> None:
-        nonlocal pending_emit_generation, latest_status, latest_bar_marker, latest_trade_count
-        if not isinstance(payload, Mapping):
-            return
-        runtime_payload = payload.get("runtime")
-        if not isinstance(runtime_payload, Mapping):
-            return
-        status_value = str(runtime_payload.get("status") or "").strip().lower()
-        bar_marker = _runtime_bar_marker(runtime_payload)
-        trade_count = _runtime_trade_count(runtime_payload)
-        should_emit = False
-        with emit_state_lock:
-            if status_value:
-                latest_status = status_value
-            if bar_marker and bar_marker != latest_bar_marker:
-                latest_bar_marker = bar_marker
-                should_emit = True
-            if trade_count >= 0 and trade_count != latest_trade_count:
-                latest_trade_count = trade_count
-                should_emit = True
-            if status_value in _TERMINAL_STATUSES:
-                should_emit = True
-            if should_emit:
-                pending_emit_generation += 1
-        if should_emit:
-            emit_wakeup.set()
-
-    def _view_state_emitter_loop() -> None:
-        nonlocal emitted_generation
-        while not emit_stop.is_set():
-            emit_wakeup.wait(timeout=0.05)
-            emit_wakeup.clear()
-            with emit_state_lock:
-                pending_generation = int(pending_emit_generation)
-            if pending_generation <= emitted_generation:
-                continue
-            try:
-                _emit_view_state()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "bot_symbol_worker_view_state_emit_failed | run_id=%s | bot_id=%s | worker_id=%s | error=%s",
-                    run_id,
-                    bot_id,
-                    worker_id,
-                    exc,
-                )
-            with emit_state_lock:
-                emitted_generation = int(pending_emit_generation)
-
-    runtime = BotRuntime(bot_id=bot_id, config=child_config, state_callback=_state_callback)
+    runtime = BotRuntime(bot_id=bot_id, config=child_config, deps=build_bot_runtime_deps())
     runtime.reset_if_finished()
-    emitter_thread = threading.Thread(
-        target=_view_state_emitter_loop,
-        name=f"bot-view-emitter-{worker_id}",
-        daemon=True,
+    runtime.warm_up()
+    initial_chart_snapshot = runtime.chart_payload()
+    compact_snapshot = _compact_view_state_payload(
+        initial_chart_snapshot if isinstance(initial_chart_snapshot, Mapping) else {},
+        max_series=stream_max_series,
+        max_candles=stream_max_candles,
+        max_overlays=stream_max_overlays,
+        max_overlay_points=stream_max_overlay_points,
+        max_closed_trades=stream_max_closed_trades,
+        max_logs=stream_max_logs,
+        max_decisions=stream_max_decisions,
+        max_warnings=stream_max_warnings,
     )
+    series_entries = compact_snapshot.get("series") if isinstance(compact_snapshot.get("series"), list) else []
+    primary_series = series_entries[0] if series_entries else {}
+    if not isinstance(primary_series, Mapping):
+        raise RuntimeError(f"worker bootstrap missing series payload | worker_id={worker_id} | symbols={list(symbols)}")
+    series_key = canonical_series_key_from_entry(primary_series)
+    if not series_key:
+        raise RuntimeError(f"worker bootstrap missing series key | worker_id={worker_id} | symbols={list(symbols)}")
+    event_queue.put(
+        {
+            "kind": "series_bootstrap",
+            "worker_id": worker_id,
+            "symbols": list(symbols),
+            "series_key": series_key,
+            "projection": compact_snapshot,
+            "known_at": _utc_now_iso(),
+            "event_time": _utc_now_iso(),
+        }
+    )
+    subscription_token, subscription_queue = runtime.subscribe()
+    stream_stop = threading.Event()
+
+    def _runtime_delta_loop() -> None:
+        while not stream_stop.is_set() or not subscription_queue.empty():
+            try:
+                message = subscription_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if not isinstance(message, Mapping):
+                continue
+            if str(message.get("type") or "").strip().lower() != "delta":
+                continue
+            runtime_payload = message.get("runtime") if isinstance(message.get("runtime"), Mapping) else {}
+            known_at = runtime_payload.get("last_snapshot_at") or runtime_payload.get("known_at") or _utc_now_iso()
+            event_queue.put(
+                {
+                    "kind": "runtime_delta",
+                    "worker_id": worker_id,
+                    "symbols": list(symbols),
+                    "series_key": series_key,
+                    "runtime_delta": _json_safe(dict(message)),
+                    "known_at": known_at,
+                    "event_time": _utc_now_iso(),
+                }
+            )
+
+    emitter_thread = threading.Thread(target=_runtime_delta_loop, name=f"bot-delta-stream-{worker_id}", daemon=True)
     emitter_thread.start()
     try:
         runtime.start()
@@ -772,20 +888,10 @@ def _series_worker(
         runtime_error["message"] = str(exc)
         runtime_error["exception"] = repr(exc)
     finally:
-        emit_stop.set()
-        emit_wakeup.set()
+        stream_stop.set()
         emitter_thread.join(timeout=1.0)
-    try:
-        status = _emit_view_state()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "bot_symbol_worker_final_view_state_emit_failed | run_id=%s | bot_id=%s | worker_id=%s | error=%s",
-            run_id,
-            bot_id,
-            worker_id,
-            exc,
-        )
-        status = "error" if runtime_error else "stopped"
+        runtime.unsubscribe(subscription_token)
+    status = str((runtime.snapshot() or {}).get("status") or "").strip().lower() or ("error" if runtime_error else "stopped")
     if runtime_error:
         event_queue.put(
             {
@@ -812,26 +918,8 @@ def main() -> int:
     if not bot_id:
         raise RuntimeError("BOT_ID is required")
 
-    snapshot_interval_ms = int(os.getenv("SNAPSHOT_INTERVAL_MS") or "0")
-    if snapshot_interval_ms <= 0:
-        raise RuntimeError("SNAPSHOT_INTERVAL_MS must be > 0")
-    fast_snapshot_interval_ms = _coerce_int(
-        os.getenv("SNAPSHOT_FAST_INTERVAL_MS"),
-        min(snapshot_interval_ms, 250),
-    )
-    if fast_snapshot_interval_ms <= 0:
-        raise RuntimeError("SNAPSHOT_FAST_INTERVAL_MS must be > 0")
-    idle_snapshot_interval_ms = _coerce_int(
-        os.getenv("SNAPSHOT_IDLE_INTERVAL_MS"),
-        snapshot_interval_ms,
-    )
-    if idle_snapshot_interval_ms <= 0:
-        raise RuntimeError("SNAPSHOT_IDLE_INTERVAL_MS must be > 0")
-    fast_snapshot_interval_ms = max(25, fast_snapshot_interval_ms)
-    idle_snapshot_interval_ms = max(fast_snapshot_interval_ms, idle_snapshot_interval_ms)
-    idle_cycle_threshold = max(1, _coerce_int(os.getenv("SNAPSHOT_IDLE_CYCLES"), 2))
-
     telemetry_url = str(os.getenv("BACKEND_TELEMETRY_WS_URL") or "").strip()
+    event_poll_ms = max(10, _coerce_int(os.getenv("BOT_TELEMETRY_EVENT_POLL_MS"), 50))
 
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
     if bot is None:
@@ -879,7 +967,6 @@ def main() -> int:
     child_queues: Dict[str, "mp.Queue[Dict[str, Any]]"] = {}
     children: Dict[str, mp.Process] = {}
     worker_symbols: Dict[str, List[str]] = {}
-    latest_view_state: Dict[str, Dict[str, Any]] = {}
     degraded_symbols: set[str] = set()
 
     for index, symbols in enumerate(symbol_shards):
@@ -904,27 +991,21 @@ def main() -> int:
         proc.start()
         children[worker_id] = proc
 
-    cycle_seq = 0
-    view_seq = 0
+    run_seq = 0
+    series_seq_by_key: Dict[str, int] = {}
     telemetry_sender = _TelemetryEmitter(telemetry_url)
     telemetry_degraded = False
-    idle_cycles_without_view_events = 0
     try:
-        while children or latest_view_state:
+        while children:
             loop_started_at = datetime.now(timezone.utc)
             loop_started = time.monotonic()
             queue_drain_ms = 0.0
             worker_reconcile_ms = 0.0
-            merge_ms = 0.0
-            snapshot_write_ms = 0.0
             telemetry_emit_ms = 0.0
             status_write_ms = 0.0
             payload_bytes = 0
-            sleep_for = 0.0
-            target_interval_ms = idle_snapshot_interval_ms
-            cadence_mode = "idle"
-            view_state_events_in_cycle = 0
-            view_state_build_ms = 0.0
+            emitted_events_in_cycle = 0
+            cadence_mode = "event_driven"
             queue_drain_started = time.monotonic()
             for worker_id, event_queue in list(child_queues.items()):
                 while True:
@@ -933,11 +1014,68 @@ def main() -> int:
                     except queue.Empty:
                         break
                     kind = str(event.get("kind") or "").strip().lower()
-                    if kind == "view_state":
-                        view_state_events_in_cycle += 1
-                        latest_view_state[worker_id] = dict(event)
-                        break
-                    elif kind == "worker_error":
+                    if kind == "series_bootstrap":
+                        series_key = normalize_series_key(event.get("series_key"))
+                        if not series_key:
+                            continue
+                        run_seq = _next_run_event_seq(shared_wallet_proxy)
+                        series_seq = series_seq_by_key.get(series_key, 0) + 1
+                        series_seq_by_key[series_key] = series_seq
+                        telemetry_payload = {
+                            "kind": "botlens_series_bootstrap",
+                            "bot_id": bot_id,
+                            "run_id": run_id,
+                            "worker_id": worker_id,
+                            "run_seq": run_seq,
+                            "series_seq": series_seq,
+                            "series_key": series_key,
+                            "known_at": event.get("known_at") or _utc_now_iso(),
+                            "event_time": event.get("event_time") or _utc_now_iso(),
+                            "projection": dict(event.get("projection") or {}),
+                            "summary": {},
+                        }
+                        telemetry_message = json.dumps(_json_safe(telemetry_payload))
+                        payload_bytes = len(telemetry_message.encode("utf-8"))
+                        telemetry_payload["summary"]["payload_bytes"] = payload_bytes
+                        telemetry_started = time.monotonic()
+                        sent = telemetry_sender.send(telemetry_payload)
+                        telemetry_emit_ms += max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
+                        if not sent:
+                            telemetry_degraded = True
+                        emitted_events_in_cycle += 1
+                        continue
+                    if kind == "runtime_delta":
+                        series_key = normalize_series_key(event.get("series_key"))
+                        runtime_delta = event.get("runtime_delta") if isinstance(event.get("runtime_delta"), Mapping) else {}
+                        if not series_key or not runtime_delta:
+                            continue
+                        run_seq = _next_run_event_seq(shared_wallet_proxy)
+                        series_seq = series_seq_by_key.get(series_key, 0) + 1
+                        series_seq_by_key[series_key] = series_seq
+                        telemetry_payload = {
+                            "kind": "botlens_series_delta",
+                            "bot_id": bot_id,
+                            "run_id": run_id,
+                            "worker_id": worker_id,
+                            "run_seq": run_seq,
+                            "series_seq": series_seq,
+                            "series_key": series_key,
+                            "known_at": event.get("known_at") or _utc_now_iso(),
+                            "event_time": event.get("event_time") or _utc_now_iso(),
+                            "runtime_delta": dict(runtime_delta),
+                            "summary": {},
+                        }
+                        telemetry_message = json.dumps(_json_safe(telemetry_payload))
+                        payload_bytes = len(telemetry_message.encode("utf-8"))
+                        telemetry_payload["summary"]["payload_bytes"] = payload_bytes
+                        telemetry_started = time.monotonic()
+                        sent = telemetry_sender.send(telemetry_payload)
+                        telemetry_emit_ms += max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
+                        if not sent:
+                            telemetry_degraded = True
+                        emitted_events_in_cycle += 1
+                        continue
+                    if kind == "worker_error":
                         symbols = event.get("symbols")
                         if isinstance(symbols, list):
                             degraded_symbols.update(str(symbol).upper() for symbol in symbols if str(symbol).strip())
@@ -972,60 +1110,6 @@ def main() -> int:
                 child_queues.pop(worker_id, None)
             worker_reconcile_ms = max((time.monotonic() - worker_reconcile_started) * 1000.0, 0.0)
 
-            cycle_seq += 1
-            now_iso = _utc_now_iso()
-            merge_started = time.monotonic()
-            merged_chart = _merge_worker_view_state(
-                latest_view_state,
-                worker_count=len(symbol_shards),
-                active_workers=len(children),
-                degraded_symbols=sorted(degraded_symbols),
-            )
-            merge_ms = max((time.monotonic() - merge_started) * 1000.0, 0.0)
-            view_state_envelope: Dict[str, Any] | None = None
-            if view_state_events_in_cycle > 0 or view_seq == 0 or not children:
-                view_state_started = time.monotonic()
-                view_seq += 1
-                view_state_envelope = {
-                    "kind": "view_state",
-                    "schema_version": _VIEW_STATE_SCHEMA_VERSION,
-                    "run_id": run_id,
-                    "seq": view_seq,
-                    "series_key": "bot",
-                    "status": str((merged_chart.get("runtime") or {}).get("status") or ""),
-                    "payload": merged_chart,
-                    "known_at": now_iso,
-                    "at": now_iso,
-                }
-                view_state_build_ms = max((time.monotonic() - view_state_started) * 1000.0, 0.0)
-            telemetry_payload = {
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "series_key": "bot",
-                "seq": cycle_seq,
-                "status": str((merged_chart.get("runtime") or {}).get("status") or ""),
-                "at": now_iso,
-                "known_at": now_iso,
-                "summary": {
-                    "series_count": len(merged_chart.get("series") or []),
-                    "trade_count": len(merged_chart.get("trades") or []),
-                    "warning_count": len(merged_chart.get("warnings") or []),
-                },
-            }
-            if isinstance(view_state_envelope, Mapping):
-                telemetry_payload["view_state"] = dict(view_state_envelope)
-            telemetry_message = json.dumps(_json_safe(telemetry_payload))
-            payload_bytes = len(telemetry_message.encode("utf-8"))
-            summary_payload = telemetry_payload.get("summary")
-            if isinstance(summary_payload, MutableMapping):
-                summary_payload["payload_bytes"] = payload_bytes
-                telemetry_message = json.dumps(_json_safe(telemetry_payload))
-                payload_bytes = len(telemetry_message.encode("utf-8"))
-            telemetry_started = time.monotonic()
-            sent = telemetry_sender.send_message(telemetry_message)
-            telemetry_emit_ms = max((time.monotonic() - telemetry_started) * 1000.0, 0.0)
-            if not sent:
-                telemetry_degraded = True
             status = "running" if children else "stopped"
             status_write_started = time.monotonic()
             update_bot_runtime_status(
@@ -1035,55 +1119,28 @@ def main() -> int:
                 telemetry_degraded=telemetry_degraded,
             )
             status_write_ms = max((time.monotonic() - status_write_started) * 1000.0, 0.0)
-            if children:
-                if view_state_events_in_cycle > 0:
-                    idle_cycles_without_view_events = 0
-                    target_interval_ms = fast_snapshot_interval_ms
-                    cadence_mode = "hot"
-                else:
-                    idle_cycles_without_view_events += 1
-                    if idle_cycles_without_view_events >= idle_cycle_threshold:
-                        target_interval_ms = idle_snapshot_interval_ms
-                        cadence_mode = "idle"
-                    else:
-                        target_interval_ms = fast_snapshot_interval_ms
-                        cadence_mode = "warmup"
-                elapsed = time.monotonic() - loop_started
-                sleep_for = max((target_interval_ms / 1000.0) - elapsed, 0.005)
-            else:
-                sleep_for = 0.0
-                idle_cycles_without_view_events = 0
-                cadence_mode = "stopped"
+            sleep_for = 0.0 if not children else max((event_poll_ms / 1000.0) - (time.monotonic() - loop_started), 0.005)
             loop_ended_at = datetime.now(timezone.utc)
             loop_total_ms = max((time.monotonic() - loop_started) * 1000.0, 0.0)
             record_bot_run_step(
                 {
                     "run_id": run_id,
                     "bot_id": bot_id,
-                    "step_name": "container_snapshot_cycle",
+                    "step_name": "container_runtime_event_cycle",
                     "started_at": loop_started_at,
                     "ended_at": loop_ended_at,
                     "duration_ms": loop_total_ms,
                     "ok": True,
                     "context": {
-                        "snapshot_seq": cycle_seq,
-                        "view_seq": view_seq,
+                        "run_seq": run_seq,
                         "worker_count": len(symbol_shards),
                         "active_workers": len(children),
                         "degraded_symbols_count": len(degraded_symbols),
-                        "snapshot_interval_ms": snapshot_interval_ms,
-                        "target_interval_ms": target_interval_ms,
-                        "fast_snapshot_interval_ms": fast_snapshot_interval_ms,
-                        "idle_snapshot_interval_ms": idle_snapshot_interval_ms,
-                        "idle_cycle_threshold": idle_cycle_threshold,
-                        "idle_cycles_without_snapshot_events": idle_cycles_without_view_events,
-                        "snapshot_events_in_cycle": view_state_events_in_cycle,
+                        "event_poll_ms": event_poll_ms,
+                        "emitted_events_in_cycle": emitted_events_in_cycle,
                         "cadence_mode": cadence_mode,
                         "queue_drain_ms": queue_drain_ms,
                         "worker_reconcile_ms": worker_reconcile_ms,
-                        "merge_ms": merge_ms,
-                        "snapshot_write_ms": snapshot_write_ms,
-                        "view_state_build_ms": view_state_build_ms,
                         "telemetry_emit_ms": telemetry_emit_ms,
                         "payload_bytes": payload_bytes,
                         "status_write_ms": status_write_ms,
@@ -1091,10 +1148,6 @@ def main() -> int:
                     },
                 }
             )
-            if not children:
-                latest_view_state.clear()
-                break
-
             sleep_started_at = datetime.now(timezone.utc)
             sleep_ended_at = sleep_started_at + timedelta(seconds=max(sleep_for, 0.0))
             try:
@@ -1102,21 +1155,15 @@ def main() -> int:
                     {
                         "run_id": run_id,
                         "bot_id": bot_id,
-                        "step_name": "container_snapshot_sleep",
+                        "step_name": "container_runtime_event_sleep",
                         "started_at": sleep_started_at,
                         "ended_at": sleep_ended_at,
                         "duration_ms": max(sleep_for * 1000.0, 0.0),
                         "ok": True,
                         "context": {
-                            "snapshot_seq": cycle_seq,
-                            "view_seq": view_seq,
-                            "snapshot_interval_ms": snapshot_interval_ms,
-                            "target_interval_ms": target_interval_ms,
-                            "fast_snapshot_interval_ms": fast_snapshot_interval_ms,
-                            "idle_snapshot_interval_ms": idle_snapshot_interval_ms,
-                            "idle_cycle_threshold": idle_cycle_threshold,
-                            "idle_cycles_without_snapshot_events": idle_cycles_without_view_events,
-                            "snapshot_events_in_cycle": view_state_events_in_cycle,
+                            "run_seq": run_seq,
+                            "event_poll_ms": event_poll_ms,
+                            "emitted_events_in_cycle": emitted_events_in_cycle,
                             "cadence_mode": cadence_mode,
                             "active_workers": len(children),
                             "worker_count": len(symbol_shards),
@@ -1128,9 +1175,10 @@ def main() -> int:
                     "bot_runtime_container_sleep_step_trace_failed | bot_id=%s | run_id=%s | seq=%s",
                     bot_id,
                     run_id,
-                    cycle_seq,
+                    run_seq,
                 )
-            time.sleep(sleep_for)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
     except Exception:
         update_bot_runtime_status(bot_id=bot_id, run_id=run_id, status="failed", telemetry_degraded=telemetry_degraded)
         raise

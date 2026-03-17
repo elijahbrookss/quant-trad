@@ -11,17 +11,17 @@ from typing import List
 
 from sqlalchemy import select
 
-from .....db import db
-from .....db.models import (
+from ...db import db
+from ...db.models import (
     ATMTemplateRecord,
     StrategyIndicatorLink as StrategyIndicatorLinkDB,
     StrategyInstrumentLink as StrategyInstrumentLinkDB,
     StrategyRecord,
     StrategyRuleRecord,
 )
-from ....risk.atm import normalise_template
+from ..risk.atm import normalise_template
+from engines.bot_runtime.strategy.models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
 from utils.log_context import build_log_context, with_log_context
-from .models import Strategy, StrategyIndicatorLink, StrategyInstrumentLink
 
 logger = logging.getLogger(__name__)
 

@@ -42,6 +42,7 @@ from typing import Callable, Dict, List, Optional, Set
 from ..storage.storage import (
     clear_bot_runner,
     find_orphaned_bots,
+    load_bots,
     mark_bot_crashed,
     update_bot_heartbeat,
 )
@@ -257,8 +258,6 @@ class BotWatchdog:
 
     def verify_container_ownership(self) -> List[str]:
         """Verify running bot rows still map to live docker containers."""
-
-        from ..storage.storage import load_bots
 
         failed: List[str] = []
         for bot in load_bots():

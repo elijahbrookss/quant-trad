@@ -18,7 +18,9 @@ from engines.bot_runtime.core.runtime_events import (
     new_runtime_event,
 )
 from engines.bot_runtime.core.wallet import project_wallet_from_events
+from engines.bot_runtime.core.wallet import wallet_required_reservation
 from engines.bot_runtime.core.wallet_gateway import SharedWalletGateway
+from engines.bot_runtime.runtime.event_types import runtime_event_type
 from utils.log_context import with_log_context
 
 from ..components import RunContext
@@ -28,6 +30,57 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeEventsMixin:
+    def _allocate_runtime_event_seq(self) -> int:
+        if self._run_context is None:
+            raise ValueError("run context is required for runtime event sequencing")
+        shared_wallet_proxy = self.config.get("shared_wallet_proxy")
+        seq_override: Optional[int] = None
+        if isinstance(shared_wallet_proxy, Mapping):
+            seq_counter = shared_wallet_proxy.get("runtime_event_seq")
+            proxy_lock = shared_wallet_proxy.get("lock")
+            if seq_counter is not None:
+                if proxy_lock is not None:
+                    proxy_lock.acquire()
+                try:
+                    if hasattr(seq_counter, "get"):
+                        current_value = int(seq_counter.get())
+                    elif hasattr(seq_counter, "value"):
+                        current_value = int(getattr(seq_counter, "value"))
+                    else:
+                        raise RuntimeError(
+                            "shared runtime_event_seq counter does not expose get() or value; "
+                            f"type={type(seq_counter)!r}"
+                        )
+                    next_value = current_value + 1
+                    if hasattr(seq_counter, "set"):
+                        seq_counter.set(next_value)
+                    elif hasattr(seq_counter, "value"):
+                        setattr(seq_counter, "value", next_value)
+                    else:
+                        raise RuntimeError(
+                            "shared runtime_event_seq counter does not expose set() or value; "
+                            f"type={type(seq_counter)!r}"
+                        )
+                    seq_override = int(next_value)
+                finally:
+                    if proxy_lock is not None:
+                        proxy_lock.release()
+            elif not bool(getattr(self, "_runtime_event_seq_missing_warned", False)):
+                logger.warning(
+                    "bot_runtime_event_seq_counter_missing | bot_id=%s | run_id=%s",
+                    self.bot_id,
+                    self._run_context.run_id,
+                )
+                setattr(self, "_runtime_event_seq_missing_warned", True)
+        with self._lock:
+            if seq_override is None:
+                self._run_context.runtime_event_seq += 1
+                seq = int(self._run_context.runtime_event_seq)
+            else:
+                seq = int(seq_override)
+                self._run_context.runtime_event_seq = max(int(self._run_context.runtime_event_seq), seq)
+        return int(seq)
+
     def _log_event(
         self,
         event: str,
@@ -210,51 +263,8 @@ class RuntimeEventsMixin:
             raise ValueError("run context is required for runtime event persistence")
         serialized = event.serialize()
         shared_wallet_proxy = self.config.get("shared_wallet_proxy")
-        seq_override: Optional[int] = None
-        if isinstance(shared_wallet_proxy, Mapping):
-            seq_counter = shared_wallet_proxy.get("runtime_event_seq")
-            proxy_lock = shared_wallet_proxy.get("lock")
-            if seq_counter is not None:
-                if proxy_lock is not None:
-                    proxy_lock.acquire()
-                try:
-                    if hasattr(seq_counter, "get"):
-                        current_value = int(seq_counter.get())
-                    elif hasattr(seq_counter, "value"):
-                        current_value = int(getattr(seq_counter, "value"))
-                    else:
-                        raise RuntimeError(
-                            "shared runtime_event_seq counter does not expose get() or value; "
-                            f"type={type(seq_counter)!r}"
-                        )
-                    next_value = current_value + 1
-                    if hasattr(seq_counter, "set"):
-                        seq_counter.set(next_value)
-                    elif hasattr(seq_counter, "value"):
-                        setattr(seq_counter, "value", next_value)
-                    else:
-                        raise RuntimeError(
-                            "shared runtime_event_seq counter does not expose set() or value; "
-                            f"type={type(seq_counter)!r}"
-                        )
-                    seq_override = int(next_value)
-                finally:
-                    if proxy_lock is not None:
-                        proxy_lock.release()
-            elif not bool(getattr(self, "_runtime_event_seq_missing_warned", False)):
-                logger.warning(
-                    "bot_runtime_event_seq_counter_missing | bot_id=%s | run_id=%s",
-                    self.bot_id,
-                    self._run_context.run_id,
-                )
-                setattr(self, "_runtime_event_seq_missing_warned", True)
+        seq = self._allocate_runtime_event_seq()
         with self._lock:
-            if seq_override is None:
-                self._run_context.runtime_event_seq += 1
-                seq = int(self._run_context.runtime_event_seq)
-            else:
-                seq = int(seq_override)
-                self._run_context.runtime_event_seq = max(int(self._run_context.runtime_event_seq), seq)
             serialized["seq"] = int(seq)
             self._run_context.runtime_events.append(event)
             self._run_context.runtime_event_stream.append(serialized)
@@ -278,15 +288,13 @@ class RuntimeEventsMixin:
                     proxy_lock.release()
             else:
                 runtime_events_proxy.append(serialized)
-        from portal.backend.service.storage import storage
-
-        storage.record_bot_runtime_event(
+        self._deps.record_bot_runtime_event(
             {
                 "event_id": event.event_id,
                 "bot_id": self.bot_id,
                 "run_id": self._run_context.run_id,
                 "seq": seq,
-                "event_type": event.event_name.value,
+                "event_type": runtime_event_type(event.event_name),
                 "critical": event.event_name
                 in {
                     RuntimeEventName.DECISION_REJECTED,
@@ -510,8 +518,6 @@ class RuntimeEventsMixin:
             accounting_mode = series.execution_profile.accounting_mode
         collateral_reserved = 0.0
         if accounting_mode == "margin":
-            from engines.bot_runtime.core.wallet import wallet_required_reservation
-
             _currency, collateral_reserved = wallet_required_reservation(
                 side="buy" if direction == "long" else "sell",
                 base_currency=str(getattr(trade, "base_currency", "") or ""),
@@ -761,12 +767,10 @@ class RuntimeEventsMixin:
     def _persist_run_artifact(self, status: str) -> None:
         if self._run_context is None:
             return
-        from portal.backend.service.storage import storage
-        from portal.backend.service.reports import report_service
 
         artifact = self._run_artifact_payload(status)
-        storage.update_bot_run_artifact(self.bot_id, artifact)
-        report_service.record_run_report(
+        self._deps.update_bot_run_artifact(self.bot_id, artifact)
+        self._deps.record_run_report(
             bot_id=self.bot_id,
             run_id=artifact.get("run_id"),
             status=status,

@@ -11,6 +11,7 @@ from queue import Empty, Full, Queue
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.runtime.event_types import SERIES_STATE_SNAPSHOT
 from utils.log_context import with_log_context
 
 from ..core import _isoformat, _timeframe_to_seconds
@@ -19,6 +20,21 @@ logger = logging.getLogger(__name__)
 
 
 class RuntimeStateStreamingMixin:
+    @staticmethod
+    def _event_timestamp(value: Optional[datetime]) -> Optional[str]:
+        if value is None:
+            return None
+        target = value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return _isoformat(target)
+
+    @staticmethod
+    def _series_state_key_time(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
     def logs(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Return up to *limit* recent log entries."""
 
@@ -47,17 +63,10 @@ class RuntimeStateStreamingMixin:
         instrument_id = (series.instrument or {}).get("id") if isinstance(series.instrument, dict) else None
         metrics = dict(trade._metrics_snapshot())
         try:
-            from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
-            from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
-
-            entry_context = derive_entry_context(
-                instrument_id=instrument_id,
-                timeframe_seconds=timeframe_seconds,
-                entry_time=trade.entry_time,
-                stats_version=STATS_VERSION,
-                regime_version=REGIME_VERSION,
-            )
-            metrics.update(build_entry_metrics(entry_context))
+            runtime_derived_state = getattr(series, "runtime_derived_state", None)
+            if runtime_derived_state is None:
+                raise RuntimeError("runtime-derived entry context missing")
+            metrics.update(runtime_derived_state.entry_metrics(entry_time=trade.entry_time))
         except Exception as exc:
             context = self._runtime_log_context(
                 strategy_id=series.strategy_id,
@@ -114,6 +123,76 @@ class RuntimeStateStreamingMixin:
             }
         )
 
+    def _persist_series_state_snapshot(
+        self,
+        *,
+        series: StrategySeries,
+        candle: Candle,
+        bar_index: int,
+    ) -> Optional[float]:
+        if self._run_context is None:
+            raise ValueError("run context is required before persisting series state")
+        runtime_derived_state = getattr(series, "runtime_derived_state", None)
+        if runtime_derived_state is None:
+            raise RuntimeError(f"runtime-derived state missing for series {series.symbol}|{series.timeframe}")
+        instrument = series.instrument if isinstance(series.instrument, dict) else {}
+        instrument_id = str(instrument.get("id") or "").strip()
+        timeframe_seconds = _timeframe_to_seconds(series.timeframe)
+        if not instrument_id:
+            raise RuntimeError(f"instrument_id missing for series {series.symbol}|{series.timeframe}")
+        if timeframe_seconds <= 0:
+            raise RuntimeError(f"timeframe_seconds missing for series {series.symbol}|{series.timeframe}")
+        bar_key = self._series_state_key_time(candle.time)
+        if bar_key is None:
+            raise RuntimeError(f"bar_time missing for series {series.symbol}|{series.timeframe}")
+        stats = runtime_derived_state.candle_stats_by_time.get(bar_key)
+        regime = runtime_derived_state.regime_rows.get(bar_key)
+        event_time = candle.end if isinstance(candle.end, datetime) else candle.time
+        seq = self._allocate_runtime_event_seq()
+        payload = {
+            "event_id": f"{self._run_context.run_id}:{seq}:{SERIES_STATE_SNAPSHOT}:{series.symbol}:{series.timeframe}",
+            "bot_id": self.bot_id,
+            "run_id": self._run_context.run_id,
+            "seq": seq,
+            "event_type": SERIES_STATE_SNAPSHOT,
+            "critical": False,
+            "schema_version": 1,
+            "event_time": self._event_timestamp(event_time),
+            "known_at": self._event_timestamp(event_time or candle.time),
+            "payload": {
+                "series_key": f"{str(series.symbol or '').strip().upper()}|{str(series.timeframe or '').strip().lower()}",
+                "strategy_id": str(series.strategy_id or ""),
+                "symbol": str(series.symbol or ""),
+                "timeframe": str(series.timeframe or ""),
+                "timeframe_seconds": int(timeframe_seconds),
+                "instrument_id": instrument_id,
+                "bar_index": int(bar_index),
+                "bar_time": self._event_timestamp(candle.time),
+                "candle": candle.to_dict(),
+                "stats_version": str(runtime_derived_state.stats_version),
+                "stats": dict(stats or {}),
+                "regime_version": str(runtime_derived_state.regime_version),
+                "regime": dict(regime or {}),
+            },
+        }
+        enqueue_ms = self._series_state_buffer.record(payload)
+        logger.debug(
+            with_log_context(
+                "bot_series_state_snapshot_enqueued",
+                self._runtime_log_context(
+                    strategy_id=series.strategy_id,
+                    symbol=series.symbol,
+                    timeframe=series.timeframe,
+                    instrument_id=instrument_id,
+                    seq=seq,
+                    bar_index=bar_index,
+                    bar_time=self._event_timestamp(candle.time),
+                    enqueue_ms=round(enqueue_ms, 3),
+                ),
+            )
+        )
+        return enqueue_ms
+
     def _persist_runtime_state(self, status: str) -> None:
         """Send completion metadata back to the service layer for persistence."""
 
@@ -134,6 +213,7 @@ class RuntimeStateStreamingMixin:
         flush_started = datetime.now(timezone.utc)
         try:
             self._persistence_buffer.flush(reason=reason)
+            self._series_state_buffer.flush(reason=reason, shutdown=reason in {"runtime_loop_complete", "runtime_loop_failed"})
             self._record_step_trace(
                 "persistence_flush",
                 started_at=flush_started,
@@ -217,7 +297,7 @@ class RuntimeStateStreamingMixin:
             )
             return enqueue_ms
         except Exception as exc:  # pragma: no cover - defensive logging
-            step_context = self._runtime_log_context(step=step_name, run_id=run_id, error=str(exc))
+            step_context = self._runtime_log_context(step=step_name, error=str(exc))
             logger.warning(with_log_context("bot_runtime_step_trace_persist_failed", step_context))
             return None
 
@@ -431,22 +511,25 @@ class RuntimeStateStreamingMixin:
         message = dict(payload or {})
         message.setdefault("type", event)
         with self._lock:
-            channels = list(self._subscribers.values())
-        dropped_messages = 0
+            channels = list(self._subscribers.items())
         for channel in channels:
+            token, queue_ref = channel
             try:
-                channel.put_nowait(message)
+                queue_ref.put_nowait(message)
             except Full:
+                context = self._runtime_log_context(
+                    subscriber_token=token,
+                    queue_max=getattr(queue_ref, "maxsize", None),
+                    event=event,
+                )
+                logger.warning(with_log_context("bot_runtime_stream_backpressure", context))
                 try:
-                    channel.get_nowait()
-                except Empty:
-                    pass
-                try:
-                    channel.put_nowait(message)
-                except Full:
-                    dropped_messages += 1
-                    continue
-        return len(channels), dropped_messages
+                    queue_ref.put(message, timeout=0.25)
+                except Full as exc:
+                    raise RuntimeError(
+                        f"runtime stream subscriber backpressure exceeded | event={event} subscriber={token}"
+                    ) from exc
+        return len(channels), 0
 
     @staticmethod
     def _overlay_points_for_payload(payload: Mapping[str, Any]) -> int:

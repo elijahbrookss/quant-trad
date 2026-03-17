@@ -13,6 +13,7 @@ from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
 from .runner import BotRunner
 from .runner import DockerBotRunner
+from ..storage.storage import upsert_bot
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,6 @@ class BotControlStorage(Protocol):
 
 
 def _default_upsert_bot(payload: Mapping[str, Any]) -> None:
-    from ..storage.storage import upsert_bot
-
     upsert_bot(dict(payload))
 
 

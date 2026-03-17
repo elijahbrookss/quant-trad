@@ -15,12 +15,12 @@ from engines.bot_runtime.core.domain import (
     normalize_epoch,
     timeframe_duration,
 )
-from portal.backend.service.market.stats_contract import REGIME_VERSION
 from signals.overlays.schema import build_overlay
 from utils.log_context import build_log_context, with_log_context
 from utils.perf_log import perf_log
 
 from ..regime_overlay import build_regime_overlays
+from ..stats_contract import REGIME_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ DEFAULT_SIM_LOOKBACK_DAYS = 7
 def _regime_version_or_raise() -> str:
     version = str(REGIME_VERSION or "").strip()
     if not version:
-        raise RuntimeError("REGIME_VERSION is empty; fix portal.backend.service.market.stats_contract")
+        raise RuntimeError("REGIME_VERSION is empty; fix engines.bot_runtime.strategy.stats_contract")
     return version
 
 class SeriesBuilderOverlaysRegimeMixin:
@@ -43,10 +43,8 @@ class SeriesBuilderOverlaysRegimeMixin:
         # Look up canonical instrument record in storage by datasource/exchange/symbol.
         if not symbol:
             return None
-        from .....market import instrument_service
-
         try:
-            record = instrument_service.resolve_instrument(datasource, exchange, symbol)
+            record = self._deps.resolve_instrument(datasource, exchange, symbol)
         except Exception:
             record = None
         return record
@@ -68,8 +66,6 @@ class SeriesBuilderOverlaysRegimeMixin:
         datasource: Optional[str],
         exchange: Optional[str],
     ) -> List[Dict[str, Any]]:
-        from .....indicators import indicator_service
-
         if not self._include_indicator_overlays:
             return []
 
@@ -91,12 +87,7 @@ class SeriesBuilderOverlaysRegimeMixin:
 
             # Load fresh indicator metadata from DB (no snapshots)
             try:
-                if self._indicator_ctx is None:
-                    indicator_meta = indicator_service.get_instance_meta(indicator_id)
-                else:
-                    indicator_meta = indicator_service.get_instance_meta(
-                        indicator_id, ctx=self._indicator_ctx
-                    )
+                indicator_meta = self._deps.indicator_get_instance_meta(indicator_id, ctx=self._indicator_ctx)
             except KeyError:
                 context = self._runtime_log_context(indicator_id=indicator_id)
                 logger.warning(with_log_context("bot_overlay_indicator_not_found", context))
@@ -167,21 +158,13 @@ class SeriesBuilderOverlaysRegimeMixin:
 
             # Resolve indicator runtime plan so overlay recompute cadence follows the indicator's source timeframe.
             try:
-                if self._indicator_ctx is None:
-                    runtime_input_plan = indicator_service.runtime_input_plan_for_instance(
-                        indicator_id,
-                        strategy_interval=str(interval),
-                        start=start_iso,
-                        end=end_iso,
-                    )
-                else:
-                    runtime_input_plan = indicator_service.runtime_input_plan_for_instance(
-                        indicator_id,
-                        strategy_interval=str(interval),
-                        start=start_iso,
-                        end=end_iso,
-                        ctx=self._indicator_ctx,
-                    )
+                runtime_input_plan = self._deps.indicator_runtime_input_plan_for_instance(
+                    indicator_id,
+                    strategy_interval=str(interval),
+                    start=start_iso,
+                    end=end_iso,
+                    ctx=self._indicator_ctx,
+                )
             except Exception as exc:
                 logger.warning(
                     with_log_context(
@@ -275,29 +258,17 @@ class SeriesBuilderOverlaysRegimeMixin:
                             )
                             continue
             try:
-                if self._indicator_ctx is None:
-                    payload = indicator_service.overlays_for_instance(
-                        indicator_id,
-                        start=plan_start,
-                        end=plan_end,
-                        interval=str(plan_interval),
-                        symbol=window_symbol,
-                        datasource=ds,
-                        exchange=ex,
-                        overlay_options=overlay_options or None,
-                    )
-                else:
-                    payload = indicator_service.overlays_for_instance(
-                        indicator_id,
-                        start=plan_start,
-                        end=plan_end,
-                        interval=str(plan_interval),
-                        symbol=window_symbol,
-                        datasource=ds,
-                        exchange=ex,
-                        overlay_options=overlay_options or None,
-                        ctx=self._indicator_ctx,
-                    )
+                payload = self._deps.indicator_overlays_for_instance(
+                    indicator_id,
+                    start=plan_start,
+                    end=plan_end,
+                    interval=str(plan_interval),
+                    symbol=window_symbol,
+                    datasource=ds,
+                    exchange=ex,
+                    overlay_options=overlay_options or None,
+                    ctx=self._indicator_ctx,
+                )
                 received_context = self._runtime_log_context(
                     indicator_id=indicator_id,
                     boxes=len(payload.get("boxes", [])),
@@ -351,6 +322,7 @@ class SeriesBuilderOverlaysRegimeMixin:
         timeframe: str,
         strategy_id: Optional[str],
         symbol: Optional[str],
+        runtime_derived_state: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         regime_version = _regime_version_or_raise()
         if not instrument_id:
@@ -425,15 +397,35 @@ class SeriesBuilderOverlaysRegimeMixin:
             return []
         start_dt = candles[0].time
         end_dt = candles[-1].time
-        regime_rows = self._regime_rows_for_window(
-            instrument_id=instrument_id,
-            timeframe=timeframe,
-            timeframe_seconds=timeframe_seconds,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            strategy_id=strategy_id,
-            symbol=symbol,
-        )
+        runtime_rows = getattr(runtime_derived_state, "regime_rows", None)
+        if isinstance(runtime_rows, Mapping):
+            start_norm = self._to_utc_naive(start_dt)
+            end_norm = self._to_utc_naive(end_dt)
+            regime_rows = {
+                candle_time: payload
+                for candle_time, payload in runtime_rows.items()
+                if isinstance(candle_time, datetime) and start_norm <= self._to_utc_naive(candle_time) <= end_norm
+            }
+        else:
+            self._emit_warning(
+                "regime_overlay_runtime_state_missing",
+                "Regime overlay skipped: runtime regime state missing for series",
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
+            logger.warning(
+                with_log_context(
+                    "bot_regime_overlay_runtime_state_missing",
+                    self._runtime_log_context(
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        instrument_id=instrument_id,
+                        timeframe=timeframe,
+                    ),
+                )
+            )
+            return []
         logger.debug(
             with_log_context(
                 "bot_regime_rows_collected",
@@ -509,7 +501,7 @@ class SeriesBuilderOverlaysRegimeMixin:
         for overlay in overlays:
             overlay.update(
                 {
-                    "source": "regime_stats",
+                    "source": "runtime_regime",
                     "bot_id": self.bot_id,
                     "strategy_id": strategy_id,
                     "symbol": symbol,
@@ -517,112 +509,6 @@ class SeriesBuilderOverlaysRegimeMixin:
                 }
             )
         return overlays
-
-    def _regime_rows_for_window(
-        self,
-        *,
-        instrument_id: str,
-        timeframe: str,
-        timeframe_seconds: int,
-        start_dt: datetime,
-        end_dt: datetime,
-        strategy_id: Optional[str],
-        symbol: Optional[str],
-    ) -> Dict[datetime, Mapping[str, Any]]:
-        start_norm = self._to_utc_naive(start_dt)
-        end_norm = self._to_utc_naive(end_dt)
-        regime_version = _regime_version_or_raise()
-        cache_key = f"{instrument_id}:{timeframe_seconds}:{regime_version}"
-        with self._regime_cache_lock:
-            cached = self._regime_snapshot_cache.get(cache_key)
-            if cached is None:
-                rows = self._normalize_regime_rows(
-                    self._fetch_regime_rows(
-                        instrument_id=instrument_id,
-                        timeframe_seconds=timeframe_seconds,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        strategy_id=strategy_id,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        cache_state="miss",
-                    )
-                )
-                self._regime_snapshot_cache[cache_key] = {
-                    "start": start_norm,
-                    "end": end_norm,
-                    "rows": dict(rows),
-                }
-                return rows
-
-            cached_start = self._to_utc_naive_optional(cached.get("start"))
-            cached_end = self._to_utc_naive_optional(cached.get("end"))
-            cached_rows_raw = cached.get("rows") if isinstance(cached.get("rows"), Mapping) else {}
-            cached_rows = self._normalize_regime_rows(cached_rows_raw)
-            if not isinstance(cached_start, datetime) or not isinstance(cached_end, datetime):
-                rows = self._normalize_regime_rows(
-                    self._fetch_regime_rows(
-                        instrument_id=instrument_id,
-                        timeframe_seconds=timeframe_seconds,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        strategy_id=strategy_id,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        cache_state="rebuild",
-                    )
-                )
-                self._regime_snapshot_cache[cache_key] = {
-                    "start": start_norm,
-                    "end": end_norm,
-                    "rows": dict(rows),
-                }
-                return rows
-
-            needs_older = start_norm < cached_start
-            needs_newer = end_norm > cached_end
-            rows = dict(cached_rows)
-            if needs_older:
-                older_rows = self._normalize_regime_rows(
-                    self._fetch_regime_rows(
-                        instrument_id=instrument_id,
-                        timeframe_seconds=timeframe_seconds,
-                        start_dt=start_norm,
-                        end_dt=cached_start,
-                        strategy_id=strategy_id,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        cache_state="partial_older",
-                    )
-                )
-                rows.update(older_rows)
-            if needs_newer:
-                newer_rows = self._normalize_regime_rows(
-                    self._fetch_regime_rows(
-                        instrument_id=instrument_id,
-                        timeframe_seconds=timeframe_seconds,
-                        start_dt=cached_end,
-                        end_dt=end_norm,
-                        strategy_id=strategy_id,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        cache_state="partial_newer",
-                    )
-                )
-                rows.update(newer_rows)
-
-            # Bound cache memory to the active window.
-            window_rows = {
-                candle_time: payload
-                for candle_time, payload in rows.items()
-                if start_norm <= self._to_utc_naive(candle_time) <= end_norm
-            }
-            self._regime_snapshot_cache[cache_key] = {
-                "start": start_norm,
-                "end": end_norm,
-                "rows": dict(window_rows),
-            }
-            return window_rows
 
     def _normalize_regime_rows(
         self,
@@ -635,97 +521,6 @@ class SeriesBuilderOverlaysRegimeMixin:
             normalized[self._to_utc_naive(candle_time)] = payload
         return normalized
 
-    def _fetch_regime_rows(
-        self,
-        *,
-        instrument_id: str,
-        timeframe_seconds: int,
-        start_dt: datetime,
-        end_dt: datetime,
-        strategy_id: Optional[str],
-        symbol: Optional[str],
-        timeframe: str,
-        cache_state: str,
-    ) -> Dict[datetime, Mapping[str, Any]]:
-        from portal.backend.service.market.stats_repository import build_stats_snapshot
-
-        regime_version = _regime_version_or_raise()
-        if end_dt < start_dt:
-            return {}
-        stats_cache_key = f"{instrument_id}:{timeframe_seconds}:{start_dt.isoformat()}->{end_dt.isoformat()}"
-        with perf_log(
-            "cache.lookup",
-            logger=logger,
-            base_context=self._runtime_log_context(
-                instrument_id=instrument_id,
-                timeframe_seconds=timeframe_seconds,
-                strategy_id=strategy_id,
-                symbol=symbol,
-                timeframe=timeframe,
-                cache_state=cache_state,
-            ),
-            enabled=self._obs_enabled,
-            slow_ms=self._obs_slow_ms,
-            operation_name="build_stats_snapshot",
-            cache_scope="series_builder_regime",
-            cache_key_summary=stats_cache_key,
-        ):
-            stats_snapshot = build_stats_snapshot(
-                instrument_ids=[instrument_id],
-                timeframe_seconds=timeframe_seconds,
-                start=start_dt,
-                end=end_dt,
-                regime_versions=[regime_version],
-                include_latest_regime=True,
-            )
-        logger.debug(
-            with_log_context(
-                "bot_regime_overlay_snapshot_built",
-                self._runtime_log_context(
-                    strategy_id=strategy_id,
-                    symbol=symbol,
-                    instrument_id=instrument_id,
-                    timeframe=timeframe,
-                    timeframe_seconds=timeframe_seconds,
-                    regime_rows=len(stats_snapshot.regime_stats_by_version),
-                    start=start_dt,
-                    end=end_dt,
-                    cache_state=cache_state,
-                ),
-            )
-        )
-        regime_rows: Dict[datetime, Mapping[str, Any]] = {}
-        discovered_versions: set[str] = set()
-        for (inst_id, candle_time, version), regime in stats_snapshot.regime_stats_by_version.items():
-            if inst_id != instrument_id:
-                continue
-            discovered_versions.add(str(version))
-            if str(version) != regime_version:
-                continue
-            if candle_time:
-                regime_rows[self._to_utc_naive(candle_time)] = regime
-        if not regime_rows and discovered_versions and regime_version not in discovered_versions:
-            available_versions = sorted(discovered_versions)
-            warning_context = self._runtime_log_context(
-                strategy_id=strategy_id,
-                symbol=symbol,
-                instrument_id=instrument_id,
-                timeframe=timeframe,
-                requested_regime_version=regime_version,
-                available_regime_versions=",".join(available_versions),
-            )
-            logger.warning(with_log_context("bot_regime_overlay_version_mismatch", warning_context))
-            self._emit_warning(
-                "regime_overlay_version_mismatch",
-                "Regime overlay version mismatch: runtime requested unavailable regime version.",
-                strategy_id=strategy_id,
-                symbol=symbol,
-                instrument_id=instrument_id,
-                timeframe=timeframe,
-                requested_regime_version=regime_version,
-                available_regime_versions=available_versions,
-            )
-        return regime_rows
 
     @staticmethod
     def _to_utc_naive(value: Any) -> datetime:
@@ -921,8 +716,3 @@ class SeriesBuilderOverlaysRegimeMixin:
                 )
             )
         return candles
-
-    def _resolve_risk_template(self, strategy: Mapping[str, Any]) -> Dict[str, Any]:
-        from portal.backend.service.risk.atm import merge_templates
-
-        return merge_templates(strategy.get("atm_template"))

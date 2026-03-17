@@ -6,10 +6,11 @@ import logging
 import threading
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set
 
-from portal.backend.service.bots.bot_runtime.strategy.models import Strategy
+from engines.bot_runtime.deps import BotRuntimeDeps
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms
 
+from ..models import Strategy
 from .models import StrategySeries
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ class SeriesBuilderLifecycleMixin:
         bot_id: str,
         config: Mapping[str, Any],
         run_type: str,
+        deps: BotRuntimeDeps,
         log_candle_sequence: Optional[Callable[..., None]] = None,
         indicator_ctx: Optional[Any] = None,
         warning_sink: Optional[Callable[[Dict[str, object]], None]] = None,
@@ -27,6 +29,7 @@ class SeriesBuilderLifecycleMixin:
         self.bot_id = bot_id
         self.config = config
         self.run_type = run_type
+        self._deps = deps
         # Default to including indicator overlays during bot runs; callers can disable if they truly want a lighter path.
         self._include_indicator_overlays = bool(config.get("include_indicator_overlays", True))
         self._log_candle_sequence = log_candle_sequence
@@ -93,6 +96,19 @@ class SeriesBuilderLifecycleMixin:
             self._regime_snapshot_cache.clear()
         return
 
+    def _build_runtime_series_derived_state(
+        self,
+        *,
+        candles: Sequence[Any],
+        instrument_id: str,
+        timeframe_seconds: int,
+    ) -> Any:
+        return self._deps.build_runtime_series_derived_state(
+            candles=candles,
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+        )
+
     def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
         """Build series from strategy IDs (clean DB-based approach).
 
@@ -108,12 +124,9 @@ class SeriesBuilderLifecycleMixin:
         Raises:
             ValueError: If any strategy not found
         """
-        from portal.backend.service.bots.bot_runtime.strategy.strategy_loader import StrategyLoader
-
         series_list: List[StrategySeries] = []
         for strategy_id in strategy_ids:
-            # Load strategy fresh from DB with proper typing
-            strategy = StrategyLoader.fetch_strategy(strategy_id)
+            strategy = self._deps.fetch_strategy(strategy_id)
             # Build one series per enabled instrument
             series_per_strategy = self._build_series_for_strategy(strategy)
             series_list.extend(series_per_strategy)

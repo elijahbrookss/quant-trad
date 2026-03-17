@@ -1,4 +1,4 @@
-"""Reporting helpers and overlay utilities for bot runtime."""
+"""Runtime reporting constants and overlay helpers."""
 
 from __future__ import annotations
 
@@ -21,12 +21,14 @@ def instrument_key(datasource: Optional[str], exchange: Optional[str], symbol: O
     )
 
 
-def payload_has_content(payload) -> bool:
+def payload_has_content(payload: object) -> bool:
     return bool(payload)
 
 
-def trim_overlay_payload(payload, current_epoch):
+def trim_overlay_payload(payload: object, current_epoch: object) -> tuple[object, bool]:
+    _ = current_epoch
     return payload, True
+
 
 __all__ = [
     "TRADE_OVERLAY_SOURCE",

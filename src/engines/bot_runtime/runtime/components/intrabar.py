@@ -21,7 +21,7 @@ class IntrabarManager:
         self,
         bot_id: str,
         *,
-        fetcher: Optional[Callable[..., Any]] = None,
+        fetcher: Callable[..., Any],
         build_candles: Callable[[Any, Optional[str]], List[Candle]],
         timeframe_seconds: Callable[[Optional[str]], Optional[float]],
         strategy_key_fn: Callable[[Any], str],
@@ -29,7 +29,7 @@ class IntrabarManager:
         obs_sample_rate: Optional[float] = None,
     ) -> None:
         self.bot_id = bot_id
-        self._fetcher = fetcher if fetcher is not None else self._default_fetcher
+        self._fetcher = fetcher
         self._build_candles = build_candles
         self._timeframe_seconds = timeframe_seconds
         self._strategy_key = strategy_key_fn
@@ -43,12 +43,6 @@ class IntrabarManager:
         self._cache: Dict[str, List[Candle]] = {}
         self._snapshots: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
-
-    @staticmethod
-    def _default_fetcher(*args: Any, **kwargs: Any) -> Any:
-        from portal.backend.service.market.candle_service import fetch_ohlcv
-
-        return fetch_ohlcv(*args, **kwargs)
 
     @property
     def snapshots(self) -> Dict[str, Dict[str, Any]]:

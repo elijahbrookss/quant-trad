@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from utils.log_context import build_log_context, with_log_context
 
-from ..bots.bot_runtime.strategy.strategy_loader import StrategyLoader
+from ..bots.strategy_loader import StrategyLoader
 from ..storage import storage
 from . import report_data
 from .metrics import (
@@ -794,6 +794,8 @@ def get_report(run_id: str) -> Dict[str, Any]:
     run = report_data.get_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
+    run = dict(run)
+    run["decision_ledger"] = report_data.list_decision_ledger(run_id)
     trades = report_data.list_trades_for_run(run_id)
     try:
         return _build_report(run, trades)

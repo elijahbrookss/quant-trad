@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence
 
+from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
 from ..storage.storage import list_bot_runtime_events
 
 _EVENT_NAME_TO_CATEGORY: Dict[str, str] = {
@@ -135,9 +136,11 @@ def list_run_ledger_events(
         run_id=str(run_id),
         after_seq=max(0, int(after_seq or 0)),
         limit=max_limit,
-        event_types=filter_names or None,
+        event_type_prefixes=[RUNTIME_PREFIX],
     )
     events = [_project_runtime_row(row) for row in rows if isinstance(row, Mapping)]
+    if filter_names:
+        events = [event for event in events if str(event.get("event_name") or "").upper() in filter_names]
     next_after_seq = max((int(item.get("seq") or 0) for item in events), default=max(0, int(after_seq or 0)))
     return {
         "bot_id": str(bot_id),

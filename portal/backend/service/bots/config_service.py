@@ -7,6 +7,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
+
+from .strategy_loader import StrategyLoader
+from ..market import instrument_service
 from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
 
 MIN_STARTING_WALLET = 10.0
@@ -326,8 +330,6 @@ class BotConfigService:
         return candidate
 
     def validate_strategy_existence(self, bot: Mapping[str, object]) -> None:
-        from .bot_runtime.strategy import StrategyLoader
-
         strategy_id = str(bot.get("strategy_id") or "").strip()
         if not strategy_id:
             raise ValueError("Bots require a strategy_id.")
@@ -339,8 +341,6 @@ class BotConfigService:
         if not policy:
             return
 
-        from .bot_runtime.strategy import StrategyLoader
-
         strategy_id = str(bot.get("strategy_id") or "").strip()
         if not strategy_id:
             raise ValueError("Bots require a strategy_id.")
@@ -350,7 +350,6 @@ class BotConfigService:
             instrument_type = str(snapshot.get("instrument_type") or "").lower()
             symbol = snapshot.get("symbol") or link.symbol
             if not instrument_type:
-                from ..market import instrument_service
                 resolved = instrument_service.resolve_instrument(strategy.datasource, strategy.exchange, symbol or "")
                 instrument_type = str((resolved or {}).get("instrument_type") or "").lower()
             if not instrument_type:
@@ -378,10 +377,6 @@ class BotConfigService:
 
     def validate_runtime_readiness(self, bot: Mapping[str, object]) -> None:
         """Validate bot runtime prerequisites for v1 derivatives execution."""
-
-        from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
-        from .bot_runtime.strategy import StrategyLoader
-        from ..market import instrument_service
 
         strategy_id = str(bot.get("strategy_id") or "").strip()
         if not strategy_id:
