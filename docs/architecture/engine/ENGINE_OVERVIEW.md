@@ -67,17 +67,20 @@ Current bot runtime package layout:
 - `src/engines/bot_runtime/runtime/components/`: reusable runtime components (series runner, intrabar, buffers, policy, sinks)
 - `src/engines/bot_runtime/runtime/mixins/`: orchestration behavior split by concern (setup, execution loop, events, state/streaming)
 - `src/engines/bot_runtime/runtime/runtime.py`: `BotRuntime` assembly surface
-- `portal/backend/service/bots/bot_runtime/runtime/`: compatibility adapters/re-exports for service-layer callers
+- `src/engines/bot_runtime/strategy/`: runtime-domain series construction, regime overlay shaping, and incremental overlay/signal preparation
+- `src/engines/bot_runtime/deps.py`: explicit engine boundary contract for portal-owned collaborators
 
 ## Strategy + Storage Package Map
 
 Current series preparation layout:
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`: `SeriesBuilder` assembly facade
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/lifecycle.py`: builder lifecycle/reset/load concerns
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/live_updates.py`: live refresh + strategy evaluation helpers
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/series_construction.py`: series construction + incremental per-bar evaluation
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/overlays_regime.py`: overlay and regime projection helpers
-- `portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/models.py`: `StrategySeries` runtime payload model
+- `src/engines/bot_runtime/strategy/series_builder.py`: `SeriesBuilder` assembly facade
+- `src/engines/bot_runtime/strategy/series_builder_parts/lifecycle.py`: builder lifecycle/reset/load concerns
+- `src/engines/bot_runtime/strategy/series_builder_parts/live_updates.py`: live refresh + strategy evaluation helpers
+- `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py`: series construction + incremental per-bar evaluation
+- `src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py`: overlay and regime projection helpers
+- `src/engines/bot_runtime/strategy/series_builder_parts/models.py`: `StrategySeries` runtime payload model
+- `portal/backend/service/bots/strategy_loader.py`: DB-backed strategy adapter for runtime-domain models
+- `portal/backend/service/bots/runtime_derived_state.py`: portal-side adapter for runtime-local stats/regime derivation
 
 Current storage layout:
 - `portal/backend/service/storage/repos/`: cohesive repository modules grouped by domain (`bots`, `runs`, `trades`, `runtime_events`, etc.)

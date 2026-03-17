@@ -25,7 +25,7 @@ code_paths:
 ## Responsibilities
 
 - Build a `RuntimeComposition` dataclass with runtime collaborators and explicit `RuntimeMode`.
-- Keep import-time wiring cheap by deferring storage imports to composition build time.
+- Keep the service layer honest by wiring concrete collaborators in one place.
 - Provide a singleton accessor for production (`get_runtime_composition`).
 - Provide an override seam for tests (`set_runtime_composition_for_tests`).
 
@@ -48,6 +48,9 @@ Mode selection defaults from `BOT_RUNTIME_MODE` and can be overridden when calli
 - `BotRuntimeControlService`
 - `BotStorageGateway` (storage boundary)
 - `BotWatchdog`
+
+Related worker-runtime boundary:
+- `portal/backend/service/bots/runtime_dependencies.py` builds the explicit `BotRuntimeDeps` bundle used by `container_runtime.py`.
 
 ## Design Rules
 

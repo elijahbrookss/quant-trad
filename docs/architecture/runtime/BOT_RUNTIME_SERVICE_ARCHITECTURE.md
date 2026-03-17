@@ -12,6 +12,13 @@ code_paths:
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/bots/runtime_control_service.py
   - portal/backend/service/bots/container_runtime.py
+  - portal/backend/service/bots/runtime_dependencies.py
+  - portal/backend/service/bots/strategy_loader.py
+  - portal/backend/service/bots/runtime_derived_state.py
+  - portal/backend/service/bots/telemetry_stream.py
+  - portal/backend/service/bots/botlens_series_service.py
+  - portal/backend/service/market/candle_service.py
+  - src/engines/bot_runtime/runtime/mixins/state_streaming.py
 ---
 # Bot Runtime Service Architecture
 
@@ -19,7 +26,7 @@ code_paths:
 
 - `Component`: Bot runtime service orchestration
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 2.0
+- `Doc Version`: 3.0
 - `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
 
 ## 1) Problem and scope
@@ -48,11 +55,16 @@ flowchart LR
     A[Bot API / service] --> B[BotRuntimeControlService]
     B --> C[DockerBotRunner]
     C --> D[container_runtime.py]
-    D --> E[one process per symbol]
+    D --> E[one process per series]
     E --> F[BotRuntime worker]
-    F --> G[Runtime events + trade persistence]
-    D --> H[Merged view_state + telemetry]
-    D --> I[Runtime status + container step traces]
+    F --> G[Series timeline initialize/apply_bar/snapshot]
+    G --> H[Runtime events + trades + reports]
+    G --> I[Per-series bootstrap and delta stream]
+    I --> J[telemetry_stream.py]
+    J --> K[Append-only BotLens series events]
+    J --> L[Latest per-series view-state rows]
+    J --> M[Atomic websocket bootstrap + live tail]
+    D --> N[Run status + container step traces]
 ```
 
 ## 3) Service entrypoints
@@ -60,7 +72,7 @@ flowchart LR
 Current entrypoints:
 - `portal/backend/service/bots/runtime_control_service.py`: API-facing start/stop and watchdog status surface.
 - `portal/backend/service/bots/runner.py`: runner abstraction plus `DockerBotRunner`.
-- `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, merged view-state emission, and container-level status/step traces.
+- `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, per-series BotLens transport emission, and container-level status/step traces.
 
 Current target support:
 - only `BOT_RUNTIME_TARGET=docker` is implemented.
@@ -72,8 +84,9 @@ Runtime API-facing service wiring now flows through `portal/backend/service/bots
 
 - `RuntimeComposition` assembles stream manager, config service, runtime control service, storage gateway, and watchdog.
 - `RuntimeMode` (default from `BOT_RUNTIME_MODE`) selects a composition branch so backtest/paper/live can evolve without pushing mode switches into service leaf modules.
-- `bot_service.py` consumes this composition lazily via `get_runtime_composition()` instead of module-level singleton construction.
+- `bot_service.py` consumes this composition via `get_runtime_composition()` instead of module-level singleton construction.
 - Runtime control storage writes (`upsert_bot`) are injected as a collaborator boundary, reducing hidden deep imports in service methods.
+- Worker runtime construction uses `build_bot_runtime_deps()` to pass portal-owned adapters into the canonical engine instead of letting engine modules import portal services directly.
 
 This keeps start/stop behavior stable while making runtime wiring explicit and testable.
 
@@ -130,8 +143,8 @@ The launched process is:
 - assigning symbols to worker processes,
 - creating the shared-wallet multiprocessing proxy,
 - supervising child workers,
-- merging worker view-state payloads,
-- emitting compact telemetry envelopes,
+- assigning run-scoped and series-scoped BotLens sequence numbers,
+- forwarding per-series bootstrap/delta telemetry envelopes,
 - writing bot runtime status and container step traces.
 
 Important current limits:
@@ -144,9 +157,12 @@ Important current limits:
 Each child worker process:
 - receives exactly one symbol shard,
 - receives the shared `run_id`,
-- constructs a `BotRuntime` with `degrade_series_on_error=True`,
+- constructs a `BotRuntime` with `degrade_series_on_error=True` and an explicit `BotRuntimeDeps` bundle,
 - forces `series_runner="inline"`,
-- emits compact `view_state` envelopes back to the parent process,
+- computes candle stats, regime state, overlays, decisions, and trades on the same series timeline,
+- persists `series_state.snapshot` ledger events asynchronously from that same series timeline,
+- emits one `botlens_series_bootstrap` after warm-up,
+- emits ordered `botlens_series_delta` messages from the runtime subscriber queue,
 - emits `worker_error` messages when runtime execution fails.
 
 The parent process treats worker failures as degraded-symbol events:
@@ -160,39 +176,132 @@ The parent process treats worker failures as degraded-symbol events:
 The service/runtime split is important.
 
 Worker runtime persistence:
-- canonical runtime events via `storage.record_bot_runtime_event(...)`,
-- trade rows via `storage.record_bot_trade(...)`,
-- trade-event rows via `storage.record_bot_trade_event(...)`,
-- worker run artifacts via `storage.update_bot_run_artifact(...)`,
-- worker reports via `report_service.record_run_report(...)`,
-- runtime step traces via batched `storage.record_bot_run_steps_batch(...)`.
+- canonical execution events via injected `BotRuntimeDeps.record_bot_runtime_event(...)` with `event_type=runtime.*`,
+- runtime-owned per-series analytical state via `BotRuntimeDeps.record_bot_runtime_events_batch(...)` with `event_type=series_state.snapshot`,
+- trade rows via `BotRuntimeDeps.record_bot_trade(...)`,
+- trade-event rows via `BotRuntimeDeps.record_bot_trade_event(...)`,
+- worker run artifacts via `BotRuntimeDeps.update_bot_run_artifact(...)`,
+- worker reports via `BotRuntimeDeps.record_run_report(...)`,
+- runtime step traces via `BotRuntimeDeps.record_bot_run_steps_batch(...)`.
 
-Container runtime persistence:
+Container/runtime telemetry persistence:
 - run status via `update_bot_runtime_status(...)`,
 - container loop step traces via `record_bot_run_step(...)`.
+- append-only BotLens series events via `record_bot_runtime_event(...)` with:
+  - `event_type=botlens.series_bootstrap`
+  - `event_type=botlens.series_delta`
+- latest per-series BotLens materializations via `upsert_bot_run_view_state(...)`.
 
-Current non-persistence:
-- merged BotLens `view_state` is not durably written by `container_runtime.py`,
-- the merged view is an ephemeral telemetry/read-model surface.
+Important semantics:
+- the latest BotLens row is a materialized cache, not the execution source of truth,
+- BotLens bootstrap can read the materialized rows,
+- but live execution never reads DB-backed BotLens projections back into the worker timeline.
+- BotLens persistence only accepts canonical per-series keys of the form `SYMBOL|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
+- report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_state.*`, and `botlens.*`.
+
+## 8.1) Stats and regime ownership
+
+Stats/regime ownership is split deliberately by product surface.
+
+QuantLab path:
+- backend OHLCV persistence may enqueue async stats/regime work,
+- those tables exist for research, browsing, export, and precompute.
+
+Bot runtime path:
+- each series worker computes stats/regime from its in-memory candle timeline,
+- overlays, entry metrics, and BotLens derive from that runtime-local state through `portal/backend/service/bots/runtime_derived_state.py`,
+- bot runtime OHLCV fetches set `schedule_stats=False`,
+- runtime-local regime derivation may attach regime block ids for explainability, but it must not upsert regime rows/blocks through the DB persistence path when `engine=None`,
+- and the live bot does not depend on `candle_stats` / `regime_stats` tables.
+
+This preserves the system contract:
+- one runtime state-engine timeline,
+- no alternate reconstruction path for bot execution artifacts,
+- and no async stats lag leaking into live execution semantics.
 
 ## 9) Telemetry contract
 
-The container runtime builds a compact telemetry envelope with:
-- `run_id`,
-- `bot_id`,
-- container sequence numbers,
-- merged summary counts,
-- optional merged `view_state`.
+The container runtime emits BotLens telemetry with per-series message ownership.
+
+Envelope types:
+- `botlens_series_bootstrap`
+- `botlens_series_delta`
+
+Each envelope carries:
+- `run_id`
+- `bot_id`
+- `series_key`
+- monotonic `run_seq`
+- monotonic per-series `series_seq`
+- event timing fields
+- either a bounded per-series `projection` bootstrap or a typed `runtime_delta`
 
 Transport:
 - websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
-- latest-message compaction inside `_TelemetryEmitter` to avoid backlog growth.
+- bounded FIFO queueing inside `_TelemetryEmitter` to preserve in-order per-series delivery semantics.
 
 Durability:
-- telemetry is supplemental,
-- runtime events, trades, run artifacts, status rows, and step traces remain the durable execution record.
+- telemetry transport is supplemental,
+- `botlens.*` rows in `portal_bot_run_events` are the durable BotLens artifact ledger,
+- `series_state.snapshot` rows are the durable runtime-owned stats/regime deepdive source,
+- runtime/trade/status/step-trace rows remain the rest of the durable execution record.
 
-## 10) Merged runtime status semantics
+### 9.1) BotLens series delivery semantics
+
+BotLens `series_seq` is continuity-sensitive.
+
+That means transport is not allowed to silently compact away intermediate `series_seq` values if downstream consumers treat missing sequences as continuity failure.
+
+Required semantics:
+- `series_seq` is emitted in ascending order per `run_id` / `series_key`,
+- the emitter preserves FIFO order,
+- a failed send does not advance the queue head,
+- later snapshots must not bypass an older undelivered snapshot,
+- BotLens series websocket subscribe must send the baseline snapshot on that same channel and replay buffered live-tail messages newer than `baseline_seq` before enabling future-only fanout,
+- one continuity epoch is identified by `stream_session_id`, and continuity invalidation rotates that id before future live fanout resumes,
+- the backend may emit `botlens_live_resync_required` and close active sockets when run continuity is no longer trusted,
+- and any backlog must be surfaced as explicit backpressure rather than silent compaction.
+
+This is important because the ingest path and BotLens frontend both treat missing `series_seq` values as a resync condition.
+
+### 9.2) Producer backpressure
+
+Producer backpressure means per-series update production is forced to observe transport capacity instead of overwriting undelivered messages.
+
+In the current service implementation this entails:
+- `_TelemetryEmitter` has a bounded queue,
+- `send_message(...)` blocks up to `BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS` when the queue is full,
+- if capacity does not free within that window, the emitter logs `bot_telemetry_emit_queue_backpressure` and returns failure,
+- container runtime marks telemetry degraded when send fails,
+- and operators can inspect queue depth, retry timing, payload size, and send latency through telemetry logs.
+
+Backpressure is therefore an explicit signal that:
+- per-series update cadence is too aggressive,
+- payloads are still too large,
+- or the transport path is too slow.
+
+It is not a license to silently skip state.
+
+### 9.3) Continuity invalidation and retry semantics
+
+BotLens live recovery is explicit.
+
+When continuity is broken:
+- the backend rotates `stream_session_id`,
+- clears incompatible live-tail replay buffers,
+- emits `botlens_live_resync_required` to current viewers,
+- and closes those sockets so the client must establish a new atomic subscribe.
+
+The frontend is expected to retry within a bounded budget and surface a terminal continuity-unavailable state if that budget is exhausted.
+
+### 9.4) Important non-goal
+
+The telemetry queue is not the durable execution record.
+
+It exists only to preserve transport continuity for the BotLens live inspection path.
+Authoritative execution history still lives in durable runtime events, trades, artifacts, and derived BotLens view-state persistence.
+
+## 10) Run-level and series-level status semantics
 
 Two status surfaces exist and should not be conflated.
 
@@ -201,7 +310,7 @@ Persisted service status:
 - `stopped`
 - `failed`
 
-Merged runtime payload status inside `view_state.runtime.status`:
+Runtime payload status inside a per-series BotLens projection:
 - `running`
 - `completed`
 - `stopped`
@@ -209,8 +318,8 @@ Merged runtime payload status inside `view_state.runtime.status`:
 - `degraded`
 
 Current nuance:
-- if any workers are still active, merged runtime status remains `running` even when `degraded_symbols` is non-empty,
-- degraded state is primarily surfaced through merged payload warnings plus `telemetry_degraded`,
+- if any workers are still active, run-level status may remain `running` even when one series is degraded,
+- degraded state is surfaced through runtime warnings, per-series payload state, and telemetry continuity signals,
 - the persisted bot runtime status row does not currently store a separate `degraded` terminal state.
 
 ## 11) Stop and watchdog flow
@@ -234,5 +343,5 @@ The watchdog remains responsible for:
 - Service start/stop must remain explicit and auditable.
 - Runtime readiness validation happens before container launch, not lazily inside UI paths.
 - The shared `run_id` belongs to the whole container run and is propagated to all symbol workers.
-- Container runtime owns symbol sharding and merged telemetry; worker runtimes own execution semantics and canonical runtime events.
+- Container runtime owns symbol sharding, run/series sequencing, and per-series BotLens transport; worker runtimes own execution semantics and canonical runtime events.
 - Failures must be surfaced either as explicit bot/container failure or explicit symbol degradation. No silent success state may be invented.

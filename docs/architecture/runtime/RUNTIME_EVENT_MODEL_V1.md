@@ -22,7 +22,7 @@ code_paths:
 
 ## 1) Problem and scope
 
-This model defines one canonical append-only event stream for runtime causality, audit, and deterministic reconstruction.
+This model defines one canonical append-only event stream for bot-run causality, deepdive, and deterministic reconstruction.
 
 In scope:
 - runtime event envelope and taxonomy,
@@ -59,23 +59,25 @@ See the event-flow diagrams in the detailed sections below.
 
 - Inputs: strategy/risk decisions, fill outcomes, wallet operations, runtime exceptions.
 - Dependencies: runtime event schema validator, storage write path, reason code taxonomy.
-- Outputs: persisted `RuntimeEvent` rows, derived wallet projection state, derived decision traces.
-- Side effects: append-only writes to `portal_bot_run_events`, replay/read-model derivation, runtime logging.
+- Outputs: persisted bot-run ledger rows, derived wallet projection state, derived decision traces, derived per-series state views.
+- Side effects: append-only writes to `portal_bot_run_events`, read-model derivation, runtime logging.
 
 ## 4) Core components and data flow
 
 - Runtime creates validated `RuntimeEvent` envelopes.
-- Events are persisted append-only via one runtime write path.
+- Runtime derives per-series analytical state snapshots on the same timeline.
+- BotLens projects UI/debugger state from the same runtime timeline.
+- All three artifact families are persisted append-only via one bot ledger write path.
 - Causality links (`root_id`, `parent_id`, `correlation_id`) encode chain structure.
 - Consumers/replay build wallet and decision views from the canonical stream.
 
 ## 5) State model
 
 Authoritative state:
-- runtime event stream in `portal_bot_run_events`.
+- bot-run ledger in `portal_bot_run_events`.
 
 Derived state:
-- wallet state, wallet ledger compatibility view, decision trace views, bootstrap snapshots.
+- wallet state, decision trace views, report exports, and BotLens latest-state caches.
 
 Persistence boundaries:
 - persisted: canonical events and run metadata.
@@ -83,7 +85,7 @@ Persistence boundaries:
 
 ## 6) Why this architecture
 
-- Single stream removes drift across multiple ledgers.
+- Single bot ledger removes drift across multiple ledgers.
 - Causality fields preserve explainability and traceability.
 - Deterministic replay enables audit and runtime recovery paths.
 
@@ -101,7 +103,8 @@ Persistence boundaries:
 
 ## 9) Strict contract
 
-- Runtime events are canonical runtime truth.
+- `portal_bot_run_events` is the canonical bot deepdive ledger.
+- Runtime event payloads remain the canonical execution-truth family inside that ledger.
 - Retry/idempotency semantics: at-least-once producer behavior with idempotency by unique `event_id`.
 - Degrade state machine:
   - `RUNNING`: event emission and persistence healthy.
@@ -120,7 +123,7 @@ Persistence boundaries:
 - Validation hooks (applicable):
   - code: runtime event payload validation and reason-code enforcement,
   - logs: emission failures and parent-resolution fallback events,
-  - storage: unique `event_id` and monotonic `seq` per run,
+  - storage: unique `event_id` and unique logical `seq` per bot/run ledger,
   - metrics: event ingest rate, rejected event count, parent-missing count.
 
 ## 10) Versioning and compatibility
@@ -133,10 +136,27 @@ Persistence boundaries:
 
 ## Detailed Design
 
-## What This Is
-Runtime V1 uses one canonical append-only stream: `RuntimeEvent`.
+## Ledger families
 
-Every important runtime fact (signal, decision, fills, runtime errors) is written as a `RuntimeEvent` and persisted to `portal_bot_run_events`.
+`portal_bot_run_events` now carries three namespaced event families:
+
+- `runtime.*`
+  - canonical execution causality (`runtime.signal_emitted`, `runtime.decision_accepted`, `runtime.entry_filled`, ...)
+- `series_state.*`
+  - runtime-owned per-series analytical state snapshots persisted on the runtime timeline
+  - current contract starts with `series_state.snapshot`
+- `botlens.*`
+  - debugger/view artifacts (`botlens.series_bootstrap`, `botlens.series_delta`)
+
+The storage table stays structurally generic.
+Meaning lives in `event_type` plus the typed JSON payload.
+
+## What This Is
+Runtime V1 uses one canonical append-only bot ledger.
+
+Every important runtime fact (signal, decision, fills, runtime errors) is written as a `RuntimeEvent` and persisted under a `runtime.*` ledger event type in `portal_bot_run_events`.
+
+Per-series runtime-derived analytical state is also persisted to that same table under `series_state.*`.
 
 Wallet state is not stored as a separate canonical ledger anymore. It is derived by replaying runtime events.
 
@@ -148,7 +168,7 @@ The previous model had multiple overlapping ledgers:
 
 That made causality hard to follow and created taxonomy drift.
 
-V1 keeps one stream and derives views from it.
+V1 keeps one bot ledger and derives views from it.
 
 ## Canonical Event Contract
 `RuntimeEvent` fields:
@@ -275,7 +295,6 @@ flowchart TD
 Single write path in runtime:
 - `BotRuntime._persist_runtime_event(...)`
 - implementation location: `src/engines/bot_runtime/runtime/mixins/runtime_events.py`
-- portal compatibility entrypoint: `portal/backend/service/bots/bot_runtime/runtime/runtime.py`
 
 Storage target:
 - table: `portal_bot_run_events`

@@ -8,7 +8,9 @@ tags:
   - regime
   - classification
 code_paths:
-  - portal/backend/service/bots/bot_runtime/strategy/regime_overlay.py
+  - src/engines/bot_runtime/strategy/regime_overlay.py
+  - src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py
+  - portal/backend/service/bots/runtime_derived_state.py
 ---
 # Regime Classification System
 
@@ -25,12 +27,13 @@ Audience: high/mid-level engineers who need implementation-level clarity.
 
 ## TL;DR
 
-- Regime classification is a DB-backed pipeline, not computed inside the bot step loop.
+- Regime classification has two valid ownership paths now:
+  - QuantLab / strategy-preview path: DB-backed async `candle_stats` and `regime_stats`.
+  - Bot runtime path: runtime-local derivation from the in-memory candle timeline.
 - New candles trigger async stats jobs.
 - Jobs compute `candle_stats` first, then `regime_stats` (versioned).
-- Runtime uses those rows for:
-  - decision/filter gating (if filters reference `regime_stats`),
-  - BotLens regime overlays (view layer).
+- Strategy-preview/runtime filter code can still use persisted `regime_stats`.
+- Bot runtime overlays and entry-context metrics use runtime-local derived state, not DB rows.
 - Overlay geometry can be prebuilt and still be accurate because visibility is time-gated by `current_epoch` and `known_at`.
 
 ## Core Components
@@ -123,11 +126,12 @@ Important nuance:
 
 ### B) BotLens Overlay Path (view layer)
 
-- Runtime reads regime rows from DB and builds overlay payloads.
-- Overlays include boxes/segments/markers and block metadata.
+- Runtime derives stats/regime from the worker's in-memory candle timeline, then builds overlay payloads from that runtime-local state.
+- Overlays include boxes/segments/markers and block metadata without depending on async `regime_stats` table freshness.
 - Key code:
-  - [overlays_regime.py](/home/elijah/dev/quant-trad/portal/backend/service/bots/bot_runtime/strategy/series_builder_parts/overlays_regime.py:346)
-  - [regime_overlay.py](/home/elijah/dev/quant-trad/portal/backend/service/bots/bot_runtime/strategy/regime_overlay.py:524)
+  - [runtime_derived_state.py](/home/elijah/dev/quant-trad/portal/backend/service/bots/runtime_derived_state.py)
+  - [overlays_regime.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py)
+  - [regime_overlay.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/strategy/regime_overlay.py)
 
 ## Why Prebuilt Overlays Can Still Be Correct
 
@@ -154,7 +158,7 @@ So:
 Use per-bar/periodic rebuild only when underlying regime rows can change during the run timeline:
 
 - live/sim modes with appended candles,
-- when newly computed `regime_stats` arrive mid-run and you need immediate overlay refresh.
+- when the runtime-local candle window changes and you need immediate overlay refresh.
 
 In those cases, rebuild should be event-driven by new regime data availability, not unconditional every bar.
 
@@ -174,6 +178,7 @@ Key code:
 ## Known Tradeoffs
 
 - Async stats pipeline can create short freshness lag for newest candle regime in live contexts.
+- Runtime-local derivation duplicates some research-time computation, but preserves the single runtime timeline and avoids async lag leaking into execution semantics.
 - Recompute range + upsert is robust/idempotent but can be heavy under very high ingest throughput.
 - Larger confirmation/min-block settings improve stability but delay visible state transitions.
 
@@ -198,4 +203,3 @@ If regime looks stale or wrong:
 5. Confirm overlay visibility trimming vs current epoch.
 6. Check runtime mode:
    - prebuilt static vs rebuild.
-

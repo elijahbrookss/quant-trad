@@ -8,8 +8,10 @@ tags:
   - runtime
   - engine
 code_paths:
-  - portal/backend/service/bots/bot_runtime
-  - src/engines/bot_runtime
+  - src/engines/bot_runtime/core
+  - src/engines/bot_runtime/runtime
+  - src/engines/bot_runtime/strategy
+  - portal/backend/service/bots/runtime_dependencies.py
 ---
 # Bot Runtime Engine Architecture
 
@@ -17,8 +19,8 @@ code_paths:
 
 - `Component`: Bot runtime execution engine
 - `Owner/Domain`: Bot Runtime
-- `Doc Version`: 2.0
-- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/runtime/`, `src/engines/bot_runtime/core/`, `portal/backend/service/bots/bot_runtime/runtime/`
+- `Doc Version`: 2.1
+- `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/runtime/`, `src/engines/bot_runtime/core/`, `src/engines/bot_runtime/strategy/`, `portal/backend/service/bots/runtime_dependencies.py`
 
 ## 1) Problem and scope
 
@@ -47,10 +49,15 @@ Current package split:
 - `src/engines/bot_runtime/runtime/mixins/runtime_events.py`: canonical runtime event emission, decision trace, run artifact construction, shared wallet runtime context.
 - `src/engines/bot_runtime/runtime/mixins/state_streaming.py`: snapshots, chart payloads, persistence buffer flush, push subscribers, step-trace recording.
 - `src/engines/bot_runtime/runtime/components/`: helpers for run context, runtime policy, series runner, chart state, intrabar cache, settlement, signal consumption, event sinks, trade persistence, and step-trace buffering.
+- `src/engines/bot_runtime/strategy/`: runtime-domain strategy loading contracts, series construction, regime overlays, and incremental signal/overlay preparation.
+- `src/engines/bot_runtime/deps.py`: explicit boundary contract for portal-owned collaborators.
 - `src/engines/bot_runtime/core/`: execution profile compilation, execution adapters, wallet gateway, wallet projection, margin/fee helpers, and the ladder trading domain engine.
 - `src/engines/bot_runtime/core/domain/engine.py`: `LadderRiskEngine`, the per-series execution core used by strategy series.
 
-Compatibility wrappers still exist under `portal/backend/service/bots/bot_runtime/runtime/`, but they are re-exports, not the canonical implementation.
+Portal-owned adapters now live beside the service composition layer rather than inside a shadow runtime tree:
+- `portal/backend/service/bots/runtime_dependencies.py`: concrete dependency bundle for worker runtime construction.
+- `portal/backend/service/bots/strategy_loader.py`: DB-backed strategy adapter that returns runtime-domain strategy models.
+- `portal/backend/service/bots/runtime_derived_state.py`: runtime-local stats/regime derivation adapter built from in-memory candles.
 
 ## 3) Runtime topology
 
@@ -73,9 +80,11 @@ flowchart LR
 
 Runtime assembly:
 - `BotRuntime` subclasses four mixins and adds no behavior of its own beyond assembly and overlay registration.
+- `BotRuntime` requires an explicit `BotRuntimeDeps` bundle and does not import portal services directly.
 
 Preparation boundary:
 - `RuntimeSetupPrepareMixin` owns strategy loading, series construction, indicator engine initialization, warmup replay, overlay bootstrap, and building `SeriesExecutionState`.
+- Runtime preparation depends on injected collaborators for strategy loading, market data fetch, indicator metadata, derived-state building, and persistence.
 
 Execution boundary:
 - `RuntimeExecutionLoopMixin` owns `warm_up()`, `start()`, `_execute_loop()`, `_step_series_state()`, intrabar stepping, and final status transitions.
@@ -103,7 +112,7 @@ Component boundary:
 
 Preparation does the following:
 1. Validate that `strategy_ids` are present.
-2. Build `StrategySeries` instances through `portal/backend/service/bots/bot_runtime/strategy/series_builder.py`.
+2. Build `StrategySeries` instances through `src/engines/bot_runtime/strategy/series_builder.py`.
 3. Build `SeriesExecutionState` for each series.
 4. Initialize indicator plugin engines and replay warmup candles into each indicator engine using the canonical `initialize -> apply_bar -> snapshot` engine contract.
 5. Bootstrap indicator overlays and runtime regime overlays.
@@ -159,7 +168,7 @@ Current runtime uses that contract for:
 Important invariants:
 - every runtime event is stamped with `run_id`, `bot_id`, `strategy_id`, symbol/timeframe context, and a deterministic bar correlation ID,
 - signal/decision/execution causality is linked through `root_id`, `parent_id`, and `correlation_id`,
-- runtime events are persisted immediately through `storage.record_bot_runtime_event(...)`,
+- runtime events are persisted immediately through injected storage collaborators from `BotRuntimeDeps`,
 - wallet state is projected from runtime events, not from ad-hoc mutable balance copies,
 - shared-wallet coordination uses reservations plus the shared canonical runtime-event stream.
 
@@ -194,9 +203,9 @@ This keeps playback and BotLens aligned with the same known-at causality used by
 
 - Only `inline` series execution is accepted by `BotRuntime`; alternate runner types are not part of the live contract.
 - Intrabar refinement is always enabled by `RuntimeModePolicy` and currently uses 1-minute fetches plus an in-memory cache.
-- The runtime still depends on `portal.backend.service.bots.bot_runtime.strategy.series_builder` for strategy-series construction.
+- The runtime still depends on portal-owned adapters for external boundaries, but only through the explicit `BotRuntimeDeps` contract.
 - Worker runtimes persist their own run artifacts/reports using the shared `run_id`; the container layer does not currently build a separate bot-level artifact.
-- Compatibility wrappers under `portal/backend/service/bots/bot_runtime/runtime/` remain in place to avoid breaking older imports.
+- Package roots such as `engines.bot_runtime.runtime` and `engines.bot_runtime.strategy` are intentionally kept light; callers should import concrete modules directly when they need runtime assembly or series-builder behavior.
 
 ## 10) Strict contract
 
