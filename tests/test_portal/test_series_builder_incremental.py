@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("pandas")
 
 from engines.bot_runtime.core.domain import Candle, isoformat
-from portal.backend.service.bots.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
+from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
 
 
 def _candle_at(ts: datetime, value: float = 100.0) -> Candle:

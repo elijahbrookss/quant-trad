@@ -1,7 +1,7 @@
 from collections import deque
 
 from engines.bot_runtime.core.domain import StrategySignal
-from portal.backend.service.bots.bot_runtime.runtime.signal_consumption import SignalConsumption, consume_signals
+from engines.bot_runtime.runtime.components.signal_consumption import SignalConsumption, consume_signals
 
 
 def test_signal_consumption_preserves_history():

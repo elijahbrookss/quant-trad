@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from portal.backend.service.bots.bot_runtime.strategy.models import (
+from engines.bot_runtime.strategy.models import (
     Strategy,
     StrategyIndicatorLink,
     StrategyInstrumentLink,

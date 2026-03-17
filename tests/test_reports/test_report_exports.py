@@ -3,7 +3,7 @@ import io
 import json
 import uuid
 import zipfile
-from datetime import datetime
+from typing import Dict
 
 import pytest
 
@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, text
 
 from portal.backend.db.session import db
 from portal.backend.main import app
-from portal.backend.service.market.entry_context import build_entry_metrics, derive_entry_context
+from engines.bot_runtime.runtime.event_types import SERIES_STATE_SNAPSHOT, runtime_event_type
 from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 from portal.backend.service.storage import storage
 from tests.helpers.builders.report_storage_builder import (
@@ -71,32 +71,7 @@ def _ensure_export_tables(dsn: str) -> None:
             )
         )
         conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS candle_stats (
-                    instrument_id TEXT NOT NULL,
-                    timeframe_seconds INTEGER NOT NULL,
-                    candle_time TIMESTAMPTZ NOT NULL,
-                    stats_version TEXT NOT NULL,
-                    computed_at TIMESTAMPTZ,
-                    stats JSON
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS regime_stats (
-                    instrument_id TEXT NOT NULL,
-                    timeframe_seconds INTEGER NOT NULL,
-                    candle_time TIMESTAMPTZ NOT NULL,
-                    regime_version TEXT NOT NULL,
-                    computed_at TIMESTAMPTZ,
-                    regime JSON
-                )
-                """
-            )
+            text("SELECT 1")
         )
 
 
@@ -166,87 +141,99 @@ def _upsert_export_candle(
     )
 
 
-def _upsert_candle_stats(
-    conn,
+def _record_series_state_snapshot(
     *,
+    run_id: str,
+    bot_id: str,
+    event_id: str,
+    seq: int,
+    strategy_id: str,
     instrument_id: str,
+    symbol: str,
+    timeframe: str,
     timeframe_seconds: int,
-    candle_time: str,
-    stats_version: str,
-    computed_at: str,
-    stats: str,
+    bar_time: str,
+    stats: Dict[str, object],
+    regime: Dict[str, object],
 ) -> None:
-    conn.execute(
-        text(
-            """
-            INSERT INTO candle_stats (
-                instrument_id,
-                timeframe_seconds,
-                candle_time,
-                stats_version,
-                computed_at,
-                stats
-            ) VALUES (
-                :instrument_id,
-                :timeframe_seconds,
-                :candle_time,
-                :stats_version,
-                :computed_at,
-                :stats
-            )
-            ON CONFLICT DO NOTHING
-            """
-        ),
+    storage.record_bot_runtime_event(
         {
-            "instrument_id": instrument_id,
-            "timeframe_seconds": timeframe_seconds,
-            "candle_time": candle_time,
-            "stats_version": stats_version,
-            "computed_at": computed_at,
-            "stats": stats,
-        },
+            "event_id": event_id,
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": SERIES_STATE_SNAPSHOT,
+            "schema_version": 1,
+            "event_time": bar_time,
+            "known_at": bar_time,
+            "payload": {
+                "series_key": f"{symbol}|{timeframe}",
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timeframe_seconds": timeframe_seconds,
+                "instrument_id": instrument_id,
+                "bar_index": 0,
+                "bar_time": bar_time,
+                "candle": {
+                    "time": bar_time,
+                    "open": 40000.0,
+                    "high": 40000.0,
+                    "low": 40000.0,
+                    "close": 40000.0,
+                },
+                "stats_version": STATS_VERSION,
+                "stats": dict(stats),
+                "regime_version": REGIME_VERSION,
+                "regime": dict(regime),
+            },
+        }
     )
 
 
-def _upsert_regime_stats(
-    conn,
+def _record_runtime_signal_event(
     *,
-    instrument_id: str,
-    timeframe_seconds: int,
-    candle_time: str,
-    regime_version: str,
-    computed_at: str,
-    regime: str,
+    run_id: str,
+    bot_id: str,
+    event_id: str,
+    seq: int,
+    strategy_id: str,
+    symbol: str,
+    timeframe: str,
+    event_ts: str,
 ) -> None:
-    conn.execute(
-        text(
-            """
-            INSERT INTO regime_stats (
-                instrument_id,
-                timeframe_seconds,
-                candle_time,
-                regime_version,
-                computed_at,
-                regime
-            ) VALUES (
-                :instrument_id,
-                :timeframe_seconds,
-                :candle_time,
-                :regime_version,
-                :computed_at,
-                :regime
-            )
-            ON CONFLICT DO NOTHING
-            """
-        ),
+    storage.record_bot_runtime_event(
         {
-            "instrument_id": instrument_id,
-            "timeframe_seconds": timeframe_seconds,
-            "candle_time": candle_time,
-            "regime_version": regime_version,
-            "computed_at": computed_at,
-            "regime": regime,
-        },
+            "event_id": event_id,
+            "bot_id": bot_id,
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": runtime_event_type("SIGNAL_EMITTED"),
+            "schema_version": 1,
+            "event_time": event_ts,
+            "known_at": event_ts,
+            "payload": {
+                "event_id": event_id,
+                "event_ts": event_ts,
+                "run_id": run_id,
+                "bot_id": bot_id,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "event_name": "SIGNAL_EMITTED",
+                "category": "SIGNAL",
+                "root_id": event_id,
+                "parent_id": None,
+                "correlation_id": f"{run_id}:{symbol}:{timeframe}:{event_ts}",
+                "reason_code": "SIGNAL_STRATEGY_SIGNAL",
+                "payload": {
+                    "direction": "long",
+                    "qty": 1,
+                    "price": 40000.0,
+                    "context": {"source": "test"},
+                },
+            },
+        }
     )
 
 
@@ -278,27 +265,23 @@ def test_report_export_contains_trades_and_events(monkeypatch):
         )
     )
     engine = create_engine(db.dsn, future=True)
-    candle_stats_json = json.dumps(
-        {
-            "tr_pct": 0.02,
-            "atr_ratio": 1.25,
-            "atr_slope": 0.3,
-            "atr_zscore": 0.7,
-            "directional_efficiency": 0.9,
-            "overlap_pct": 0.15,
-            "range_position": 0.55,
-            "slope_stability_warmup": True,
-        }
-    )
-    regime_json = json.dumps(
-        {
-            "volatility": {"state": "low"},
-            "structure": {"state": "balanced"},
-            "expansion": {"state": "expanding"},
-            "liquidity": {"state": "deep"},
-            "confidence": 0.82,
-        }
-    )
+    stats_payload = {
+        "tr_pct": 0.02,
+        "atr_ratio": 1.25,
+        "atr_slope": 0.3,
+        "atr_zscore": 0.7,
+        "directional_efficiency": 0.9,
+        "overlap_pct": 0.15,
+        "range_position": 0.55,
+        "slope_stability_warmup": True,
+    }
+    regime_payload = {
+        "volatility": {"state": "low"},
+        "structure": {"state": "balanced"},
+        "expansion": {"state": "expanding"},
+        "liquidity": {"state": "deep"},
+        "confidence": 0.82,
+    }
     with engine.begin() as conn:
         _upsert_export_candle(
             conn,
@@ -308,34 +291,32 @@ def test_report_export_contains_trades_and_events(monkeypatch):
             close_time="2024-01-01T03:00:00Z",
             close=40000.0,
         )
-        _upsert_candle_stats(
-            conn,
-            instrument_id=instrument_id,
-            timeframe_seconds=3600,
-            candle_time="2024-01-01T02:00:00Z",
-            stats_version=STATS_VERSION,
-            computed_at="2024-01-01T02:01:00Z",
-            stats=candle_stats_json,
-        )
-        _upsert_regime_stats(
-            conn,
-            instrument_id=instrument_id,
-            timeframe_seconds=3600,
-            candle_time="2024-01-01T02:00:00Z",
-            regime_version=REGIME_VERSION,
-            computed_at="2024-01-01T02:01:00Z",
-            regime=regime_json,
-        )
-
-    entry_time = datetime.fromisoformat("2024-01-01T02:00:00+00:00")
-    entry_context = derive_entry_context(
+    _record_series_state_snapshot(
+        run_id=run_id,
+        bot_id=bot_id,
+        event_id=f"{run_id}:series-state:1",
+        seq=1,
+        strategy_id="strategy-1",
         instrument_id=instrument_id,
+        symbol="BTCUSD",
+        timeframe="1h",
         timeframe_seconds=3600,
-        entry_time=entry_time,
-        stats_version=STATS_VERSION,
-        regime_version=REGIME_VERSION,
+        bar_time="2024-01-01T02:00:00Z",
+        stats=stats_payload,
+        regime=regime_payload,
     )
-    metrics = build_entry_metrics(entry_context)
+    _record_runtime_signal_event(
+        run_id=run_id,
+        bot_id=bot_id,
+        event_id=f"{run_id}:runtime:2",
+        seq=2,
+        strategy_id="strategy-1",
+        symbol="BTCUSD",
+        timeframe="1h",
+        event_ts="2024-01-01T02:00:00Z",
+    )
+
+    entry_time = "2024-01-01T02:00:00Z"
     storage.record_bot_trade(
         build_trade_payload(
             trade_id=trade_id,
@@ -343,7 +324,7 @@ def test_report_export_contains_trades_and_events(monkeypatch):
             bot_id=bot_id,
             symbol="BTCUSD",
             direction="long",
-            entry_time=entry_time.isoformat().replace("+00:00", "Z"),
+            entry_time=entry_time,
             exit_time="2024-01-01T03:00:00Z",
             gross_pnl=12.0,
             fees_paid=1.0,
@@ -352,7 +333,7 @@ def test_report_export_contains_trades_and_events(monkeypatch):
                 "timeframe": "1h",
                 "timeframe_seconds": 3600,
                 "instrument_id": instrument_id,
-                "metrics": metrics,
+                "metrics": {},
             },
         )
     )
@@ -386,7 +367,9 @@ def test_report_export_contains_trades_and_events(monkeypatch):
     assert candle_stats[0]["instrument_id"] == instrument_id
     assert len(regime_stats) == 1
     assert regime_stats[0]["instrument_id"] == instrument_id
-    assert len(decision_ledger) == 0
+    assert len(decision_ledger) == 1
+    assert decision_ledger[0]["decision_type"] == "signal"
+    assert decision_ledger[0]["action"] == "strategy_signal"
 
     metrics = json.loads(trades[0]["metrics_json"])
     assert metrics["entry_atr_ratio"] == 1.25
@@ -441,20 +424,18 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
             },
         )
     )
-    regime_json = json.dumps(
-        {
-            "volatility": {"state": "high", "atr_zscore": 1.8, "tr_pct": 0.045, "atr_ratio": 1.35},
-            "structure": {
-                "state": "trend",
-                "directional_efficiency": 0.75,
-                "slope_stability": 0.1,
-                "range_position": 0.6,
-            },
-            "expansion": {"state": "expanding", "atr_slope": 0.41, "overlap_pct": 0.25},
-            "liquidity": {"state": "normal"},
-            "confidence": 0.91,
-        }
-    )
+    regime_payload = {
+        "volatility": {"state": "high", "atr_zscore": 1.8, "tr_pct": 0.045, "atr_ratio": 1.35},
+        "structure": {
+            "state": "trend",
+            "directional_efficiency": 0.75,
+            "slope_stability": 0.1,
+            "range_position": 0.6,
+        },
+        "expansion": {"state": "expanding", "atr_slope": 0.41, "overlap_pct": 0.25},
+        "liquidity": {"state": "normal"},
+        "confidence": 0.91,
+    }
     engine = create_engine(db.dsn, future=True)
     with engine.begin() as conn:
         _upsert_export_candle(
@@ -465,25 +446,22 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
             close_time="2024-01-01T03:00:00Z",
             close=2750.0,
         )
-        _upsert_regime_stats(
-            conn,
-            instrument_id=instrument_id,
-            timeframe_seconds=3600,
-            candle_time="2024-01-01T02:00:00Z",
-            regime_version=REGIME_VERSION,
-            computed_at="2024-01-01T02:01:30Z",
-            regime=regime_json,
-        )
-
-    entry_time = datetime.fromisoformat("2024-01-01T02:00:00+00:00")
-    entry_context = derive_entry_context(
+    _record_series_state_snapshot(
+        run_id=run_id,
+        bot_id=bot_id,
+        event_id=f"{run_id}:series-state:1",
+        seq=1,
+        strategy_id="strategy-2",
         instrument_id=instrument_id,
+        symbol="ETHUSD",
+        timeframe="1h",
         timeframe_seconds=3600,
-        entry_time=entry_time,
-        stats_version=STATS_VERSION,
-        regime_version=REGIME_VERSION,
+        bar_time="2024-01-01T02:00:00Z",
+        stats={},
+        regime=regime_payload,
     )
-    metrics = build_entry_metrics(entry_context)
+
+    entry_time = "2024-01-01T02:00:00Z"
     storage.record_bot_trade(
         build_trade_payload(
             trade_id=trade_id,
@@ -491,7 +469,7 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
             bot_id=bot_id,
             symbol="ETHUSD",
             direction="long",
-            entry_time=entry_time.isoformat().replace("+00:00", "Z"),
+            entry_time=entry_time,
             exit_time="2024-01-01T03:00:00Z",
             gross_pnl=14.0,
             fees_paid=0.9,
@@ -500,7 +478,7 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
                 "timeframe": "1h",
                 "timeframe_seconds": 3600,
                 "instrument_id": instrument_id,
-                "metrics": metrics,
+                "metrics": {},
             },
         )
     )

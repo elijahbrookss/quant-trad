@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from engines.indicator_engine.contracts import IndicatorStateSnapshot, SignalEvaluationInput
 from engines.indicator_engine.signal_evaluator import evaluate_rules_from_state_snapshots
-from portal.backend.service.bots.bot_runtime.strategy.series_builder_parts.live_updates import (
+from engines.bot_runtime.strategy.series_builder_parts.live_updates import (
     SeriesBuilderLiveUpdatesMixin,
 )
 

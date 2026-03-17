@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import threading
 
-from portal.backend.service.bots.bot_runtime.runtime.series_runner import PoolSeriesRunner, SeriesRunnerContext
+from engines.bot_runtime.runtime.components.series_runner import PoolSeriesRunner, SeriesRunnerContext
 
 
 @dataclass

@@ -5,7 +5,7 @@ from engines.bot_runtime.core.domain import Candle
 from engines.bot_runtime.runtime.core import SeriesExecutionState
 from engines.bot_runtime.runtime.mixins.execution_loop import RuntimeExecutionLoopMixin
 from engines.indicator_engine.contracts import IndicatorStateDelta, IndicatorStateSnapshot
-from portal.backend.service.bots.bot_runtime.strategy.series_builder_parts.models import StrategySeries
+from engines.bot_runtime.strategy.series_builder_parts.models import StrategySeries
 
 
 class _SeriesBuilderStub:
