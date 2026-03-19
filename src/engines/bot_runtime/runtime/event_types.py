@@ -5,12 +5,12 @@ from __future__ import annotations
 from engines.bot_runtime.core.runtime_events import RuntimeEventName
 
 RUNTIME_PREFIX = "runtime."
-SERIES_STATE_PREFIX = "series_state."
+SERIES_BAR_PREFIX = "series_bar."
 BOTLENS_PREFIX = "botlens."
 
 BOTLENS_SERIES_BOOTSTRAP = f"{BOTLENS_PREFIX}series_bootstrap"
 BOTLENS_SERIES_DELTA = f"{BOTLENS_PREFIX}series_delta"
-SERIES_STATE_SNAPSHOT = f"{SERIES_STATE_PREFIX}snapshot"
+SERIES_BAR_TELEMETRY = f"{SERIES_BAR_PREFIX}telemetry"
 
 
 def runtime_event_type(value: RuntimeEventName | str) -> str:
@@ -26,7 +26,7 @@ __all__ = [
     "BOTLENS_SERIES_DELTA",
     "BOTLENS_PREFIX",
     "RUNTIME_PREFIX",
-    "SERIES_STATE_PREFIX",
-    "SERIES_STATE_SNAPSHOT",
+    "SERIES_BAR_PREFIX",
+    "SERIES_BAR_TELEMETRY",
     "runtime_event_type",
 ]

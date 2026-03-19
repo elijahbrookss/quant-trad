@@ -37,7 +37,6 @@ class StrategySeries:
     bootstrap_indicator_overlays: int = 0
     bootstrap_total_overlays: int = 0
     execution_profile: Optional[SeriesExecutionProfile] = None
-    runtime_derived_state: Optional[Any] = None
 
 
 __all__ = ["StrategySeries"]

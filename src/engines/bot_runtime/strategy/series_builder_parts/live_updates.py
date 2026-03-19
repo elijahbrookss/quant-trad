@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional
 
-from engines.bot_runtime.core.domain import timeframe_duration
-from signals.contract import assert_no_execution_fields, assert_signal_contract
-from strategies import evaluator, markers
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log
 
@@ -57,22 +54,7 @@ class SeriesBuilderLiveUpdatesMixin:
         if not new_candles:
             return False
         series.candles.extend(new_candles)
-        instrument_id = None
-        if isinstance(series.instrument, Mapping):
-            instrument_id = series.instrument.get("id")
-        timeframe_seconds = None
         try:
-            timeframe_seconds = int(timeframe_duration(series.timeframe).total_seconds())
-        except Exception:
-            timeframe_seconds = None
-        if instrument_id and timeframe_seconds and timeframe_seconds > 0:
-            series.runtime_derived_state = self._build_runtime_series_derived_state(
-                candles=series.candles,
-                instrument_id=str(instrument_id),
-                timeframe_seconds=int(timeframe_seconds),
-            )
-        try:
-            config = {"mode": self.run_type}
             context = self._series_log_context(series, has_meta=series.meta is not None)
             logger.info(with_log_context("append_series_updates", context))
             if series.meta:
@@ -88,6 +70,18 @@ class SeriesBuilderLiveUpdatesMixin:
             )
             logger.info(with_log_context("append_series_updates_call", call_context))
 
+            instrument_id = None
+            if isinstance(series.instrument, Mapping):
+                instrument_id = series.instrument.get("id")
+            if not instrument_id:
+                raise RuntimeError(
+                    f"Series {series.strategy_id} is missing instrument id for live updates"
+                )
+            strategy_obj = SimpleNamespace(
+                id=series.strategy_id,
+                rules=(series.meta or {}).get("rules") or {},
+            )
+
             # NOTE: NO CACHE – strategy evaluation re-computes per call.
             cache_key_summary = f"{series.symbol}:{series.timeframe}:{series.window_start or start_iso}->{end_iso}"
             with perf_log(
@@ -96,7 +90,7 @@ class SeriesBuilderLiveUpdatesMixin:
                 base_context=series_context,
                 enabled=self._obs_enabled,
                 slow_ms=self._obs_slow_ms,
-                operation_name="strategy_service.evaluate",
+                operation_name="strategy_service.generate_signals",
                 cache_scope="none",
                 cache_key_summary=cache_key_summary,
             ):
@@ -108,52 +102,25 @@ class SeriesBuilderLiveUpdatesMixin:
                     slow_ms=self._obs_slow_ms,
                     strategy_id=series.strategy_id,
                 ) as perf:
-                    evaluation = self._deps.strategy_evaluate(
-                        strategy_id=series.strategy_id,
-                        start=series.window_start or start_iso,
-                        end=end_iso,
-                        interval=series.timeframe,
-                        symbol=series.symbol,
-                        datasource=series.datasource,
-                        exchange=series.exchange,
-                        config=config,
+                    evaluation = self._evaluate_strategy(
+                        start_iso=series.window_start or start_iso,
+                        end_iso=end_iso,
+                        timeframe=series.timeframe,
+                        instrument_id=str(instrument_id),
+                        strategy=strategy_obj,
                     )
-                    chart_markers = evaluation.get("chart_markers") or {}
+                    trigger_rows = evaluation.get("trigger_rows") or []
                     perf.add_fields(
-                        buy_markers_count=len(chart_markers.get("buy", [])),
-                        sell_markers_count=len(chart_markers.get("sell", [])),
+                        trigger_rows_count=len(trigger_rows),
                     )
-            overlays = self._extract_indicator_overlays(evaluation)
-            if self._include_indicator_overlays:
-                overlays.extend(
-                    self._indicator_overlay_entries(
-                        series.meta or {},
-                        series.window_start or start_iso,
-                        end_iso,
-                        series.timeframe,
-                        series.symbol,
-                        series.datasource,
-                        series.exchange,
-                    )
-                )
-            regime_overlays = self._build_regime_overlays(
-                instrument_id=instrument_id or "",
-                candles=series.candles,
-                timeframe=series.timeframe,
-                strategy_id=series.strategy_id,
-                symbol=series.symbol,
-                runtime_derived_state=series.runtime_derived_state,
-            )
-            overlays.extend(regime_overlays)
-            series.overlays = overlays
+            series.overlays = [dict(entry) for entry in evaluation.get("overlays") or [] if isinstance(entry, Mapping)]
             marker_context = self._series_log_context(
                 series,
-                chart_markers_keys=sorted(chart_markers.keys()),
-                buy_markers=len(chart_markers.get("buy", [])),
-                sell_markers=len(chart_markers.get("sell", [])),
+                trigger_rows=len(trigger_rows),
+                overlays=len(series.overlays),
             )
-            logger.debug(with_log_context("append_series_updates_markers", marker_context))
-            signals = self._build_signals_from_markers(chart_markers)
+            logger.debug(with_log_context("append_series_updates_preview_result", marker_context))
+            signals = self._build_signals_from_trigger_rows(trigger_rows)
             raw_context = self._series_log_context(
                 series,
                 raw_signals=len(signals),
@@ -304,7 +271,6 @@ class SeriesBuilderLiveUpdatesMixin:
         instrument_id: str,
         strategy: Any,
         *,
-        include_walk_forward_markers: bool = False,
         evaluation_config: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evaluate strategy and generate signals."""
@@ -338,7 +304,7 @@ class SeriesBuilderLiveUpdatesMixin:
             )
             logger.info(with_log_context("evaluate_strategy_call", call_context))
 
-            evaluation = self._deps.strategy_generate_signals(
+            evaluation = self._deps.strategy_run_preview(
                 strategy_id=strategy.id,
                 start=start_iso,
                 end=end_iso,
@@ -353,19 +319,11 @@ class SeriesBuilderLiveUpdatesMixin:
                 instrument_payload = instruments.get(instrument_id)
             if not isinstance(instrument_payload, dict):
                 instrument_payload = evaluation
-            # Log what we got back
-            chart_markers = instrument_payload.get("chart_markers", {}) if isinstance(instrument_payload, dict) else {}
-            if include_walk_forward_markers and isinstance(instrument_payload, dict):
-                walk_forward_markers = self._build_walk_forward_markers(
-                    strategy,
-                    instrument_payload.get("indicator_results") or {},
-                )
-                if walk_forward_markers is not None:
-                    chart_markers = walk_forward_markers
+            trigger_rows = instrument_payload.get("trigger_rows", []) if isinstance(instrument_payload, dict) else []
             result_context = self._strategy_log_context(
                 strategy,
-                buy_markers=len(chart_markers.get("buy", [])),
-                sell_markers=len(chart_markers.get("sell", [])),
+                trigger_rows=len(trigger_rows) if isinstance(trigger_rows, list) else 0,
+                overlays=len(instrument_payload.get("overlays", [])) if isinstance(instrument_payload, dict) and isinstance(instrument_payload.get("overlays"), list) else 0,
             )
             logger.info(with_log_context("evaluate_strategy_result", result_context))
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -375,218 +333,3 @@ class SeriesBuilderLiveUpdatesMixin:
             raise RuntimeError(message) from exc
 
         return instrument_payload if isinstance(instrument_payload, dict) else evaluation
-
-    def _build_walk_forward_markers(
-        self,
-        strategy: Any,
-        indicator_payloads: Mapping[str, Any],
-    ) -> Optional[Dict[str, List[Dict[str, Any]]]]:
-        if not isinstance(indicator_payloads, Mapping):
-            return None
-
-        signals_by_indicator: Dict[str, List[Dict[str, Any]]] = {}
-        all_epochs: Set[int] = set()
-        for indicator_id, payload in indicator_payloads.items():
-            if not isinstance(payload, Mapping):
-                continue
-            signals = payload.get("signals")
-            if not isinstance(signals, Sequence):
-                continue
-            cleaned: List[Dict[str, Any]] = []
-            payload_timeframe_seconds = None
-            for timeframe_key in ("chart_timeframe_seconds", "source_timeframe_seconds", "timeframe_seconds"):
-                try:
-                    candidate = int(payload.get(timeframe_key))  # type: ignore[arg-type]
-                except (TypeError, ValueError, AttributeError):
-                    candidate = 0
-                if candidate > 0:
-                    payload_timeframe_seconds = candidate
-                    break
-            payload_runtime_scope = str(payload.get("_runtime_scope") or "") if isinstance(payload, Mapping) else ""
-            for signal in signals:
-                if not isinstance(signal, Mapping):
-                    continue
-                signal_copy = dict(signal)
-                signal_copy.setdefault("indicator_id", str(indicator_id))
-                if payload_timeframe_seconds is not None:
-                    signal_copy.setdefault("timeframe_seconds", payload_timeframe_seconds)
-                if payload_runtime_scope:
-                    signal_copy.setdefault("runtime_scope", payload_runtime_scope)
-                signal_copy.setdefault("rule_id", signal_copy.get("type"))
-                signal_copy.setdefault("pattern_id", signal_copy.get("rule_id") or signal_copy.get("type"))
-                metadata = signal_copy.get("metadata")
-                if isinstance(metadata, Mapping):
-                    metadata_copy = dict(metadata)
-                else:
-                    metadata_copy = {}
-                metadata_copy.setdefault("rule_id", signal_copy.get("rule_id"))
-                metadata_copy.setdefault("pattern_id", signal_copy.get("pattern_id"))
-                metadata_copy.setdefault("indicator_id", signal_copy.get("indicator_id"))
-                metadata_copy.setdefault("runtime_scope", signal_copy.get("runtime_scope"))
-                metadata_copy.setdefault("timeframe_seconds", signal_copy.get("timeframe_seconds"))
-                if "signal_time" in signal_copy:
-                    metadata_copy.setdefault("signal_time", signal_copy.get("signal_time"))
-                elif "time" in signal_copy:
-                    metadata_copy.setdefault("signal_time", signal_copy.get("time"))
-                signal_copy["metadata"] = metadata_copy
-                assert_signal_contract(signal_copy)
-                assert_no_execution_fields(signal_copy)
-                epoch = evaluator._extract_signal_epoch(signal_copy)
-                if epoch is None:
-                    continue
-                cleaned.append(signal_copy)
-                all_epochs.add(epoch)
-            if cleaned:
-                cleaned.sort(key=lambda entry: evaluator._extract_signal_epoch(entry) or 0)
-                signals_by_indicator[str(indicator_id)] = cleaned
-
-        if not all_epochs:
-            return {"buy": [], "sell": []}
-
-        sorted_epochs = sorted(all_epochs)
-        buy_results: List[Dict[str, Any]] = []
-        sell_results: List[Dict[str, Any]] = []
-        emitted: Set[Tuple[str, int, Optional[str]]] = set()
-
-        for epoch in sorted_epochs:
-            filtered_payloads: Dict[str, Dict[str, Any]] = {}
-            for indicator_id, signals in signals_by_indicator.items():
-                filtered = [
-                    signal
-                    for signal in signals
-                    if (evaluator._extract_signal_epoch(signal) or 0) <= epoch
-                    and self._signal_known_at_epoch(signal) <= epoch
-                ]
-                payload = indicator_payloads.get(indicator_id) or {}
-                if isinstance(payload, Mapping):
-                    payload_copy = dict(payload)
-                else:
-                    payload_copy = {}
-                payload_copy["signals"] = filtered
-                filtered_payloads[indicator_id] = payload_copy
-
-            for rule in getattr(strategy, "rules", {}).values():
-                result = self._evaluate_rule_payload(rule, filtered_payloads)
-                if not result:
-                    continue
-                if not result.get("matched"):
-                    continue
-                terminal_signal = result.get("signal")
-                if not isinstance(terminal_signal, Mapping):
-                    continue
-                terminal_epoch = evaluator._extract_signal_epoch(terminal_signal)
-                if terminal_epoch is None or terminal_epoch != epoch:
-                    continue
-                dedupe_key = (result.get("rule_id") or "", terminal_epoch, result.get("direction"))
-                if dedupe_key in emitted:
-                    continue
-                emitted.add(dedupe_key)
-                payload = dict(result)
-                payload["signals"] = [terminal_signal]
-                if result.get("action") == "buy":
-                    buy_results.append(payload)
-                elif result.get("action") == "sell":
-                    sell_results.append(payload)
-
-        return markers.build_chart_markers(buy_results, sell_results)
-
-    @staticmethod
-    def _evaluate_rule_payload(
-        rule_payload: Any,
-        indicator_payloads: Mapping[str, Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        if hasattr(rule_payload, "evaluate"):
-            return rule_payload.evaluate(indicator_payloads)
-        if not isinstance(rule_payload, Mapping):
-            return None
-
-        matched = False
-        reason: Optional[str] = None
-        condition_results: List[Dict[str, Any]] = []
-        trigger_signals: List[Dict[str, Any]] = []
-
-        enabled = rule_payload.get("enabled", True)
-        conditions = rule_payload.get("conditions") or []
-        if not enabled:
-            reason = "Rule disabled"
-        elif not conditions:
-            reason = "Rule has no conditions"
-        else:
-            match_results: List[bool] = []
-            for condition in conditions:
-                if not isinstance(condition, Mapping):
-                    continue
-                condition_obj = SimpleNamespace(
-                    indicator_id=condition.get("indicator_id"),
-                    signal_type=condition.get("signal_type"),
-                    rule_id=condition.get("rule_id"),
-                    direction=condition.get("direction"),
-                )
-                result = evaluator._evaluate_condition(condition_obj, indicator_payloads)
-                condition_results.append(result)
-                match_results.append(result.get("matched"))
-                if result.get("matched"):
-                    signals = result.get("signals") or []
-                    if signals:
-                        trigger_signals.extend(signals)
-                    elif result.get("signal"):
-                        trigger_signals.append(result.get("signal"))
-
-            match_mode = str(rule_payload.get("match") or "all").lower()
-            if match_mode == "any":
-                matched = any(match_results)
-            else:
-                matched = bool(match_results) and all(match_results)
-
-            if not matched and not reason:
-                reason = "No matching signals"
-
-        direction = None
-        terminal_signal: Optional[Mapping[str, Any]] = None
-        if trigger_signals:
-            terminal_candidates = [
-                signal for signal in trigger_signals if isinstance(signal, Mapping)
-            ]
-            if terminal_candidates:
-                terminal_candidates.sort(
-                    key=lambda signal: evaluator._extract_signal_epoch(signal) or 0
-                )
-                terminal_signal = terminal_candidates[-1]
-                direction = evaluator._infer_signal_direction(terminal_signal)
-
-        return {
-            "rule_id": rule_payload.get("id"),
-            "rule_name": rule_payload.get("name"),
-            "action": rule_payload.get("action"),
-            "matched": matched,
-            "conditions": condition_results,
-            "signal": terminal_signal if matched else None,
-            "signals": trigger_signals if matched else [],
-            "direction": direction,
-            "reason": reason,
-        }
-
-    @staticmethod
-    def _signal_known_at_epoch(signal: Mapping[str, Any]) -> int:
-        metadata = signal.get("metadata") if isinstance(signal, Mapping) else None
-        candidates = []
-        if isinstance(metadata, Mapping):
-            for key in (
-                "known_at",
-                "formed_at",
-                "session_end",
-                "value_area_end",
-                "profile_end",
-                "va_end",
-            ):
-                if key in metadata:
-                    candidates.append(metadata.get(key))
-        if "known_at" in signal:
-            candidates.append(signal.get("known_at"))
-        if "formed_at" in signal:
-            candidates.append(signal.get("formed_at"))
-        for value in candidates:
-            epoch = evaluator._iso_to_epoch_seconds(value)
-            if epoch is not None:
-                return epoch
-        return 0

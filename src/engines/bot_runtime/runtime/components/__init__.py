@@ -4,7 +4,7 @@ from .intrabar import IntrabarManager
 from .persistence_buffer import TradePersistenceBuffer
 from .run_context import RunContext
 from .runtime_policy import RuntimeModePolicy
-from .series_state_buffer import SeriesStatePersistenceBuffer
+from .series_bar_telemetry_buffer import SeriesBarTelemetryBuffer
 from .series_runner import InlineSeriesRunner, PoolSeriesRunner, SeriesRunnerContext
 from .settlement import SettlementApplier
 from .signal_consumption import SignalConsumption, consume_signals
@@ -18,7 +18,7 @@ __all__ = [
     "TradePersistenceBuffer",
     "RunContext",
     "RuntimeModePolicy",
-    "SeriesStatePersistenceBuffer",
+    "SeriesBarTelemetryBuffer",
     "InlineSeriesRunner",
     "PoolSeriesRunner",
     "SeriesRunnerContext",

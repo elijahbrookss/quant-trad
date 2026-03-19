@@ -9,7 +9,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from queue import Queue
-from typing import Any, Callable, Deque, Dict, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import normalize_epoch
@@ -20,15 +20,12 @@ from engines.bot_runtime.runtime.reporting import (
     TRADE_STOP_COLOR,
     TRADE_TARGET_COLOR,
 )
+from engines.bot_runtime.runtime.overlay_types import ensure_runtime_overlay_types_registered
 from engines.bot_runtime.strategy.series_builder import SeriesBuilder, StrategySeries
-from engines.indicator_engine import (
-    OverlayProjectionInput,
-    ensure_builtin_indicator_plugins_registered,
-    plugin_registry,
-)
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.runtime.indicator_overlay_cache import default_overlay_cache
 from signals.overlays.builtins import ensure_builtin_overlays_registered
-from signals.overlays.schema import build_overlay, normalize_overlays
+from signals.overlays.schema import build_overlay
 from utils.log_context import build_log_context, merge_log_context, series_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_slow_ms, get_obs_step_sample_rate, should_sample
 
@@ -40,7 +37,7 @@ from ..components import (
     RuntimeEventSink,
     RuntimeModePolicy,
     RunContext,
-    SeriesStatePersistenceBuffer,
+    SeriesBarTelemetryBuffer,
     SeriesRunnerContext,
     SettlementApplier,
     SignalConsumption,
@@ -72,6 +69,7 @@ class RuntimeSetupPrepareMixin:
         state_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         ensure_builtin_overlays_registered()
+        ensure_runtime_overlay_types_registered()
         self.bot_id = bot_id
         self.config = dict(config)
         self._deps = deps
@@ -133,11 +131,7 @@ class RuntimeSetupPrepareMixin:
         self._overlay_dirty = threading.Event()
         self._overlay_aggregator_stop = threading.Event()
         self._overlay_aggregator_thread: Optional[threading.Thread] = None
-        ensure_builtin_indicator_plugins_registered()
-        self._indicator_plugin_registry = plugin_registry()
         overlay_cache = default_overlay_cache()
-        for indicator_type in self._indicator_plugin_registry.list_types():
-            overlay_cache.enable_type(indicator_type)
         self._overlay_cache = overlay_cache
         self._indicator_ctx = self._deps.build_indicator_context(
             self.bot_id,
@@ -163,7 +157,7 @@ class RuntimeSetupPrepareMixin:
             record_trade=self._deps.record_bot_trade,
             record_trade_event=self._deps.record_bot_trade_event,
         )
-        self._series_state_buffer = SeriesStatePersistenceBuffer.from_config(
+        self._series_bar_telemetry_buffer = SeriesBarTelemetryBuffer.from_config(
             self.config,
             record_batch=self._deps.record_bot_runtime_events_batch,
         )
@@ -606,10 +600,6 @@ class RuntimeSetupPrepareMixin:
                 total_bars=len(series.candles),
                 last_consumed_epoch=max(int(getattr(series, "last_consumed_epoch", 0) or 0), 0),
             )
-            state.regime_overlays_static = self._build_runtime_regime_overlays(
-                series=series,
-                candles=series.candles,
-            )
             key = self._strategy_key(series)
             self._series_states.append(state)
             self._series_state_map[key] = state
@@ -624,109 +614,47 @@ class RuntimeSetupPrepareMixin:
         indicator_ids = strategy_meta.get("indicator_ids")
         if not indicator_links and isinstance(indicator_ids, list):
             indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
-
+        indicator_metas: Dict[str, Dict[str, Any]] = {}
         for link in indicator_links:
             indicator_id = str(link.get("indicator_id") or link.get("id") or "").strip()
             if not indicator_id:
                 continue
-            meta = self._deps.indicator_get_instance_meta(indicator_id, ctx=self._indicator_ctx)
-            indicator_type = str(meta.get("type") or "").strip().lower()
-            if not indicator_type:
-                raise RuntimeError(f"indicator_state_setup_failed: missing indicator type | indicator_id={indicator_id}")
-            plugin = self._indicator_plugin_registry.resolve(indicator_type)
-            engine = plugin.engine_factory(meta)
-            if engine is None:
-                raise RuntimeError(f"indicator_plugin_engine_missing: indicator_type={indicator_type} indicator_id={indicator_id}")
-            engine_state = engine.initialize({
-                "symbol": series.symbol,
-                "timeframe": series.timeframe,
-                "strategy_id": series.strategy_id,
-                "indicator_id": indicator_id,
-            })
-            state.indicator_state_runtime[indicator_id] = {
-                "indicator_id": indicator_id,
-                "indicator_type": indicator_type,
-                "indicator_meta": dict(meta),
-                "plugin": plugin,
-                "engine": engine,
-                "engine_state": engine_state,
-                "last_revision": -1,
-            }
-            state.indicator_projection_runtime[indicator_id] = {
-                "seq": 0,
-                "revision": -1,
-                "entries": {},
-            }
-
-        # Prime indicator engines with warmup candles before replay start so
-        # overlays/signals at bar 0 reflect known history.
-        warmup_count = max(int(state.bar_index or 0), 0)
-        if warmup_count <= 0:
-            return
-        warmup_candles = list(series.candles[:warmup_count])
-        for runtime in state.indicator_state_runtime.values():
-            engine = runtime.get("engine")
-            engine_state = runtime.get("engine_state")
-            if engine is None or not isinstance(engine_state, MutableMapping):
-                continue
-            for warmup_candle in warmup_candles:
-                engine.apply_bar(engine_state, warmup_candle)
-            snapshot = engine.snapshot(engine_state)
-            runtime["last_revision"] = snapshot.revision
-            indicator_type = str(runtime.get("indicator_type") or "")
-            projector = getattr(runtime.get("plugin"), "overlay_projector", None)
-            if projector is None:
-                continue
-            raw_entries = projector(
-                OverlayProjectionInput(
-                    snapshot=snapshot,
-                    previous_projection_state={"seq": 0, "revision": -1, "entries": {}},
-                )
-            )
-            if not isinstance(raw_entries, Mapping):
-                continue
-            normalized_entries: Dict[str, Dict[str, Any]] = {}
-            indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
-            overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
-            for entry_key, entry_value in raw_entries.items():
-                if not isinstance(entry_value, Mapping):
-                    continue
-                normalized = normalize_overlays(indicator_type, [dict(entry_value)])
-                if not normalized:
-                    continue
-                overlay_entry = dict(normalized[0])
-                overlay_entry.update(
-                    {
-                        "ind_id": indicator_id,
-                        "source": "indicator_state",
-                        "bot_id": self.bot_id,
-                        "strategy_id": series.strategy_id,
-                        "symbol": series.symbol,
-                        "timeframe": series.timeframe,
-                    }
-                )
-                if isinstance(overlay_color, str) and overlay_color.strip():
-                    overlay_entry["color"] = overlay_color
-                normalized_entries[str(entry_key)] = overlay_entry
-            indicator_id = str(runtime.get("indicator_id") or "").strip()
-            if not indicator_id:
-                continue
-            projection_state = state.indicator_projection_runtime.setdefault(
+            indicator_metas[indicator_id] = self._deps.indicator_get_instance_meta(
                 indicator_id,
-                {"seq": 0, "revision": -1, "entries": {}},
+                ctx=self._indicator_ctx,
             )
-            projection_state["revision"] = snapshot.revision
-            projection_state["entries"] = normalized_entries
+
+        indicators = [
+            self._deps.indicator_build_runtime_instance(
+                indicator_id,
+                meta=meta,
+                strategy_indicator_metas=indicator_metas,
+            )
+            for indicator_id, meta in indicator_metas.items()
+        ]
+        state.indicator_engine = IndicatorExecutionEngine(indicators)
+        state.indicator_output_types = state.indicator_engine.output_types
+        state.indicator_outputs = {}
+        state.indicator_overlays = {}
+
+        warmup_count = max(int(state.bar_index or 0), 0)
+        if warmup_count > 0 and state.indicator_engine is not None:
+            last_frame = None
+            for warmup_candle in series.candles[:warmup_count]:
+                last_frame = state.indicator_engine.step(bar=warmup_candle, bar_time=warmup_candle.time)
+            if last_frame is not None:
+                state.indicator_outputs = dict(last_frame.outputs)
+                state.indicator_overlays = dict(last_frame.overlays)
 
         series.overlays = self._series_overlay_entries(state)
         logger.info(
             with_log_context(
-                "indicator_state_warmup_seeded",
+                "indicator_runtime_initialized",
                 self._series_log_context(
                     series,
                     warmup_candles=warmup_count,
-                    indicators=len(state.indicator_state_runtime),
-                    overlays=len(series.overlays or []),
+                    indicators=len(indicators),
+                    order=list(state.indicator_engine.order if state.indicator_engine else ()),
                 ),
             )
         )
@@ -806,217 +734,51 @@ class RuntimeSetupPrepareMixin:
     def _resolve_live_window(self) -> Tuple[str, str]:
         return self._ensure_series_builder()._resolve_live_window()
 
-    def _indicator_overlay_entries(
-        self,
-        strategy: Mapping[str, Any],
-        start_iso: str,
-        end_iso: str,
-        timeframe: Optional[str],
-        symbol: Optional[str],
-        datasource: Optional[str],
-        exchange: Optional[str],
-    ) -> List[Dict[str, Any]]:
-        return self._ensure_series_builder()._indicator_overlay_entries(
-            strategy,
-            start_iso,
-            end_iso,
-            timeframe,
-            symbol,
-            datasource,
-            exchange,
-        )
-
     def _series_overlay_entries(self, state: SeriesExecutionState) -> List[Dict[str, Any]]:
-        started = time.perf_counter()
         overlays: List[Dict[str, Any]] = []
-        indicator_entries = 0
-        indicator_started = time.perf_counter()
-        for projection_state in state.indicator_projection_runtime.values():
-            entries = projection_state.get("entries")
-            if not isinstance(entries, Mapping):
+        for overlay_key in sorted(state.indicator_overlays.keys()):
+            runtime_overlay = state.indicator_overlays.get(overlay_key)
+            if runtime_overlay is None or not runtime_overlay.ready:
                 continue
-            normalized_entries = [dict(value) for value in entries.values() if isinstance(value, Mapping)]
-            overlays.extend(normalized_entries)
-            indicator_entries += len(normalized_entries)
-        indicator_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
-
-        regime_started = time.perf_counter()
-        if self._runtime_regime_overlay_rebuild:
-            visible_count = min(max(int(state.bar_index) + 1, 1), len(state.series.candles))
-            visible_candles = state.series.candles[:visible_count]
-            regime_overlays = self._build_runtime_regime_overlays(series=state.series, candles=visible_candles)
-            regime_mode = "rebuild"
-        else:
-            regime_overlays = list(state.regime_overlays_static or [])
-            regime_mode = "static"
-        regime_ms = max((time.perf_counter() - regime_started) * 1000.0, 0.0)
-        overlays.extend(regime_overlays)
-        total_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+            indicator_id, _, overlay_name = str(overlay_key).partition(".")
+            entry = dict(runtime_overlay.value)
+            entry.setdefault("overlay_id", overlay_key)
+            entry.setdefault("indicator_id", indicator_id)
+            entry.setdefault("overlay_name", overlay_name)
+            overlays.append(entry)
         state.overlay_runtime_metrics = {
-            "series_overlay_entries_ms": total_ms,
-            "series_overlay_indicator_entries_ms": indicator_ms,
-            "series_overlay_regime_build_ms": regime_ms,
-            "series_overlay_indicator_entries_count": float(indicator_entries),
-            "series_overlay_regime_entries_count": float(len(regime_overlays)),
+            "series_overlay_entries_ms": 0.0,
+            "series_overlay_indicator_entries_ms": 0.0,
+            "series_overlay_regime_build_ms": 0.0,
+            "series_overlay_indicator_entries_count": float(len(overlays)),
+            "series_overlay_regime_entries_count": 0.0,
             "series_overlay_total_entries_count": float(len(overlays)),
-            "series_overlay_regime_mode_rebuild": 1.0 if regime_mode == "rebuild" else 0.0,
+            "series_overlay_regime_mode_rebuild": 0.0,
         }
         return overlays
 
     def _bootstrap_indicator_overlays_for_state(self, state: SeriesExecutionState) -> None:
         series = state.series
-        strategy_meta = series.meta or {}
-        indicator_links = list(strategy_meta.get("indicator_links") or [])
-        replay_idx = max(int(state.bar_index or 0), 0)
-        if replay_idx >= len(series.candles):
-            replay_idx = max(len(series.candles) - 1, 0)
-        if not series.candles:
-            return
-        end_iso = _isoformat(series.candles[replay_idx].time) or _isoformat(series.candles[-1].time)
-        start_iso = str(series.window_start or end_iso)
-        fetched: List[Dict[str, Any]] = []
-        if indicator_links:
-            fetched = self._indicator_overlay_entries(
-                strategy_meta,
-                start_iso,
-                str(end_iso),
-                series.timeframe,
-                series.symbol,
-                series.datasource,
-                series.exchange,
-            )
-        grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        counters: Dict[str, int] = {}
-        for overlay in fetched:
-            if not isinstance(overlay, Mapping):
-                continue
-            indicator_id = str(overlay.get("ind_id") or "").strip()
-            if not indicator_id:
-                continue
-            bucket = grouped.setdefault(indicator_id, {})
-            idx = counters.get(indicator_id, 0)
-            key = f"bootstrap:{idx}"
-            counters[indicator_id] = idx + 1
-            bucket[key] = dict(overlay)
-        for indicator_id, entries in grouped.items():
-            projection_state = state.indicator_projection_runtime.setdefault(
-                indicator_id,
-                {"seq": 0, "revision": -1, "entries": {}},
-            )
-            projection_state["entries"] = entries
-        series.overlays = self._series_overlay_entries(state)
         series.bootstrap_completed = True
-        series.bootstrap_indicator_overlays = int(sum(len(entries or {}) for entries in grouped.values()))
+        series.bootstrap_indicator_overlays = len(series.overlays or [])
         series.bootstrap_total_overlays = len(series.overlays or [])
         logger.info(
             with_log_context(
                 "indicator_overlay_bootstrap_completed",
                 self._series_log_context(
                     series,
-                    start=start_iso,
-                    end=end_iso,
                     overlays=len(series.overlays or []),
-                    indicators=len(grouped),
-                    indicator_overlays=series.bootstrap_indicator_overlays,
+                    indicators=len(state.indicator_engine.order if state.indicator_engine else ()),
+                    indicator_overlays=len(series.overlays or []),
                 ),
             )
         )
 
     def _validate_bootstrap_readiness(self) -> None:
-        min_total = max(int(self.config.get("bootstrap_min_total_overlays_per_series") or 0), 0)
-        min_indicator = max(int(self.config.get("bootstrap_min_indicator_overlays_per_series") or 1), 0)
-        require_indicator = bool(self.config.get("bootstrap_require_indicator_overlays", True))
-        require_indicator = require_indicator and bool(self.config.get("include_indicator_overlays", True))
-
-        failures: List[Dict[str, Any]] = []
         for state in self._series_states:
             series = state.series
             if not bool(series.bootstrap_completed):
-                failures.append(
-                    self._series_log_context(
-                        series,
-                        reason="bootstrap_incomplete",
-                        bootstrap_completed=False,
-                    )
-                )
-                continue
-
-            total_overlays = int(series.bootstrap_total_overlays or 0)
-            indicator_overlays = int(series.bootstrap_indicator_overlays or 0)
-            indicator_links = list((series.meta or {}).get("indicator_links") or [])
-            expected_indicators = len(indicator_links)
-
-            if min_total > 0 and total_overlays < min_total:
-                failures.append(
-                    self._series_log_context(
-                        series,
-                        reason="bootstrap_total_overlays_below_min",
-                        total_overlays=total_overlays,
-                        min_total_overlays=min_total,
-                    )
-                )
-                continue
-
-            if require_indicator and expected_indicators > 0 and indicator_overlays < min_indicator:
-                failures.append(
-                    self._series_log_context(
-                        series,
-                        reason="bootstrap_indicator_overlays_below_min",
-                        indicator_overlays=indicator_overlays,
-                        min_indicator_overlays=min_indicator,
-                        expected_indicators=expected_indicators,
-                    )
-                )
-
-        if failures:
-            self._prepare_error = {
-                "message": "Indicator bootstrap validation failed.",
-                "failures": failures,
-            }
-            context = self._runtime_log_context(
-                failures=failures,
-                min_total_overlays=min_total,
-                min_indicator_overlays=min_indicator,
-                require_indicator_overlays=require_indicator,
-            )
-            logger.error(with_log_context("bot_runtime_bootstrap_validation_failed", context))
-            raise RuntimeError(
-                "Indicator bootstrap validation failed. "
-                "Check bot_runtime_bootstrap_validation_failed log for per-series details."
-            )
-
-    def _build_runtime_regime_overlays(
-        self,
-        *,
-        series: StrategySeries,
-        candles: Sequence[Candle],
-    ) -> List[Dict[str, Any]]:
-        instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
-        instrument_id = str(instrument.get("id") or "").strip()
-        if not instrument_id:
-            return []
-        return self._ensure_series_builder()._build_regime_overlays(
-            instrument_id=instrument_id,
-            candles=list(candles),
-            timeframe=series.timeframe,
-            strategy_id=series.strategy_id,
-            symbol=series.symbol,
-            runtime_derived_state=getattr(series, "runtime_derived_state", None),
-        )
-
-    @staticmethod
-    def _indicator_overlay_cache_key(
-        indicator_id: str,
-        start_iso: Optional[str],
-        end_iso: Optional[str],
-        interval: Optional[str],
-        symbol: Optional[str],
-        datasource: Optional[str],
-        exchange: Optional[str],
-    ) -> str:
-        return _series_builder_cls()._indicator_overlay_cache_key(
-            indicator_id, start_iso, end_iso, interval, symbol, datasource, exchange
-        )
+                raise RuntimeError("indicator_bootstrap_invalid: bootstrap_completed is required")
 
     def _update_trade_overlay(self, series: Optional[StrategySeries]) -> None:
         if series is None:
@@ -1098,8 +860,8 @@ class RuntimeSetupPrepareMixin:
         return _series_builder_cls()._build_candles(df, timeframe)
 
     @staticmethod
-    def _build_signals_from_markers(markers: Mapping[str, Any]) -> Deque[StrategySignal]:
-        return _series_builder_cls()._build_signals_from_markers(markers)
+    def _build_signals_from_trigger_rows(rows: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
+        return _series_builder_cls()._build_signals_from_trigger_rows(rows)
 
     @staticmethod
     def _strategy_key(series: StrategySeries) -> str:
@@ -1305,7 +1067,7 @@ class RuntimeSetupPrepareMixin:
             update_started = datetime.now(timezone.utc)
             try:
                 update_metrics = self._update_state(self._state_candle_for(state.series, candle))
-                update_metrics["series_state_enqueue_ms"] = self._persist_series_state_snapshot(
+                update_metrics["series_bar_telemetry_enqueue_ms"] = self._persist_series_bar_telemetry(
                     series=state.series,
                     candle=candle,
                     bar_index=current_bar_index,
@@ -1379,7 +1141,7 @@ class RuntimeSetupPrepareMixin:
             "delta_build_ms": push_metrics.get("delta_build_ms"),
             "delta_serialize_ms": push_metrics.get("delta_serialize_ms"),
             "stream_emit_ms": push_metrics.get("stream_emit_ms"),
-            "series_state_enqueue_ms": update_metrics.get("series_state_enqueue_ms"),
+            "series_bar_telemetry_enqueue_ms": update_metrics.get("series_bar_telemetry_enqueue_ms"),
             "subscribers_count": push_metrics.get("subscribers_count"),
             "overlay_points_changed": push_metrics.get("overlay_points"),
             "step_trace_queue_depth": step_trace_metrics.get("step_trace_queue_depth"),
@@ -1647,10 +1409,3 @@ class RuntimeSetupPrepareMixin:
     def _normalise_epoch(value: Any) -> Optional[int]:
         """Deprecated: Use normalize_epoch from domain module instead."""
         return normalize_epoch(value)
-
-    @staticmethod
-    def _extract_indicator_overlays(result: Mapping[str, Any]) -> List[Dict[str, Any]]:
-        # Indicator results include overlays that visualize raw signal markers.
-        # The bot lens should only render the strategy's configured indicator
-        # overlays, so skip signal-driven visuals entirely.
-        return _series_builder_cls()._extract_indicator_overlays(result)

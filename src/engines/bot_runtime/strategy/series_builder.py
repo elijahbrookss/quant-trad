@@ -6,7 +6,6 @@ from .series_builder_parts import (
     SeriesBuilderConstructionMixin,
     SeriesBuilderLifecycleMixin,
     SeriesBuilderLiveUpdatesMixin,
-    SeriesBuilderOverlaysRegimeMixin,
     StrategySeries,
 )
 
@@ -15,7 +14,6 @@ class SeriesBuilder(
     SeriesBuilderLifecycleMixin,
     SeriesBuilderLiveUpdatesMixin,
     SeriesBuilderConstructionMixin,
-    SeriesBuilderOverlaysRegimeMixin,
 ):
     """Prepare strategy series and overlays for the runtime."""
 

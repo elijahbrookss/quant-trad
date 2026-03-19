@@ -16,12 +16,13 @@ from engines.bot_runtime.core.domain import (
     LadderRiskEngine,
     StrategySignal,
     isoformat,
+    normalize_epoch,
     timeframe_duration,
 )
 from engines.bot_runtime.adapters import BacktestAdapter, LiveAdapter, PaperAdapter
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, SeriesExecutionProfile
 from atm import merge_templates
-from utils.log_context import with_log_context
+from utils.log_context import build_log_context, with_log_context
 
 from ..models import Strategy
 from .models import StrategySeries
@@ -29,6 +30,120 @@ from .models import StrategySeries
 logger = logging.getLogger(__name__)
 
 class SeriesBuilderConstructionMixin:
+    @staticmethod
+    def _build_signals_from_trigger_rows(rows: Sequence[Mapping[str, Any]]) -> Deque[StrategySignal]:
+        queued: List[StrategySignal] = []
+        context = build_log_context(
+            trigger_rows=len(rows),
+        )
+        logger.debug(with_log_context("build_signals_from_trigger_rows", context))
+        for entry in rows:
+            if not isinstance(entry, Mapping):
+                continue
+            epoch = SeriesBuilderConstructionMixin._normalise_epoch(entry.get("epoch"))
+            action = str(entry.get("action") or "").strip().lower()
+            direction = "long" if action == "buy" else "short" if action == "sell" else None
+            if epoch is None or direction is None:
+                continue
+            queued.append(StrategySignal(epoch=epoch, direction=direction))
+        queued.sort(key=lambda signal: signal.epoch)
+        logger.debug(with_log_context("build_signals_from_trigger_rows", build_log_context(total_signals=len(queued))))
+        return deque(queued)
+
+    @staticmethod
+    def _normalise_epoch(value: Any) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+            return int(parsed.timestamp())
+        except ValueError:
+            return normalize_epoch(value)
+
+    @staticmethod
+    def _build_candles(df: Any, timeframe: Optional[str] = None) -> List[Candle]:
+        import pandas as pd
+
+        frame = df.copy()
+        frame.index = pd.to_datetime(frame.index, utc=True)
+        if not frame.index.is_monotonic_increasing:
+            frame = frame.sort_index()
+        range_series = frame.get("high", frame.get("High")) - frame.get("low", frame.get("Low"))
+        frame["__range__"] = range_series
+        atr_col = None
+        for candidate in ("ATR_Wilder", "atr", "atr_wilder"):
+            if candidate in frame.columns:
+                atr_col = candidate
+                break
+        volume_col = None
+        for candidate in ("volume", "Volume"):
+            if candidate in frame.columns:
+                volume_col = candidate
+                break
+        if atr_col:
+            frame["__avg_atr_15"] = frame[atr_col].rolling(window=15).mean().shift(1)
+        frame["__avg_range_15"] = range_series.rolling(window=15).mean().shift(1)
+        if volume_col:
+            frame["__avg_volume_15"] = frame[volume_col].rolling(window=15).mean().shift(1)
+        candles: List[Candle] = []
+        duration = timeframe_duration(timeframe)
+        for ts, row in frame.iterrows():
+            try:
+                open_price = float(row.get("open", row.get("Open")))
+                high_price = float(row.get("high", row.get("High")))
+                low_price = float(row.get("low", row.get("Low")))
+                close_price = float(row.get("close", row.get("Close")))
+            except (TypeError, ValueError):
+                continue
+            start_dt = ts.to_pydatetime()
+            end_dt = start_dt + duration if duration else None
+            atr_value = None
+            if atr_col and row.get(atr_col) is not None:
+                try:
+                    atr_value = float(row.get(atr_col))
+                except (TypeError, ValueError):
+                    atr_value = None
+            volume_value = None
+            if volume_col and row.get(volume_col) is not None:
+                try:
+                    volume_value = float(row.get(volume_col))
+                except (TypeError, ValueError):
+                    volume_value = None
+            lookback = {
+                "avg_range_15": row.get("__avg_range_15"),
+                "avg_atr_15": row.get("__avg_atr_15"),
+                "avg_volume_15": row.get("__avg_volume_15"),
+            }
+            candles.append(
+                Candle(
+                    time=start_dt,
+                    open=open_price,
+                    high=high_price,
+                    low=low_price,
+                    close=close_price,
+                    end=end_dt,
+                    atr=atr_value,
+                    volume=volume_value,
+                    range=float(high_price - low_price),
+                    lookback_15={k: float(v) if v is not None and not pd.isna(v) else None for k, v in lookback.items()},
+                )
+            )
+        return candles
+
     def _build_atm_template_with_instrument(
         self,
         strategy: Strategy,
@@ -340,12 +455,6 @@ class SeriesBuilderConstructionMixin:
         # No precomputed signals/overlays in runtime path. These are evaluated incrementally per bar.
         overlays: List[Dict[str, Any]] = []
         signals = deque()
-        timeframe_seconds = int(timeframe_duration(timeframe).total_seconds())
-        runtime_derived_state = self._build_runtime_series_derived_state(
-            candles=candles,
-            instrument_id=str(instrument.get("id") or "") if isinstance(instrument, Mapping) else "",
-            timeframe_seconds=timeframe_seconds,
-        )
         return StrategySeries(
             strategy_id=strategy.id,
             name=f"{strategy.name} ({symbol})",  # Include symbol for multi-instrument clarity
@@ -364,7 +473,6 @@ class SeriesBuilderConstructionMixin:
             atm_template=atm_template,
             replay_start_index=replay_start_index,
             execution_profile=execution_profile,
-            runtime_derived_state=runtime_derived_state,
         )
 
     def _build_backtest_candles_with_warmup(
@@ -502,7 +610,6 @@ class SeriesBuilderConstructionMixin:
             "timeframe": series.timeframe,
             "instrument_id": str(instrument_id),
             "strategy": strategy_obj,
-            "include_walk_forward_markers": False,
         }
         if evaluation_config is not None:
             evaluate_kwargs["evaluation_config"] = evaluation_config
@@ -511,63 +618,43 @@ class SeriesBuilderConstructionMixin:
         )
         strategy_eval_ms = max((time.perf_counter() - strategy_eval_started) * 1000.0, 0.0)
 
-        chart_markers = evaluation.get("chart_markers") or {}
+        trigger_rows = evaluation.get("trigger_rows") or []
         current_epoch = int(candle.time.timestamp())
         signals = deque(
             signal
-            for signal in self._build_signals_from_markers(chart_markers)
+            for signal in self._build_signals_from_trigger_rows(trigger_rows)
             if signal.epoch == current_epoch and signal.epoch > last_evaluated_epoch
         )
 
         overlay_started = time.perf_counter()
-        overlays = self._extract_indicator_overlays(evaluation)
         strategy_meta = series.meta or {}
         indicator_links = list(strategy_meta.get("indicator_links") or [])
         indicator_ids = strategy_meta.get("indicator_ids")
         if not indicator_links and isinstance(indicator_ids, list):
             indicator_links = [{"indicator_id": indicator_id} for indicator_id in indicator_ids if indicator_id]
         indicators_count = float(len(indicator_links))
-        if self._include_indicator_overlays:
-            overlays.extend(
-                self._indicator_overlay_entries(
-                    strategy_meta,
-                    start_iso,
-                    end_iso,
-                    series.timeframe,
-                    series.symbol,
-                    series.datasource,
-                    series.exchange,
-                )
-            )
-        regime_overlays = self._build_regime_overlays(
-            instrument_id=instrument_id or "",
-            candles=list(visible_candles),
-            timeframe=series.timeframe,
-            strategy_id=series.strategy_id,
-            symbol=series.symbol,
-        )
-        overlays.extend(regime_overlays)
+        overlays = [dict(entry) for entry in evaluation.get("overlays") or [] if isinstance(entry, Mapping)]
         overlays_update_ms = max((time.perf_counter() - overlay_started) * 1000.0, 0.0)
         perf_payload = evaluation.get("perf") if isinstance(evaluation, Mapping) else None
-        indicator_eval_ms: Optional[float] = None
-        rule_eval_ms: Optional[float] = None
+        candle_fetch_ms: Optional[float] = None
+        preview_replay_ms: Optional[float] = None
         if isinstance(perf_payload, Mapping):
-            raw_indicator = perf_payload.get("indicator_eval_ms")
-            raw_rule = perf_payload.get("rule_eval_ms")
+            raw_fetch = perf_payload.get("candle_fetch_ms")
+            raw_replay = perf_payload.get("preview_replay_ms")
             try:
-                indicator_eval_ms = float(raw_indicator) if raw_indicator is not None else None
+                candle_fetch_ms = float(raw_fetch) if raw_fetch is not None else None
             except (TypeError, ValueError):
-                indicator_eval_ms = None
+                candle_fetch_ms = None
             try:
-                rule_eval_ms = float(raw_rule) if raw_rule is not None else None
+                preview_replay_ms = float(raw_replay) if raw_replay is not None else None
             except (TypeError, ValueError):
-                rule_eval_ms = None
+                preview_replay_ms = None
         total_eval_ms = max((time.perf_counter() - stage_started) * 1000.0, 0.0)
         return signals, overlays, {
             "epochs_evaluated_this_tick": 1.0,
             "strategy_eval_ms": strategy_eval_ms,
-            "indicator_eval_ms": indicator_eval_ms,
-            "rule_eval_ms": rule_eval_ms,
+            "candle_fetch_ms": candle_fetch_ms,
+            "preview_replay_ms": preview_replay_ms,
             "signals_emitted_count": float(len(signals)),
             "overlays_update_ms": overlays_update_ms,
             "indicators_count": indicators_count,

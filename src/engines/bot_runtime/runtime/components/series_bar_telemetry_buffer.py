@@ -1,4 +1,4 @@
-"""Async batched persistence for per-series runtime state snapshots."""
+"""Async batched persistence for per-series runtime bar telemetry."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ def _missing_batch_writer(name: str):
     return _raise
 
 
-class SeriesStatePersistenceBuffer:
-    """Persist `series_state.*` runtime artifacts without making bar steps DB-bound."""
+class SeriesBarTelemetryBuffer:
+    """Persist per-series runtime telemetry without making bar steps DB-bound."""
 
     def __init__(
         self,
@@ -55,7 +55,7 @@ class SeriesStatePersistenceBuffer:
         config: Dict[str, object],
         *,
         record_batch: Optional[Callable[[list[dict[str, Any]]], int]] = None,
-    ) -> "SeriesStatePersistenceBuffer":
+    ) -> "SeriesBarTelemetryBuffer":
         def _int(value: object, default: int) -> int:
             try:
                 return int(value) if value is not None else int(default)
@@ -69,23 +69,23 @@ class SeriesStatePersistenceBuffer:
                 return float(default)
 
         queue_max = _int(
-            config.get("series_state_queue_max") or config.get("BOT_RUNTIME_SERIES_STATE_QUEUE_MAX"),
+            config.get("series_bar_telemetry_queue_max") or config.get("BOT_RUNTIME_SERIES_BAR_TELEMETRY_QUEUE_MAX"),
             4096,
         )
         batch_size = _int(
-            config.get("series_state_batch_size") or config.get("BOT_RUNTIME_SERIES_STATE_BATCH_SIZE"),
+            config.get("series_bar_telemetry_batch_size") or config.get("BOT_RUNTIME_SERIES_BAR_TELEMETRY_BATCH_SIZE"),
             200,
         )
         flush_interval_ms = _float(
-            config.get("series_state_flush_interval_ms") or config.get("BOT_RUNTIME_SERIES_STATE_FLUSH_INTERVAL_MS"),
+            config.get("series_bar_telemetry_flush_interval_ms") or config.get("BOT_RUNTIME_SERIES_BAR_TELEMETRY_FLUSH_INTERVAL_MS"),
             200.0,
         )
         enqueue_timeout_ms = _float(
-            config.get("series_state_enqueue_timeout_ms") or config.get("BOT_RUNTIME_SERIES_STATE_ENQUEUE_TIMEOUT_MS"),
+            config.get("series_bar_telemetry_enqueue_timeout_ms") or config.get("BOT_RUNTIME_SERIES_BAR_TELEMETRY_ENQUEUE_TIMEOUT_MS"),
             5000.0,
         )
         retry_interval_ms = _float(
-            config.get("series_state_retry_interval_ms") or config.get("BOT_RUNTIME_SERIES_STATE_RETRY_INTERVAL_MS"),
+            config.get("series_bar_telemetry_retry_interval_ms") or config.get("BOT_RUNTIME_SERIES_BAR_TELEMETRY_RETRY_INTERVAL_MS"),
             500.0,
         )
         return cls(
@@ -120,12 +120,12 @@ class SeriesStatePersistenceBuffer:
             self._queue.put(item, timeout=self._enqueue_timeout_s)
         except queue.Full as exc:
             logger.error(
-                "bot_series_state_queue_backpressure | queue_depth=%s | queue_max=%s | enqueue_timeout_ms=%s",
+                "bot_series_bar_telemetry_queue_backpressure | queue_depth=%s | queue_max=%s | enqueue_timeout_ms=%s",
                 self._queue.qsize(),
                 self._queue_max,
                 round(self._enqueue_timeout_s * 1000.0, 3),
             )
-            raise RuntimeError("series_state persistence queue is saturated") from exc
+            raise RuntimeError("series_bar telemetry persistence queue is saturated") from exc
         return max((time.perf_counter() - enqueue_started) * 1000.0, 0.0)
 
     def flush(self, *, reason: str, shutdown: bool = False, timeout_s: float = 5.0) -> None:
@@ -140,7 +140,7 @@ class SeriesStatePersistenceBuffer:
             time.sleep(0.01)
         if self._queue.unfinished_tasks > 0 or not self._queue.empty():
             raise RuntimeError(
-                f"series_state persistence flush timed out | reason={reason} | queue_depth={self._queue.qsize()}"
+                f"series_bar telemetry persistence flush timed out | reason={reason} | queue_depth={self._queue.qsize()}"
             )
         if shutdown:
             self._stop.set()
@@ -148,9 +148,9 @@ class SeriesStatePersistenceBuffer:
             if thread and thread.is_alive():
                 thread.join(timeout=max(float(timeout_s), 0.1))
             if thread and thread.is_alive():
-                raise RuntimeError(f"series_state persistence worker did not stop cleanly | reason={reason}")
+                raise RuntimeError(f"series_bar telemetry persistence worker did not stop cleanly | reason={reason}")
         logger.debug(
-            "bot_series_state_flush | reason=%s | queue_depth=%s | unfinished=%s",
+            "bot_series_bar_telemetry_flush | reason=%s | queue_depth=%s | unfinished=%s",
             reason,
             self._queue.qsize(),
             self._queue.unfinished_tasks,
@@ -201,7 +201,7 @@ class SeriesStatePersistenceBuffer:
                     with self._metrics_lock:
                         self._persist_error_count += 1
                     logger.warning(
-                        "bot_series_state_batch_persist_failed | batch_size=%s | queue_depth=%s | error=%s",
+                        "bot_series_bar_telemetry_batch_persist_failed | batch_size=%s | queue_depth=%s | error=%s",
                         len(payloads),
                         self._queue.qsize(),
                         exc,
@@ -220,7 +220,7 @@ class SeriesStatePersistenceBuffer:
 
             logger.debug(
                 with_log_context(
-                    "bot_series_state_batch_persisted",
+                    "bot_series_bar_telemetry_batch_persisted",
                     {
                         "batch_size": len(payloads),
                         "persisted": persisted,

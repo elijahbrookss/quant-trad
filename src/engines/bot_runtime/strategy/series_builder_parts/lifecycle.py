@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from engines.bot_runtime.deps import BotRuntimeDeps
 from utils.log_context import build_log_context, merge_log_context, series_log_context, strategy_log_context
@@ -14,6 +15,8 @@ from ..models import Strategy
 from .models import StrategySeries
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SIM_LOOKBACK_DAYS = 7
 
 class SeriesBuilderLifecycleMixin:
     def __init__(
@@ -30,8 +33,6 @@ class SeriesBuilderLifecycleMixin:
         self.config = config
         self.run_type = run_type
         self._deps = deps
-        # Default to including indicator overlays during bot runs; callers can disable if they truly want a lighter path.
-        self._include_indicator_overlays = bool(config.get("include_indicator_overlays", True))
         self._log_candle_sequence = log_candle_sequence
         self._indicator_ctx = indicator_ctx
         self._warning_sink = warning_sink
@@ -86,6 +87,29 @@ class SeriesBuilderLifecycleMixin:
             }
         )
 
+    def _instrument_for(
+        self,
+        datasource: Optional[str],
+        exchange: Optional[str],
+        symbol: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not symbol:
+            return None
+        try:
+            return self._deps.resolve_instrument(datasource, exchange, symbol)
+        except Exception:
+            return None
+
+    def _resolve_live_window(self) -> Tuple[str, str]:
+        lookback_days = int(self.config.get("sim_lookback_days") or DEFAULT_SIM_LOOKBACK_DAYS)
+        lookback_days = max(lookback_days, 1)
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=lookback_days)
+        return (
+            start_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            end_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+
     def reset(self) -> None:
         # Overlay caching now handled by shared IndicatorOverlayCache in the service context.
         # Reset runtime-scoped caches for a clean run.
@@ -95,19 +119,6 @@ class SeriesBuilderLifecycleMixin:
         with self._regime_cache_lock:
             self._regime_snapshot_cache.clear()
         return
-
-    def _build_runtime_series_derived_state(
-        self,
-        *,
-        candles: Sequence[Any],
-        instrument_id: str,
-        timeframe_seconds: int,
-    ) -> Any:
-        return self._deps.build_runtime_series_derived_state(
-            candles=candles,
-            instrument_id=instrument_id,
-            timeframe_seconds=timeframe_seconds,
-        )
 
     def build_series_by_ids(self, strategy_ids: List[str]) -> List[StrategySeries]:
         """Build series from strategy IDs (clean DB-based approach).

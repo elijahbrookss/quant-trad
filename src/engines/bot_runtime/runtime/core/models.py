@@ -14,6 +14,8 @@ from engines.bot_runtime.core.domain import (
     isoformat,
     timeframe_to_seconds,
 )
+from engines.indicator_engine.contracts import OutputType, RuntimeOutput, RuntimeOverlay
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 
 DEFAULT_SIM_LOOKBACK_DAYS = 7
 MAX_LOG_ENTRIES = 500
@@ -40,9 +42,10 @@ class SeriesExecutionState:
     signal_consumptions: Deque[Any] = field(
         default_factory=lambda: deque(maxlen=MAX_SIGNAL_CONSUMPTIONS)
     )
-    indicator_state_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    indicator_projection_runtime: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    regime_overlays_static: List[Dict[str, Any]] = field(default_factory=list)
+    indicator_engine: Optional[IndicatorExecutionEngine] = None
+    indicator_outputs: Dict[str, RuntimeOutput] = field(default_factory=dict)
+    indicator_overlays: Dict[str, RuntimeOverlay] = field(default_factory=dict)
+    indicator_output_types: Dict[str, OutputType] = field(default_factory=dict)
     overlay_runtime_metrics: Dict[str, float] = field(default_factory=dict)
 
     def intrabar_active(self) -> bool:

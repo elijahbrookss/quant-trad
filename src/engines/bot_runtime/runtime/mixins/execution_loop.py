@@ -6,12 +6,10 @@ import logging
 import time
 from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from engines.bot_runtime.core.domain import Candle, isoformat
-from engines.indicator_engine import SignalEvaluationInput, evaluate_rules_from_state_snapshots
-from engines.indicator_engine.overlay_runtime import project_and_normalize_entries
-from signals.runtime import emit_manifest_signals
+from engines.bot_runtime.core.domain import Candle, StrategySignal, isoformat
+from strategies.evaluator import evaluate_typed_rules
 from utils.log_context import with_log_context
 from utils.perf_log import perf_log, should_sample
 
@@ -611,7 +609,10 @@ class RuntimeExecutionLoopMixin:
                         trade=new_trade,
                         direction=str(direction or ""),
                     )
-                    self._persist_trade_entry(series, new_trade)
+                    self._persist_trade_entry(
+                        series,
+                        new_trade,
+                    )
                     self._update_trade_overlay(series)
                 self._record_step_trace(
                     "step_decision_flow",
@@ -1016,74 +1017,27 @@ class RuntimeExecutionLoopMixin:
             )
 
         indicator_started = time.perf_counter()
-        snapshots: Dict[str, Any] = {}
-        state_revisions_changed_count = 0
-        previous_candle: Optional[Candle] = None
-        if state.bar_index > 0 and state.bar_index - 1 < len(series.candles):
-            previous_candle = series.candles[state.bar_index - 1]
-
-        for indicator_id, runtime in state.indicator_state_runtime.items():
-            indicator_type = str(runtime.get("indicator_type") or "")
-            engine = runtime.get("engine")
-            engine_state = runtime.get("engine_state")
-            if engine is None or not isinstance(engine_state, MutableMapping):
-                raise RuntimeError(f"indicator_state_runtime_invalid: indicator_id={indicator_id}")
-            delta = engine.apply_bar(engine_state, candle)
-            snapshot = engine.snapshot(engine_state)
-
-            payload = dict(snapshot.payload)
-            runtime_state_storage = runtime.get("signal_runtime_storage")
-            if not isinstance(runtime_state_storage, MutableMapping):
-                runtime_state_storage = {}
-            runtime["signal_runtime_storage"] = runtime_state_storage
-            payload.setdefault("_indicator_id", indicator_id)
-            payload.setdefault("symbol", series.symbol)
-            payload.setdefault("chart_timeframe", series.timeframe)
-            payload.setdefault("source_timeframe", str(snapshot.source_timeframe or series.timeframe or ""))
-            payload["_runtime_state_storage"] = runtime_state_storage
-            plugin = runtime.get("plugin")
-            if plugin is None:
-                raise RuntimeError(f"indicator_plugin_runtime_missing: indicator_id={indicator_id}")
-            if getattr(plugin, "signal_emitter", None) is not None:
-                rule_payload = emit_manifest_signals(
-                    manifest=plugin,
-                    snapshot_payload=payload,
-                    candle=candle,
-                    previous_candle=previous_candle,
-                )
-            else:
-                rule_payload = {"signals": []}
-            updated_runtime_state_storage = payload.get("_runtime_state_storage")
-            if isinstance(updated_runtime_state_storage, MutableMapping):
-                runtime["signal_runtime_storage"] = updated_runtime_state_storage
-            enriched_payload = dict(payload)
-            enriched_payload.update(dict(rule_payload or {}))
-            snapshots[indicator_id] = type(snapshot)(
-                revision=snapshot.revision,
-                known_at=snapshot.known_at,
-                formed_at=snapshot.formed_at,
-                source_timeframe=snapshot.source_timeframe,
-                payload=enriched_payload,
-            )
-            if bool(delta.changed):
-                state_revisions_changed_count += 1
-
+        if state.indicator_engine is None:
+            raise RuntimeError("indicator_runtime_missing: series indicator engine is not initialized")
+        frame = state.indicator_engine.step(bar=candle, bar_time=candle.time)
+        outputs = frame.outputs
+        state.indicator_outputs = outputs
+        state.indicator_overlays = frame.overlays
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
         signal_started = time.perf_counter()
         rules = (series.meta or {}).get("rules") or {}
-        evaluated = evaluate_rules_from_state_snapshots(
-            signal_input=SignalEvaluationInput(snapshots=snapshots),
+        matched_rules = evaluate_typed_rules(
             rules=rules,
+            outputs=outputs,
+            output_types=state.indicator_output_types,
             current_epoch=epoch,
-            rule_evaluator=self._ensure_series_builder()._evaluate_rule_payload,
         )
         signal_eval_ms = max((time.perf_counter() - signal_started) * 1000.0, 0.0)
 
         previous_overlay_count = float(len(series.overlays or []))
         previous_overlay_points = float(self._count_overlay_points(series.overlays or []))
-
-        projection_started = time.perf_counter()
+        overlay_projection_ms = 0.0
         overlay_projection_skipped_count = 0
         overlay_projection_projector_ms = 0.0
         overlay_projection_delta_ms = 0.0
@@ -1094,78 +1048,6 @@ class RuntimeExecutionLoopMixin:
         overlay_projection_ops_count = 0.0
         overlay_projection_normalize_cache_hits = 0.0
         overlay_projection_normalize_cache_misses = 0.0
-        for indicator_id, snapshot in snapshots.items():
-            runtime = state.indicator_state_runtime.get(indicator_id) or {}
-            indicator_type = str(runtime.get("indicator_type") or "")
-            plugin = runtime.get("plugin")
-            projector = getattr(plugin, "overlay_projector", None) if plugin is not None else None
-            if projector is None:
-                overlay_projection_skipped_count += 1
-                continue
-            projection_state = state.indicator_projection_runtime.setdefault(indicator_id, {"seq": 0, "revision": -1, "entries": {}})
-            indicator_meta = runtime.get("indicator_meta") if isinstance(runtime.get("indicator_meta"), Mapping) else {}
-            overlay_color = indicator_meta.get("color") if isinstance(indicator_meta, Mapping) else None
-
-            def _entry_adapter(_entry_key: str, overlay_entry: Dict[str, Any]) -> Dict[str, Any]:
-                adapted = dict(overlay_entry)
-                adapted.update(
-                    {
-                        "ind_id": indicator_id,
-                        "source": "indicator_state",
-                        "bot_id": self.bot_id,
-                        "strategy_id": series.strategy_id,
-                        "symbol": series.symbol,
-                        "timeframe": series.timeframe,
-                    }
-                )
-                if isinstance(overlay_color, str) and overlay_color.strip():
-                    adapted["color"] = overlay_color
-                return adapted
-
-            projection = project_and_normalize_entries(
-                indicator_type=indicator_type,
-                snapshot=snapshot,
-                projection_state=projection_state,
-                entry_projector=projector,
-                invalid_projection_error=(
-                    f"indicator_overlay_projection_invalid: indicator_type={indicator_type} indicator_id={indicator_id}"
-                ),
-                normalize_failed_error=lambda entry_key: (
-                    f"indicator_overlay_projection_normalize_failed: indicator_type={indicator_type} "
-                    f"indicator_id={indicator_id} entry_key={entry_key}"
-                ),
-                entry_adapter=_entry_adapter,
-            )
-            if not projection.delta.ops:
-                projection_state["seq"] = projection.delta.seq
-                projection_state["revision"] = snapshot.revision
-                projection_state["_normalize_cache"] = projection.normalize_cache
-                overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
-                overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
-                overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
-                overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
-                overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
-                overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
-                overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
-                overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
-                overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
-                overlay_projection_skipped_count += 1
-                continue
-            projection_state["seq"] = projection.delta.seq
-            projection_state["revision"] = snapshot.revision
-            projection_state["entries"] = projection.entries
-            projection_state["_normalize_cache"] = projection.normalize_cache
-            overlay_projection_projector_ms += float(projection.perf.get("projector_ms", 0.0) or 0.0)
-            overlay_projection_delta_ms += float(projection.perf.get("delta_ms", 0.0) or 0.0)
-            overlay_projection_normalize_ms += float(projection.perf.get("normalize_ms", 0.0) or 0.0)
-            overlay_projection_fingerprint_ms += float(projection.perf.get("fingerprint_ms", 0.0) or 0.0)
-            overlay_projection_entries_total += float(projection.perf.get("entries_total", 0.0) or 0.0)
-            overlay_projection_entries_changed += float(projection.perf.get("entries_changed", 0.0) or 0.0)
-            overlay_projection_ops_count += float(projection.perf.get("ops_count", 0.0) or 0.0)
-            overlay_projection_normalize_cache_hits += float(projection.perf.get("normalize_cache_hits", 0.0) or 0.0)
-            overlay_projection_normalize_cache_misses += float(projection.perf.get("normalize_cache_misses", 0.0) or 0.0)
-
-        overlay_projection_ms = max((time.perf_counter() - projection_started) * 1000.0, 0.0)
         overlays = self._series_overlay_entries(state)
         overlay_runtime_metrics = state.overlay_runtime_metrics if isinstance(state.overlay_runtime_metrics, Mapping) else {}
         series_overlay_entries_ms = float(overlay_runtime_metrics.get("series_overlay_entries_ms") or 0.0)
@@ -1190,8 +1072,10 @@ class RuntimeExecutionLoopMixin:
         series.overlays = overlays
 
         append_started = time.perf_counter()
-        for signal in evaluated:
-            state.pending_signals.append(signal)
+        for match in matched_rules:
+            action = str(match.get("action") or "")
+            direction = "long" if action == "buy" else "short"
+            state.pending_signals.append(StrategySignal(epoch=int(epoch), direction=direction))
         pending_append_ms = max((time.perf_counter() - append_started) * 1000.0, 0.0)
 
         consume_started = time.perf_counter()
@@ -1208,7 +1092,7 @@ class RuntimeExecutionLoopMixin:
             "pending_signals_append_ms": pending_append_ms,
             "pending_signals_consume_ms": pending_consume_ms,
             "pending_signals_ops_ms": pending_ops_ms,
-            "signals_emitted_count": float(len(evaluated)),
+            "signals_emitted_count": float(len(matched_rules)),
             "overlays_update_ms": overlays_update_ms,
             "indicator_state_update_ms": indicator_state_update_ms,
             "signal_eval_ms": signal_eval_ms,
@@ -1230,8 +1114,8 @@ class RuntimeExecutionLoopMixin:
             "series_overlay_regime_entries_count": series_overlay_regime_entries_count,
             "series_overlay_total_entries_count": series_overlay_total_entries_count,
             "series_overlay_regime_mode_rebuild": series_overlay_regime_mode_rebuild,
-            "state_revisions_changed_count": float(state_revisions_changed_count),
-            "indicators_count": float(len(state.indicator_state_runtime)),
+            "state_revisions_changed_count": float(len(outputs)),
+            "indicators_count": float(len(state.indicator_engine.order)),
             "overlays_changed_count": overlays_changed_count,
             "overlay_points_changed": overlay_points_changed,
             "overlay_count_before": previous_overlay_count,
