@@ -59,7 +59,7 @@ def test_start_bot_persists_error_and_broadcasts_runtime_when_runner_fails(monke
         def start_bot(self, *, bot):
             raise RuntimeError("container boot failed")
 
-    monkeypatch.setenv("BOT_RUNTIME_TARGET", "docker")
+    monkeypatch.setenv("QT_BOT_RUNTIME_TARGET", "docker")
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.from_env",
         lambda: _FailingRunner(),
@@ -90,7 +90,7 @@ def test_start_bot_rejects_unknown_runtime_target(monkeypatch):
     config = _FakeConfigService()
     stream = _FakeStreamManager()
     service = BotRuntimeControlService(config, stream)
-    monkeypatch.setenv("BOT_RUNTIME_TARGET", "vps")
+    monkeypatch.setenv("QT_BOT_RUNTIME_TARGET", "vps")
 
     with pytest.raises(RuntimeError, match="Unsupported bot runtime target"):
         service.start_bot("bot-1")
