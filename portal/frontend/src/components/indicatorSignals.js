@@ -56,30 +56,16 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     };
   });
 
-const normalizeSignalOverlays = (value) => {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== 'object') return [];
-  if (Array.isArray(value.entries)) return value.entries;
-  if (Array.isArray(value.items)) return value.items;
-  if (value.payload && typeof value.payload === 'object') {
-    if (Array.isArray(value.payload.entries)) return value.payload.entries;
-    if (Array.isArray(value.payload.items)) return value.payload.items;
-  }
-  return [];
-};
-
 export async function runSignalGeneration({
   indicator,
   chartId,
   chartState,
   startISO,
   endISO,
-  indColors,
   getChart,
   updateChart,
   setError,
   signalsAdapter,
-  colorizer = applyIndicatorColors,
 }) {
   if (!indicator) {
     signalsLogger.warn('signal_generation_skipped_indicator_missing', { chartId });
@@ -125,31 +111,13 @@ export async function runSignalGeneration({
   });
 
   try {
-    const confirmationBars = chartState?.signalsConfig?.pivotBreakoutConfirmationBars
-      ?? indicator?.params?.pivot_breakout_confirmation_bars
-      ?? indicator?.params?.pivot_breakout_config?.confirmation_bars;
-
-    const config = {};
-    if (confirmationBars != null) {
-      config.pivot_breakout_confirmation_bars = confirmationBars;
-    }
-
-    const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id];
-    if (Array.isArray(enabledRules) && enabledRules.length) {
-      config.enabled_rules = enabledRules;
-    }
-    // Signals tab expects overlay artifacts for visual inspection.
-    config.include_overlays = true;
-
-    scopedLogger.debug('signal_generation_request', { config });
-
     const requestPayload = {
       start: startISO,
       end: endISO,
       interval: chartState.interval,
       symbol: chartState.symbol,
-      config,
     };
+    scopedLogger.debug('signal_generation_request', { requestPayload });
 
     if (chartState.datasource) {
       requestPayload.datasource = chartState.datasource;
@@ -161,29 +129,13 @@ export async function runSignalGeneration({
     const response = await signalsAdapter(indicator.id, requestPayload);
 
     const rawSignals = Array.isArray(response?.signals) ? response.signals : [];
-    const signalOverlays = normalizeSignalOverlays(response?.overlays);
-
-    const annotatedSignals = signalOverlays.map(ov => ({
-      ...ov,
-      ind_id: indicator.id,
-      source: 'signals',
-    }));
-
-    const current = (getChart(chartId)?.overlays || []).filter(Boolean);
-    const withoutOldSignals = current.filter(ov => !(ov?.ind_id === indicator.id && ov?.source === 'signals'));
-    const merged = [...withoutOldSignals, ...annotatedSignals];
-
-    const colored = colorizer(merged, indColors);
-
     const prevSignals = getChart(chartId)?.signalResults || {};
     updateChart(chartId, {
-      overlays: colored,
       signalResults: { ...prevSignals, [indicator.id]: rawSignals },
     });
 
     scopedLogger.info('signal_generation_complete', {
       signals: rawSignals.length,
-      overlays: signalOverlays.length,
     });
 
     setError?.(null);

@@ -3,6 +3,12 @@ import { ExternalLink, Unlink2 } from 'lucide-react'
 import { Button } from '../../ui'
 import { countIndicatorRuleUsage, requiresDetachConfirm } from '../utils/indicatorUsage.js'
 
+const typeTone = {
+  signal: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
+  context: 'border-sky-400/25 bg-sky-400/10 text-sky-100',
+  metric: 'border-amber-400/25 bg-amber-400/10 text-amber-100',
+}
+
 /**
  * Component for managing attached indicators to a strategy.
  */
@@ -56,14 +62,18 @@ export const AttachedIndicators = ({
     setConfirm(null)
   }
 
-  const renderSignalBadge = (rule, entryId) => {
-    const label = rule?.label || rule?.id || 'Signal'
+  const renderOutputBadge = (output, entryId) => {
+    const label = output?.label || output?.name || 'Output'
+    const type = String(output?.type || '').toLowerCase()
     return (
       <span
         key={`${entryId}-${label}`}
-        className="inline-flex items-center gap-1 rounded-md border border-white/12 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-200"
+        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] ${
+          typeTone[type] || 'border-white/12 bg-white/5 text-slate-200'
+        }`}
       >
-        {rule?.signal_type ? rule.signal_type.toUpperCase() : label}
+        <span>{type || 'output'}</span>
+        <span className="text-white/90">{label}</span>
       </span>
     )
   }
@@ -74,7 +84,7 @@ export const AttachedIndicators = ({
         <form onSubmit={handleAttach} className="flex flex-1 items-center gap-2">
           <div className="flex-1">
             <DropdownSelect
-              label="Attach signal source"
+              label="Attach indicator"
               value={selected}
               onChange={setSelected}
               placeholder="Search indicators…"
@@ -82,7 +92,7 @@ export const AttachedIndicators = ({
                 value: indicator.id,
                 label: indicator.name || indicator.type,
                 description: indicator.type,
-                badge: Array.isArray(indicator.signal_rules) ? `${indicator.signal_rules.length} signals` : null,
+                badge: Array.isArray(indicator.typed_outputs) ? `${indicator.typed_outputs.length} outputs` : null,
               }))}
               disabled={!availableIndicators.length}
               className="w-full"
@@ -96,7 +106,7 @@ export const AttachedIndicators = ({
 
       {entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-black/30 p-4 text-sm text-slate-400">
-          <p>No indicators attached. Add signal sources from QuantLab, then attach them here.</p>
+          <p>No indicators attached. Add indicators from QuantLab, then compose rule flows from their typed outputs.</p>
           <div className="mt-3">
             <ActionButton variant="ghost" onClick={handleFocusAttach}>
               Attach indicator
@@ -106,10 +116,10 @@ export const AttachedIndicators = ({
       ) : (
         <div className="divide-y divide-white/5 rounded-xl border border-white/10 bg-black/30">
           {entries.map((entry) => {
-            const signals = Array.isArray(entry.signal_rules)
-              ? entry.signal_rules
-              : Array.isArray(entry.meta?.signal_rules)
-                ? entry.meta.signal_rules
+            const typedOutputs = Array.isArray(entry.typed_outputs)
+              ? entry.typed_outputs
+              : Array.isArray(entry.meta?.typed_outputs)
+                ? entry.meta.typed_outputs
                 : []
             const impact = usageMap.get(entry.id) || 0
             return (
@@ -122,8 +132,8 @@ export const AttachedIndicators = ({
                     </span>
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
-                    {signals.length ? signals.map((rule) => renderSignalBadge(rule, entry.id)) : (
-                      <span className="text-slate-500">No signals</span>
+                    {typedOutputs.length ? typedOutputs.map((output) => renderOutputBadge(output, entry.id)) : (
+                      <span className="text-slate-500">No typed outputs</span>
                     )}
                   </div>
                 </div>

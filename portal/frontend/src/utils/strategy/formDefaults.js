@@ -14,15 +14,12 @@ const RULE_FORM_DEFAULT = {
   name: '',
   description: '',
   action: 'buy',
-  match: 'all',
-  conditions: [
-    {
-      indicator_id: '',
-      rule_id: '',
-      signal_type: '',
-      direction: '',
-    },
-  ],
+  trigger: {
+    indicator_id: '',
+    output_name: '',
+    event_key: '',
+  },
+  guards: [],
   enabled: true,
 }
 

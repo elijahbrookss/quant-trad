@@ -1,65 +1,40 @@
-import { useEffect, useMemo, useState } from 'react'
-import { BotLensChart } from '../../bots/BotLensChart.jsx'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
+
 import { fetchInstrumentCandles } from '../../../hooks/useInstrumentCandles.js'
-import { fetchIndicatorOverlays } from '../../../adapters/indicator.adapter.js'
 import { createLogger } from '../../../utils/logger.js'
 import { toSec } from '../../bots/chartDataUtils.js'
 import { useChartState } from '../../../contexts/ChartStateContext.jsx'
 
-const buildSignalOverlay = ({ strategyId, instrumentId, markers }) => ({
-  id: `strategy-${strategyId}-${instrumentId}-signals`,
-  source: 'strategy',
-  type: 'strategy_signal',
-  pane_views: ['marker'],
-  payload: { markers },
-})
+const BotLensChart = lazy(() =>
+  import('../../bots/BotLensChart.jsx').then((module) => ({ default: module.BotLensChart })),
+)
 
-const buildIndicatorOverlay = ({ indicator, instrumentId, payload }) => {
-  const baseOverlay = payload && payload.type && payload.payload ? payload : { type: indicator.type || 'indicator', payload }
-  return {
-    ...baseOverlay,
-    id: `indicator-${indicator.id}-${instrumentId}`,
-    source: 'indicator',
-    color: indicator.color,
-  }
-}
-
-export const SignalPreviewCharts = ({
+export const StrategyPreviewCharts = ({
   strategy,
   instruments,
   previewInstrumentId = null,
-  signalResult,
-  attachedIndicators,
+  previewResult,
   focusRequest = null,
 }) => {
   const [previewState, setPreviewState] = useState({})
-  const logger = useMemo(() => createLogger('SignalPreviewCharts'), [])
+  const logger = useMemo(() => createLogger('StrategyPreviewCharts'), [])
   const { getChart } = useChartState()
-  const hasInstrumentsPayload = Boolean(signalResult?.instruments)
+  const hasInstrumentsPayload = Boolean(previewResult?.instruments)
 
   const instrumentResults = useMemo(() => {
-    if (!signalResult?.instruments || !instruments?.length || !previewInstrumentId) return []
+    if (!previewResult?.instruments || !instruments?.length || !previewInstrumentId) return []
     return instruments
       .filter((instrument) => instrument?.id)
       .filter((instrument) => instrument.id === previewInstrumentId)
       .map((instrument) => ({
         instrumentId: instrument.id,
         symbol: instrument.symbol,
-        result: signalResult.instruments[instrument.id],
+        result: previewResult.instruments[instrument.id],
       }))
-  }, [signalResult, instruments, previewInstrumentId])
+  }, [previewResult, instruments, previewInstrumentId])
 
   useEffect(() => {
     if (!instrumentResults.length || !strategy) return
-    if (!Array.isArray(attachedIndicators)) {
-      instrumentResults.forEach(({ instrumentId }) => {
-        setPreviewState((prev) => ({
-          ...prev,
-          [instrumentId]: { loading: false, error: 'Indicator list missing for preview.', candles: [], overlays: [] },
-        }))
-      })
-      return
-    }
 
     instrumentResults.forEach(({ instrumentId }) => {
       setPreviewState((prev) => ({
@@ -74,7 +49,7 @@ export const SignalPreviewCharts = ({
         if (!result?.window) {
           setPreviewState((prev) => ({
             ...prev,
-            [instrumentId]: { loading: false, error: 'Signal window missing.', candles: [], overlays: [] },
+            [instrumentId]: { loading: false, error: 'Preview window missing.', candles: [], overlays: [] },
           }))
           continue
         }
@@ -82,7 +57,7 @@ export const SignalPreviewCharts = ({
 
         try {
           if (!start || !end || !interval) {
-            throw new Error('Signal window is incomplete.')
+            throw new Error('Preview window is incomplete.')
           }
           if (!instrument_id || instrument_id !== instrumentId) {
             throw new Error('Instrument mismatch for preview.')
@@ -111,21 +86,20 @@ export const SignalPreviewCharts = ({
             candles: candles.length,
           })
           if (candles.length) {
-            const sample = candles.slice(0, 3).map((entry) => ({
-              time: entry?.time,
-              type: typeof entry?.time,
+            const sample = candles.slice(0, 3).map((item) => ({
+              time: item?.time,
+              type: typeof item?.time,
             }))
             const parsedTimes = candles
-              .map((entry) => toSec(entry?.time))
+              .map((item) => toSec(item?.time))
               .filter((value) => Number.isFinite(value))
-            const uniqueTimes = new Set(parsedTimes)
             logger.info('preview_candles_timecheck', {
               instrumentId,
               symbol: windowSymbol,
               interval,
               rawCount: candles.length,
               parsedCount: parsedTimes.length,
-              uniqueTimes: uniqueTimes.size,
+              uniqueTimes: new Set(parsedTimes).size,
               first: parsedTimes[0],
               last: parsedTimes[parsedTimes.length - 1],
               sample,
@@ -135,35 +109,13 @@ export const SignalPreviewCharts = ({
             throw new Error('No candles returned for preview.')
           }
 
-          const indicatorOverlays = []
-          for (const indicator of attachedIndicators) {
-            const overlayPayload = await fetchIndicatorOverlays(indicator.id, {
-              start,
-              end,
-              interval,
-              symbol: windowSymbol,
-              datasource,
-              exchange,
-              instrument_id: instrumentId,
-            })
-            indicatorOverlays.push(buildIndicatorOverlay({ indicator, instrumentId, payload: overlayPayload }))
-          }
-
-          const buyMarkers = Array.isArray(result?.chart_markers?.buy) ? result.chart_markers.buy : []
-          const sellMarkers = Array.isArray(result?.chart_markers?.sell) ? result.chart_markers.sell : []
-          const signalOverlay = buildSignalOverlay({
-            strategyId: strategy.id,
-            instrumentId,
-            markers: [...buyMarkers, ...sellMarkers],
-          })
-
           setPreviewState((prev) => ({
             ...prev,
             [instrumentId]: {
               loading: false,
               error: null,
               candles,
-              overlays: [...indicatorOverlays, signalOverlay],
+              overlays: Array.isArray(result?.overlays) ? result.overlays : [],
             },
           }))
         } catch (err) {
@@ -181,13 +133,13 @@ export const SignalPreviewCharts = ({
     }
 
     run()
-  }, [attachedIndicators, instrumentResults, strategy])
+  }, [instrumentResults, strategy, logger])
 
   useEffect(() => {
     if (!focusRequest || !Number.isFinite(focusRequest?.epoch)) return
     const targetInstrumentId = focusRequest.instrumentId || previewInstrumentId
     if (!targetInstrumentId || !strategy?.id) return
-    const chartId = `signal-preview-${strategy.id}-${targetInstrumentId}`
+    const chartId = `strategy-preview-${strategy.id}-${targetInstrumentId}`
     const chart = getChart?.(chartId)
     const handles = chart?.handles
     const focusFn = handles?.focusAtTime
@@ -195,18 +147,17 @@ export const SignalPreviewCharts = ({
     focusFn(Number(focusRequest.epoch))
   }, [focusRequest, getChart, previewInstrumentId, strategy?.id])
 
-  if (!signalResult) return null
+  if (!previewResult) return null
 
   if (!hasInstrumentsPayload) {
     return (
       <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
-        Signal preview response is missing the multi-instrument payload. Update the backend to return
+        Strategy preview response is missing the multi-instrument payload. Update the backend to return
         <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">
           instruments[&lt;instrument_id&gt;]
         </span>
-        with <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">window</span>,
-        <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">chart_markers</span>,
-        and <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">applied_inputs</span>
+        with <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">window</span>
+        and <span className="mx-1 font-mono text-[11px] uppercase tracking-[0.2em] text-rose-100">overlays</span>
         for each instrument.
       </div>
     )
@@ -219,14 +170,14 @@ export const SignalPreviewCharts = ({
       <div>
         <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Preview charts</p>
         <p className="mt-1 text-sm text-slate-400">
-          Indicators and signal markers for the evaluation window.
+          All preview visuals come through canonical overlays from the preview runtime.
         </p>
       </div>
       <div className="space-y-4">
         {instrumentResults.map(({ instrumentId, symbol }) => {
           const state = previewState[instrumentId] || {}
           return (
-            <div key={`signal-preview-${instrumentId}`} className="rounded-xl border border-white/10 bg-[#0f1524]/70 p-4">
+            <div key={`strategy-preview-${instrumentId}`} className="rounded-xl border border-white/10 bg-[#0f1524]/70 p-4">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Instrument</p>
@@ -240,15 +191,23 @@ export const SignalPreviewCharts = ({
                 </div>
               ) : state.candles?.length ? (
                 <div className="mt-3">
-                  <BotLensChart
-                    chartId={`signal-preview-${strategy.id}-${instrumentId}`}
-                    candles={state.candles}
-                    trades={[]}
-                    overlays={state.overlays || []}
-                    playbackSpeed={0}
-                    debugRanges
-                    className="h-[320px] w-full"
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="flex h-[320px] items-center justify-center rounded-xl border border-white/10 bg-black/20 text-xs text-slate-400">
+                        Loading preview chart…
+                      </div>
+                    }
+                  >
+                    <BotLensChart
+                      chartId={`strategy-preview-${strategy.id}-${instrumentId}`}
+                      candles={state.candles}
+                      trades={[]}
+                      overlays={state.overlays || []}
+                      playbackSpeed={0}
+                      debugRanges
+                      className="h-[320px] w-full"
+                    />
+                  </Suspense>
                 </div>
               ) : null}
             </div>

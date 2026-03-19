@@ -1,9 +1,6 @@
 import React from 'react'
 
-/**
- * Component displaying a summary of signal generation results.
- */
-export const SignalSummary = ({ result, instrumentId }) => {
+export const StrategyPreviewSummary = ({ result, instrumentId }) => {
   if (!result || !instrumentId) return null
 
   const instrumentResult = result?.instruments?.[instrumentId]
@@ -11,38 +8,20 @@ export const SignalSummary = ({ result, instrumentId }) => {
 
   const {
     window,
-    buy_signals: buys = [],
-    sell_signals: sells = [],
-    rule_results: rules = [],
+    trigger_rows: triggerRows = [],
+    overlays: overlays = [],
     status,
     missing_indicators: missingIndicatorsRaw = [],
   } = instrumentResult
 
-  const matchedRules = rules.filter((entry) => entry?.matched).length
-  const totalRules = rules.length
+  const rows = Array.isArray(triggerRows) ? triggerRows : []
+  const buyCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'buy').length
+  const sellCount = rows.filter((entry) => String(entry?.action || '').toLowerCase() === 'sell').length
+  const matchedRules = new Set(rows.map((entry) => entry?.rule_id).filter(Boolean)).size
   const missingIndicators = Array.isArray(missingIndicatorsRaw)
     ? missingIndicatorsRaw.filter(Boolean)
     : []
-  const buySignalCount = buys.reduce((total, entry) => {
-    if (!entry) return total
-    const signalCount = Array.isArray(entry.signals) && entry.signals.length
-      ? entry.signals.length
-      : entry.matched
-        ? 1
-        : 0
-    return total + signalCount
-  }, 0)
-  const sellSignalCount = sells.reduce((total, entry) => {
-    if (!entry) return total
-    const signalCount = Array.isArray(entry.signals) && entry.signals.length
-      ? entry.signals.length
-      : entry.matched
-        ? 1
-        : 0
-    return total + signalCount
-  }, 0)
-  const buyRuleMatches = buys.length
-  const sellRuleMatches = sells.length
+  const overlayCount = Array.isArray(overlays) ? overlays.length : 0
   const statusLabel = status === 'missing_indicators' ? 'Missing indicators' : 'Complete'
   const statusClasses =
     status === 'missing_indicators'
@@ -66,27 +45,23 @@ export const SignalSummary = ({ result, instrumentId }) => {
         </span>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-4">
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-100">
-          <p className="text-[10px] uppercase tracking-[0.3em] text-emerald-200/80">Buy</p>
-          <p className="text-lg font-semibold">{buySignalCount}</p>
-          <p className="text-[11px] text-emerald-200/70">
-            {buyRuleMatches || 0} rule{buyRuleMatches === 1 ? '' : 's'} matched
-          </p>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-emerald-200/80">Buy Triggers</p>
+          <p className="text-lg font-semibold">{buyCount}</p>
         </div>
         <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-100">
-          <p className="text-[10px] uppercase tracking-[0.3em] text-rose-200/80">Sell</p>
-          <p className="text-lg font-semibold">{sellSignalCount}</p>
-          <p className="text-[11px] text-rose-200/70">
-            {sellRuleMatches || 0} rule{sellRuleMatches === 1 ? '' : 's'} matched
-          </p>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-rose-200/80">Sell Triggers</p>
+          <p className="text-lg font-semibold">{sellCount}</p>
         </div>
         <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-indigo-100">
-          <p className="text-[10px] uppercase tracking-[0.3em] text-indigo-200/80">Rules</p>
-          <p className="text-lg font-semibold">
-            {matchedRules}
-            <span className="text-sm text-indigo-200/80">/{totalRules || 0}</span>
-          </p>
+          <p className="text-[10px] uppercase tracking-[0.3em] text-indigo-200/80">Rules Hit</p>
+          <p className="text-lg font-semibold">{matchedRules}</p>
+          <p className="text-[11px] text-indigo-200/80">{rows.length} trigger event{rows.length === 1 ? '' : 's'}</p>
+        </div>
+        <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-sky-100">
+          <p className="text-[10px] uppercase tracking-[0.3em] text-sky-200/80">Overlays</p>
+          <p className="text-lg font-semibold">{overlayCount}</p>
         </div>
       </div>
 
@@ -94,7 +69,7 @@ export const SignalSummary = ({ result, instrumentId }) => {
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
           <p className="font-semibold text-amber-200">Indicators unavailable</p>
           <p className="mt-1 text-amber-100/90">
-            Recreate or reattach the following indicators before running live checks:
+            Recreate or reattach the following indicators before running preview checks:
           </p>
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {missingIndicators.map((identifier) => (

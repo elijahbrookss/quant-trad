@@ -43,19 +43,13 @@ const StrategyDetails = ({
   onEditRule,
   onDuplicateRule,
   onDeleteRule,
-  onCreateGlobalFilter,
-  onUpdateGlobalFilter,
-  onDeleteGlobalFilter,
-  onCreateRuleFilter,
-  onUpdateRuleFilter,
-  onDeleteRuleFilter,
-  onRunSignals,
-  signalWindow,
-  setSignalWindow,
-  signalResult,
-  signalsLoading,
-  signalInstrumentId,
-  setSignalInstrumentId,
+  onRunPreview,
+  previewWindow,
+  setPreviewWindow,
+  previewResult,
+  previewLoading,
+  previewInstrumentId,
+  setPreviewInstrumentId,
   onAddInstrument = () => {},
   onRefreshInstrumentMetadata,
   instrumentRefreshStatus,
@@ -73,7 +67,7 @@ const StrategyDetails = ({
   const strategySymbols = symbolsFromInstrumentSlots(strategy?.instrument_slots)
 
   const handleDateRangeChange = (range) => {
-    setSignalWindow((prev) => ({ ...prev, dateRange: range }))
+    setPreviewWindow((prev) => ({ ...prev, dateRange: range }))
   }
 
   const instrumentMap = useMemo(() => {
@@ -244,7 +238,7 @@ const StrategyDetails = ({
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    await onRunSignals(signalWindow)
+    await onRunPreview(previewWindow)
   }
 
   if (!hasStrategy) {
@@ -433,7 +427,7 @@ const StrategyDetails = ({
           <TabButton active={activeTab === 'atm'} onClick={() => setActiveTab('atm')}>
             Risk & Execution
           </TabButton>
-          <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>
+          <TabButton active={activeTab === 'preview'} onClick={() => setActiveTab('preview')}>
             Order Triggers
           </TabButton>
         </div>
@@ -461,7 +455,7 @@ const StrategyDetails = ({
         </TabPanel>
 
         <TabPanel active={activeTab === 'logic'}>
-          <p className="px-6 pb-2 text-xs text-slate-400">Attach signal sources, define rule logic, and gate triggers with filters.</p>
+          <p className="px-6 pb-2 text-xs text-slate-400">Attach indicators, inspect typed outputs, and compose trigger-to-action rule flows.</p>
           <RulesTab
             strategy={strategy}
             attachedIndicators={attachedIndicators}
@@ -472,29 +466,22 @@ const StrategyDetails = ({
             onEditRule={onEditRule}
             onDuplicateRule={onDuplicateRule}
             onDeleteRule={onDeleteRule}
-            onCreateGlobalFilter={onCreateGlobalFilter}
-            onUpdateGlobalFilter={onUpdateGlobalFilter}
-            onDeleteGlobalFilter={onDeleteGlobalFilter}
-            onCreateRuleFilter={onCreateRuleFilter}
-            onUpdateRuleFilter={onUpdateRuleFilter}
-            onDeleteRuleFilter={onDeleteRuleFilter}
             indicatorLookup={indicatorLookup}
             DropdownSelect={DropdownSelect}
             ActionButton={ActionButton}
           />
         </TabPanel>
 
-        <TabPanel active={activeTab === 'signals'}>
+        <TabPanel active={activeTab === 'preview'}>
           <p className="px-6 pb-2 text-xs text-slate-400">Preview when this strategy would attempt orders.</p>
           <OrderTriggersTab
             strategy={strategy}
             instruments={strategyInstruments}
-            attachedIndicators={attachedIndicators}
-            signalWindow={signalWindow}
-            signalsLoading={signalsLoading}
-            signalResult={signalResult}
-            signalInstrumentId={signalInstrumentId}
-            onInstrumentChange={setSignalInstrumentId}
+            previewWindow={previewWindow}
+            previewLoading={previewLoading}
+            previewResult={previewResult}
+            previewInstrumentId={previewInstrumentId}
+            onInstrumentChange={setPreviewInstrumentId}
             onSubmit={handleSubmit}
             onDateRangeChange={handleDateRangeChange}
             DateRangePickerComponent={DateRangePickerComponent}

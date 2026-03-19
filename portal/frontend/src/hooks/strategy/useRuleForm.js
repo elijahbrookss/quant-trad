@@ -1,13 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { RULE_FORM_DEFAULT } from '../../utils/strategy/formDefaults.js'
+import { extractRuleFlow } from '../../components/strategy/rules/ruleUtils.js'
+
+const EMPTY_GUARD = {
+  type: 'context_match',
+  indicator_id: '',
+  output_name: '',
+  state_key: '',
+  field: '',
+  operator: '>',
+  value: '',
+}
+
+const getOutputsByType = (indicator, outputType) => {
+  const typedOutputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
+  return typedOutputs.filter((entry) => entry?.type === outputType)
+}
 
 const useRuleForm = ({
   open,
   indicators,
   ensureIndicatorMeta,
   initialValues,
-  onSubmit,
   getDefaultName,
 } = {}) => {
   const [form, setForm] = useState(RULE_FORM_DEFAULT)
@@ -15,14 +30,16 @@ const useRuleForm = ({
   const indicatorMap = useMemo(() => {
     const map = new Map()
     for (const indicator of indicators || []) {
-      map.set(indicator.id, indicator)
+      if (indicator?.id) {
+        map.set(indicator.id, indicator)
+      }
     }
     return map
   }, [indicators])
 
-  const makeEmptyCondition = useCallback(
-    () => ({ indicator_id: '', rule_id: '', signal_type: '', direction: '' }),
-    [],
+  const signalIndicators = useMemo(
+    () => (indicators || []).filter((indicator) => getOutputsByType(indicator, 'signal').length > 0),
+    [indicators],
   )
 
   useEffect(() => {
@@ -30,174 +47,211 @@ const useRuleForm = ({
       setForm(RULE_FORM_DEFAULT)
       return
     }
-
     if (initialValues) {
-      const mappedConditions = Array.isArray(initialValues.conditions)
-        ? initialValues.conditions.map((condition) => ({
-            indicator_id: condition.indicator_id || '',
-            rule_id: condition.rule_id || '',
-            signal_type: condition.signal_type || '',
-            direction: condition.direction || '',
-          }))
-        : []
-
+      const flow = extractRuleFlow(initialValues)
       setForm({
         name: initialValues.name || '',
         description: initialValues.description || '',
         action: initialValues.action || 'buy',
-        match: initialValues.match || 'all',
-        conditions: mappedConditions.length ? mappedConditions : [makeEmptyCondition()],
+        trigger: {
+          indicator_id: flow.trigger?.indicator_id || '',
+          output_name: flow.trigger?.output_name || '',
+          event_key: flow.trigger?.event_key || '',
+        },
+        guards: Array.isArray(flow.guards) ? flow.guards.slice(0, 2).map((guard) => ({
+          ...EMPTY_GUARD,
+          ...guard,
+          value: guard?.value ?? '',
+        })) : [],
         enabled: Boolean(initialValues.enabled),
       })
-    } else {
-      setForm({ ...RULE_FORM_DEFAULT, conditions: [makeEmptyCondition()] })
-    }
-  }, [open, initialValues, makeEmptyCondition])
-
-  const trackedIndicatorIds = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          (form.conditions || [])
-            .map((condition) => condition.indicator_id)
-            .filter((indicatorId) => typeof indicatorId === 'string' && indicatorId.trim().length > 0),
-        ),
-      ),
-    [form.conditions],
-  )
-
-  useEffect(() => {
-    if (!open || typeof ensureIndicatorMeta !== 'function' || !trackedIndicatorIds.length) {
       return
     }
-    trackedIndicatorIds.forEach((indicatorId) => {
-      ensureIndicatorMeta(indicatorId)
-    })
+    setForm({ ...RULE_FORM_DEFAULT })
+  }, [open, initialValues])
+
+  const trackedIndicatorIds = useMemo(() => {
+    const ids = [form.trigger?.indicator_id, ...(form.guards || []).map((guard) => guard?.indicator_id)]
+    return Array.from(new Set(ids.filter((value) => typeof value === 'string' && value.trim())))
+  }, [form.trigger, form.guards])
+
+  useEffect(() => {
+    if (!open || typeof ensureIndicatorMeta !== 'function') return
+    trackedIndicatorIds.forEach((indicatorId) => ensureIndicatorMeta(indicatorId))
   }, [open, trackedIndicatorIds, ensureIndicatorMeta])
 
-  const canSubmit = form.conditions.some(
-    (condition) => condition.indicator_id && condition.signal_type,
+  const canSubmit = Boolean(
+    form.trigger?.indicator_id
+    && form.trigger?.output_name
+    && form.trigger?.event_key,
   )
 
-  const updateCondition = (index, updates) => {
+  const updateTrigger = useCallback((updates) => {
+    setForm((prev) => ({
+      ...prev,
+      trigger: {
+        ...prev.trigger,
+        ...updates,
+      },
+    }))
+  }, [])
+
+  const updateGuard = useCallback((index, updates) => {
+    setForm((prev) => ({
+      ...prev,
+      guards: prev.guards.map((guard, guardIndex) => (
+        guardIndex === index ? { ...guard, ...updates } : guard
+      )),
+    }))
+  }, [])
+
+  const addGuard = useCallback(() => {
     setForm((prev) => {
-      const nextConditions = prev.conditions.map((condition, idx) =>
-        idx === index ? { ...condition, ...updates } : condition,
-      )
-      return { ...prev, conditions: nextConditions }
+      if ((prev.guards || []).length >= 2) {
+        return prev
+      }
+      return {
+        ...prev,
+        guards: [...(prev.guards || []), { ...EMPTY_GUARD }],
+      }
     })
+  }, [])
+
+  const removeGuard = useCallback((index) => {
+    setForm((prev) => ({
+      ...prev,
+      guards: prev.guards.filter((_, guardIndex) => guardIndex !== index),
+    }))
+  }, [])
+
+  const handleFieldChange = (field) => (input) => {
+    let value = input
+    if (input && typeof input === 'object' && 'target' in input) {
+      const target = input.target
+      value = target.type === 'checkbox' ? target.checked : target.value
+    }
+    setForm((prev) => ({ ...prev, [field]: value }))
   }
 
-  const handleConditionIndicatorChange = (index) => (indicatorId) => {
-    updateCondition(index, {
+  const handleTriggerIndicatorChange = (indicatorId) => {
+    updateTrigger({
       indicator_id: indicatorId || '',
-      rule_id: '',
-      signal_type: '',
-      direction: '',
+      output_name: '',
+      event_key: '',
     })
     if (indicatorId && typeof ensureIndicatorMeta === 'function') {
       ensureIndicatorMeta(indicatorId)
     }
   }
 
-  const handleConditionRuleChange = (index) => (ruleId) => {
-    setForm((prev) => {
-      const nextConditions = [...prev.conditions]
-      const current = nextConditions[index]
-      const indicatorMeta = indicatorMap.get(current.indicator_id)
-      const rules = Array.isArray(indicatorMeta?.signal_rules) ? indicatorMeta.signal_rules : []
-      const selectedRule = rules.find((rule) => rule.id === ruleId)
-      const defaultDirection = Array.isArray(selectedRule?.directions) && selectedRule.directions.length === 1
-        ? selectedRule.directions[0].id
-        : ''
-      nextConditions[index] = {
-        ...current,
-        rule_id: ruleId || '',
-        signal_type: selectedRule?.signal_type || '',
-        direction: defaultDirection || '',
-      }
-      return { ...prev, conditions: nextConditions }
+  const handleTriggerOutputChange = (outputName) => {
+    updateTrigger({
+      output_name: outputName || '',
+      event_key: '',
     })
   }
 
-  const handleConditionDirectionChange = (index) => (direction) => {
-    updateCondition(index, { direction: direction || '' })
+  const handleTriggerEventChange = (eventKey) => {
+    updateTrigger({ event_key: eventKey || '' })
   }
 
-  const addCondition = () => {
-    setForm((prev) => ({
-      ...prev,
-      conditions: [...prev.conditions, makeEmptyCondition()],
-    }))
-  }
-
-  const removeCondition = (index) => {
-    setForm((prev) => {
-      const nextConditions = prev.conditions.filter((_, idx) => idx !== index)
-      return {
-        ...prev,
-        conditions: nextConditions.length ? nextConditions : [makeEmptyCondition()],
-      }
+  const handleGuardTypeChange = (index, type) => {
+    updateGuard(index, {
+      ...EMPTY_GUARD,
+      type: type || 'context_match',
     })
   }
 
-  const handleFieldChange = (field) => (input) => {
-    let value = input
-    if (input && typeof input === 'object' && 'target' in input) {
-      const target = input.target
-      if (target.type === 'checkbox') {
-        value = target.checked
-      } else {
-        value = target.value
-      }
+  const handleGuardIndicatorChange = (index, indicatorId) => {
+    updateGuard(index, {
+      indicator_id: indicatorId || '',
+      output_name: '',
+      state_key: '',
+      field: '',
+      value: '',
+    })
+    if (indicatorId && typeof ensureIndicatorMeta === 'function') {
+      ensureIndicatorMeta(indicatorId)
     }
-    setForm((prev) => ({ ...prev, [field]: value }))
+  }
+
+  const handleGuardOutputChange = (index, outputName) => {
+    updateGuard(index, {
+      output_name: outputName || '',
+      state_key: '',
+      field: '',
+      value: '',
+    })
+  }
+
+  const handleGuardFieldChange = (index, field, value) => {
+    updateGuard(index, { [field]: value })
   }
 
   const buildPayload = () => {
-    const conditions = form.conditions
-      .map((condition) => ({
-        indicator_id: condition.indicator_id,
-        signal_type: condition.signal_type,
-        rule_id: condition.rule_id || null,
-        direction: condition.direction || null,
-      }))
-      .filter((condition) => condition.indicator_id && condition.signal_type)
-
-    if (!conditions.length) {
-      return null
+    if (!canSubmit) return null
+    const trigger = {
+      type: 'signal_match',
+      indicator_id: form.trigger.indicator_id,
+      output_name: form.trigger.output_name,
+      event_key: form.trigger.event_key,
     }
+    const guards = (form.guards || []).map((guard) => {
+      if (guard.type === 'context_match') {
+        return {
+          type: 'context_match',
+          indicator_id: guard.indicator_id,
+          output_name: guard.output_name,
+          state_key: guard.state_key,
+        }
+      }
+      return {
+        type: 'metric_match',
+        indicator_id: guard.indicator_id,
+        output_name: guard.output_name,
+        field: guard.field,
+        operator: guard.operator,
+        value: guard.value === '' ? null : Number(guard.value),
+      }
+    }).filter((guard) => {
+      if (guard.type === 'context_match') {
+        return guard.indicator_id && guard.output_name && guard.state_key
+      }
+      return guard.indicator_id && guard.output_name && guard.field && guard.operator && guard.value !== null && !Number.isNaN(guard.value)
+    })
 
-    const resolvedName = form.name.trim() || getDefaultName?.(form, indicatorMap) || 'Rule'
+    const resolvedName = form.name.trim() || getDefaultName?.({
+      action: form.action,
+      trigger,
+      guards,
+      indicatorLookup: indicatorMap,
+    }) || 'Rule'
+
     return {
       name: resolvedName,
       description: form.description.trim() || null,
       action: form.action,
-      match: form.match,
-      conditions,
       enabled: Boolean(form.enabled),
+      when: guards.length ? { type: 'all', conditions: [trigger, ...guards] } : trigger,
     }
-  }
-
-  const handleSubmit = async (event) => {
-    event.preventDefault()
-    const payload = buildPayload()
-    if (!payload) return
-    await onSubmit(payload)
   }
 
   return {
     form,
     indicatorMap,
+    signalIndicators,
     canSubmit,
+    addGuard,
+    removeGuard,
     buildPayload,
-    handleSubmit,
     handleFieldChange,
-    addCondition,
-    removeCondition,
-    handleConditionIndicatorChange,
-    handleConditionRuleChange,
-    handleConditionDirectionChange,
+    handleTriggerIndicatorChange,
+    handleTriggerOutputChange,
+    handleTriggerEventChange,
+    handleGuardTypeChange,
+    handleGuardIndicatorChange,
+    handleGuardOutputChange,
+    handleGuardFieldChange,
   }
 }
 

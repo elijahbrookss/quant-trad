@@ -76,10 +76,10 @@ export const strategyService = {
   },
 
   /**
-   * Generate signals for a strategy.
+   * Run a rule-logic preview for a strategy.
    */
-  async generateSignals(strategyId, params) {
-    return api.post(`/strategies/${strategyId}/signals`, params)
+  async runPreview(strategyId, params) {
+    return api.post(`/strategies/${strategyId}/preview`, params)
   },
 
   /**

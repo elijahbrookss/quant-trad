@@ -115,6 +115,27 @@ const stripRuntimeParams = (params) => {
   return cleaned;
 };
 
+const normalizeIndicatorOverlayResponse = (indicator, response) => {
+  const overlays = Array.isArray(response?.overlays)
+    ? response.overlays
+    : Array.isArray(response)
+      ? response
+      : response && response.type && response.payload
+        ? [response]
+        : [];
+  return overlays
+    .filter((entry) => entry && entry.type && entry.payload)
+    .map((entry, index) => ({
+      ...entry,
+      ind_id: indicator.id,
+      type: entry.type || indicator.type,
+      payload: entry.payload,
+      color: entry.color ?? indicator.color,
+      source: entry.source ?? 'indicator',
+      overlay_id: entry.overlay_id || `${indicator.id}.${index}`,
+    }));
+};
+
 const parseTimestamp = (value) => {
   if (!value) return 0;
   const ts = Date.parse(value);
@@ -451,15 +472,18 @@ export const IndicatorSection = ({ chartId }) => {
     const results = await Promise.all(
       active.map(async (ind) => {
         try {
-          const payload = await fetchIndicatorOverlays(ind.id, body);
-          const rawPayload = payload?.payload || payload
-          const count = (key) => (Array.isArray(rawPayload?.[key]) ? rawPayload[key].length : 0)
+          const response = await fetchIndicatorOverlays(ind.id, body);
+          const overlays = normalizeIndicatorOverlayResponse(ind, response);
+          const rawPayload = overlays[0]?.payload || {}
+          const count = (key) => overlays.reduce((total, entry) => (
+            total + (Array.isArray(entry?.payload?.[key]) ? entry.payload[key].length : 0)
+          ), 0)
           info('overlay_fetch_success', {
             indicatorId: ind.id,
             indicatorType: ind.type,
             instrument_id: chartState?.instrument_id,
-            hasPayload: Boolean(payload),
-            overlay_type: payload?.type || ind.type,
+            overlays: overlays.length,
+            overlay_type: overlays[0]?.type || ind.type,
             boxes: count('boxes'),
             markers: count('markers'),
             price_lines: count('price_lines'),
@@ -467,18 +491,7 @@ export const IndicatorSection = ({ chartId }) => {
             polylines: count('polylines'),
             profiles: count('profiles'),
           });
-          if (!payload) return null;
-          if (payload?.type && payload?.payload) {
-            return {
-              ...payload,
-              ind_id: ind.id,
-              type: payload.type || ind.type,
-              payload: payload.payload,
-              color: payload.color ?? ind.color,
-              source: payload.source ?? 'indicator',
-            };
-          }
-          return { ind_id: ind.id, type: ind.type, payload };
+          return overlays;
         } catch (e) {
           const msg = String(e?.message ?? e);
           if (
@@ -499,7 +512,7 @@ export const IndicatorSection = ({ chartId }) => {
       })
     );
 
-    const overlaysPayload = results.filter(Boolean);
+    const overlaysPayload = results.flatMap((entry) => (Array.isArray(entry) ? entry : entry ? [entry] : []));
     const nextColorMap = buildColorMap(working);
     setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
 
@@ -525,21 +538,6 @@ export const IndicatorSection = ({ chartId }) => {
       setRefreshingList(false);
     }
   }, [fetchAndSyncIndicators, refreshEnabledOverlays, guardBusy, logError]);
-
-  const applySignalRules = useCallback((indicatorId, ruleSelection) => {
-    const selection = Array.isArray(ruleSelection) ? ruleSelection : null;
-    if (!indicatorId || !selection) return;
-    const currentConfig = getChart(chartId)?.signalsConfig || {};
-    const currentEnabled = currentConfig.enabledRules || {};
-    const nextEnabled = { ...currentEnabled };
-
-    nextEnabled[indicatorId] = selection;
-    const nextSignalsConfig = {
-      ...currentConfig,
-      enabledRules: nextEnabled,
-    };
-    updateChart(chartId, { signalsConfig: nextSignalsConfig });
-  }, [chartId, getChart, updateChart]);
 
   const createIndicatorOptimistic = useCallback(async (meta, params, reuseId = null) => {
     const tempId = reuseId || `temp-${Date.now()}`;
@@ -636,18 +634,10 @@ export const IndicatorSection = ({ chartId }) => {
         }
       }
 
-      if (!needsIndicatorUpdate) {
-        if (meta.id) {
-          applySignalRules(meta.id, meta.signalRules);
-        }
-        return;
-      }
+      if (!needsIndicatorUpdate) return;
 
       if (!meta.id) {
-        const created = await createIndicatorOptimistic(meta, params);
-        if (created?.id && meta.signalRules?.length) {
-          applySignalRules(created.id, meta.signalRules);
-        }
+        await createIndicatorOptimistic(meta, params);
         return;
       }
 
@@ -667,10 +657,6 @@ export const IndicatorSection = ({ chartId }) => {
         color: existing?.color ?? null,
       });
       indicatorId = payload?.id ?? meta.id;
-
-      if (indicatorId) {
-        applySignalRules(indicatorId, meta.signalRules);
-      }
 
       const latest = await fetchAndSyncIndicators({ silent: false });
       await refreshEnabledOverlays(latest);
@@ -715,30 +701,6 @@ export const IndicatorSection = ({ chartId }) => {
         next.delete(id);
         return next;
       });
-      const currentConfig = getChart(chartId)?.signalsConfig;
-      if (currentConfig && typeof currentConfig === 'object') {
-        const nextConfig = { ...currentConfig };
-        let changed = false;
-
-        const enabledRules = currentConfig.enabledRules;
-        if (enabledRules && Object.prototype.hasOwnProperty.call(enabledRules, id)) {
-          const nextEnabled = { ...enabledRules };
-          delete nextEnabled[id];
-          if (Object.keys(nextEnabled).length > 0) {
-            nextConfig.enabledRules = nextEnabled;
-          } else {
-            delete nextConfig.enabledRules;
-          }
-          changed = true;
-        }
-
-        if (changed) {
-          const remainingKeys = Object.keys(nextConfig);
-          updateChart(chartId, {
-            signalsConfig: remainingKeys.length > 0 ? nextConfig : null,
-          });
-        }
-      }
       const latest = await fetchAndSyncIndicators({ silent: true });
       await refreshEnabledOverlays(latest);
       setDeleteModal({ open: false, indicatorId: null, indicatorName: '' });
@@ -905,7 +867,6 @@ export const IndicatorSection = ({ chartId }) => {
         chartState: freshChartState,
         startISO,
         endISO,
-        indColors,
         getChart,
         updateChart,
         setError,
@@ -920,8 +881,7 @@ export const IndicatorSection = ({ chartId }) => {
 
   const openEditModal = (indicator = null) => {
     if (indicator) {
-      const enabledRules = chartState?.signalsConfig?.enabledRules?.[indicator.id] || []
-      setEditing({ ...indicator, signalRules: [...enabledRules] })
+      setEditing({ ...indicator })
     } else {
       setEditing(null)
     }
@@ -1023,12 +983,12 @@ export const IndicatorSection = ({ chartId }) => {
 
     try {
       const payload = await fetchIndicatorOverlays(id, ctx);
-      if (payload) {
+      const nextOverlays = normalizeIndicatorOverlayResponse(indicator, payload);
+      if (nextOverlays.length) {
         const currentOverlays = getChart(chartId)?.overlays || [];
         // Remove old overlays for this indicator and add new ones
         const filtered = currentOverlays.filter((o) => o.ind_id !== id);
-        const newOverlay = { ind_id: id, type: indicator.type, payload };
-        const merged = [...filtered, newOverlay];
+        const merged = [...filtered, ...nextOverlays];
         const colored = applyIndicatorColors(merged, indColors);
         updateChart(chartId, { overlays: colored });
       }
@@ -1055,7 +1015,7 @@ export const IndicatorSection = ({ chartId }) => {
     const params = { ...draftParams, ...ctx };
     try {
       await createIndicatorOptimistic(
-        { type: indicator._draft.type, name: indicator._draft.name, signalRules: indicator.signalRules || [], color: indicator._draft.color },
+        { type: indicator._draft.type, name: indicator._draft.name, color: indicator._draft.color },
         params,
         indicator.id
       );

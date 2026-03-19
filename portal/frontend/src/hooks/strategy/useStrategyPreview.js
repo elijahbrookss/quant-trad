@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { generateStrategySignals } from '../../adapters/strategy.adapter.js'
+import { runStrategyPreview } from '../../adapters/strategy.adapter.js'
 
-const useSignalGeneration = ({
+const useStrategyPreview = ({
   chartId,
   chartSnapshot,
-  getChart,
   updateChart,
   selectedStrategy,
   selectedInstrumentIds,
   logger,
   onError,
 } = {}) => {
-  const [signalsLoading, setSignalsLoading] = useState(false)
-  const [signalResult, setSignalResult] = useState(null)
-  const [signalInstrumentId, setSignalInstrumentId] = useState(null)
-  const [signalWindow, setSignalWindow] = useState(() => {
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewResult, setPreviewResult] = useState(null)
+  const [previewInstrumentId, setPreviewInstrumentId] = useState(null)
+  const [previewWindow, setPreviewWindow] = useState(() => {
     const end = new Date()
     const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000)
     return { dateRange: [start, end] }
@@ -23,7 +22,7 @@ const useSignalGeneration = ({
 
   useEffect(() => {
     const chartRange = Array.isArray(chartSnapshot?.dateRange) ? chartSnapshot.dateRange : null
-    setSignalWindow((prev) => {
+    setPreviewWindow((prev) => {
       const hasValidRange = Array.isArray(prev.dateRange)
         && prev.dateRange[0] instanceof Date
         && !Number.isNaN(prev.dateRange[0]?.valueOf())
@@ -39,52 +38,52 @@ const useSignalGeneration = ({
 
   useEffect(() => {
     if (!selectedInstrumentIds.length) {
-      setSignalInstrumentId(null)
+      setPreviewInstrumentId(null)
       return
     }
-    setSignalInstrumentId((prev) =>
+    setPreviewInstrumentId((prev) =>
       prev && selectedInstrumentIds.includes(prev) ? prev : selectedInstrumentIds[0],
     )
   }, [selectedInstrumentIds])
 
   useEffect(() => {
-    setSignalResult(null)
+    setPreviewResult(null)
   }, [selectedStrategy?.id])
 
-  const runSignals = useCallback(
+  const runPreview = useCallback(
     async (window) => {
       if (!selectedStrategy) return
       const [startDate, endDate] = window.dateRange || []
       if (!(startDate instanceof Date) || Number.isNaN(startDate.valueOf()) || !(endDate instanceof Date) || Number.isNaN(endDate.valueOf())) {
-        onError?.('A valid start and end date are required to generate signals.')
+        onError?.('A valid start and end date are required to run preview.')
         return
       }
-      if (!signalInstrumentId) {
+      if (!previewInstrumentId) {
         onError?.('Select an instrument to focus the preview.')
         return
       }
-      if (!selectedInstrumentIds.includes(signalInstrumentId)) {
+      if (!selectedInstrumentIds.includes(previewInstrumentId)) {
         onError?.('Selected instrument is not attached to this strategy.')
         return
       }
-      setSignalsLoading(true)
-      setSignalResult(null)
+      setPreviewLoading(true)
+      setPreviewResult(null)
       onError?.(null)
       try {
         const interval = selectedStrategy.timeframe
 
-        const result = await generateStrategySignals(selectedStrategy.id, {
+        const result = await runStrategyPreview(selectedStrategy.id, {
           start: startDate.toISOString(),
           end: endDate.toISOString(),
           interval,
-          instrument_ids: [signalInstrumentId],
+          instrument_ids: [previewInstrumentId],
         })
-        setSignalResult(result)
-        logger?.info?.('strategy_signals_generated', { strategyId: selectedStrategy.id })
+        setPreviewResult(result)
+        logger?.info?.('strategy_preview_generated', { strategyId: selectedStrategy.id })
 
-        const instrumentResult = result?.instruments?.[signalInstrumentId]
+        const instrumentResult = result?.instruments?.[previewInstrumentId]
         if (!instrumentResult?.window) {
-          onError?.('Signal preview response is missing the window payload for the selected instrument.')
+          onError?.('Strategy preview response is missing the window payload for the selected instrument.')
           return
         }
 
@@ -96,34 +95,16 @@ const useSignalGeneration = ({
           exchange: resolvedExchange,
         } = instrumentResult.window
 
-        if (!resolvedInstrumentId || resolvedInstrumentId !== signalInstrumentId) {
-          onError?.('Signal preview response does not match the selected instrument.')
+        if (!resolvedInstrumentId || resolvedInstrumentId !== previewInstrumentId) {
+          onError?.('Strategy preview response does not match the selected instrument.')
           return
         }
         if (!resolvedSymbol || !resolvedInterval || !resolvedDatasource) {
-          onError?.('Signal preview response is missing symbol, interval, or datasource.')
+          onError?.('Strategy preview response is missing symbol, interval, or datasource.')
           return
         }
 
-        const buyMarkers = Array.isArray(instrumentResult?.chart_markers?.buy) ? instrumentResult.chart_markers.buy : []
-        const sellMarkers = Array.isArray(instrumentResult?.chart_markers?.sell) ? instrumentResult.chart_markers.sell : []
-        const combinedMarkers = [...buyMarkers, ...sellMarkers]
-
-        const existing = (getChart(chartId)?.overlays || []).filter(Boolean)
-        const overlays = existing
-          .filter((overlay) => !(overlay && overlay.source === 'strategy'))
-          .filter(Boolean)
-
-        if (combinedMarkers.length) {
-          overlays.push({
-            id: `strategy-${selectedStrategy.id}-signals`,
-            source: 'strategy',
-            strategyId: selectedStrategy.id,
-            type: 'strategy_signal',
-            pane_views: ['marker'],
-            payload: { markers: combinedMarkers },
-          })
-        }
+        const overlays = Array.isArray(instrumentResult?.overlays) ? instrumentResult.overlays : []
 
         const appliedDateRange = Array.isArray(window.dateRange)
           && window.dateRange[0] instanceof Date
@@ -140,24 +121,24 @@ const useSignalGeneration = ({
           dateRange: appliedDateRange,
         })
       } catch (err) {
-        onError?.(err?.message || 'Failed to generate signals')
-        logger?.error?.('strategy_signals_failed', err)
+        onError?.(err?.message || 'Failed to run strategy preview')
+        logger?.error?.('strategy_preview_failed', err)
       } finally {
-        setSignalsLoading(false)
+        setPreviewLoading(false)
       }
     },
-    [chartId, getChart, onError, selectedInstrumentIds, selectedStrategy, signalInstrumentId, updateChart, logger],
+    [chartId, onError, selectedInstrumentIds, selectedStrategy, previewInstrumentId, updateChart, logger],
   )
 
   return {
-    signalsLoading,
-    signalResult,
-    signalInstrumentId,
-    setSignalInstrumentId,
-    signalWindow,
-    setSignalWindow,
-    runSignals,
+    previewLoading,
+    previewResult,
+    previewInstrumentId,
+    setPreviewInstrumentId,
+    previewWindow,
+    setPreviewWindow,
+    runPreview,
   }
 }
 
-export default useSignalGeneration
+export default useStrategyPreview

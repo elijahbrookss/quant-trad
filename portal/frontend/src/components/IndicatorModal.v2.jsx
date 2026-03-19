@@ -11,7 +11,8 @@ const EMPTY_META = {
   ui_descriptions: {},
   ui_order: [],
   ui_enums: {},
-  signal_rules: [],
+  typed_outputs: [],
+  overlay_outputs: [],
 }
 
 const NUMBER_FIELDS = new Set(['int', 'float', 'number'])
@@ -192,8 +193,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const [params, setParams] = useState({})
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
-  const [availableSignalRules, setAvailableSignalRules] = useState([])
-  const [selectedSignalRules, setSelectedSignalRules] = useState([])
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
@@ -211,9 +210,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMetaError(null)
     setParams(initial?.params || {})
     setShowAdvanced(false)
-    const existingRules = Array.isArray(initial?.signalRules) ? [...initial.signalRules] : []
-    setSelectedSignalRules(existingRules)
-    setAvailableSignalRules([])
   }, [initial, isOpen])
 
   useEffect(() => {
@@ -229,17 +225,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setParams(preparedParams)
         setShowAdvanced(false)
 
-        const rules = Array.isArray(nextMeta.signal_rules) ? nextMeta.signal_rules : []
-        setAvailableSignalRules(rules)
-
-        if (initial?.signalRules?.length) {
-          const filtered = initial.signalRules.filter((ruleId) => rules.some((rule) => rule.id === ruleId))
-          setSelectedSignalRules(filtered)
-        } else if (rules.length) {
-          setSelectedSignalRules(rules.map((rule) => rule.id))
-        } else {
-          setSelectedSignalRules([])
-        }
       })
       .catch((err) => {
         if (cancelled) return
@@ -249,7 +234,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     return () => {
       cancelled = true
     }
-  }, [initial?.params, initial?.signalRules, isOpen, typeId])
+  }, [initial?.params, isOpen, typeId])
 
   const fieldOrder = useMemo(() => buildFieldOrder(meta, params), [meta, params])
   const intListKeys = useMemo(() => deriveIntListKeys(meta), [meta])
@@ -286,20 +271,6 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const handleBooleanChange = (key) => (value) => {
     setParams((prev) => ({ ...prev, [key]: Boolean(value) }))
   }
-
-  const toggleSignalRule = (ruleId) => {
-    setSelectedSignalRules((prev) => {
-      const next = new Set(prev)
-      if (next.has(ruleId)) {
-        next.delete(ruleId)
-      } else {
-        next.add(ruleId)
-      }
-      return Array.from(next)
-    })
-  }
-
-  const allRulesSelected = availableSignalRules.length > 0 && selectedSignalRules.length === availableSignalRules.length
 
   const renderField = (key) => {
     const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
@@ -371,13 +342,8 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       setMetaError('Please provide an indicator name.')
       return
     }
-    if (availableSignalRules.length > 0 && selectedSignalRules.length === 0) {
-      setMetaError('Enable at least one signal rule to generate signals.')
-      return
-    }
-
     const preparedParams = convertParamsForSave(meta, params)
-    onSave({ id: initial?.id, type: typeId, name: name.trim(), params: preparedParams, signalRules: selectedSignalRules })
+    onSave({ id: initial?.id, type: typeId, name: name.trim(), params: preparedParams })
   }
 
   if (!isOpen) return null
@@ -392,7 +358,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
               {initial?.id ? 'Edit indicator' : 'Create indicator'}
             </DialogTitle>
             <p className="mt-1 text-sm text-slate-400">
-              Configure the core parameters and choose which signal rules should run for this indicator. Required fields are marked with *.
+              Configure indicator parameters. Required fields are marked with *.
             </p>
           </header>
 
@@ -488,55 +454,10 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                   </p>
                 )}
 
-                {availableSignalRules.length > 0 && (
-                  <div className="space-y-3 rounded-lg border border-white/10 bg-slate-900/60 p-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h4 className="text-sm font-semibold text-white">Signal rules</h4>
-                        <p className="text-xs text-slate-400">Toggle the detections you want to run for this indicator.</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="rounded-md border border-white/10 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-[color:var(--accent-alpha-40)] hover:text-white"
-                        onClick={() => setSelectedSignalRules(allRulesSelected ? [] : availableSignalRules.map((rule) => rule.id))}
-                      >
-                        {allRulesSelected ? 'Clear' : 'Enable all'}
-                      </button>
-                    </div>
-
-                    <div className="divide-y divide-white/10 rounded-md border border-white/10 bg-black/20">
-                      {availableSignalRules.map((rule, idx) => {
-                        const checked = selectedSignalRules.includes(rule.id)
-                        return (
-                          <label
-                            key={rule.id}
-                            className={`flex items-start justify-between gap-3 px-3 py-3 text-sm transition ${
-                              checked
-                                ? 'bg-[color:var(--accent-alpha-10)] text-white'
-                                : 'text-slate-200 hover:bg-white/5 hover:text-white'
-                            } ${idx === 0 ? 'rounded-t-md' : ''} ${idx === availableSignalRules.length - 1 ? 'rounded-b-md' : ''}`}
-                          >
-                            <div className="space-y-1">
-                              <span className="font-medium">{rule.label || rule.id}</span>
-                              {rule.description && <p className="text-xs text-slate-300/80 leading-relaxed">{rule.description}</p>}
-                            </div>
-                            <Switch
-                              checked={checked}
-                              onChange={() => toggleSignalRule(rule.id)}
-                              className={`${checked ? 'bg-[color:var(--accent-alpha-80)]' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition`}
-                            >
-                              <span className={`${checked ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
-                            </Switch>
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )}
               </div>
             ) : (
               <p className="rounded-lg border border-dashed border-white/10 bg-slate-900/50 p-4 text-sm text-slate-400">
-                Select an indicator type to configure its parameters and signal rules.
+                Select an indicator type to configure its parameters.
               </p>
             )}
           </div>

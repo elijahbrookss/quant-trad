@@ -2,18 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   attachStrategyIndicator,
-  createRuleFilter,
   createStrategy,
-  createStrategyFilter,
   createStrategyRule,
-  deleteRuleFilter,
   deleteStrategy,
-  deleteStrategyFilter,
   deleteStrategyRule,
   detachStrategyIndicator,
-  updateRuleFilter,
   updateStrategy,
-  updateStrategyFilter,
   updateStrategyRule,
 } from '../adapters/strategy.adapter.js'
 import { createInstrument } from '../adapters/instrument.adapter.js'
@@ -30,7 +24,8 @@ import useStrategyData from '../hooks/strategy/useStrategyData.js'
 import useStrategySelection from '../hooks/strategy/useStrategySelection.js'
 import useIndicatorCache from '../hooks/strategy/useIndicatorCache.js'
 import useInstrumentMetadata from '../hooks/strategy/useInstrumentMetadata.js'
-import useSignalGeneration from '../hooks/strategy/useSignalGeneration.js'
+import useStrategyPreview from '../hooks/strategy/useStrategyPreview.js'
+import { extractRuleFlow } from './strategy/rules/ruleUtils.js'
 
 const StrategyTab = ({ chartId }) => {
   const { getChart, updateChart } = useChartState()
@@ -78,17 +73,16 @@ const StrategyTab = ({ chartId }) => {
     [selectedStrategyInstruments],
   )
   const {
-    signalsLoading,
-    signalResult,
-    signalInstrumentId,
-    setSignalInstrumentId,
-    signalWindow,
-    setSignalWindow,
-    runSignals,
-  } = useSignalGeneration({
+    previewLoading,
+    previewResult,
+    previewInstrumentId,
+    setPreviewInstrumentId,
+    previewWindow,
+    setPreviewWindow,
+    runPreview,
+  } = useStrategyPreview({
     chartId,
     chartSnapshot,
-    getChart,
     updateChart,
     selectedStrategy,
     selectedInstrumentIds,
@@ -215,14 +209,14 @@ const StrategyTab = ({ chartId }) => {
       return attachedIndicators
     }
     const existing = new Map(attachedIndicators.map((indicator) => [indicator.id, indicator]))
-    const extras = []
-    for (const condition of ruleModal.rule.conditions || []) {
-      const indicatorId = condition.indicator_id
+    const { trigger, guards } = extractRuleFlow(ruleModal.rule)
+    const refs = [trigger, ...(Array.isArray(guards) ? guards : [])]
+    for (const ref of refs) {
+      const indicatorId = ref?.indicator_id
       if (!indicatorId || existing.has(indicatorId)) continue
       const meta = indicatorLookup.get(indicatorId)
       if (meta) {
         existing.set(indicatorId, meta)
-        extras.push(meta)
       }
     }
     return [...existing.values()]
@@ -350,7 +344,7 @@ const StrategyTab = ({ chartId }) => {
     }
   }
 
-  const handleRuleSubmit = async (payload, gatePayloads = []) => {
+  const handleRuleSubmit = async (payload) => {
     if (!selectedStrategy) return
     setSavingRule(true)
     setErrorMessage(null)
@@ -358,19 +352,9 @@ const StrategyTab = ({ chartId }) => {
       if (ruleModal.mode === 'edit' && ruleModal.rule?.id) {
         await updateStrategyRule(selectedStrategy.id, ruleModal.rule.id, payload)
         info('strategy_rule_updated', { strategyId: selectedStrategy.id, ruleId: ruleModal.rule.id })
-        if (gatePayloads.length) {
-          await Promise.all(
-            gatePayloads.map((gate) => createRuleFilter(selectedStrategy.id, ruleModal.rule.id, gate)),
-          )
-        }
       } else {
-        const created = await createStrategyRule(selectedStrategy.id, payload)
+        await createStrategyRule(selectedStrategy.id, payload)
         info('strategy_rule_created', { strategyId: selectedStrategy.id })
-        if (gatePayloads.length && created?.id) {
-          await Promise.all(
-            gatePayloads.map((gate) => createRuleFilter(selectedStrategy.id, created.id, gate)),
-          )
-        }
       }
       await refreshStrategies()
       closeRuleModal()
@@ -392,84 +376,6 @@ const StrategyTab = ({ chartId }) => {
     } catch (err) {
       setErrorMessage(err?.message || 'Failed to delete rule')
       error('strategy_rule_delete_failed', err)
-    }
-  }
-
-  const handleCreateGlobalFilter = async (payload) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await createStrategyFilter(selectedStrategy.id, payload)
-      info('strategy_filter_created', { strategyId: selectedStrategy.id })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to create global filter')
-      error('strategy_filter_create_failed', err)
-    }
-  }
-
-  const handleUpdateGlobalFilter = async (filterId, payload) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await updateStrategyFilter(selectedStrategy.id, filterId, payload)
-      info('strategy_filter_updated', { strategyId: selectedStrategy.id, filterId })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to update global filter')
-      error('strategy_filter_update_failed', err)
-    }
-  }
-
-  const handleDeleteGlobalFilter = async (filterId) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await deleteStrategyFilter(selectedStrategy.id, filterId)
-      info('strategy_filter_deleted', { strategyId: selectedStrategy.id, filterId })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to delete global filter')
-      error('strategy_filter_delete_failed', err)
-    }
-  }
-
-  const handleCreateRuleFilter = async (ruleId, payload) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await createRuleFilter(selectedStrategy.id, ruleId, payload)
-      info('rule_filter_created', { strategyId: selectedStrategy.id, ruleId })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to create rule filter')
-      error('rule_filter_create_failed', err)
-    }
-  }
-
-  const handleUpdateRuleFilter = async (ruleId, filterId, payload) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await updateRuleFilter(selectedStrategy.id, ruleId, filterId, payload)
-      info('rule_filter_updated', { strategyId: selectedStrategy.id, ruleId, filterId })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to update rule filter')
-      error('rule_filter_update_failed', err)
-    }
-  }
-
-  const handleDeleteRuleFilter = async (ruleId, filterId) => {
-    if (!selectedStrategy) return
-    setErrorMessage(null)
-    try {
-      await deleteRuleFilter(selectedStrategy.id, ruleId, filterId)
-      info('rule_filter_deleted', { strategyId: selectedStrategy.id, ruleId, filterId })
-      await refreshStrategies()
-    } catch (err) {
-      setErrorMessage(err?.message || 'Failed to delete rule filter')
-      error('rule_filter_delete_failed', err)
     }
   }
 
@@ -576,19 +482,13 @@ const StrategyTab = ({ chartId }) => {
               onEditRule={(rule) => openRuleModal(rule)}
               onDuplicateRule={(rule) => openRuleModal({ ...rule, name: `${rule?.name || 'Rule'} copy` }, { mode: 'create' })}
               onDeleteRule={handleDeleteRule}
-              onCreateGlobalFilter={handleCreateGlobalFilter}
-              onUpdateGlobalFilter={handleUpdateGlobalFilter}
-              onDeleteGlobalFilter={handleDeleteGlobalFilter}
-              onCreateRuleFilter={handleCreateRuleFilter}
-              onUpdateRuleFilter={handleUpdateRuleFilter}
-              onDeleteRuleFilter={handleDeleteRuleFilter}
-              onRunSignals={runSignals}
-              signalWindow={signalWindow}
-              setSignalWindow={setSignalWindow}
-              signalResult={signalResult}
-              signalsLoading={signalsLoading}
-              signalInstrumentId={signalInstrumentId}
-              setSignalInstrumentId={setSignalInstrumentId}
+              onRunPreview={runPreview}
+              previewWindow={previewWindow}
+              setPreviewWindow={setPreviewWindow}
+              previewResult={previewResult}
+              previewLoading={previewLoading}
+              previewInstrumentId={previewInstrumentId}
+              setPreviewInstrumentId={setPreviewInstrumentId}
               onAddInstrument={(defaults) => openInstrumentModal(defaults)}
               onRefreshInstrumentMetadata={refreshInstrumentMetadata}
               instrumentRefreshStatus={instrumentRefreshStatus}
