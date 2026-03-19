@@ -6,12 +6,25 @@ import os
 import time
 from typing import Callable, TypeVar
 
+from sqlalchemy import or_
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from ._shared import *
 
 _T = TypeVar("_T")
 _DB_WRITE_RETRY_ATTEMPTS = max(1, _coerce_int(os.getenv("PORTAL_DB_WRITE_RETRY_ATTEMPTS")) or 2)
+
+
+def _normalize_botlens_series_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    symbol, separator, timeframe = text.partition("|")
+    normalized_symbol = symbol.strip().upper()
+    normalized_timeframe = timeframe.strip().lower()
+    if not separator or "|" in timeframe or not normalized_symbol or not normalized_timeframe:
+        return ""
+    return f"{normalized_symbol}|{normalized_timeframe}"
 
 
 def _is_transient_connection_error(exc: Exception) -> bool:
@@ -152,10 +165,10 @@ def upsert_bot_run_view_state(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise RuntimeError("database is required for bot view-state persistence")
     run_id = str(payload.get("run_id") or "").strip()
     bot_id = str(payload.get("bot_id") or "").strip()
-    series_key = str(payload.get("series_key") or "").strip()
+    series_key = _normalize_botlens_series_key(payload.get("series_key"))
     seq = int(payload.get("seq") or 0)
     if not run_id or not bot_id or not series_key:
-        raise ValueError("run_id, bot_id and series_key are required for bot view-state persistence")
+        raise ValueError("run_id, bot_id and canonical series_key are required for bot view-state persistence")
     if seq <= 0:
         raise ValueError("seq must be a positive integer for bot view-state persistence")
 
@@ -222,21 +235,58 @@ def get_latest_bot_run_view_state(
     *,
     bot_id: str,
     run_id: Optional[str] = None,
-    series_key: str = "bot",
+    series_key: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     if not db.available:
         return None
-    query = (
-        select(BotRunViewStateRecord)
-        .where(BotRunViewStateRecord.bot_id == str(bot_id))
-        .where(BotRunViewStateRecord.series_key == str(series_key))
-    )
+    query = select(BotRunViewStateRecord).where(BotRunViewStateRecord.bot_id == str(bot_id))
+    if series_key is not None:
+        normalized_series_key = _normalize_botlens_series_key(series_key)
+        if not normalized_series_key:
+            return None
+        query = query.where(BotRunViewStateRecord.series_key == normalized_series_key)
+    else:
+        query = query.where(BotRunViewStateRecord.series_key.like("%|%"))
+        query = query.where(~BotRunViewStateRecord.series_key.like("%|"))
+        query = query.where(~BotRunViewStateRecord.series_key.like("|%"))
     if run_id is not None:
         query = query.where(BotRunViewStateRecord.run_id == str(run_id))
     query = query.order_by(BotRunViewStateRecord.seq.desc(), BotRunViewStateRecord.id.desc()).limit(1)
     with db.session() as session:
         row = session.execute(query).scalars().first()
         return row.to_dict() if row else None
+
+
+def list_bot_run_view_states(
+    *,
+    bot_id: str,
+    run_id: str,
+) -> List[Dict[str, Any]]:
+    if not db.available:
+        return []
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(BotRunViewStateRecord)
+                .where(BotRunViewStateRecord.bot_id == str(bot_id))
+                .where(BotRunViewStateRecord.run_id == str(run_id))
+                .where(BotRunViewStateRecord.series_key.like("%|%"))
+                .where(~BotRunViewStateRecord.series_key.like("%|"))
+                .where(~BotRunViewStateRecord.series_key.like("|%"))
+                .order_by(BotRunViewStateRecord.series_key.asc(), BotRunViewStateRecord.seq.desc(), BotRunViewStateRecord.id.desc())
+            )
+            .scalars()
+            .all()
+        )
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            payload = row.to_dict()
+            series_key = _normalize_botlens_series_key(payload.get("series_key"))
+            if not series_key or series_key in deduped:
+                continue
+            payload["series_key"] = series_key
+            deduped[series_key] = payload
+        return list(deduped.values())
 
 
 def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -254,6 +304,7 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     schema_version = int(raw_event_schema_version) if raw_event_schema_version is not None else 1
     if schema_version <= 0:
         raise ValueError("schema_version must be >= 1 for runtime event persistence")
+
     def _write() -> Dict[str, Any]:
         with db.session() as session:
             existing = (
@@ -267,16 +318,24 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
             if existing is not None:
                 return existing.to_dict()
-            latest_seq = (
+            existing_seq = (
                 session.execute(
-                    select(func.max(BotRunEventRecord.seq))
+                    select(BotRunEventRecord)
                     .where(BotRunEventRecord.bot_id == bot_id)
                     .where(BotRunEventRecord.run_id == run_id)
+                    .where(BotRunEventRecord.seq == seq)
+                    .limit(1)
                 )
-                .scalar()
+                .scalars()
+                .first()
             )
-            if latest_seq is not None and seq <= int(latest_seq):
-                raise ValueError(f"seq must be monotonic per bot/run (incoming={seq}, latest={int(latest_seq)})")
+            if existing_seq is not None:
+                existing_event_id = str(existing_seq.event_id or "").strip()
+                if existing_event_id != event_id:
+                    raise ValueError(
+                        f"seq collision for bot/run (incoming={seq}, existing_event_id={existing_event_id}, event_id={event_id})"
+                    )
+                return existing_seq.to_dict()
             row = BotRunEventRecord(
                 event_id=event_id,
                 bot_id=bot_id,
@@ -301,6 +360,119 @@ def record_bot_runtime_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def record_bot_runtime_events_batch(payloads: Sequence[Dict[str, Any]]) -> int:
+    if not db.available:
+        raise RuntimeError("database is required for bot runtime event persistence")
+    items = [dict(payload) for payload in (payloads or []) if isinstance(payload, dict)]
+    if not items:
+        return 0
+
+    normalized: List[Dict[str, Any]] = []
+    for payload in items:
+        event_id = str(payload.get("event_id") or "").strip()
+        bot_id = str(payload.get("bot_id") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        seq = int(payload.get("seq") or 0)
+        if not event_id or not bot_id or not run_id:
+            raise ValueError("event_id, bot_id and run_id are required for runtime event persistence")
+        if seq <= 0:
+            raise ValueError("seq must be a positive integer")
+        raw_event_schema_version = payload.get("schema_version")
+        schema_version = int(raw_event_schema_version) if raw_event_schema_version is not None else 1
+        if schema_version <= 0:
+            raise ValueError("schema_version must be >= 1 for runtime event persistence")
+        normalized.append(
+            {
+                "event_id": event_id,
+                "bot_id": bot_id,
+                "run_id": run_id,
+                "seq": seq,
+                "event_type": str(payload.get("event_type") or "state_delta"),
+                "critical": bool(payload.get("critical", False)),
+                "schema_version": schema_version,
+                "payload": _json_safe(dict(payload.get("payload") or {})),
+                "event_time": _parse_optional_timestamp(payload.get("event_time")),
+                "known_at": _parse_optional_timestamp(payload.get("known_at")) or _utcnow(),
+            }
+        )
+    if not normalized:
+        return 0
+
+    grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    for row in normalized:
+        grouped.setdefault((row["bot_id"], row["run_id"]), []).append(row)
+
+    def _write() -> int:
+        inserted = 0
+        with db.session() as session:
+            for (bot_id, run_id), rows in grouped.items():
+                rows.sort(key=lambda item: (int(item["seq"]), str(item["event_id"])))
+                event_ids = [str(item["event_id"]) for item in rows]
+                seqs = [int(item["seq"]) for item in rows]
+                existing_rows = (
+                    session.execute(
+                        select(BotRunEventRecord)
+                        .where(BotRunEventRecord.bot_id == bot_id)
+                        .where(BotRunEventRecord.run_id == run_id)
+                        .where(
+                            or_(
+                                BotRunEventRecord.event_id.in_(event_ids),
+                                BotRunEventRecord.seq.in_(seqs),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                existing_by_event_id = {str(row.event_id): row for row in existing_rows}
+                existing_by_seq = {int(row.seq or 0): row for row in existing_rows}
+                pending: List[BotRunEventRecord] = []
+                seen_seqs: set[int] = set()
+                for row in rows:
+                    event_id = str(row["event_id"])
+                    seq = int(row["seq"])
+                    existing = existing_by_event_id.get(event_id)
+                    if existing is not None:
+                        continue
+                    conflict = existing_by_seq.get(seq)
+                    if conflict is not None:
+                        raise ValueError(
+                            f"seq collision for bot/run (incoming={seq}, existing_event_id={conflict.event_id}, event_id={event_id})"
+                        )
+                    if seq in seen_seqs:
+                        raise ValueError(f"duplicate seq in runtime event batch (seq={seq}, bot_id={bot_id}, run_id={run_id})")
+                    seen_seqs.add(seq)
+                    pending.append(
+                        BotRunEventRecord(
+                            event_id=event_id,
+                            bot_id=bot_id,
+                            run_id=run_id,
+                            seq=seq,
+                            event_type=str(row["event_type"]),
+                            critical=bool(row["critical"]),
+                            schema_version=int(row["schema_version"]),
+                            payload=dict(row["payload"]),
+                            event_time=row["event_time"],
+                            known_at=row["known_at"],
+                            created_at=_utcnow(),
+                        )
+                    )
+                if pending:
+                    session.add_all(pending)
+                    inserted += len(pending)
+        return inserted
+
+    return _execute_write_with_retry(
+        operation="record_bot_runtime_events_batch",
+        context={
+            "run_id": str(normalized[0].get("run_id") or ""),
+            "bot_id": str(normalized[0].get("bot_id") or ""),
+            "event_id": str(normalized[0].get("event_id") or ""),
+        },
+        action=_write,
+    )
+
+
 def list_bot_runtime_events(
     *,
     bot_id: str,
@@ -308,11 +480,13 @@ def list_bot_runtime_events(
     after_seq: int = 0,
     limit: int = 1000,
     event_types: Optional[Sequence[str]] = None,
+    event_type_prefixes: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     if not db.available:
         return []
     max_rows = max(1, min(int(limit or 1000), 5000))
     filter_event_types = [str(value).strip() for value in (event_types or []) if str(value).strip()]
+    filter_prefixes = [str(value).strip() for value in (event_type_prefixes or []) if str(value).strip()]
     with db.session() as session:
         query = (
             select(BotRunEventRecord)
@@ -320,8 +494,13 @@ def list_bot_runtime_events(
             .where(BotRunEventRecord.run_id == str(run_id))
             .where(BotRunEventRecord.seq > int(after_seq or 0))
         )
-        if filter_event_types:
-            query = query.where(BotRunEventRecord.event_type.in_(filter_event_types))
+        if filter_event_types or filter_prefixes:
+            clauses = []
+            if filter_event_types:
+                clauses.append(BotRunEventRecord.event_type.in_(filter_event_types))
+            for prefix in filter_prefixes:
+                clauses.append(BotRunEventRecord.event_type.like(f"{prefix}%"))
+            query = query.where(or_(*clauses))
         query = query.order_by(BotRunEventRecord.seq.asc(), BotRunEventRecord.id.asc()).limit(max_rows)
         rows = session.execute(query).scalars().all()
         return [row.to_dict() for row in rows]
@@ -333,9 +512,13 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
     with db.session() as session:
         row = (
             session.execute(
-                select(BotRunEventRecord.run_id)
-                .where(BotRunEventRecord.bot_id == str(bot_id))
-                .order_by(BotRunEventRecord.id.desc())
+                select(BotRunRecord.run_id)
+                .where(BotRunRecord.bot_id == str(bot_id))
+                .order_by(
+                    func.coalesce(BotRunRecord.started_at, BotRunRecord.updated_at, BotRunRecord.created_at).desc(),
+                    BotRunRecord.updated_at.desc(),
+                    BotRunRecord.created_at.desc(),
+                )
                 .limit(1)
             )
             .scalars()
@@ -345,13 +528,9 @@ def get_latest_bot_runtime_run_id(bot_id: str) -> Optional[str]:
             return str(row)
         fallback = (
             session.execute(
-                select(BotRunRecord.run_id)
-                .where(BotRunRecord.bot_id == str(bot_id))
-                .order_by(
-                    BotRunRecord.updated_at.desc(),
-                    BotRunRecord.started_at.desc(),
-                    BotRunRecord.created_at.desc(),
-                )
+                select(BotRunEventRecord.run_id)
+                .where(BotRunEventRecord.bot_id == str(bot_id))
+                .order_by(BotRunEventRecord.id.desc())
                 .limit(1)
             )
             .scalars()

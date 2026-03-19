@@ -108,7 +108,7 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
         run_id = str(run.get("run_id") or "").strip()
         if not run_id:
             continue
-        view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key="bot")
+        view_row = _composition().storage.get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id)
         view_payload = dict(view_row.get("payload") or {}) if isinstance(view_row, Mapping) else {}
         runtime_payload = dict(view_payload.get("runtime") or {}) if isinstance(view_payload.get("runtime"), Mapping) else {}
         summary = dict(run.get("summary") or {})
@@ -157,7 +157,7 @@ def runtime_capacity() -> Dict[str, Any]:
         view_row = _composition().storage.get_latest_bot_run_view_state(
             bot_id=str(bot.get("id") or ""),
             run_id=None,
-            series_key="bot",
+            series_key=None,
         )
         if isinstance(view_row, Mapping):
             payload = view_row.get("payload")

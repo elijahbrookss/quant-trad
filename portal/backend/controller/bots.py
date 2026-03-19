@@ -304,13 +304,13 @@ async def bot_lens_series_live(
     run_id: str,
     series_key: str,
     websocket: WebSocket,
-    after_seq: int = 0,
+    limit: int = 320,
 ) -> None:
     await telemetry_hub.add_series_viewer(
         run_id=str(run_id),
         series_key=str(series_key),
         ws=websocket,
-        after_seq=max(0, int(after_seq or 0)),
+        limit=max(1, min(int(limit or 320), 2000)),
     )
     try:
         while True:

@@ -225,7 +225,7 @@ def project_bot_state(bot: Mapping[str, Any], *, inspect_container: bool = True)
     persisted_status = _normalize_status(payload.get("status"))
     run_id = get_latest_bot_runtime_run_id(bot_id)
     run = get_bot_run(run_id) if run_id else None
-    view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id, series_key="bot") if run_id else None
+    view_row = get_latest_bot_run_view_state(bot_id=bot_id, run_id=run_id) if run_id else None
     view_payload = _mapping(view_row.get("payload")) if isinstance(view_row, Mapping) else {}
     snapshot_runtime = _mapping(view_payload.get("runtime"))
     engine_status = _normalize_status(snapshot_runtime.get("status"), default="")

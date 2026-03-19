@@ -44,10 +44,27 @@ def normalize_candle_time(value: Any) -> Optional[int]:
 
 
 def canonical_series_key(symbol: Any, timeframe: Any) -> str:
-    return f"{str(symbol or '').strip().upper()}|{str(timeframe or '').strip().lower()}"
+    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if not normalized_symbol or not normalized_timeframe:
+        return ""
+    return f"{normalized_symbol}|{normalized_timeframe}"
+
+
+def normalize_series_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    symbol, separator, timeframe = text.partition("|")
+    if not separator or "|" in timeframe:
+        return ""
+    return canonical_series_key(symbol, timeframe)
 
 
 def canonical_series_key_from_entry(entry: Mapping[str, Any]) -> str:
+    explicit = normalize_series_key(entry.get("series_key"))
+    if explicit:
+        return explicit
     return canonical_series_key(entry.get("symbol"), entry.get("timeframe"))
 
 
@@ -87,7 +104,10 @@ def merge_candle_streams(*streams: Any) -> List[Dict[str, Any]]:
 def overlay_identity(overlay: Any, index: int) -> str:
     if not isinstance(overlay, Mapping):
         return f"index:{index}"
-    for key in ("overlay_id", "id", "name", "key", "slug", "indicator_id", "type"):
+    explicit_overlay_id = str(overlay.get("overlay_id") or "").strip()
+    if explicit_overlay_id:
+        return explicit_overlay_id
+    for key in ("id", "name", "key", "slug", "indicator_id", "type"):
         value = str(overlay.get(key) or "").strip()
         if value:
             return f"{key}:{value}"
@@ -111,6 +131,41 @@ def project_overlay_state(overlays: Any) -> List[Dict[str, Any]]:
         )
         projected[identity] = normalized
     return list(projected.values())
+
+
+def apply_overlay_delta(overlays: Any, delta: Any) -> List[Dict[str, Any]]:
+    current = project_overlay_state(overlays)
+    payload = delta if isinstance(delta, Mapping) else {}
+    ops = payload.get("ops") if isinstance(payload.get("ops"), list) else []
+    overlay_map: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    for index, overlay in enumerate(current):
+        if not isinstance(overlay, Mapping):
+            continue
+        overlay_id = str(overlay.get("overlay_id") or overlay_identity(overlay, index))
+        normalized = dict(overlay)
+        normalized["overlay_id"] = overlay_id
+        overlay_map[overlay_id] = normalized
+    for op in ops:
+        if not isinstance(op, Mapping):
+            continue
+        op_name = str(op.get("op") or "").strip().lower()
+        key = str(op.get("key") or "").strip()
+        if not key:
+            continue
+        if op_name == "remove":
+            overlay_map.pop(key, None)
+            continue
+        if op_name == "upsert":
+            overlay = op.get("overlay")
+            if not isinstance(overlay, Mapping):
+                continue
+            normalized = dict(overlay)
+            normalized["overlay_id"] = key
+            normalized["overlay_revision"] = overlay_revision(
+                {entry_key: entry_value for entry_key, entry_value in normalized.items() if entry_key != "overlay_revision"}
+            )
+            overlay_map[key] = normalized
+    return list(overlay_map.values())
 
 
 def canonicalize_series_entry(entry: Any, index: int = 0) -> Optional[Dict[str, Any]]:
@@ -149,6 +204,72 @@ def canonicalize_projection(snapshot: Any) -> Dict[str, Any]:
     }
 
 
+def apply_series_runtime_delta(
+    snapshot: Any,
+    *,
+    series_key: str,
+    seq: int,
+    runtime_delta: Any,
+) -> Dict[str, Any]:
+    projection = canonicalize_projection(snapshot)
+    delta = runtime_delta if isinstance(runtime_delta, Mapping) else {}
+    target_series_key = normalize_series_key(series_key)
+    runtime_payload = delta.get("runtime") if isinstance(delta.get("runtime"), Mapping) else {}
+    series_entries = delta.get("series") if isinstance(delta.get("series"), list) else []
+    series_delta = None
+    for entry in series_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        candidate_key = canonical_series_key_from_entry(entry)
+        if candidate_key == target_series_key:
+            series_delta = dict(entry)
+            break
+
+    existing_series = find_series(projection, target_series_key) or {
+        "series_key": target_series_key,
+        "symbol": str(target_series_key.split("|")[0] if "|" in target_series_key else ""),
+        "timeframe": str(target_series_key.split("|")[1] if "|" in target_series_key else ""),
+        "candles": [],
+        "overlays": [],
+        "stats": {},
+    }
+    next_series = dict(existing_series)
+    if isinstance(series_delta, Mapping):
+        for field in ("strategy_id", "symbol", "timeframe", "datasource", "exchange", "instrument", "bar_index"):
+            if field in series_delta:
+                next_series[field] = series_delta.get(field)
+        candle = series_delta.get("candle")
+        if isinstance(candle, Mapping):
+            next_series["candles"] = merge_candle_streams(next_series.get("candles"), [dict(candle)])
+        if isinstance(series_delta.get("overlay_delta"), Mapping):
+            next_series["overlays"] = apply_overlay_delta(next_series.get("overlays"), series_delta.get("overlay_delta"))
+        if isinstance(series_delta.get("trades"), list):
+            projection["trades"] = [dict(entry) for entry in series_delta.get("trades") if isinstance(entry, Mapping)]
+        if isinstance(series_delta.get("stats"), Mapping):
+            next_series["stats"] = dict(series_delta.get("stats") or {})
+
+    if isinstance(delta.get("logs"), list):
+        projection["logs"] = list(delta.get("logs") or [])
+    if isinstance(delta.get("decisions"), list):
+        projection["decisions"] = list(delta.get("decisions") or [])
+    if isinstance(runtime_payload, Mapping):
+        projection["runtime"] = dict(runtime_payload)
+        warnings = runtime_payload.get("warnings")
+        if isinstance(warnings, list):
+            projection["warnings"] = list(warnings)
+
+    projection["series"] = [
+        entry
+        for entry in projection.get("series") or []
+        if canonical_series_key_from_entry(entry) != target_series_key
+    ]
+    projection["series"].append(canonicalize_series_entry(next_series) or next_series)
+    projection["series"].sort(key=lambda entry: str(entry.get("series_key") or canonical_series_key_from_entry(entry)))
+    projection["seq"] = int(seq)
+    projection["series_key"] = target_series_key
+    return projection
+
+
 def bounded_projection(snapshot: Any, *, candle_limit: int) -> Dict[str, Any]:
     projection = canonicalize_projection(snapshot)
     limit = max(1, int(candle_limit))
@@ -165,11 +286,11 @@ def bounded_projection(snapshot: Any, *, candle_limit: int) -> Dict[str, Any]:
 
 def find_series(snapshot: Any, series_key: str) -> Optional[Dict[str, Any]]:
     projection = snapshot if isinstance(snapshot, Mapping) else {}
-    target = str(series_key or "").strip().upper()
+    target = normalize_series_key(series_key)
     for entry in projection.get("series") if isinstance(projection.get("series"), list) else []:
         if not isinstance(entry, Mapping):
             continue
-        candidate_key = str(entry.get("series_key") or canonical_series_key_from_entry(entry)).strip().upper()
+        candidate_key = canonical_series_key_from_entry(entry)
         if candidate_key == target:
             return dict(entry)
     return None
