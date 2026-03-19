@@ -7,8 +7,14 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Protocol
 
+from core.settings import get_settings
+
 logger = logging.getLogger(__name__)
 DEFAULT_BOT_RUNTIME_NETWORK = "quant-trad_quanttrad"
+_SETTINGS = get_settings()
+_BOT_RUNTIME_SETTINGS = _SETTINGS.bot_runtime
+_DATABASE_SETTINGS = _SETTINGS.database
+_SECURITY_SETTINGS = _SETTINGS.security
 
 
 class BotRunner(Protocol):
@@ -25,12 +31,12 @@ class DockerBotRunner:
 
     @classmethod
     def from_env(cls) -> "DockerBotRunner":
-        image = os.getenv("BOT_RUNTIME_IMAGE", "").strip()
+        image = str(_BOT_RUNTIME_SETTINGS.image or "").strip()
         if not image:
-            raise RuntimeError("BOT_RUNTIME_IMAGE is required for docker bot runner")
-        network = os.getenv("BOT_RUNTIME_NETWORK", DEFAULT_BOT_RUNTIME_NETWORK).strip()
+            raise RuntimeError("QT_BOT_RUNTIME_IMAGE is required for docker bot runner")
+        network = str(_BOT_RUNTIME_SETTINGS.network or DEFAULT_BOT_RUNTIME_NETWORK).strip()
         if not network:
-            raise RuntimeError("BOT_RUNTIME_NETWORK is required for docker bot runner")
+            raise RuntimeError("QT_BOT_RUNTIME_NETWORK is required for docker bot runner")
         return cls(image=image, network=network)
 
     @staticmethod
@@ -59,12 +65,23 @@ class DockerBotRunner:
             return self.network
 
         raise RuntimeError(
-            "BOT_RUNTIME_NETWORK not found. "
+            "QT_BOT_RUNTIME_NETWORK not found. "
             f"requested={self.network} "
             "Expected shared compose network from docker/docker-compose.yml is "
             f"{DEFAULT_BOT_RUNTIME_NETWORK}. "
-            "Set BOT_RUNTIME_NETWORK explicitly to the exact docker network name in use."
+            "Set QT_BOT_RUNTIME_NETWORK explicitly to the exact docker network name in use."
         )
+
+    @staticmethod
+    def _runtime_process_env(bot_id: str) -> Dict[str, str]:
+        env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
+        if _DATABASE_SETTINGS.dsn:
+            env_map["PG_DSN"] = str(_DATABASE_SETTINGS.dsn)
+        provider_key = str(_SECURITY_SETTINGS.provider_credential_key or "").strip()
+        if provider_key:
+            env_map["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"] = provider_key
+        env_map["QT_BOT_RUNTIME_BOT_ID"] = str(bot_id)
+        return env_map
 
     @classmethod
     def inspect_bot_container(
@@ -123,15 +140,16 @@ class DockerBotRunner:
         snapshot_interval = bot.get("snapshot_interval_ms")
         if not isinstance(snapshot_interval, int) or snapshot_interval <= 0:
             raise RuntimeError("snapshot_interval_ms is required and must be a positive integer")
-        provider_credential_key = str(os.getenv("PROVIDER_CREDENTIAL_KEY", "") or "").strip()
+        provider_credential_key = str(_SECURITY_SETTINGS.provider_credential_key or "").strip()
         if not provider_credential_key:
             raise RuntimeError(
-                "PROVIDER_CREDENTIAL_KEY is required for bot runtime containers. "
+                "QT_SECURITY_PROVIDER_CREDENTIAL_KEY is required for bot runtime containers. "
                 "Set it on the backend service environment before starting bots."
             )
         name = self._container_name(bot_id)
         self.stop_bot(bot_id=bot_id)
         network = self._resolve_runtime_network()
+        runtime_env = self._runtime_process_env(bot_id)
         cmd = [
             "docker",
             "run",
@@ -140,45 +158,9 @@ class DockerBotRunner:
             name,
             "--network",
             network,
-            "-e",
-            f"PG_DSN={os.getenv('PG_DSN','')}",
-            "-e",
-            f"PROVIDER_CREDENTIAL_KEY={provider_credential_key}",
-            "-e",
-            f"BOT_ID={bot_id}",
-            "-e",
-            f"SNAPSHOT_INTERVAL_MS={snapshot_interval}",
-            "-e",
-            f"BACKEND_TELEMETRY_WS_URL={os.getenv('BACKEND_TELEMETRY_WS_URL','ws://backend.quanttrad:8000/api/bots/ws/telemetry/ingest')}",
         ]
-        for key in (
-            "SNAPSHOT_FAST_INTERVAL_MS",
-            "SNAPSHOT_IDLE_INTERVAL_MS",
-            "SNAPSHOT_IDLE_CYCLES",
-            "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
-            "BOTLENS_STREAM_MAX_SERIES",
-            "BOTLENS_STREAM_MAX_CANDLES",
-            "BOTLENS_STREAM_MAX_OVERLAYS",
-            "BOTLENS_STREAM_MAX_OVERLAY_POINTS",
-            "BOTLENS_STREAM_MAX_CLOSED_TRADES",
-            "BOTLENS_STREAM_MAX_LOGS",
-            "BOTLENS_STREAM_MAX_DECISIONS",
-            "BOTLENS_STREAM_MAX_WARNINGS",
-            "BOT_RUNTIME_STEP_TRACE_QUEUE_MAX",
-            "BOT_RUNTIME_STEP_TRACE_BATCH_SIZE",
-            "BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS",
-            "BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY",
-        ):
-            value = str(os.getenv(key, "") or "").strip()
-            if value:
-                cmd.extend(["-e", f"{key}={value}"])
-        bot_env = bot.get("bot_env")
-        if isinstance(bot_env, Mapping):
-            for key, value in bot_env.items():
-                env_key = str(key or "").strip()
-                if not env_key:
-                    continue
-                cmd.extend(["-e", f"{env_key}={'' if value is None else str(value)}"])
+        for key, value in sorted(runtime_env.items()):
+            cmd.extend(["-e", f"{key}={value}"])
         cmd.extend(
             [
                 self.image,

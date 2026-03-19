@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from core.settings import get_settings
 from ..storage.storage import get_bot_run, get_latest_bot_run_view_state, get_latest_bot_runtime_run_id
 from .runner import DockerBotRunner
 
 logger = logging.getLogger(__name__)
+_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 
 _ACTIVE_STATUSES = {"starting", "running", "paused", "degraded", "telemetry_degraded"}
 _TERMINAL_STATUSES = {"idle", "stopped", "completed", "error", "failed", "crashed"}
-_HEARTBEAT_STALE_MS = max(5_000, int(os.getenv("BOT_STATUS_HEARTBEAT_STALE_MS", "45000")))
+_HEARTBEAT_STALE_MS = _BOT_RUNTIME_SETTINGS.status_heartbeat_stale_ms
 
 
 def _normalize_status(value: Any, default: str = "idle") -> str:

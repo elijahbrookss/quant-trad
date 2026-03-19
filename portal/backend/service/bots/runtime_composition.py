@@ -6,11 +6,11 @@ behavior and avoid hidden deep imports for persistence and runtime control.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
+from core.settings import get_settings
 from .bot_stream import BotStreamManager
 from .bot_watchdog import get_watchdog
 from .config_service import BotConfigService
@@ -24,6 +24,9 @@ class RuntimeMode(str, Enum):
     BACKTEST = "backtest"
     PAPER = "paper"
     LIVE = "live"
+
+
+_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 
 
 class BotStorageGateway(Protocol):
@@ -68,7 +71,7 @@ def _normalize_mode(value: RuntimeMode | str | None) -> RuntimeMode:
 
 
 def _runtime_mode_from_env() -> RuntimeMode:
-    return _normalize_mode(os.getenv("BOT_RUNTIME_MODE", RuntimeMode.BACKTEST.value))
+    return _normalize_mode(_BOT_RUNTIME_SETTINGS.mode)
 
 
 def _build_storage_gateway() -> BotStorageGateway:

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol
 
+from core.settings import get_settings
 from .bot_stream import BotStreamManager
 from .bot_state_projection import project_bot_state
 from .bot_watchdog import get_watchdog
@@ -16,6 +16,7 @@ from .runner import DockerBotRunner
 from ..storage.storage import upsert_bot
 
 logger = logging.getLogger(__name__)
+_BOT_RUNTIME_SETTINGS = get_settings().bot_runtime
 
 
 class BotControlStorage(Protocol):
@@ -52,7 +53,7 @@ class BotRuntimeControlService:
 
     @staticmethod
     def _runner_target() -> str:
-        return str(os.getenv("BOT_RUNTIME_TARGET", "docker") or "docker").strip().lower()
+        return str(_BOT_RUNTIME_SETTINGS.target or "docker").strip().lower()
 
     def _resolve_runner(self) -> BotRunner:
         if self._runner_factory is not None:
@@ -62,7 +63,7 @@ class BotRuntimeControlService:
             return DockerBotRunner.from_env()
         raise RuntimeError(
             f"Unsupported bot runtime target: {target}. "
-            "Set BOT_RUNTIME_TARGET=docker."
+            "Set QT_BOT_RUNTIME_TARGET=docker."
         )
 
     def _upsert_bot(self, payload: Mapping[str, Any]) -> None:

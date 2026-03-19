@@ -35,10 +35,11 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
+import socket
 import threading
 from typing import Callable, Dict, List, Optional, Set
 
+from core.settings import get_settings
 from ..storage.storage import (
     clear_bot_runner,
     find_orphaned_bots,
@@ -52,21 +53,19 @@ logger = logging.getLogger(__name__)
 
 
 # Configuration
-HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("BOT_WATCHDOG_HEARTBEAT_INTERVAL", "15"))
-STALE_THRESHOLD_SECONDS = float(os.getenv("BOT_WATCHDOG_STALE_THRESHOLD", "60"))
-MONITOR_INTERVAL_SECONDS = float(os.getenv("BOT_WATCHDOG_MONITOR_INTERVAL", "30"))
+_SETTINGS = get_settings().bot_runtime.watchdog
+HEARTBEAT_INTERVAL_SECONDS = _SETTINGS.heartbeat_interval_seconds
+STALE_THRESHOLD_SECONDS = _SETTINGS.stale_threshold_seconds
+MONITOR_INTERVAL_SECONDS = _SETTINGS.monitor_interval_seconds
 
 
 def _generate_runner_id() -> str:
     """Generate a stable runner ID for this server instance."""
 
-    explicit = os.getenv("BOT_RUNNER_ID")
+    explicit = _SETTINGS.runner_id
     if explicit:
         return explicit.strip()
-    hostname = os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME")
-    if hostname:
-        return hostname
-    return "unknown"
+    return socket.gethostname() or "unknown"
 
 
 class BotWatchdog:

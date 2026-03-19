@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+from core.settings import env_is_set, env_value, get_settings
 from engines.bot_runtime.core.execution_profile import compile_runtime_profile_or_error
 
 from .strategy_loader import StrategyLoader
@@ -16,6 +16,7 @@ from ..storage.storage import delete_bot, load_bots, load_strategies, upsert_bot
 MIN_STARTING_WALLET = 10.0
 _DERIVATIVE_TYPES = {"perp", "perps", "swap", "future", "futures", "derivative", "derivatives"}
 _RUNTIME_ALLOWED_DERIVATIVE_TYPES = {"future", "futures", "perp", "perps"}
+_SETTINGS = get_settings()
 
 
 class BotConfigService:
@@ -219,102 +220,101 @@ class BotConfigService:
 
     def settings_catalog(self) -> Dict[str, Any]:
         exposed = [
-            "BOT_RUNTIME_IMAGE",
-            "BOT_RUNTIME_NETWORK",
-            "BACKEND_TELEMETRY_WS_URL",
-            "SNAPSHOT_INTERVAL_MS",
-            "SNAPSHOT_FAST_INTERVAL_MS",
-            "SNAPSHOT_IDLE_INTERVAL_MS",
-            "SNAPSHOT_IDLE_CYCLES",
-            "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
-            "BOTLENS_STREAM_MAX_SERIES",
-            "BOTLENS_STREAM_MAX_CANDLES",
-            "BOTLENS_STREAM_MAX_OVERLAYS",
-            "BOTLENS_STREAM_MAX_OVERLAY_POINTS",
-            "BOTLENS_STREAM_MAX_CLOSED_TRADES",
-            "BOTLENS_STREAM_MAX_LOGS",
-            "BOTLENS_STREAM_MAX_DECISIONS",
-            "BOTLENS_STREAM_MAX_WARNINGS",
-            "BOT_RUNTIME_STEP_TRACE_QUEUE_MAX",
-            "BOT_RUNTIME_STEP_TRACE_BATCH_SIZE",
-            "BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS",
-            "BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY",
-            "BOT_WATCHDOG_HEARTBEAT_INTERVAL",
-            "BOT_WATCHDOG_STALE_THRESHOLD",
-            "BOT_WATCHDOG_MONITOR_INTERVAL",
+            "QT_BOT_RUNTIME_IMAGE",
+            "QT_BOT_RUNTIME_NETWORK",
+            "QT_BOT_RUNTIME_TELEMETRY_WS_URL",
+            "QT_BOT_RUNTIME_TELEMETRY_EVENT_POLL_MS",
+            "QT_BOT_RUNTIME_MAX_SYMBOLS_PER_STRATEGY",
+            "QT_BOT_RUNTIME_SYMBOL_PROCESS_MAX",
+            "QT_BOT_RUNTIME_STATUS_HEARTBEAT_STALE_MS",
+            "QT_BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_SERIES",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_CANDLES",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAYS",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_OVERLAY_POINTS",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_CLOSED_TRADES",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_LOGS",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_DECISIONS",
+            "QT_BOT_RUNTIME_BOTLENS_MAX_WARNINGS",
+            "QT_BOT_RUNTIME_STEP_TRACE_QUEUE_MAX",
+            "QT_BOT_RUNTIME_STEP_TRACE_BATCH_SIZE",
+            "QT_BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS",
+            "QT_BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY",
+            "QT_BOT_RUNTIME_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS",
+            "QT_BOT_RUNTIME_WATCHDOG_STALE_THRESHOLD_SECONDS",
+            "QT_BOT_RUNTIME_WATCHDOG_MONITOR_INTERVAL_SECONDS",
             "PG_DSN",
-            "PROVIDER_CREDENTIAL_KEY",
+            "QT_SECURITY_PROVIDER_CREDENTIAL_KEY",
         ]
         env_rows: List[Dict[str, Any]] = []
         for key in exposed:
-            current = os.getenv(key)
+            current = env_value(key)
             masked = self.mask_env_value(key, current)
             env_rows.append(
                 {
                     "key": key,
                     "value": masked,
                     "is_secret": masked == "***",
-                    "is_set": current not in (None, ""),
+                    "is_set": env_is_set(key),
                 }
             )
         return {
             "bot_defaults": {
-                "snapshot_interval_ms": int(os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "250") or "250"),
+                "snapshot_interval_ms": _SETTINGS.bot_runtime.snapshot.default_interval_ms,
                 "env_templates": [
-                    {"key": "SNAPSHOT_INTERVAL_MS", "default": os.getenv("BOT_DEFAULT_SNAPSHOT_INTERVAL_MS", "250")},
+                    {"key": "SNAPSHOT_INTERVAL_MS", "default": _SETTINGS.bot_runtime.snapshot.default_interval_ms},
                     {
                         "key": "SNAPSHOT_FAST_INTERVAL_MS",
-                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_FAST_INTERVAL_MS", "250"),
+                        "default": _SETTINGS.bot_runtime.snapshot.fast_interval_ms,
                     },
                     {
                         "key": "SNAPSHOT_IDLE_INTERVAL_MS",
-                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_IDLE_INTERVAL_MS", "1000"),
+                        "default": _SETTINGS.bot_runtime.snapshot.idle_interval_ms,
                     },
                     {
                         "key": "SNAPSHOT_IDLE_CYCLES",
-                        "default": os.getenv("BOT_DEFAULT_SNAPSHOT_IDLE_CYCLES", "2"),
+                        "default": _SETTINGS.bot_runtime.snapshot.idle_cycles,
                     },
                     {
                         "key": "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY",
-                        "default": os.getenv("BOT_DEFAULT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY", "10"),
+                        "default": _SETTINGS.bot_runtime.push.payload_bytes_sample_every,
                     },
-                    {"key": "BOTLENS_STREAM_MAX_SERIES", "default": os.getenv("BOTLENS_STREAM_MAX_SERIES", "12")},
-                    {"key": "BOTLENS_STREAM_MAX_CANDLES", "default": os.getenv("BOTLENS_STREAM_MAX_CANDLES", "320")},
-                    {"key": "BOTLENS_STREAM_MAX_OVERLAYS", "default": os.getenv("BOTLENS_STREAM_MAX_OVERLAYS", "400")},
+                    {"key": "BOTLENS_STREAM_MAX_SERIES", "default": _SETTINGS.bot_runtime.botlens.max_series},
+                    {"key": "BOTLENS_STREAM_MAX_CANDLES", "default": _SETTINGS.bot_runtime.botlens.max_candles},
+                    {"key": "BOTLENS_STREAM_MAX_OVERLAYS", "default": _SETTINGS.bot_runtime.botlens.max_overlays},
                     {
                         "key": "BOTLENS_STREAM_MAX_OVERLAY_POINTS",
-                        "default": os.getenv("BOTLENS_STREAM_MAX_OVERLAY_POINTS", "160"),
+                        "default": _SETTINGS.bot_runtime.botlens.max_overlay_points,
                     },
                     {
                         "key": "BOTLENS_STREAM_MAX_CLOSED_TRADES",
-                        "default": os.getenv("BOTLENS_STREAM_MAX_CLOSED_TRADES", "240"),
+                        "default": _SETTINGS.bot_runtime.botlens.max_closed_trades,
                     },
-                    {"key": "BOTLENS_STREAM_MAX_LOGS", "default": os.getenv("BOTLENS_STREAM_MAX_LOGS", "300")},
+                    {"key": "BOTLENS_STREAM_MAX_LOGS", "default": _SETTINGS.bot_runtime.botlens.max_logs},
                     {
                         "key": "BOTLENS_STREAM_MAX_DECISIONS",
-                        "default": os.getenv("BOTLENS_STREAM_MAX_DECISIONS", "600"),
+                        "default": _SETTINGS.bot_runtime.botlens.max_decisions,
                     },
                     {
                         "key": "BOTLENS_STREAM_MAX_WARNINGS",
-                        "default": os.getenv("BOTLENS_STREAM_MAX_WARNINGS", "120"),
+                        "default": _SETTINGS.bot_runtime.botlens.max_warnings,
                     },
                     {
                         "key": "BOT_RUNTIME_STEP_TRACE_QUEUE_MAX",
-                        "default": os.getenv("BOT_RUNTIME_STEP_TRACE_QUEUE_MAX", "8192"),
+                        "default": _SETTINGS.bot_runtime.step_trace.queue_max,
                     },
                     {
                         "key": "BOT_RUNTIME_STEP_TRACE_BATCH_SIZE",
-                        "default": os.getenv("BOT_RUNTIME_STEP_TRACE_BATCH_SIZE", "200"),
+                        "default": _SETTINGS.bot_runtime.step_trace.batch_size,
                     },
                     {
                         "key": "BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS",
-                        "default": os.getenv("BOT_RUNTIME_STEP_TRACE_FLUSH_INTERVAL_MS", "200"),
+                        "default": _SETTINGS.bot_runtime.step_trace.flush_interval_ms,
                     },
                     {
                         "key": "BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY",
-                        "default": os.getenv("BOT_RUNTIME_STEP_TRACE_OVERFLOW_POLICY", "drop_oldest"),
+                        "default": _SETTINGS.bot_runtime.step_trace.overflow_policy,
                     },
-                    {"key": "BACKEND_TELEMETRY_WS_URL", "default": os.getenv("BACKEND_TELEMETRY_WS_URL", "")},
                 ],
             },
             "runtime_env": env_rows,

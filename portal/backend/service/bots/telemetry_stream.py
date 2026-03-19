@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import time
 import uuid
 from collections import defaultdict, deque
@@ -12,6 +11,7 @@ from collections.abc import Mapping as AbcMapping
 from datetime import datetime
 from typing import Any, DefaultDict, Dict, Optional, Tuple
 
+from core.settings import get_settings
 from engines.bot_runtime.runtime.event_types import BOTLENS_SERIES_BOOTSTRAP, BOTLENS_SERIES_DELTA
 from fastapi import WebSocket
 
@@ -27,8 +27,9 @@ from .botlens_projection import apply_series_runtime_delta, canonicalize_project
 logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 1
-_RING_SIZE = max(32, int(os.getenv("BOTLENS_STREAM_RING_SIZE") or 2048))
-_INGEST_QUEUE_MAX = max(64, int(os.getenv("BOTLENS_INGEST_QUEUE_MAX") or 4096))
+_SETTINGS = get_settings()
+_RING_SIZE = _SETTINGS.bot_runtime.botlens.ring_size
+_INGEST_QUEUE_MAX = _SETTINGS.bot_runtime.botlens.ingest_queue_max
 
 
 def _sanitize_json(value: Any) -> Any:

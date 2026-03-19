@@ -5,7 +5,6 @@ from collections import deque
 import json
 import logging
 import multiprocessing as mp
-import os
 import queue
 import threading
 import time
@@ -13,6 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Sequence
 
+from core.settings import get_settings
 from engines.bot_runtime.runtime.runtime import BotRuntime
 from engines.bot_runtime.core.runtime_events import RuntimeEventName, build_correlation_id, new_runtime_event
 from portal.backend.db.session import db
@@ -39,18 +39,39 @@ from portal.backend.service.storage.storage import (
 
 logger = logging.getLogger(__name__)
 _TERMINAL_STATUSES = {"completed", "stopped", "error", "failed", "crashed"}
-_MAX_SYMBOLS_PER_STRATEGY = 10
 _MAX_SYMBOL_WORKERS = 8
 _VIEW_STATE_SCHEMA_VERSION = 1
+_SETTINGS = get_settings()
+_LOGGING_SETTINGS = _SETTINGS.logging
+_BOT_RUNTIME_SETTINGS = _SETTINGS.bot_runtime
+_TELEMETRY_SETTINGS = _BOT_RUNTIME_SETTINGS.telemetry
+_BOTLENS_SETTINGS = _BOT_RUNTIME_SETTINGS.botlens
+_PUSH_SETTINGS = _BOT_RUNTIME_SETTINGS.push
+_MAX_SYMBOLS_PER_STRATEGY = _BOT_RUNTIME_SETTINGS.max_symbols_per_strategy
 
 
 def _configure_logging() -> None:
-    logging.basicConfig(level=getattr(logging, os.getenv("PORTAL_LOG_LEVEL", "INFO").upper(), logging.INFO))
+    logging.basicConfig(level=_LOGGING_SETTINGS.level)
 
 
-_TELEMETRY_EMIT_QUEUE_MAX = max(8, coerce_int(os.getenv("BOT_TELEMETRY_EMIT_QUEUE_MAX"), 256))
-_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS = max(10, coerce_int(os.getenv("BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS"), 1000))
-_TELEMETRY_EMIT_RETRY_MS = max(50, coerce_int(os.getenv("BOT_TELEMETRY_EMIT_RETRY_MS"), 250))
+_TELEMETRY_EMIT_QUEUE_MAX = _TELEMETRY_SETTINGS.emit_queue_max
+_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS = _TELEMETRY_SETTINGS.emit_queue_timeout_ms
+_TELEMETRY_EMIT_RETRY_MS = _TELEMETRY_SETTINGS.emit_retry_ms
+
+
+def _materialize_bot_config(bot_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    materialized = dict(bot_payload or {})
+    snapshot_interval = materialized.get("snapshot_interval_ms")
+    if "SNAPSHOT_INTERVAL_MS" not in materialized and isinstance(snapshot_interval, int) and snapshot_interval > 0:
+        materialized["SNAPSHOT_INTERVAL_MS"] = snapshot_interval
+    bot_env = bot_payload.get("bot_env") if isinstance(bot_payload, Mapping) else None
+    if isinstance(bot_env, Mapping):
+        for raw_key, raw_value in bot_env.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            materialized[key] = raw_value
+    return materialized
 
 
 def _normalise_balances(raw_balances: Mapping[str, Any]) -> Dict[str, float]:
@@ -191,19 +212,16 @@ def _series_worker(
         "BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY" not in child_config
         and "push_payload_bytes_sample_every" not in child_config
     ):
-        child_config["BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"] = max(
-            1,
-            coerce_int(os.getenv("BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"), 10),
-        )
+        child_config["BOT_RUNTIME_PUSH_PAYLOAD_BYTES_SAMPLE_EVERY"] = _PUSH_SETTINGS.payload_bytes_sample_every
     runtime_error: Dict[str, str] = {}
-    stream_max_series = max(1, coerce_int(os.getenv("BOTLENS_STREAM_MAX_SERIES"), 12))
-    stream_max_candles = max(50, coerce_int(os.getenv("BOTLENS_STREAM_MAX_CANDLES"), 320))
-    stream_max_overlays = max(50, coerce_int(os.getenv("BOTLENS_STREAM_MAX_OVERLAYS"), 400))
-    stream_max_overlay_points = max(20, coerce_int(os.getenv("BOTLENS_STREAM_MAX_OVERLAY_POINTS"), 160))
-    stream_max_closed_trades = max(20, coerce_int(os.getenv("BOTLENS_STREAM_MAX_CLOSED_TRADES"), 240))
-    stream_max_logs = max(50, coerce_int(os.getenv("BOTLENS_STREAM_MAX_LOGS"), 300))
-    stream_max_decisions = max(100, coerce_int(os.getenv("BOTLENS_STREAM_MAX_DECISIONS"), 600))
-    stream_max_warnings = max(20, coerce_int(os.getenv("BOTLENS_STREAM_MAX_WARNINGS"), 120))
+    stream_max_series = _BOTLENS_SETTINGS.max_series
+    stream_max_candles = _BOTLENS_SETTINGS.max_candles
+    stream_max_overlays = _BOTLENS_SETTINGS.max_overlays
+    stream_max_overlay_points = _BOTLENS_SETTINGS.max_overlay_points
+    stream_max_closed_trades = _BOTLENS_SETTINGS.max_closed_trades
+    stream_max_logs = _BOTLENS_SETTINGS.max_logs
+    stream_max_decisions = _BOTLENS_SETTINGS.max_decisions
+    stream_max_warnings = _BOTLENS_SETTINGS.max_warnings
     runtime = BotRuntime(bot_id=bot_id, config=child_config, deps=build_bot_runtime_deps())
     runtime.reset_if_finished()
     runtime.warm_up()
@@ -298,16 +316,17 @@ def _series_worker(
 
 def main() -> int:
     _configure_logging()
-    bot_id = str(os.getenv("BOT_ID") or "").strip()
+    bot_id = str(_BOT_RUNTIME_SETTINGS.bot_id or "").strip()
     if not bot_id:
-        raise RuntimeError("BOT_ID is required")
+        raise RuntimeError("QT_BOT_RUNTIME_BOT_ID is required")
 
-    telemetry_url = str(os.getenv("BACKEND_TELEMETRY_WS_URL") or "").strip()
-    event_poll_ms = max(10, coerce_int(os.getenv("BOT_TELEMETRY_EVENT_POLL_MS"), 50))
+    telemetry_url = str(_TELEMETRY_SETTINGS.ws_url or "").strip()
+    event_poll_ms = _TELEMETRY_SETTINGS.event_poll_ms
 
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
     if bot is None:
         raise RuntimeError(f"Bot not found: {bot_id}")
+    runtime_bot_config = _materialize_bot_config(bot)
 
     run_id = str(uuid.uuid4())
     if list_bot_runtime_events(bot_id=bot_id, run_id=run_id, after_seq=0, limit=1):
@@ -318,7 +337,7 @@ def main() -> int:
     if not strategy_id:
         raise RuntimeError(f"Bot {bot_id} has no strategy_id configured")
     all_symbols = _load_strategy_symbols(strategy_id)
-    max_symbols = coerce_int(os.getenv("BOT_MAX_SYMBOLS_PER_STRATEGY"), _MAX_SYMBOLS_PER_STRATEGY)
+    max_symbols = _MAX_SYMBOLS_PER_STRATEGY
     if len(all_symbols) > max_symbols:
         raise RuntimeError(
             f"Strategy {strategy_id} has {len(all_symbols)} symbols but runtime limit is {max_symbols}. "
@@ -326,7 +345,11 @@ def main() -> int:
         )
 
     default_max_workers = max(_MAX_SYMBOL_WORKERS, len(all_symbols))
-    max_workers = coerce_int(os.getenv("BOT_SYMBOL_PROCESS_MAX"), default_max_workers)
+    max_workers = (
+        _BOT_RUNTIME_SETTINGS.symbol_process_max
+        if _BOT_RUNTIME_SETTINGS.symbol_process_max is not None
+        else default_max_workers
+    )
     symbol_shards = _assign_symbols_to_workers(
         all_symbols,
         max_workers=max(1, max_workers),
@@ -366,7 +389,7 @@ def main() -> int:
                 "worker_id": worker_id,
                 "strategy_id": strategy_id,
                 "symbols": list(symbols),
-                "bot_config": bot,
+                "bot_config": runtime_bot_config,
                 "shared_wallet_proxy": shared_wallet_proxy,
                 "event_queue": event_queue,
             },
