@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Dict, Optional
 
 from sqlalchemy import create_engine, text
@@ -11,14 +10,16 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from cryptography.fernet import Fernet, InvalidToken
 from core.logger import logger
+from core.settings import get_settings
 
 _TABLE_NAME = "portal_provider_credentials"
 _ENGINE: Optional[Engine] = None
 _FERNET: Optional[Fernet] = None
+_SETTINGS = get_settings()
 
 
 def _dsn() -> str:
-    value = os.getenv("PG_DSN")
+    value = _SETTINGS.database.dsn
     if value:
         return value
     raise RuntimeError("PG_DSN is required for credential storage.")
@@ -38,7 +39,9 @@ def _cipher() -> Fernet:
         try:
             _FERNET = Fernet(key)
         except Exception as exc:  # pragma: no cover - configuration error
-            raise RuntimeError("PROVIDER_CREDENTIAL_KEY must be a valid 32-byte urlsafe base64 key.") from exc
+            raise RuntimeError(
+                "QT_SECURITY_PROVIDER_CREDENTIAL_KEY must be a valid 32-byte urlsafe base64 key."
+            ) from exc
     return _FERNET
 
 
@@ -47,12 +50,12 @@ def _normalize(value: Optional[str]) -> str:
 
 
 def _ensure_provider_key() -> str:
-    """Fetch PROVIDER_CREDENTIAL_KEY from environment and fail loud if missing."""
-    existing = str(os.getenv("PROVIDER_CREDENTIAL_KEY", "") or "").strip()
+    """Fetch the provider credential encryption key and fail loud if missing."""
+    existing = str(_SETTINGS.security.provider_credential_key or "").strip()
     if existing:
         return existing
     raise RuntimeError(
-        "PROVIDER_CREDENTIAL_KEY is required for provider credential encryption/decryption."
+        "QT_SECURITY_PROVIDER_CREDENTIAL_KEY is required for provider credential encryption/decryption."
     )
 
 
@@ -145,7 +148,10 @@ def load_credentials(provider_id: Optional[str], venue_id: Optional[str]) -> Opt
             normalized_venue,
             exc.__class__.__name__,
         )
-        raise RuntimeError("Failed to decrypt provider credentials. Check PROVIDER_CREDENTIAL_KEY and re-save secrets.") from exc
+        raise RuntimeError(
+            "Failed to decrypt provider credentials. "
+            "Check QT_SECURITY_PROVIDER_CREDENTIAL_KEY and re-save secrets."
+        ) from exc
     try:
         payload = json.loads(decrypted.decode("utf-8"))
     except json.JSONDecodeError as exc:  # pragma: no cover - defensive

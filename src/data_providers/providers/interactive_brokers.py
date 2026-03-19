@@ -35,7 +35,6 @@ import asyncio
 import datetime as dt
 import json
 import math
-import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -44,8 +43,11 @@ import pandas as pd
 from ib_insync import IB, Contract, util
 
 from core.logger import logger
+from core.settings import get_settings
 from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
+
+_IBKR_SETTINGS = get_settings().providers.ibkr
 
 
 @dataclass(frozen=True)
@@ -82,28 +84,21 @@ class InteractiveBrokersProvider(BaseDataProvider):
     def __init__(self, *, exchange: Optional[str] = None, persistence=None, settings=None):
         super().__init__(persistence=persistence, settings=settings)
 
-        self._host = os.getenv("IB_HOST", "ibkr-gateway")
+        self._host = _IBKR_SETTINGS.host
         # The IB Gateway paper-trading endpoint defaults to 4002 while the
         # production endpoint listens on 4001. Users can override the port via
         # ``IB_PORT`` when connecting to a standalone TWS installation.
-        self._port = int(os.getenv("IB_PORT", "4002"))
-        self._client_id = int(os.getenv("IB_CLIENT_ID", "1"))
+        self._port = _IBKR_SETTINGS.port
+        self._client_id = _IBKR_SETTINGS.client_id
 
         # Resolve default contract hints.
-        self._default_currency = os.getenv("IB_DEFAULT_CURRENCY", "USD").upper()
-        default_sec = os.getenv("IB_DEFAULT_SEC_TYPE", "STK").upper()
-        default_exchange = os.getenv("IB_DEFAULT_EXCHANGE", "SMART").upper()
+        self._default_currency = _IBKR_SETTINGS.default_currency
+        default_sec = _IBKR_SETTINGS.default_sec_type
+        default_exchange = _IBKR_SETTINGS.default_exchange
 
         sec_hint, parsed_exchange = self._parse_exchange(exchange)
         self._default_sec_type = sec_hint or default_sec
         self._default_exchange = parsed_exchange or default_exchange
-        if "IB_DEFAULT_CURRENCY" not in os.environ:
-            logger.warning("ibkr_default_currency_fallback | currency=%s", self._default_currency)
-        if "IB_DEFAULT_SEC_TYPE" not in os.environ and not sec_hint:
-            logger.warning("ibkr_default_sec_type_fallback | sec_type=%s", self._default_sec_type)
-        if "IB_DEFAULT_EXCHANGE" not in os.environ and not parsed_exchange:
-            logger.warning("ibkr_default_exchange_fallback | exchange=%s", self._default_exchange)
-
         self._ib = IB()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._symbol_overrides = self._load_symbol_overrides()
@@ -273,7 +268,7 @@ def fetch_from_api(
                 endDateTime=end_dt,
                 durationStr=duration,
                 barSizeSetting=bar_size,
-                whatToShow=os.getenv("IB_WHAT_TO_SHOW", "TRADES"),
+                whatToShow=_IBKR_SETTINGS.what_to_show,
                 useRTH=False,
                 formatDate=1,
                 keepUpToDate=False,
@@ -401,17 +396,19 @@ def _parse_exchange(self, exchange: Optional[str]) -> Tuple[Optional[str], Optio
     return None, parts[0].upper()
 
 def _load_symbol_overrides(self) -> Dict[str, Dict[str, Any]]:
-    """Load optional per-symbol contract overrides from the environment."""
+    """Load optional per-symbol contract overrides from centralized settings."""
 
-    raw = os.getenv("IB_SYMBOL_OVERRIDES")
+    raw = _IBKR_SETTINGS.symbol_overrides
     if not raw:
         return {}
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("ibkr_symbol_override_parse_failed | error=%s", exc)
-        return {}
+    data = raw if isinstance(raw, dict) else None
+    if data is None:
+        try:
+            data = json.loads(str(raw))
+        except json.JSONDecodeError as exc:
+            logger.warning("ibkr_symbol_override_parse_failed | error=%s", exc)
+            return {}
 
     overrides: Dict[str, Dict[str, Any]] = {}
     if isinstance(data, dict):

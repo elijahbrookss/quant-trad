@@ -1,5 +1,4 @@
 import datetime as dt
-import os
 import pandas as pd
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
@@ -9,15 +8,18 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass
 from alpaca.common.exceptions import APIError
 from core.logger import logger
+from core.settings import get_settings
 from data_providers.registry import _REGISTRY
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType
+
+_ALPACA_SETTINGS = get_settings().providers.alpaca
 
 class AlpacaProvider(BaseDataProvider):
     def __init__(self, *, persistence=None, settings=None):
         super().__init__(persistence=persistence, settings=settings)
 
-        self._api_key = os.getenv("ALPACA_API_KEY")
-        self._secret_key = os.getenv("ALPACA_SECRET_KEY")
+        self._api_key = _ALPACA_SETTINGS.api_key
+        self._secret_key = _ALPACA_SETTINGS.secret_key
 
         self.client = StockHistoricalDataClient(
             self._api_key,
@@ -166,8 +168,7 @@ class AlpacaProvider(BaseDataProvider):
 
     @staticmethod
     def _paper_trading_enabled() -> bool:
-        flag = os.getenv("ALPACA_PAPER", "true").strip().lower()
-        return flag in {"1", "true", "yes", "on"}
+        return _ALPACA_SETTINGS.paper
 
 
 @_REGISTRY.provider(

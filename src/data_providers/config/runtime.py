@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from typing import Optional
-import os
 
+from core.settings import get_settings
+
+_SETTINGS = get_settings()
 
 @dataclass(frozen=True)
 class PersistenceConfig:
@@ -34,16 +36,17 @@ def _parse_int(value: Optional[str], default: int) -> int:
 def runtime_config_from_env() -> ProviderRuntimeConfig:
     """Build a runtime configuration from environment variables."""
 
+    runtime_settings = _SETTINGS.providers.runtime
     return ProviderRuntimeConfig(
-        history_segment_points=_parse_int(os.getenv("HISTORY_SEGMENT_POINTS"), 1000),
+        history_segment_points=_parse_int(runtime_settings.history_segment_points, 1000),
         persistence=PersistenceConfig(
-            dsn=os.getenv("PG_DSN"),
-            candles_raw_table=os.getenv("CANDLES_RAW_TABLE", "market_candles_raw"),
-            candle_stats_table=os.getenv("CANDLE_STATS_TABLE", "candle_stats"),
-            regime_stats_table=os.getenv("REGIME_STATS_TABLE", "regime_stats"),
-            regime_blocks_table=os.getenv("REGIME_BLOCKS_TABLE", "regime_blocks"),
-            derivatives_state_table=os.getenv("DERIVATIVES_STATE_TABLE", "derivatives_market_state"),
-            closures_table=os.getenv("CANDLE_CLOSURES_TABLE", "portal_candle_closures"),
+            dsn=_SETTINGS.database.dsn,
+            candles_raw_table=runtime_settings.persistence.candles_raw_table,
+            candle_stats_table=runtime_settings.persistence.candle_stats_table,
+            regime_stats_table=runtime_settings.persistence.regime_stats_table,
+            regime_blocks_table=runtime_settings.persistence.regime_blocks_table,
+            derivatives_state_table=runtime_settings.persistence.derivatives_state_table,
+            closures_table=runtime_settings.persistence.closures_table,
         ),
     )
 

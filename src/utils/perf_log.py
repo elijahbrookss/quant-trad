@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
-import os
 import random
 import threading
 import time
 from contextlib import AbstractContextManager
 from typing import Any, Dict, Mapping, Optional
 
+from core.settings import get_settings
 from .log_context import build_log_context, merge_log_context, with_log_context
+
+_OBS_SETTINGS = get_settings().observability
 
 DEFAULT_OBS_ENABLED = True
 DEFAULT_OBS_STEP_SAMPLE_RATE = 0.01
@@ -56,14 +58,14 @@ def _config_value(config: Optional[Mapping[str, Any]], key: str) -> Optional[obj
 def get_obs_enabled(config: Optional[Mapping[str, Any]] = None) -> bool:
     value = _config_value(config, "OBS_ENABLED")
     if value is None:
-        value = os.getenv("OBS_ENABLED")
+        value = _OBS_SETTINGS.enabled
     return _coerce_bool(value, DEFAULT_OBS_ENABLED)
 
 
 def get_obs_step_sample_rate(config: Optional[Mapping[str, Any]] = None) -> float:
     value = _config_value(config, "OBS_STEP_SAMPLE_RATE")
     if value is None:
-        value = os.getenv("OBS_STEP_SAMPLE_RATE")
+        value = _OBS_SETTINGS.step_sample_rate
     rate = _coerce_float(value, DEFAULT_OBS_STEP_SAMPLE_RATE)
     if rate <= 0:
         return 0.0
@@ -75,7 +77,7 @@ def get_obs_step_sample_rate(config: Optional[Mapping[str, Any]] = None) -> floa
 def get_obs_slow_ms(config: Optional[Mapping[str, Any]] = None) -> float:
     value = _config_value(config, "OBS_SLOW_MS")
     if value is None:
-        value = os.getenv("OBS_SLOW_MS")
+        value = _OBS_SETTINGS.slow_ms
     slow_ms = _coerce_float(value, DEFAULT_OBS_SLOW_MS)
     return slow_ms if slow_ms > 0 else DEFAULT_OBS_SLOW_MS
 
@@ -83,7 +85,7 @@ def get_obs_slow_ms(config: Optional[Mapping[str, Any]] = None) -> float:
 def get_obs_log_throttle_seconds(config: Optional[Mapping[str, Any]] = None) -> float:
     value = _config_value(config, "OBS_LOG_THROTTLE_SECONDS")
     if value is None:
-        value = os.getenv("OBS_LOG_THROTTLE_SECONDS")
+        value = _OBS_SETTINGS.log_throttle_seconds
     interval_s = _coerce_float(value, DEFAULT_OBS_LOG_THROTTLE_S)
     return interval_s if interval_s >= 0 else DEFAULT_OBS_LOG_THROTTLE_S
 

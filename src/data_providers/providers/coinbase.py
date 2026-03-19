@@ -154,7 +154,7 @@ class CoinbaseProvider(BaseDataProvider):
             logger.error("coinbase_credentials_store_error | error=%s", exc)
             raise RuntimeError(
                 "Coinbase credentials unavailable from provider credential store. "
-                "Fix PROVIDER_CREDENTIAL_KEY and re-save COINBASE credentials."
+                "Fix QT_SECURITY_PROVIDER_CREDENTIAL_KEY and re-save COINBASE credentials."
             ) from exc
 
         if not stored:
