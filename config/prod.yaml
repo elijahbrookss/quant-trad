@@ -1,0 +1,2 @@
+logging:
+  env_name: prod

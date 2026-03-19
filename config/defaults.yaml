@@ -1,0 +1,151 @@
+logging:
+  level: INFO
+  debug: false
+  env_name: dev
+  loki_url: null
+
+backend:
+  host: 0.0.0.0
+  port: 8000
+  allowed_origins:
+    - http://localhost
+    - http://localhost:3000
+    - http://localhost:5173
+    - http://127.0.0.1
+    - http://127.0.0.1:5173
+
+database:
+  dsn: null
+  application_name: quant_trad_portal
+  pool_recycle_seconds: 900
+  pool_timeout_seconds: 30
+  connect_timeout_seconds: 5
+  pool_pre_ping: true
+  tcp_keepalive_enabled: true
+  tcp_keepalive_idle_seconds: 30
+  tcp_keepalive_interval_seconds: 10
+  tcp_keepalive_count: 3
+  write_retry_attempts: 2
+
+observability:
+  enabled: true
+  step_sample_rate: 0.01
+  slow_ms: 250.0
+  log_throttle_seconds: 30.0
+
+async_jobs:
+  running_timeout_seconds: 1800
+  quantlab_job_wait_timeout_seconds: 180
+  quantlab_job_poll_interval_seconds: 0.2
+
+workers:
+  quantlab:
+    processes: 3
+    index: 0
+    total: 1
+    idle_sleep_seconds: 0.2
+    db_wait_timeout_seconds: 120
+  stats:
+    processes: 2
+    index: 0
+    total: 1
+    idle_sleep_seconds: 0.25
+    db_wait_timeout_seconds: 120
+
+bot_runtime:
+  mode: backtest
+  target: docker
+  image: quanttrad-backend:dev
+  network: quant-trad_quanttrad
+  bot_id: null
+  max_symbols_per_strategy: 10
+  symbol_process_max: null
+  status_heartbeat_stale_ms: 45000
+  snapshot:
+    default_interval_ms: 250
+    fast_interval_ms: 250
+    idle_interval_ms: 1000
+    idle_cycles: 2
+  push:
+    payload_bytes_sample_every: 10
+  telemetry:
+    ws_url: ws://backend.quanttrad:8000/api/bots/ws/telemetry/ingest
+    event_poll_ms: 50
+    emit_queue_max: 256
+    emit_queue_timeout_ms: 1000
+    emit_retry_ms: 250
+  botlens:
+    max_series: 12
+    max_candles: 320
+    max_overlays: 400
+    max_overlay_points: 160
+    max_closed_trades: 240
+    max_logs: 300
+    max_decisions: 600
+    max_warnings: 120
+    ring_size: 2048
+    ingest_queue_max: 4096
+  step_trace:
+    queue_max: 8192
+    batch_size: 200
+    flush_interval_ms: 200
+    overflow_policy: drop_oldest
+  watchdog:
+    heartbeat_interval_seconds: 15
+    stale_threshold_seconds: 60
+    monitor_interval_seconds: 30
+    runner_id: null
+
+providers:
+  runtime:
+    history_segment_points: 1000
+    persistence:
+      candles_raw_table: market_candles_raw
+      candle_stats_table: candle_stats
+      regime_stats_table: regime_stats
+      regime_blocks_table: regime_blocks
+      derivatives_state_table: derivatives_market_state
+      closures_table: portal_candle_closures
+  ibkr:
+    host: ibkr-gateway
+    port: 4002
+    client_id: 1
+    default_currency: USD
+    default_sec_type: STK
+    default_exchange: SMART
+    what_to_show: TRADES
+    symbol_overrides: {}
+  ccxt:
+    sandbox_mode: false
+    ohlcv_limit: null
+    api_key: null
+    api_secret: null
+    secret: null
+    password: null
+  alpaca:
+    api_key: null
+    secret_key: null
+    paper: true
+
+security:
+  provider_credential_key: null
+
+frontend:
+  api_base_url: /api
+  botlens:
+    auto_fit_overlay_extents: false
+    debug: false
+    target_render_lag_ms: 120
+    catchup_render_lag_ms: 1200
+    catchup_seq_behind: 6
+    catchup_queue_depth: 8
+    normal_apply_interval_ms: 33
+    catchup_apply_interval_ms: 12
+    max_catchup_batch: 2
+    metrics_publish_ms: 120
+    snap_candles_behind: 30
+    ledger_poll_ms: 800
+    ledger_poll_limit: 500
+    ledger_max_events: 3000
+    live_resubscribe_limit: 3
+    live_resubscribe_window_ms: 30000

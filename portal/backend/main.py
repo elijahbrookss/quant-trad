@@ -3,12 +3,12 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import logging
-import os
 from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.settings import get_settings
 from .controller import bots, candles, indicators as ind_controller, instruments, providers, reports, strategies
 from .service.bots.bot_watchdog import get_watchdog
 from .service.db.postgres_extensions import ensure_postgres_extensions
@@ -22,30 +22,19 @@ import indicators  # noqa: F401
 import signals  # noqa: F401
 from signals.overlays.builtins import ensure_builtin_overlays_registered
 
+_SETTINGS = get_settings()
+
 
 def _allowed_origins() -> List[str]:
-    """Load allowed origins from env, defaulting to common dev hosts."""
+    """Load allowed origins from centralized settings."""
 
-    raw = os.getenv("PORTAL_ALLOWED_ORIGINS", "")
-    if raw:
-        origins = [item.strip() for item in raw.split(",") if item.strip()]
-        if origins:
-            return origins
-    # default to typical local dev hosts/ports
-    return [
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1",
-        "http://127.0.0.1:5173",
-    ]
+    return list(_SETTINGS.backend.allowed_origins)
 
 
 def _configure_logging() -> None:
     """Configure basic logging once for the API server."""
 
-    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = _SETTINGS.logging.level
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",

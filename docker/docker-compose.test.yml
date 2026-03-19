@@ -11,8 +11,8 @@ services:
       - ../secrets.env
       - ../.env.test
     environment:
-      ALPACA_API_KEY: ${ALPACA_API_KEY}
-      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      QT_PROVIDERS_ALPACA_API_KEY: ${QT_PROVIDERS_ALPACA_API_KEY}
+      QT_PROVIDERS_ALPACA_SECRET_KEY: ${QT_PROVIDERS_ALPACA_SECRET_KEY}
     depends_on:
       timescaledb:
         condition: service_healthy

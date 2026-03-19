@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Callable, TypeVar
 
+from core.settings import get_settings
 from sqlalchemy import or_
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from ._shared import *
 
 _T = TypeVar("_T")
-_DB_WRITE_RETRY_ATTEMPTS = max(1, _coerce_int(os.getenv("PORTAL_DB_WRITE_RETRY_ATTEMPTS")) or 2)
+_DATABASE_SETTINGS = get_settings().database
+_DB_WRITE_RETRY_ATTEMPTS = max(1, int(_DATABASE_SETTINGS.write_retry_attempts))
 
 
 def _normalize_botlens_series_key(value: Any) -> str:

@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from core.settings import get_settings
 from sqlalchemy import select, update
 
 from portal.backend.db import AsyncJobRecord, db
 
 
 logger = logging.getLogger(__name__)
+_ASYNC_SETTINGS = get_settings().async_jobs
 
 
 STATUS_QUEUED = "queued"
@@ -23,7 +24,7 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_RETRY = "retry"
 TERMINAL_STATUSES = {STATUS_SUCCEEDED, STATUS_FAILED}
-DEFAULT_RUNNING_TIMEOUT_SECONDS = float(os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS", "1800"))
+DEFAULT_RUNNING_TIMEOUT_SECONDS = float(_ASYNC_SETTINGS.running_timeout_seconds)
 
 
 @dataclass(frozen=True)
@@ -58,13 +59,7 @@ def _partition_slot(partition_hash: int, partition_total: int) -> int:
 
 
 def _running_timeout_seconds() -> float:
-    raw = os.getenv("ASYNC_JOB_RUNNING_TIMEOUT_SECONDS")
-    if raw is None:
-        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return max(0.0, float(DEFAULT_RUNNING_TIMEOUT_SECONDS))
+    return max(0.0, float(_ASYNC_SETTINGS.running_timeout_seconds))
 
 
 def _reclaim_stale_running_jobs(

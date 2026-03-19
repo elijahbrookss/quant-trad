@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 from typing import Any, Dict, Mapping, Optional
 
+from core.settings import get_settings
 from portal.backend.service.async_jobs import enqueue_job, get_job
 
 
@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 JOB_TYPE_SIGNALS = "quantlab_signals"
 
 
-DEFAULT_WAIT_TIMEOUT_SECONDS = float(os.getenv("QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", "180"))
-DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("QUANTLAB_JOB_POLL_INTERVAL_SECONDS", "0.2"))
+_SETTINGS = get_settings().async_jobs
+DEFAULT_WAIT_TIMEOUT_SECONDS = float(_SETTINGS.quantlab_job_wait_timeout_seconds)
+DEFAULT_POLL_INTERVAL_SECONDS = float(_SETTINGS.quantlab_job_poll_interval_seconds)
 
 
 class AsyncJobTimeoutError(RuntimeError):

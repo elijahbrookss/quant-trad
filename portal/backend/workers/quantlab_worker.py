@@ -7,6 +7,7 @@ import socket
 import time
 from typing import Any, Dict
 
+from core.settings import get_settings
 import indicators  # noqa: F401
 import signals  # noqa: F401
 from signals.overlays.builtins import ensure_builtin_overlays_registered
@@ -29,11 +30,12 @@ from portal.backend.service.indicators.indicator_service.runtime_contract import
 
 logger = logging.getLogger(__name__)
 _STOP = False
+_SETTINGS = get_settings()
+_QUANTLAB_WORKER_SETTINGS = _SETTINGS.workers.quantlab
 
 
 def _configure_logging() -> None:
-    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = _SETTINGS.logging.level
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -50,8 +52,8 @@ def _worker_identity() -> tuple[str, int, int]:
     host = socket.gethostname()
     pid = os.getpid()
     worker_id = f"quantlab:{host}:{pid}"
-    index = int(os.getenv("QUANTLAB_WORKER_INDEX", "0") or 0)
-    total = max(1, int(os.getenv("QUANTLAB_WORKER_TOTAL", "1") or 1))
+    index = _QUANTLAB_WORKER_SETTINGS.index
+    total = _QUANTLAB_WORKER_SETTINGS.total
     return worker_id, index, total
 
 
@@ -83,8 +85,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     worker_id, partition_index, partition_total = _worker_identity()
-    idle_sleep = float(os.getenv("QUANTLAB_WORKER_IDLE_SLEEP_SECONDS", "0.2"))
-    db_wait_timeout = float(os.getenv("QUANTLAB_WORKER_DB_WAIT_TIMEOUT_SECONDS", "120"))
+    idle_sleep = _QUANTLAB_WORKER_SETTINGS.idle_sleep_seconds
+    db_wait_timeout = _QUANTLAB_WORKER_SETTINGS.db_wait_timeout_seconds
 
     if not wait_for_database_ready(timeout_seconds=db_wait_timeout, poll_interval_seconds=0.5):
         logger.error(

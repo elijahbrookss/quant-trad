@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
-import os
 
+from core.settings import get_settings
 from portal.backend.service.market.stats_queue import StatsWorker
+
+_SETTINGS = get_settings()
 
 
 def _configure_logging() -> None:
-    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = _SETTINGS.logging.level
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",

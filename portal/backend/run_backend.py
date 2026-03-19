@@ -12,6 +12,9 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from core.settings import get_settings
+
+_SETTINGS = get_settings()
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +29,7 @@ _STOP = False
 
 
 def _configure_logging() -> None:
-    level_name = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level = _SETTINGS.logging.level
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -80,17 +82,17 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
-    host = os.getenv("BACKEND_HOST", "0.0.0.0")
-    port = os.getenv("BACKEND_PORT", "8000")
-    quantlab_workers = max(1, int(os.getenv("QUANTLAB_WORKER_PROCESSES", "3")))
-    stats_workers = max(1, int(os.getenv("STATS_WORKER_PROCESSES", "2")))
+    host = _SETTINGS.backend.host
+    port = _SETTINGS.backend.port
+    quantlab_workers = _SETTINGS.workers.quantlab.processes
+    stats_workers = _SETTINGS.workers.stats.processes
     node = socket.gethostname()
 
     logger.info(
         "backend_supervisor_starting | node=%s api=%s:%s quantlab_workers=%s stats_workers=%s",
         node,
         host,
-        port,
+        str(port),
         quantlab_workers,
         stats_workers,
     )
@@ -114,8 +116,8 @@ def main() -> int:
                 f"quantlab-worker-{idx}",
                 [sys.executable, "-m", "portal.backend.workers.quantlab_worker"],
                 env_overrides={
-                    "QUANTLAB_WORKER_INDEX": str(idx),
-                    "QUANTLAB_WORKER_TOTAL": str(quantlab_workers),
+                    "QT_WORKERS_QUANTLAB_INDEX": str(idx),
+                    "QT_WORKERS_QUANTLAB_TOTAL": str(quantlab_workers),
                 },
             )
         )
@@ -126,8 +128,8 @@ def main() -> int:
                 f"stats-worker-{idx}",
                 [sys.executable, "-m", "portal.backend.workers.stats_worker"],
                 env_overrides={
-                    "STATS_WORKER_INDEX": str(idx),
-                    "STATS_WORKER_TOTAL": str(stats_workers),
+                    "QT_WORKERS_STATS_INDEX": str(idx),
+                    "QT_WORKERS_STATS_TOTAL": str(stats_workers),
                 },
             )
         )

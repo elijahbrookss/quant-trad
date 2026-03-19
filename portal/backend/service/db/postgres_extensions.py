@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Dict, Iterable, Optional, Set, Tuple
 
+from core.settings import get_settings
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
+_DATABASE_SETTINGS = get_settings().database
 
 _EXTENSIONS = ("pg_stat_statements", "pg_buffercache", "system_stats")
 
@@ -56,7 +57,7 @@ def _apply_extensions(conn, extensions: Iterable[str]) -> Dict[str, str]:
 
 
 def ensure_postgres_extensions(*, timeout_s: int = 2, retries: int = 1) -> None:
-    dsn = os.getenv("PG_DSN")
+    dsn = _DATABASE_SETTINGS.dsn
     if not dsn:
         logger.warning("postgres_extensions_skipped | reason=missing_pg_dsn")
         return

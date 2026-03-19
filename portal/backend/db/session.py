@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
+from core.settings import get_settings
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -17,6 +17,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 _SCHEMA_LOCK_KEY = 9021001
+_DB_SETTINGS = get_settings().database
 
 
 class Database:
@@ -32,53 +33,31 @@ class Database:
     @staticmethod
     def _resolve_dsn() -> str:
         """Return the configured PostgreSQL DSN."""
-        value = os.getenv("PG_DSN")
+        value = _DB_SETTINGS.dsn
         if value:
             return value
         raise RuntimeError("PG_DSN is required. No SQLite fallback is supported.")
 
-    @staticmethod
-    def _env_flag(name: str, default: bool) -> bool:
-        raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        raw = os.getenv(name)
-        if raw in (None, ""):
-            return int(default)
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return int(default)
-
     def _engine_options(self) -> Dict[str, object]:
         """Build SQLAlchemy engine options with liveness guards enabled by default."""
 
-        pool_recycle = max(-1, self._env_int("PG_POOL_RECYCLE_SECONDS", 900))
-        pool_timeout = max(1, self._env_int("PG_POOL_TIMEOUT_SECONDS", 30))
-        connect_timeout = max(1, self._env_int("PG_CONNECT_TIMEOUT_SECONDS", 5))
-
         connect_args: Dict[str, object] = {
-            "connect_timeout": connect_timeout,
-            "application_name": str(os.getenv("PG_APPLICATION_NAME", "quant_trad_portal")).strip()
-            or "quant_trad_portal",
+            "connect_timeout": _DB_SETTINGS.connect_timeout_seconds,
+            "application_name": _DB_SETTINGS.application_name or "quant_trad_portal",
         }
 
         # TCP keepalive improves resilience to dead sockets/network middleboxes.
-        if self._env_flag("PG_TCP_KEEPALIVE_ENABLED", True):
+        if _DB_SETTINGS.tcp_keepalive_enabled:
             connect_args["keepalives"] = 1
-            connect_args["keepalives_idle"] = max(1, self._env_int("PG_TCP_KEEPALIVE_IDLE_SECONDS", 30))
-            connect_args["keepalives_interval"] = max(
-                1, self._env_int("PG_TCP_KEEPALIVE_INTERVAL_SECONDS", 10)
-            )
-            connect_args["keepalives_count"] = max(1, self._env_int("PG_TCP_KEEPALIVE_COUNT", 3))
+            connect_args["keepalives_idle"] = _DB_SETTINGS.tcp_keepalive_idle_seconds
+            connect_args["keepalives_interval"] = _DB_SETTINGS.tcp_keepalive_interval_seconds
+            connect_args["keepalives_count"] = _DB_SETTINGS.tcp_keepalive_count
 
         return {
             "future": True,
-            "pool_pre_ping": self._env_flag("PG_POOL_PRE_PING", True),
-            "pool_recycle": pool_recycle,
-            "pool_timeout": pool_timeout,
+            "pool_pre_ping": _DB_SETTINGS.pool_pre_ping,
+            "pool_recycle": _DB_SETTINGS.pool_recycle_seconds,
+            "pool_timeout": _DB_SETTINGS.pool_timeout_seconds,
             "connect_args": connect_args,
         }
 

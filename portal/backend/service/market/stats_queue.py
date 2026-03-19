@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+from core.settings import get_settings
 import pandas as pd
 from sqlalchemy import create_engine
 
@@ -29,6 +30,7 @@ from .stats_contract import REGIME_VERSION, STATS_VERSION
 
 MAX_RETRIES = 3
 JOB_TYPE_STATS_COMPUTE = "stats_compute"
+_STATS_WORKER_SETTINGS = get_settings().workers.stats
 
 
 @dataclass(frozen=True)
@@ -100,15 +102,15 @@ class StatsWorker:
         self._stats_service = CandleStatsService(config=config, engine=self._engine)
         self._regime_service = RegimeStatsService(config=config, engine=self._engine)
         self._worker_id, self._partition_index, self._partition_total = self._worker_identity()
-        self._idle_sleep = float(os.getenv("STATS_WORKER_IDLE_SLEEP_SECONDS", "0.25"))
+        self._idle_sleep = _STATS_WORKER_SETTINGS.idle_sleep_seconds
 
     @staticmethod
     def _worker_identity() -> tuple[str, int, int]:
         host = socket.gethostname()
         pid = os.getpid()
         worker_id = f"stats:{host}:{pid}"
-        index = int(os.getenv("STATS_WORKER_INDEX", "0") or 0)
-        total = max(1, int(os.getenv("STATS_WORKER_TOTAL", "1") or 1))
+        index = _STATS_WORKER_SETTINGS.index
+        total = _STATS_WORKER_SETTINGS.total
         return worker_id, index, total
 
     def run_forever(self) -> None:
@@ -119,7 +121,7 @@ class StatsWorker:
         signal.signal(signal.SIGTERM, _on_signal)
         signal.signal(signal.SIGINT, _on_signal)
 
-        db_wait_timeout = float(os.getenv("STATS_WORKER_DB_WAIT_TIMEOUT_SECONDS", "120"))
+        db_wait_timeout = _STATS_WORKER_SETTINGS.db_wait_timeout_seconds
         if not wait_for_database_ready(timeout_seconds=db_wait_timeout, poll_interval_seconds=0.5):
             logger.error(
                 "stats_worker_db_timeout | worker_id=%s timeout_seconds=%s",
