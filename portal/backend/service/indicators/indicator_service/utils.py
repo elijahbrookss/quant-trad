@@ -10,8 +10,6 @@ import numpy as np
 import pandas as pd
 
 from data_providers import DataSource
-from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
-from engines.indicator_engine.plugins import plugin_registry
 
 from .context import IndicatorServiceContext, _context
 
@@ -91,10 +89,6 @@ def get_indicator_entry(
 _RUNTIME_PARAM_KEYS = {"datasource", "exchange", "symbol", "start", "end", "interval"}
 
 
-def purge_breakout_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
-    ctx.breakout_cache.purge_indicator(inst_id)
-
-
 def purge_overlay_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
     ctx.overlay_cache.purge_indicator(inst_id)
 
@@ -136,62 +130,6 @@ def coerce_float(value: Any, default: float, *, minimum: Optional[float] = None)
     return result
 
 
-def attach_signal_catalog(
-    meta: Dict[str, Any], *, ctx: IndicatorServiceContext = _context
-) -> Dict[str, Any]:
-    indicator_type = meta.get("type") or meta.get("name")
-
-    if not indicator_type:
-        logger.warning("attach_signal_catalog_missing_type | meta_keys=%s", list(meta.keys()))
-        return meta
-
-    catalog = build_signal_catalog(str(indicator_type))
-
-    if catalog:
-        meta["signal_rules"] = catalog
-    return meta
-
-
-def build_signal_catalog(indicator_type: str) -> List[Dict[str, Any]]:
-    indicator_key = str(indicator_type or "").strip().lower()
-    if not indicator_key:
-        return []
-    ensure_builtin_indicator_plugins_registered()
-    try:
-        manifest = plugin_registry().resolve(indicator_key)
-    except RuntimeError:
-        logger.warning(
-            "signal_catalog_empty | indicator_type=%s",
-            indicator_type,
-        )
-        return []
-    catalog: List[Dict[str, Any]] = []
-    for entry in manifest.signal_rules:
-        record: Dict[str, Any] = {
-            "id": str(entry.id),
-            "label": str(entry.label),
-            "description": str(entry.description),
-            "signal_type": str(entry.signal_type),
-        }
-        directions = [
-            {
-                "id": str(direction.id),
-                "label": str(direction.label),
-                "description": str(direction.description),
-            }
-            for direction in (entry.directions or ())
-        ]
-        if directions:
-            record["directions"] = directions
-        catalog.append(record)
-    if not catalog:
-        logger.warning(
-            "signal_catalog_empty | indicator_type=%s",
-            indicator_type,
-        )
-    return catalog
-
-
 def normalize_color(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -205,7 +143,7 @@ def ensure_color(meta: Dict[str, Any], *, ctx: IndicatorServiceContext = _contex
     if "color" not in meta:
         meta["color"] = None
     meta["params"] = scrub_runtime_params(meta.get("params") or {})
-    return attach_signal_catalog(meta, ctx=ctx)
+    return meta
 
 
 def normalize_datasource(
@@ -304,9 +242,7 @@ def sanitize_json(obj):
 __all__ = [
     "_context",
     "IndicatorServiceContext",
-    "attach_signal_catalog",
     "build_indicator_instance",
-    "build_signal_catalog",
     "build_meta_from_record",
     "coerce_float",
     "coerce_int",
@@ -318,7 +254,6 @@ __all__ = [
     "normalize_datasource",
     "normalize_exchange",
     "pull_datasource_exchange",
-    "purge_breakout_cache",
     "purge_overlay_cache",
     # REMOVED: "refresh_strategy_links" - no longer needed
     "resolve_data_provider",

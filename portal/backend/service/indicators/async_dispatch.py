@@ -12,7 +12,6 @@ from portal.backend.service.async_jobs import enqueue_job, get_job
 logger = logging.getLogger(__name__)
 
 
-JOB_TYPE_OVERLAYS = "quantlab_overlay"
 JOB_TYPE_SIGNALS = "quantlab_signals"
 
 
@@ -67,53 +66,6 @@ def _series_partition_key(payload: Mapping[str, Any]) -> str:
             payload.get("interval"),
         )
     return partition_key
-
-
-
-def enqueue_overlay_job(
-    *,
-    inst_id: str,
-    start: str,
-    end: str,
-    interval: str,
-    symbol: Optional[str],
-    datasource: Optional[str],
-    exchange: Optional[str],
-    instrument_id: Optional[str],
-    overlay_options: Optional[Mapping[str, Any]],
-) -> str:
-    payload: Dict[str, Any] = {
-        "inst_id": inst_id,
-        "start": start,
-        "end": end,
-        "interval": interval,
-        "symbol": symbol,
-        "datasource": datasource,
-        "exchange": exchange,
-        "instrument_id": instrument_id,
-        "overlay_options": dict(overlay_options or {}),
-    }
-    job_id = enqueue_job(
-        job_type=JOB_TYPE_OVERLAYS,
-        payload=payload,
-        partition_key=_series_partition_key(payload),
-        max_attempts=2,
-    )
-    logger.info(
-        "event=overlay_job_enqueued job_id=%s indicator_id=%s symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s instrument_id=%s",
-        job_id,
-        inst_id,
-        symbol,
-        interval,
-        start,
-        end,
-        datasource,
-        exchange,
-        instrument_id,
-    )
-    return job_id
-
-
 
 def enqueue_signal_job(
     *,
@@ -172,9 +124,7 @@ __all__ = [
     "AsyncJobFailedError",
     "AsyncJobNotFoundError",
     "AsyncJobTimeoutError",
-    "JOB_TYPE_OVERLAYS",
     "JOB_TYPE_SIGNALS",
-    "enqueue_overlay_job",
     "enqueue_signal_job",
     "wait_for_job",
 ]

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import logging
 
-from .regime_config import RegimeBlockConfig
+from indicators.regime import RegimeBlockConfig
 
 logger = logging.getLogger(__name__)
 

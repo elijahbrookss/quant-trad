@@ -1,6 +1,5 @@
 # routers/indicators.py
 import logging
-import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Response
@@ -10,7 +9,6 @@ from portal.backend.service.indicators.async_dispatch import (
     AsyncJobFailedError,
     AsyncJobNotFoundError,
     AsyncJobTimeoutError,
-    enqueue_overlay_job,
     enqueue_signal_job,
     wait_for_job,
 )
@@ -25,6 +23,7 @@ from portal.backend.service.indicators.indicator_service import (
     list_indicator_strategies,
     list_instances_meta,
     list_types,
+    overlays_for_instance,
     set_instance_enabled,
     update_instance,
 )
@@ -63,7 +62,9 @@ class IndicatorInstanceOut(BaseModel):
     color: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    signal_rules: Optional[List[Dict[str, Any]]] = None
+    typed_outputs: Optional[List[Dict[str, Any]]] = None
+    overlay_outputs: Optional[List[Dict[str, Any]]] = None
+    runtime_supported: Optional[bool] = None
 
 class OverlayRequest(BaseModel):
     start: str
@@ -204,25 +205,8 @@ async def get_indicator_type(type_id: str):
 # ===== Overlays by UUID =====
 @router.post("/{inst_id}/overlays")
 async def overlays(inst_id: str, req: OverlayRequest):
-    """
-    Returns TradingView Lightweight-Charts overlays for a stored indicator UUID
-    over the requested chart window. Does not accept indicator params.
-    """
-    job_id: Optional[str] = None
     try:
-        started = time.perf_counter()
-        logger.info(
-            "event=overlay_request_received indicator_id=%s instrument_id=%s symbol=%s interval=%s datasource=%s exchange=%s start=%s end=%s",
-            inst_id,
-            req.instrument_id,
-            req.symbol,
-            req.interval,
-            req.datasource,
-            req.exchange,
-            req.start,
-            req.end,
-        )
-        job_id = enqueue_overlay_job(
+        return overlays_for_instance(
             inst_id=inst_id,
             start=req.start,
             end=req.end,
@@ -235,73 +219,16 @@ async def overlays(inst_id: str, req: OverlayRequest):
             if req.visibility_epoch is not None
             else None,
         )
-        logger.info("event=overlay_request_enqueued indicator_id=%s job_id=%s", inst_id, job_id)
-        payload = await wait_for_job(job_id)
-        elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-        payload_obj = payload.get("payload") if isinstance(payload, dict) else None
-        logger.info(
-            "event=overlay_request_completed indicator_id=%s job_id=%s duration_ms=%.3f payload_keys=%s",
-            inst_id,
-            job_id,
-            elapsed_ms,
-            list(payload_obj.keys()) if isinstance(payload_obj, dict) else [],
-        )
-        return payload
-    except AsyncJobNotFoundError:
-        logger.error("event=overlay_request_failed indicator_id=%s job_id=%s reason=job_not_found", inst_id, job_id)
-        raise HTTPException(500, "Overlay job disappeared before completion")
-    except AsyncJobTimeoutError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=job_timeout error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        raise HTTPException(504, str(e))
-    except AsyncJobFailedError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=job_failed error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
-        _raise_failed_job(str(e))
     except KeyError:
-        logger.error("event=overlay_request_failed indicator_id=%s job_id=%s reason=indicator_not_found", inst_id, job_id)
         raise HTTPException(404, "Indicator not found")
     except LookupError as e:
-        # no candles or no overlays
-        logger.warning(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=lookup_error error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
         raise HTTPException(404, str(e))
     except ValueError as e:
-        logger.warning(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=bad_request error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
         raise HTTPException(400, str(e))
     except RuntimeError as e:
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=runtime_error error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
         raise HTTPException(500, str(e))
     except Exception as e:
         logger.exception("Unexpected overlay error")
-        logger.error(
-            "event=overlay_request_failed indicator_id=%s job_id=%s reason=unexpected error=%s",
-            inst_id,
-            job_id,
-            str(e),
-        )
         raise HTTPException(500, "Unexpected error computing overlays")
 
 

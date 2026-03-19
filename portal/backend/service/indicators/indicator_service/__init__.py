@@ -1,6 +1,7 @@
 """Indicator service exports."""
 
 from .api import (
+    build_runtime_indicator_instance,
     bulk_delete_instances,
     bulk_set_enabled,
     clear_overlay_cache,
@@ -19,14 +20,14 @@ from .api import (
     set_instance_enabled,
     update_instance,
 )
-from .context import BreakoutCacheContext, IndicatorServiceContext
+from .context import IndicatorServiceContext
 
 IndicatorService = type(default_service)
 
 __all__ = [
-    "BreakoutCacheContext",
     "IndicatorService",
     "IndicatorServiceContext",
+    "build_runtime_indicator_instance",
     "bulk_delete_instances",
     "bulk_set_enabled",
     "clear_overlay_cache",

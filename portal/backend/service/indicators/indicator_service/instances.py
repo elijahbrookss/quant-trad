@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import logging
 import uuid
 from typing import Any, Dict, Optional, Tuple
@@ -9,7 +8,10 @@ from data_providers import DataSource
 from indicators.config import DataContext
 from indicators.market_profile import MarketProfileIndicator
 
-from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
+from ..indicator_factory import (
+    INDICATOR_MAP as _INDICATOR_MAP,
+    resolve_indicator_params,
+)
 from .context import IndicatorServiceContext, _context
 from ...market import instrument_service
 from .utils import (
@@ -84,20 +86,11 @@ class IndicatorInstanceCreator:
     def _build_instance(self, Cls, provider, data_ctx: DataContext, ctor_params: Dict[str, Any]):
         try:
             indicator_name = getattr(Cls, "NAME", Cls.__name__)
+            resolved_params = resolve_indicator_params(Cls, ctor_params)
             logger.info("event=indicator_create type=%s params=%s", indicator_name, ctor_params)
-            inst = Cls.from_context(provider=provider, ctx=data_ctx, **ctor_params)
+            inst = Cls.from_context(provider=provider, ctx=data_ctx, **resolved_params)
         except Exception as exc:
             raise RuntimeError(f"Failed to instantiate indicator: {exc}")
-
-        # Validate all required params are present (fail-fast for indicators with REQUIRED_PARAMS)
-        required_params = getattr(Cls, "REQUIRED_PARAMS", None)
-        if required_params and isinstance(required_params, dict):
-            missing = [k for k in required_params.keys() if ctor_params.get(k) is None]
-            if missing:
-                raise ValueError(
-                    f"{indicator_name} indicator missing required params: {missing}. "
-                    f"This should not happen after param enforcement."
-                )
 
         return inst
 
@@ -302,33 +295,9 @@ class IndicatorInstanceUpdater:
             params.pop("bin_size", None)
 
     def _ensure_ctor_params(self, type_str: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensure required params are present using class-declared defaults."""
+        """Resolve user params into a complete constructor config."""
         Cls = _INDICATOR_MAP.get(type_str)
-
-        # Check if indicator class declares required params (modular approach)
-        required_params = getattr(Cls, "REQUIRED_PARAMS", None)
-
-        if required_params and isinstance(required_params, dict):
-            for key, default_value in required_params.items():
-                if key not in params:
-                    params[key] = default_value
-                    logger.info(
-                        "event=indicator_param_default_applied type=%s param=%s value=%s",
-                        getattr(Cls, "NAME", Cls.__name__),
-                        key,
-                        default_value
-                    )
-
-        # Fallback: inspect constructor signature for indicators without REQUIRED_PARAMS
-        sig = inspect.signature(Cls.__init__)
-        for pname, p in sig.parameters.items():
-            if pname in ("self", "df"):
-                continue
-            if pname not in params:
-                if p.default is inspect._empty:
-                    raise ValueError(f"Missing required parameter: {pname}")
-                params[pname] = p.default
-        return params
+        return resolve_indicator_params(Cls, params)
 
     def _pop_data_context(self, params: Dict[str, Any]) -> Tuple[DataContext, Dict[str, Any]]:
         ctx_keys = ("symbol", "start", "end", "interval")
@@ -388,8 +357,6 @@ class IndicatorInstanceUpdater:
         datasource: Optional[str],
         exchange: Optional[str],
     ) -> Dict[str, Any]:
-        purge_breakout_cache = self._ctx.breakout_cache.purge_indicator
-        purge_breakout_cache(inst_id)
         purge_overlay_cache = self._ctx.overlay_cache.purge_indicator
         purge_overlay_cache(inst_id)
         purge_incremental_cache = self._ctx.incremental_cache.purge_indicator

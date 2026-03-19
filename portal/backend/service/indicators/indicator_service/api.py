@@ -1,26 +1,36 @@
 from __future__ import annotations
 
-import inspect
 import logging
 import uuid
 from copy import deepcopy
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import pandas as pd
+
+from engines.bot_runtime.core.domain import Candle
+from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from .context import IndicatorServiceContext, _context
 from .instances import IndicatorInstanceCreator, IndicatorInstanceUpdater
-from .overlays import IndicatorOverlayBuilder
 from .runtime_contract import assert_engine_signal_runtime_path
-from .signals import BreakoutCacheContext, IndicatorSignalExecutor
+from .signals import IndicatorSignalExecutor
 from .utils import (
     build_indicator_instance,
     build_meta_from_record,
-    build_signal_catalog,
     ensure_color,
     load_indicator_record,
-    purge_breakout_cache,
     purge_overlay_cache,
 )
-from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
+from ..indicator_factory import (
+    INDICATOR_MAP as _INDICATOR_MAP,
+    indicator_default_params,
+    indicator_field_types,
+    indicator_output_catalog,
+    indicator_overlay_catalog,
+    indicator_required_params,
+    resolve_indicator_params,
+    runtime_indicator_builder_for_type,
+)
+from ...market import candle_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,24 +61,10 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
     if not Cls:
         raise KeyError(f"Unknown indicator type: {type_id}")
 
-    sig = inspect.signature(Cls.__init__)
-    required, defaults, field_types = [], {}, {}
-    for name, param in sig.parameters.items():
-        if name in ("self", "df"):
-            continue
-        anno = param.annotation
-        if anno is inspect._empty:
-            tname = "Any"
-        elif isinstance(anno, type):
-            tname = anno.__name__
-        else:
-            tname = str(anno)
-        field_types[name] = tname
-        if param.default is inspect._empty:
-            required.append(name)
-        else:
-            defaults[name] = param.default
     indicator_name = getattr(Cls, "NAME", type_id)
+    required = list(indicator_required_params(Cls))
+    defaults = dict(indicator_default_params(Cls))
+    field_types = dict(indicator_field_types(Cls))
 
     # Remove runtime-only context fields that should not be user-configurable
     required = [key for key in required if key not in _RUNTIME_CONTEXT_KEYS]
@@ -81,6 +77,8 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
         "required_params": required,
         "default_params": defaults,
         "field_types": field_types,
+        "typed_outputs": indicator_output_catalog(Cls),
+        "overlay_outputs": indicator_overlay_catalog(Cls),
     }
     runtime_input_specs = [
         {
@@ -99,10 +97,6 @@ def get_type_details(type_id: str, *, ctx: IndicatorServiceContext = _context) -
     if runtime_input_specs:
         details["runtime_input_specs"] = runtime_input_specs
 
-    rule_meta = build_signal_catalog(indicator_name)
-    if rule_meta:
-        details["signal_rules"] = rule_meta
-
     return details
 
 
@@ -118,6 +112,26 @@ def get_instance_meta(inst_id: str, *, ctx: IndicatorServiceContext = _context) 
     return build_meta_from_record(record, ctx=ctx)
 
 
+def build_runtime_indicator_instance(
+    indicator_id: str,
+    *,
+    meta: Mapping[str, Any],
+    strategy_indicator_metas: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Any:
+    indicator_type = str(meta.get("type") or "").strip()
+    indicator_cls = _INDICATOR_MAP.get(indicator_type)
+    if indicator_cls is None:
+        raise KeyError(f"Unknown indicator type: {indicator_type}")
+    builder = runtime_indicator_builder_for_type(indicator_type)
+    resolved_params = resolve_indicator_params(indicator_cls, meta.get("params"))
+    return builder(
+        indicator_id=indicator_id,
+        meta=meta,
+        resolved_params=resolved_params,
+        strategy_indicator_metas=strategy_indicator_metas or {},
+    )
+
+
 def list_indicator_strategies(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> List[Dict[str, Any]]:
     return ctx.repository.strategies_for_indicator(inst_id)
 
@@ -125,7 +139,6 @@ def list_indicator_strategies(inst_id: str, *, ctx: IndicatorServiceContext = _c
 def delete_instance(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
     load_indicator_record(inst_id, ctx=ctx)
     # Cache removed: no eviction needed
-    purge_breakout_cache(inst_id, ctx=ctx)
     purge_overlay_cache(inst_id, ctx=ctx)
     logger.info("event=indicator_delete indicator_id=%s", inst_id)
     ctx.repository.delete(inst_id)
@@ -214,6 +227,40 @@ def update_instance(
     )
 
 
+def _build_runtime_candles(df: pd.DataFrame) -> List[Candle]:
+    if df is None or getattr(df, "empty", False):
+        return []
+    candles: List[Candle] = []
+    timestamps = pd.to_datetime(df.index, utc=True)
+    for timestamp, (_, row) in zip(timestamps, df.iterrows()):
+        candles.append(
+            Candle(
+                time=timestamp.to_pydatetime(),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row["volume"]) if row.get("volume") is not None else None,
+            )
+        )
+    return candles
+
+
+def _collect_runtime_overlays(overlays: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    collected: List[Dict[str, Any]] = []
+    for overlay_key in sorted(overlays.keys()):
+        runtime_overlay = overlays.get(overlay_key)
+        if runtime_overlay is None or not getattr(runtime_overlay, "ready", False):
+            continue
+        indicator_id, _, overlay_name = str(overlay_key).partition(".")
+        payload = dict(getattr(runtime_overlay, "value", {}) or {})
+        payload.setdefault("overlay_id", overlay_key)
+        payload.setdefault("indicator_id", indicator_id)
+        payload.setdefault("overlay_name", overlay_name)
+        collected.append(payload)
+    return collected
+
+
 def overlays_for_instance(
     inst_id: str,
     start: str,
@@ -227,18 +274,66 @@ def overlays_for_instance(
     overlay_options: Optional[Mapping[str, Any]] = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
-    builder = IndicatorOverlayBuilder(ctx)
-    return builder.build(
-        inst_id,
-        start,
-        end,
-        interval,
-        symbol=symbol,
-        datasource=datasource,
-        exchange=exchange,
-        instrument_id=instrument_id,
-        overlay_options=overlay_options,
-    )
+    _ = overlay_options
+    meta = get_instance_meta(inst_id, ctx=ctx)
+    if not bool(meta.get("runtime_supported")):
+        raise RuntimeError(f"Indicator is not runtime-supported: {inst_id}")
+
+    indicator = build_runtime_indicator_instance(inst_id, meta=meta, strategy_indicator_metas={inst_id: meta})
+    engine = IndicatorExecutionEngine([indicator])
+
+    if instrument_id:
+        df = candle_service.fetch_ohlcv_by_instrument(
+            instrument_id,
+            start,
+            end,
+            interval,
+            schedule_stats=False,
+        )
+    else:
+        resolved_symbol = str(symbol or meta.get("params", {}).get("symbol") or "").strip()
+        resolved_datasource = str(datasource or meta.get("datasource") or meta.get("params", {}).get("datasource") or "").strip()
+        resolved_exchange = exchange or meta.get("exchange") or meta.get("params", {}).get("exchange")
+        if not resolved_symbol or not resolved_datasource:
+            raise ValueError("Indicator overlay preview requires symbol and datasource.")
+        df = candle_service.fetch_ohlcv(
+            resolved_symbol,
+            start,
+            end,
+            interval,
+            datasource=resolved_datasource,
+            exchange=resolved_exchange,
+            schedule_stats=False,
+        )
+
+    candles = _build_runtime_candles(df)
+    if not candles:
+        return {
+            "indicator_id": inst_id,
+            "runtime_path": "typed_indicator_engine_v1",
+            "window": {
+                "start": start,
+                "end": end,
+                "interval": interval,
+            },
+            "overlays": [],
+        }
+
+    last_frame = None
+    for candle in candles:
+        last_frame = engine.step(bar=candle, bar_time=candle.time)
+
+    overlays = _collect_runtime_overlays(last_frame.overlays if last_frame is not None else {})
+    return {
+        "indicator_id": inst_id,
+        "runtime_path": "typed_indicator_engine_v1",
+        "window": {
+            "start": start,
+            "end": end,
+            "interval": interval,
+        },
+        "overlays": overlays,
+    }
 
 
 def generate_signals_for_instance(
@@ -266,7 +361,7 @@ def generate_signals_for_instance(
     )
     assert_engine_signal_runtime_path(
         payload,
-        context="indicator_signal_service_execute",
+        context="indicator_signal_execute",
         indicator_id=inst_id,
     )
     return payload
@@ -408,7 +503,6 @@ default_service = IndicatorService(_context)
 __all__ = [
     "IndicatorService",
     "IndicatorServiceContext",
-    "BreakoutCacheContext",
     "create_instance",
     "update_instance",
     "delete_instance",
@@ -419,6 +513,7 @@ __all__ = [
     "clear_overlay_cache",
     "list_instances_meta",
     "get_instance_meta",
+    "build_runtime_indicator_instance",
     "list_indicator_strategies",
     "overlays_for_instance",
     "generate_signals_for_instance",

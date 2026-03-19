@@ -26,6 +26,7 @@ def fetch_ohlcv(
     *,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    schedule_stats: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV data for a given symbol and time range.
@@ -38,6 +39,7 @@ def fetch_ohlcv(
         end=end,
         interval=interval,
         instrument_id=instrument_id,
+        schedule_stats=bool(schedule_stats),
     )
     provider = get_provider(datasource, exchange=exchange)
     should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
@@ -67,6 +69,8 @@ def fetch_ohlcv_by_instrument(
     start: str,
     end: str,
     interval: str,
+    *,
+    schedule_stats: bool = True,
 ) -> pd.DataFrame:
     """Fetch OHLCV data for a canonical instrument."""
 
@@ -86,6 +90,7 @@ def fetch_ohlcv_by_instrument(
         end=end,
         interval=interval,
         instrument_id=instrument_id,
+        schedule_stats=bool(schedule_stats),
     )
     provider = get_provider(datasource, exchange=exchange)
     should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
@@ -114,6 +119,8 @@ def fetch_ohlcv_by_instrument(
 def _schedule_stats_for_context(df: pd.DataFrame, ctx: DataContext) -> None:
     """Enqueue asynchronous stats work for the requested range once candles are available."""
 
+    if not bool(getattr(ctx, "schedule_stats", True)):
+        return
     if ctx.instrument_id is None or not ctx.interval or df is None or df.empty:
         return
 

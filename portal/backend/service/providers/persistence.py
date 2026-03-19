@@ -548,12 +548,13 @@ class DataPersistenceService:
                 candle_time.min().isoformat(),
                 candle_time.max().isoformat(),
             )
-            enqueue_stats_job(
-                instrument_id=instrument_id,
-                timeframe_seconds=timeframe_seconds,
-                time_min=candle_time.min(),
-                time_max=candle_time.max(),
-            )
+            if bool(getattr(ctx, "schedule_stats", True)):
+                enqueue_stats_job(
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    time_min=candle_time.min(),
+                    time_max=candle_time.max(),
+                )
             return len(prepared)
 
         except SQLAlchemyError as exc:

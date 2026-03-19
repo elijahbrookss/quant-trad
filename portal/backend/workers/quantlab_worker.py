@@ -9,7 +9,6 @@ from typing import Any, Dict
 
 import indicators  # noqa: F401
 import signals  # noqa: F401
-from engines.indicator_engine import ensure_builtin_indicator_plugins_registered
 from signals.overlays.builtins import ensure_builtin_overlays_registered
 
 from portal.backend.service.async_jobs import (
@@ -18,10 +17,9 @@ from portal.backend.service.async_jobs import (
     fail_job,
     wait_for_database_ready,
 )
-from portal.backend.service.indicators.async_dispatch import JOB_TYPE_OVERLAYS, JOB_TYPE_SIGNALS
+from portal.backend.service.indicators.async_dispatch import JOB_TYPE_SIGNALS
 from portal.backend.service.indicators.indicator_service.api import (
     generate_signals_for_instance,
-    overlays_for_instance,
 )
 from portal.backend.service.indicators.indicator_service.context import IndicatorServiceContext
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
@@ -57,21 +55,6 @@ def _worker_identity() -> tuple[str, int, int]:
     return worker_id, index, total
 
 
-def _process_overlay(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
-    return overlays_for_instance(
-        inst_id=str(payload["inst_id"]),
-        start=str(payload["start"]),
-        end=str(payload["end"]),
-        interval=str(payload["interval"]),
-        symbol=payload.get("symbol"),
-        datasource=payload.get("datasource"),
-        exchange=payload.get("exchange"),
-        instrument_id=payload.get("instrument_id"),
-        overlay_options=payload.get("overlay_options") if isinstance(payload.get("overlay_options"), dict) else None,
-        ctx=ctx,
-    )
-
-
 def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
     response = generate_signals_for_instance(
         inst_id=str(payload["inst_id"]),
@@ -95,7 +78,6 @@ def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
 def main() -> int:
     _configure_logging()
     ensure_builtin_overlays_registered()
-    ensure_builtin_indicator_plugins_registered()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -126,7 +108,7 @@ def main() -> int:
         try:
             job = claim_next_job(
                 worker_id=worker_id,
-                job_types=[JOB_TYPE_OVERLAYS, JOB_TYPE_SIGNALS],
+                job_types=[JOB_TYPE_SIGNALS],
                 partition_index=partition_index,
                 partition_total=partition_total,
             )
@@ -153,9 +135,7 @@ def main() -> int:
             job.payload.get("exchange"),
         )
         try:
-            if job.job_type == JOB_TYPE_OVERLAYS:
-                result = _process_overlay(job.payload, ctx=indicator_ctx)
-            elif job.job_type == JOB_TYPE_SIGNALS:
+            if job.job_type == JOB_TYPE_SIGNALS:
                 result = _process_signals(job.payload, ctx=indicator_ctx)
             else:
                 raise RuntimeError(f"unknown_job_type: {job.job_type}")

@@ -10,10 +10,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from core.logger import logger
 from data_providers.config.runtime import PersistenceConfig
 
-from .regime_engine import RegimeEngineV1
+from indicators.regime import RegimeEngineV1
 from .regime_blocks import build_regime_blocks
-from .regime_config import default_regime_runtime_config
-from .regime_stabilizer import RegimeStabilizer
+from indicators.regime import RegimeStabilizer, default_regime_runtime_config
 
 
 LOOKBACK_BARS = 200
@@ -306,12 +305,20 @@ class RegimeStatsService:
                 len(blocks),
                 blocks[0].get("block_id"),
             )
-            self._upsert_blocks(
-                blocks,
-                instrument_id=instrument_id,
-                timeframe_seconds=timeframe_seconds,
-                regime_version=regime_version,
-            )
+            if self._engine is None:
+                logger.debug(
+                    "regime_blocks_persist_skipped | instrument_id=%s timeframe_seconds=%s regime_version=%s reason=engine_unavailable",
+                    instrument_id,
+                    timeframe_seconds,
+                    regime_version,
+                )
+            else:
+                self._upsert_blocks(
+                    blocks,
+                    instrument_id=instrument_id,
+                    timeframe_seconds=timeframe_seconds,
+                    regime_version=regime_version,
+                )
 
         for row_idx, row in enumerate(rows):
             block_id = block_ids.get(row_idx)

@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass
 
 from ...providers.data_provider_resolver import DataProviderResolver, default_resolver
-from indicators.runtime.indicator_breakout_cache import IndicatorBreakoutCache, default_breakout_cache
 from indicators.runtime.indicator_overlay_cache import IndicatorOverlayCache, default_overlay_cache
 from indicators.runtime.incremental_cache import IncrementalCache, default_incremental_cache
 from ..indicator_factory import IndicatorFactory
@@ -21,7 +20,6 @@ class IndicatorServiceContext:
     repository: IndicatorRepository
     resolver: DataProviderResolver
     factory: IndicatorFactory
-    breakout_cache: IndicatorBreakoutCache
     overlay_cache: IndicatorOverlayCache
     incremental_cache: IncrementalCache
     cache_owner: str
@@ -44,7 +42,6 @@ class IndicatorServiceContext:
             repository=repository,
             resolver=resolver,
             factory=factory,
-            breakout_cache=default_breakout_cache(),
             overlay_cache=default_overlay_cache(),
             incremental_cache=default_incremental_cache(),
             cache_owner=cache_owner,
@@ -69,7 +66,6 @@ class IndicatorServiceContext:
             repository=repository,
             resolver=resolver,
             factory=factory,
-            breakout_cache=base.breakout_cache,
             overlay_cache=overlay_cache,
             incremental_cache=base.incremental_cache,
             cache_owner="series_process",

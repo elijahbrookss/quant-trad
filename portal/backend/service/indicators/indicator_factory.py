@@ -6,13 +6,21 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 
+from indicators.candle_stats import CandleStatsIndicator
 from indicators.config import DataContext
-from indicators.market_profile import MarketProfileIndicator
+from indicators.market_profile.definition import MarketProfileIndicator
+from indicators.param_contract import (
+    indicator_default_params,
+    indicator_field_types,
+    indicator_required_params,
+    resolve_indicator_params,
+)
 from indicators.pivot_level import PivotLevelIndicator
+from indicators.regime import RegimeIndicator
 from indicators.trendline import TrendlineIndicator
 from indicators.vwap import VWAPIndicator
 
@@ -26,11 +34,62 @@ logger = logging.getLogger(__name__)
 
 
 INDICATOR_MAP = {
+    "candle_stats": CandleStatsIndicator,
+    "regime": RegimeIndicator,
     "vwap": VWAPIndicator,
     "pivot_level": PivotLevelIndicator,
     "trendline": TrendlineIndicator,
     "market_profile": MarketProfileIndicator,
 }
+
+
+def indicator_output_catalog(indicator_cls: Any) -> List[Dict[str, Any]]:
+    raw = getattr(indicator_cls, "OUTPUTS", ()) or ()
+    catalog: List[Dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "").strip()
+        output_type = str(entry.get("type") or "").strip().lower()
+        if not name or output_type not in {"signal", "context", "metric"}:
+            continue
+        item: Dict[str, Any] = {
+            "name": name,
+            "type": output_type,
+            "label": str(entry.get("label") or name),
+        }
+        for key in ("event_keys", "state_keys", "fields"):
+            values = entry.get(key)
+            if isinstance(values, (list, tuple)):
+                item[key] = [str(value) for value in values if str(value).strip()]
+        catalog.append(item)
+    return catalog
+
+
+def indicator_overlay_catalog(indicator_cls: Any) -> List[Dict[str, Any]]:
+    raw = getattr(indicator_cls, "OVERLAYS", ()) or ()
+    catalog: List[Dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("name") or "").strip()
+        overlay_type = str(entry.get("overlay_type") or "").strip()
+        if not name or not overlay_type:
+            continue
+        catalog.append({"name": name, "overlay_type": overlay_type})
+    return catalog
+
+
+def runtime_indicator_builder_for_type(indicator_type: str) -> Callable[..., Any]:
+    indicator_cls = INDICATOR_MAP.get(str(indicator_type or "").strip())
+    if indicator_cls is None:
+        raise KeyError(f"Unknown indicator type: {indicator_type}")
+    builder = getattr(indicator_cls, "build_runtime_indicator", None)
+    if not callable(builder):
+        raise RuntimeError(
+            f"Indicator type '{indicator_type}' does not declare a runtime indicator builder"
+        )
+    return builder
 
 
 @dataclass(frozen=True)
@@ -83,26 +142,13 @@ class IndicatorFactory:
         self._ctx = ctx  # Will be set by context during initialization
 
     def build_meta_from_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
-        from .indicator_service.utils import attach_signal_catalog
-
         meta = self._coerce_record_meta(record)
         meta = self._ensure_color(meta)
-
-        # Attach signal catalog to enrich metadata with available signal rules
-        if self._ctx:
-            meta = attach_signal_catalog(meta, ctx=self._ctx)
-            logger.debug(
-                "build_meta_from_record | id=%s | type=%s | signal_rules_attached=%s",
-                meta.get("id"),
-                meta.get("type"),
-                "signal_rules" in meta
-            )
-        else:
-            logger.warning(
-                "⚠ build_meta_from_record: No context available, signal catalog not attached | id=%s",
-                record.get("id")
-            )
-
+        indicator_cls = INDICATOR_MAP.get(str(meta.get("type") or "").strip())
+        if indicator_cls is not None:
+            meta["typed_outputs"] = indicator_output_catalog(indicator_cls)
+            meta["overlay_outputs"] = indicator_overlay_catalog(indicator_cls)
+            meta["runtime_supported"] = callable(getattr(indicator_cls, "build_runtime_indicator", None))
         return meta
 
     def ensure_color(self, meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -267,6 +313,7 @@ class IndicatorFactory:
             raise ValueError(
                 f"Indicator {inst_id} missing required context: {', '.join(missing)}"
             )
+        params = resolve_indicator_params(Cls, params)
 
         # Allow caller to override provider selection with explicit datasource/exchange
         if datasource is None:
@@ -324,8 +371,10 @@ class IndicatorFactory:
         payload = {
             "id": inst_id,
             "type": record.get("type"),
+            "version": record.get("version") or "v1",
             "name": record.get("name") or record.get("type") or inst_id or "Indicator",
             "params": deepcopy(record.get("params") or {}),
+            "dependencies": deepcopy(record.get("dependencies") or []),
             "color": record.get("color"),
             "datasource": record.get("datasource"),
             "exchange": record.get("exchange"),
