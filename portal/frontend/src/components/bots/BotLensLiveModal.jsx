@@ -29,6 +29,7 @@ import {
   normalizeProjection,
   normalizeSeriesKey,
 } from './botlensProjection.js'
+import { BOTLENS_CONFIG } from '../../config/appConfig.js'
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -105,33 +106,20 @@ function normalizeLiveTailPayload(message) {
   }
 }
 
-function readPositiveNumber(name, fallback) {
-  const raw = import.meta.env?.[name]
-  if (raw === undefined || raw === null || raw === '') return fallback
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
-  return parsed
-}
-
-function readPositiveInt(name, fallback) {
-  const value = readPositiveNumber(name, fallback)
-  return Math.max(1, Math.floor(value))
-}
-
-const TARGET_RENDER_LAG_MS = readPositiveNumber('VITE_BOTLENS_TARGET_RENDER_LAG_MS', 120)
-const CATCHUP_RENDER_LAG_MS = readPositiveNumber('VITE_BOTLENS_CATCHUP_RENDER_LAG_MS', 1200)
-const CATCHUP_SEQ_BEHIND = readPositiveInt('VITE_BOTLENS_CATCHUP_SEQ_BEHIND', 6)
-const CATCHUP_QUEUE_DEPTH = readPositiveInt('VITE_BOTLENS_CATCHUP_QUEUE_DEPTH', 8)
-const NORMAL_APPLY_INTERVAL_MS = readPositiveNumber('VITE_BOTLENS_NORMAL_APPLY_INTERVAL_MS', 33)
-const CATCHUP_APPLY_INTERVAL_MS = readPositiveNumber('VITE_BOTLENS_CATCHUP_APPLY_INTERVAL_MS', 12)
-const MAX_CATCHUP_BATCH = readPositiveInt('VITE_BOTLENS_MAX_CATCHUP_BATCH', 2)
-const METRICS_PUBLISH_MS = readPositiveNumber('VITE_BOTLENS_METRICS_PUBLISH_MS', 120)
-const SNAP_TO_LATEST_CANDLE_LAG = readPositiveInt('VITE_BOTLENS_SNAP_CANDLES_BEHIND', 30)
-const LEDGER_POLL_INTERVAL_MS = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_MS', 800)
-const LEDGER_POLL_LIMIT = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_LIMIT', 500)
-const LEDGER_MAX_EVENTS = readPositiveInt('VITE_BOTLENS_LEDGER_MAX_EVENTS', 3000)
-const LIVE_RESUBSCRIBE_LIMIT = readPositiveInt('VITE_BOTLENS_LIVE_RESUBSCRIBE_LIMIT', 3)
-const LIVE_RESUBSCRIBE_WINDOW_MS = readPositiveInt('VITE_BOTLENS_LIVE_RESUBSCRIBE_WINDOW_MS', 30000)
+const TARGET_RENDER_LAG_MS = BOTLENS_CONFIG.targetRenderLagMs
+const CATCHUP_RENDER_LAG_MS = BOTLENS_CONFIG.catchupRenderLagMs
+const CATCHUP_SEQ_BEHIND = BOTLENS_CONFIG.catchupSeqBehind
+const CATCHUP_QUEUE_DEPTH = BOTLENS_CONFIG.catchupQueueDepth
+const NORMAL_APPLY_INTERVAL_MS = BOTLENS_CONFIG.normalApplyIntervalMs
+const CATCHUP_APPLY_INTERVAL_MS = BOTLENS_CONFIG.catchupApplyIntervalMs
+const MAX_CATCHUP_BATCH = BOTLENS_CONFIG.maxCatchupBatch
+const METRICS_PUBLISH_MS = BOTLENS_CONFIG.metricsPublishMs
+const SNAP_TO_LATEST_CANDLE_LAG = BOTLENS_CONFIG.snapCandlesBehind
+const LEDGER_POLL_INTERVAL_MS = BOTLENS_CONFIG.ledgerPollMs
+const LEDGER_POLL_LIMIT = BOTLENS_CONFIG.ledgerPollLimit
+const LEDGER_MAX_EVENTS = BOTLENS_CONFIG.ledgerMaxEvents
+const LIVE_RESUBSCRIBE_LIMIT = BOTLENS_CONFIG.liveResubscribeLimit
+const LIVE_RESUBSCRIBE_WINDOW_MS = BOTLENS_CONFIG.liveResubscribeWindowMs
 
 function selectedProjectionSeries(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null

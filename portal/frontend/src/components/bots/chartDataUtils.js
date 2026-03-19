@@ -1,3 +1,5 @@
+import { BOTLENS_CONFIG } from '../../config/appConfig.js'
+
 export const toSec = (value) => {
   if (value == null) return value
   if (typeof value === 'number') {
@@ -16,7 +18,7 @@ export const toFiniteNumber = (value) => {
 }
 
 // Toggle verbose BotLens console diagnostics with VITE_BOTLENS_DEBUG=true
-export const BOTLENS_DEBUG = Boolean(import.meta?.env?.VITE_BOTLENS_DEBUG === 'true')
+export const BOTLENS_DEBUG = BOTLENS_CONFIG.debug
 
 export const coalesce = (...values) => {
   for (const value of values) {

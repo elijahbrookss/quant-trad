@@ -20,10 +20,9 @@ import {
   findNearestCandleTime,
 } from './regimeReadoutUtils.js'
 import { validateCanonicalCandles } from './botlensProjection.js'
+import { BOTLENS_CONFIG } from '../../config/appConfig.js'
 
-const AUTO_FIT_OVERLAY_EXTENTS = String(import.meta.env?.VITE_BOTLENS_AUTO_FIT_OVERLAY_EXTENTS || '')
-  .trim()
-  .toLowerCase() === 'true'
+const AUTO_FIT_OVERLAY_EXTENTS = BOTLENS_CONFIG.autoFitOverlayExtents
 
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()

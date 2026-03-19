@@ -1,17 +1,7 @@
 /**
  * Centralized API client for making HTTP requests.
  */
-
-export const normalizeApiBase = (baseUrl) => {
-  if (!baseUrl) return '/api'
-  const trimmed = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
-  if (trimmed.startsWith('http')) {
-    return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`
-  }
-  return trimmed
-}
-
-const API_BASE_URL = normalizeApiBase(import.meta.env.VITE_API_BASE_URL || '/api')
+import { API_BASE_URL, normalizeApiBase } from '../config/appConfig.js'
 
 /**
  * Base fetch wrapper with error handling.

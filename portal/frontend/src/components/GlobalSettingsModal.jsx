@@ -76,7 +76,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                 rows={6}
                 value={envText}
                 onChange={(event) => updateSettings({ botDefaults: { envText: event.target.value } })}
-                placeholder={'SNAPSHOT_INTERVAL_MS=1000\nBACKEND_TELEMETRY_WS_URL=ws://backend.quanttrad:8000/api/bots/ws/telemetry/ingest'}
+                placeholder={'SNAPSHOT_INTERVAL_MS=1000\nBOT_RUNTIME_STEP_TRACE_QUEUE_MAX=4000'}
                 className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100"
               />
               <p className="text-[11px] text-slate-500">Applied as defaults in bot creation. Runtime env changes require bot restart.</p>

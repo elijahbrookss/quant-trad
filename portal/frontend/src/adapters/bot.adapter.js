@@ -1,7 +1,8 @@
 import { createLogger } from '../utils/logger.js'
+import { API_ORIGIN } from '../config/appConfig.js'
 import { openSse, openWebSocket } from './realtime.adapter.js'
 
-const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+const BASE = API_ORIGIN
 const log = createLogger('BotAdapter')
 
 async function request(path, options = {}) {

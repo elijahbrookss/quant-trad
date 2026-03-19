@@ -1,6 +1,6 @@
 import { createLogger } from '../utils/logger.js'
 
-const BASE = import.meta.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
+import { API_ORIGIN as BASE } from '../config/appConfig.js'
 const log = createLogger('HealthAdapter')
 
 export async function pingApi({ timeoutMs = 5000 } = {}) {
