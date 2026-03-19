@@ -12,13 +12,17 @@ code_paths:
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/bots/runtime_control_service.py
   - portal/backend/service/bots/container_runtime.py
+  - portal/backend/service/bots/container_runtime_projection.py
+  - portal/backend/service/bots/container_runtime_telemetry.py
   - portal/backend/service/bots/runtime_dependencies.py
   - portal/backend/service/bots/strategy_loader.py
-  - portal/backend/service/bots/runtime_derived_state.py
   - portal/backend/service/bots/telemetry_stream.py
+  - portal/backend/service/bots/live_series_stream.py
   - portal/backend/service/bots/botlens_series_service.py
   - portal/backend/service/market/candle_service.py
-  - src/engines/bot_runtime/runtime/mixins/state_streaming.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_persistence.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
 ---
 # Bot Runtime Service Architecture
 
@@ -26,7 +30,7 @@ code_paths:
 
 - `Component`: Bot runtime service orchestration
 - `Owner/Domain`: Bot Runtime / Portal Backend
-- `Doc Version`: 3.0
+- `Doc Version`: 3.1
 - `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_ENGINE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], `portal/backend/service/bots/runtime_control_service.py`, `portal/backend/service/bots/runner.py`, `portal/backend/service/bots/container_runtime.py`
 
 ## 1) Problem and scope
@@ -73,6 +77,7 @@ Current entrypoints:
 - `portal/backend/service/bots/runtime_control_service.py`: API-facing start/stop and watchdog status surface.
 - `portal/backend/service/bots/runner.py`: runner abstraction plus `DockerBotRunner`.
 - `portal/backend/service/bots/container_runtime.py`: launched process that owns symbol sharding, worker supervision, per-series BotLens transport emission, and container-level status/step traces.
+- `portal/backend/service/bots/telemetry_stream.py`: ingest/projection hub for BotLens live delivery and durable latest-view materialization.
 
 Current target support:
 - only `BOT_RUNTIME_TARGET=docker` is implemented.
@@ -147,6 +152,10 @@ The launched process is:
 - forwarding per-series bootstrap/delta telemetry envelopes,
 - writing bot runtime status and container step traces.
 
+Supporting helpers are split explicitly:
+- `container_runtime_projection.py`: compact view-state shaping plus worker/runtime payload merge helpers.
+- `container_runtime_telemetry.py`: bounded outbound telemetry emission and message-context helpers.
+
 Important current limits:
 - default maximum symbols per strategy is 10,
 - one worker process is required per symbol,
@@ -159,8 +168,8 @@ Each child worker process:
 - receives the shared `run_id`,
 - constructs a `BotRuntime` with `degrade_series_on_error=True` and an explicit `BotRuntimeDeps` bundle,
 - forces `series_runner="inline"`,
-- computes candle stats, regime state, overlays, decisions, and trades on the same series timeline,
-- persists `series_state.snapshot` ledger events asynchronously from that same series timeline,
+- computes typed indicator outputs, indicator-owned overlays, strategy decisions, and trades on the same series timeline,
+- persists `series_bar.telemetry` ledger events asynchronously from that same series timeline,
 - emits one `botlens_series_bootstrap` after warm-up,
 - emits ordered `botlens_series_delta` messages from the runtime subscriber queue,
 - emits `worker_error` messages when runtime execution fails.
@@ -177,7 +186,9 @@ The service/runtime split is important.
 
 Worker runtime persistence:
 - canonical execution events via injected `BotRuntimeDeps.record_bot_runtime_event(...)` with `event_type=runtime.*`,
-- runtime-owned per-series analytical state via `BotRuntimeDeps.record_bot_runtime_events_batch(...)` with `event_type=series_state.snapshot`,
+- per-series runtime telemetry via `BotRuntimeDeps.record_bot_runtime_events_batch(...)` with `event_type=series_bar.telemetry`,
+  - telemetry payloads are compact per-bar runtime facts: series/bar identity plus candle payload,
+  - they are not a second analytics schema for candle stats, regime rows, or flattened indicator outputs,
 - trade rows via `BotRuntimeDeps.record_bot_trade(...)`,
 - trade-event rows via `BotRuntimeDeps.record_bot_trade_event(...)`,
 - worker run artifacts via `BotRuntimeDeps.update_bot_run_artifact(...)`,
@@ -197,7 +208,7 @@ Important semantics:
 - BotLens bootstrap can read the materialized rows,
 - but live execution never reads DB-backed BotLens projections back into the worker timeline.
 - BotLens persistence only accepts canonical per-series keys of the form `SYMBOL|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
-- report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_state.*`, and `botlens.*`.
+- report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_bar.*`, and `botlens.*`.
 
 ## 8.1) Stats and regime ownership
 
@@ -208,11 +219,15 @@ QuantLab path:
 - those tables exist for research, browsing, export, and precompute.
 
 Bot runtime path:
-- each series worker computes stats/regime from its in-memory candle timeline,
-- overlays, entry metrics, and BotLens derive from that runtime-local state through `portal/backend/service/bots/runtime_derived_state.py`,
+- each series worker evaluates indicators and strategies from the synchronous typed-output engine,
+- BotLens consumes indicator-owned overlays and per-bar snapshot events from that same timeline,
 - bot runtime OHLCV fetches set `schedule_stats=False`,
-- runtime-local regime derivation may attach regime block ids for explainability, but it must not upsert regime rows/blocks through the DB persistence path when `engine=None`,
 - and the live bot does not depend on `candle_stats` / `regime_stats` tables.
+
+Reporting/export path:
+- reports should read `candle_stats`, `regime_stats`, and `regime_blocks` from persisted DB tables when they need analytical exports,
+- `series_bar.telemetry` remains a runtime telemetry/read-model surface,
+- and runtime snapshots are not the authoritative reporting source for candle/regime analytics.
 
 This preserves the system contract:
 - one runtime state-engine timeline,
@@ -238,12 +253,16 @@ Each envelope carries:
 
 Transport:
 - websocket push to `BACKEND_TELEMETRY_WS_URL` when configured,
-- bounded FIFO queueing inside `_TelemetryEmitter` to preserve in-order per-series delivery semantics.
+- bounded FIFO queueing inside `TelemetryEmitter` to preserve in-order per-series delivery semantics.
+
+Service split:
+- `telemetry_stream.py`: ingest queue, projection application, durable `botlens.*` writes, latest per-series view-state cache, and runtime-status rebroadcast.
+- `live_series_stream.py`: websocket viewer attachment, bounded replay ring, stream-session continuity, resync invalidation, and live-tail fanout.
 
 Durability:
 - telemetry transport is supplemental,
 - `botlens.*` rows in `portal_bot_run_events` are the durable BotLens artifact ledger,
-- `series_state.snapshot` rows are the durable runtime-owned stats/regime deepdive source,
+- `series_bar.telemetry` rows are the durable per-bar runtime telemetry source,
 - runtime/trade/status/step-trace rows remain the rest of the durable execution record.
 
 ### 9.1) BotLens series delivery semantics
@@ -269,7 +288,7 @@ This is important because the ingest path and BotLens frontend both treat missin
 Producer backpressure means per-series update production is forced to observe transport capacity instead of overwriting undelivered messages.
 
 In the current service implementation this entails:
-- `_TelemetryEmitter` has a bounded queue,
+- `TelemetryEmitter` has a bounded queue,
 - `send_message(...)` blocks up to `BOT_TELEMETRY_EMIT_QUEUE_TIMEOUT_MS` when the queue is full,
 - if capacity does not free within that window, the emitter logs `bot_telemetry_emit_queue_backpressure` and returns failure,
 - container runtime marks telemetry degraded when send fails,

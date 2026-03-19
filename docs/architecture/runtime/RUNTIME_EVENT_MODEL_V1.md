@@ -142,9 +142,9 @@ Persistence boundaries:
 
 - `runtime.*`
   - canonical execution causality (`runtime.signal_emitted`, `runtime.decision_accepted`, `runtime.entry_filled`, ...)
-- `series_state.*`
+- `series_bar.*`
   - runtime-owned per-series analytical state snapshots persisted on the runtime timeline
-  - current contract starts with `series_state.snapshot`
+  - current contract starts with `series_bar.telemetry`
 - `botlens.*`
   - debugger/view artifacts (`botlens.series_bootstrap`, `botlens.series_delta`)
 
@@ -156,7 +156,7 @@ Runtime V1 uses one canonical append-only bot ledger.
 
 Every important runtime fact (signal, decision, fills, runtime errors) is written as a `RuntimeEvent` and persisted under a `runtime.*` ledger event type in `portal_bot_run_events`.
 
-Per-series runtime-derived analytical state is also persisted to that same table under `series_state.*`.
+Per-series runtime telemetry is also persisted to that same table under `series_bar.*`.
 
 Wallet state is not stored as a separate canonical ledger anymore. It is derived by replaying runtime events.
 

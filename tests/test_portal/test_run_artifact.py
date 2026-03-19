@@ -21,15 +21,14 @@ def _runtime_deps() -> BotRuntimeDeps:
         fetch_ohlcv=lambda *args, **kwargs: None,
         resolve_instrument=lambda _datasource, _exchange, _symbol: None,
         strategy_evaluate=lambda *args, **kwargs: {},
-        strategy_generate_signals=lambda *args, **kwargs: {},
+        strategy_run_preview=lambda *args, **kwargs: {},
         indicator_get_instance_meta=lambda *args, **kwargs: {},
+        indicator_build_runtime_instance=lambda *args, **kwargs: None,
         indicator_runtime_input_plan_for_instance=lambda *args, **kwargs: {},
-        indicator_overlays_for_instance=lambda *args, **kwargs: {},
         build_indicator_context=lambda bot_id, _overlay_cache: SimpleNamespace(
             cache_owner="test",
             cache_scope_id=bot_id,
         ),
-        build_runtime_series_derived_state=lambda *args, **kwargs: None,
         record_bot_runtime_event=lambda _payload: None,
         record_bot_runtime_events_batch=lambda _payloads: 0,
         record_bot_trade=lambda _payload: None,
@@ -41,14 +40,6 @@ def _runtime_deps() -> BotRuntimeDeps:
 
 
 def test_run_artifact_payload_contains_runtime_event_stream_and_derived_views(monkeypatch):
-    monkeypatch.setattr(
-        "engines.bot_runtime.runtime.mixins.setup_prepare.ensure_builtin_indicator_plugins_registered",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "engines.bot_runtime.runtime.mixins.setup_prepare.plugin_registry",
-        lambda: SimpleNamespace(list_types=lambda: []),
-    )
     runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
     run_context = RunContext(bot_id="bot-1")
     bar_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)

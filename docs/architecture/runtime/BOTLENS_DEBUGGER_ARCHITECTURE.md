@@ -13,10 +13,16 @@ tags:
 code_paths:
   - portal/backend/service/bots/botlens_series_service.py
   - portal/backend/service/bots/telemetry_stream.py
+  - portal/backend/service/bots/live_series_stream.py
+  - portal/backend/service/bots/container_runtime.py
+  - portal/backend/service/bots/botlens_projection.py
   - portal/backend/service/storage/repos/runtime_events.py
   - portal/frontend/src/components/bots/BotLensLiveModal.jsx
   - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/components/bots/chartDataUtils.js
+  - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
 ---
 # BotLens Runtime Inspection Architecture
 
@@ -55,9 +61,10 @@ BotLens promises a coherent run-scoped inspection view of runtime behavior.
 
 That means:
 
-- one run-scoped continuity model,
+- one run-scoped control and lifecycle model,
 - one canonical series identity model,
 - one canonical candle timeline per selected series,
+- one continuity model per selected run/series pair,
 - one run-scoped event timeline not anchored solely to candles,
 - one coherent set of derived projections for overlays, trades, warnings, logs, decisions, and runtime status,
 - and one consistent interpretation across bootstrap, replay, paging, and live delivery.
@@ -137,6 +144,11 @@ It contains:
 The read model must preserve continuity across those projections.
 It must not require consumers to invent alternate reconstruction rules.
 
+Current runtime split:
+- worker runtime projection comes from `runtime_projection.py` and `runtime_push_stream.py`,
+- `telemetry_stream.py` ingests/persists BotLens events and maintains latest materialized per-series view state,
+- `live_series_stream.py` owns websocket continuity, bounded replay, and forced resync semantics.
+
 ## Snapshot And Checkpoint Semantics
 
 Snapshots and checkpoints are derived materializations only.
@@ -179,6 +191,10 @@ A series identity must be stable across:
 - and frontend consumption.
 
 The frontend may maintain UI-local selection keys, but it must not redefine canonical series identity.
+
+Legacy merged BotLens rows are not part of this contract.
+Canonical BotLens identity requires both `symbol` and `timeframe`, serialized as `SYMBOL|timeframe`.
+Rows such as `series_key=bot` are unsupported and must not be surfaced or normalized into the live/replay series catalog.
 
 ### Candle Identity
 
@@ -243,11 +259,32 @@ Bootstrap establishes the baseline cursor/sequence and the baseline projected st
 
 No live application is trusted until baseline continuity is known.
 
+The bootstrap-to-live handoff is part of the continuity contract.
+Websocket subscribe must establish the baseline snapshot and continuity cursor on that same channel before normal future fanout begins.
+The attach path is therefore required to support bounded replay for recently emitted live-tail messages.
+
+The preferred live contract is atomic subscribe:
+- client selects run and series identity,
+- websocket subscribe returns the baseline snapshot on that same channel,
+- bootstrap and all later live messages carry one `stream_session_id` for that continuity epoch,
+- the server replays any buffered `seq > baseline_seq` messages for that viewer,
+- and only then switches the viewer to future live fanout.
+
+Live BotLens must not depend on a client-managed HTTP bootstrap plus websocket handoff race.
+
+Durable BotLens artifacts are persisted separately from the websocket envelope names:
+- websocket transport still uses internal `botlens_series_bootstrap` / `botlens_series_delta` message kinds,
+- persisted bot-run ledger rows use `event_type=botlens.series_bootstrap` and `event_type=botlens.series_delta`,
+- and latest `portal_bot_run_view_state` rows remain a materialized cache only.
+
 ### Live Application
 
 Live application begins only after baseline continuity is established.
 
 Incoming live payloads must be applied against the known baseline cursor/sequence.
+
+Live continuity is defined against `series_seq` for one `run_id` / `series_key`.
+If the transport drops intermediate `series_seq` values, BotLens must treat that as transport continuity failure, not as a harmless UI hiccup.
 
 ### Overlap And Older Payloads
 
@@ -259,12 +296,57 @@ Overlapping, duplicate, or older live payloads must be:
 
 They must not silently produce a competing timeline.
 
+### Transport Semantics Are Part Of The Contract
+
+BotLens continuity requirements impose transport requirements.
+
+If the backend emits `series_seq` and the frontend enforces contiguous `series_seq`, then the transport between runtime producer and BotLens ingest must preserve in-order delivery for those per-series updates.
+
+This means:
+- latest-only mailbox semantics are invalid for continuity-sensitive BotLens transport,
+- silent emitter compaction is invalid if it can remove intermediate `series_seq`,
+- FIFO delivery is required,
+- websocket subscribe must replay buffered `seq > baseline_seq` messages before switching a viewer to future-only live fanout,
+- the backend may emit an explicit `resync_required` control message and terminate the live socket when continuity is no longer trusted,
+- and queue saturation must surface as explicit backpressure/logged degradation.
+
+If the product ever wants "latest snapshot only" semantics instead, that is a different contract and must be declared explicitly across backend and frontend. It cannot coexist implicitly with continuity-sensitive `series_seq` rules.
+
+### Backpressure Semantics
+
+BotLens live delivery now treats transport congestion as explicit backpressure.
+
+Producer backpressure entails:
+- the runtime emitter uses a bounded FIFO queue rather than replacing an older pending per-series update,
+- later updates wait behind older undelivered updates,
+- enqueue pressure is logged with queue depth and timeout context,
+- retries preserve queue head ordering,
+- and transport degradation is surfaced instead of being hidden by compaction.
+
+Operationally, backpressure means one of these is true:
+- update cadence is too aggressive for current transport capacity,
+- payloads are too large,
+- the backend ingest/websocket path is too slow,
+- or the consumer side is not draining fast enough.
+
+Backpressure is therefore diagnostic signal.
+It is preferable to silent sequence loss because BotLens continuity depends on it.
+
 ### Resync
 
 Resync is a controlled rebuild from a fresh canonical baseline.
 
 It is not an ad hoc chart repair path.
 It is an explicit recovery path when continuity is no longer trusted.
+
+The preferred recovery loop is:
+- server marks the current continuity epoch invalid,
+- server emits `resync_required`,
+- client drops that socket,
+- client opens a fresh atomic subscribe,
+- and a new baseline plus `stream_session_id` are established.
+
+If repeated resubscribe attempts cannot re-establish continuity inside the configured retry budget, BotLens must stop auto-looping and enter an explicit continuity-unavailable state.
 
 ### Stale Behavior
 
@@ -302,6 +384,27 @@ Its projection model consists of:
 
 Those projections may be rendered in different surfaces, but they must remain semantically aligned to the same run-scoped authority and continuity model.
 
+## Live Payload Shape
+
+BotLens live transport is intentionally thin.
+
+The live contract is:
+- one atomic websocket subscribe per selected run/series,
+- one `botlens_live_bootstrap` baseline message,
+- then typed `botlens_live_tail` messages carrying only the incremental change for that series.
+
+Current typed live payload ownership:
+- `runtime`: small run/runtime status object
+- `logs`: replace-latest inspection list
+- `decisions`: replace-latest inspection list
+- `series_delta.candle`: append or replace-tail candle update
+- `series_delta.overlay_delta`: explicit overlay ops (`upsert` / `remove`)
+- `series_delta.stats`: replace-latest per-series stats object
+- `series_delta.trades`: replace-latest trade projection for the selected series context
+
+BotLens does not stream a giant merged all-series chart blob on every live update.
+Historical depth is loaded on demand through window/history reads.
+
 ## Merge Semantics
 
 BotLens merge behavior is deterministic.
@@ -336,6 +439,8 @@ Rules:
 
 - a newer candle appends,
 - a same-identity candle replaces,
+- overlay state advances by explicit delta operations rather than full overlay replay,
+- runtime/logs/decisions/stats update through typed sections of the same live message,
 - an older or overlapping payload does not silently create a second timeline,
 - and continuity failure triggers explicit stale/resync behavior.
 

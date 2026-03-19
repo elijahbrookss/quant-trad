@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, text
 
 from portal.backend.db.session import db
 from portal.backend.main import app
-from engines.bot_runtime.runtime.event_types import SERIES_STATE_SNAPSHOT, runtime_event_type
+from engines.bot_runtime.runtime.event_types import runtime_event_type
 from portal.backend.service.market.stats_contract import REGIME_VERSION, STATS_VERSION
 from portal.backend.service.storage import storage
 from tests.helpers.builders.report_storage_builder import (
@@ -66,6 +66,36 @@ def _ensure_export_tables(dsn: str) -> None:
                     premium_index DOUBLE,
                     next_funding_time TIMESTAMPTZ,
                     inserted_at TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS candle_stats (
+                    instrument_id TEXT NOT NULL,
+                    timeframe_seconds INTEGER NOT NULL,
+                    candle_time TIMESTAMPTZ NOT NULL,
+                    stats_version TEXT NOT NULL,
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    stats JSONB NOT NULL,
+                    PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, stats_version)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS regime_stats (
+                    instrument_id TEXT NOT NULL,
+                    timeframe_seconds INTEGER NOT NULL,
+                    candle_time TIMESTAMPTZ NOT NULL,
+                    regime_version TEXT NOT NULL,
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    regime JSONB NOT NULL,
+                    PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, regime_version)
                 )
                 """
             )
@@ -141,53 +171,89 @@ def _upsert_export_candle(
     )
 
 
-def _record_series_state_snapshot(
+def _upsert_export_candle_stats(
+    conn,
     *,
-    run_id: str,
-    bot_id: str,
-    event_id: str,
-    seq: int,
-    strategy_id: str,
     instrument_id: str,
-    symbol: str,
-    timeframe: str,
     timeframe_seconds: int,
     bar_time: str,
     stats: Dict[str, object],
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO candle_stats (
+                instrument_id,
+                timeframe_seconds,
+                candle_time,
+                stats_version,
+                computed_at,
+                stats
+            ) VALUES (
+                :instrument_id,
+                :timeframe_seconds,
+                :candle_time,
+                :stats_version,
+                :computed_at,
+                CAST(:stats AS JSONB)
+            )
+            ON CONFLICT (instrument_id, timeframe_seconds, candle_time, stats_version)
+            DO UPDATE SET
+                computed_at = EXCLUDED.computed_at,
+                stats = EXCLUDED.stats
+            """
+        ),
+        {
+            "instrument_id": instrument_id,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_time": bar_time,
+            "stats_version": STATS_VERSION,
+            "computed_at": bar_time,
+            "stats": json.dumps(dict(stats)),
+        },
+    )
+
+
+def _upsert_export_regime_stats(
+    conn,
+    *,
+    instrument_id: str,
+    timeframe_seconds: int,
+    bar_time: str,
     regime: Dict[str, object],
 ) -> None:
-    storage.record_bot_runtime_event(
+    conn.execute(
+        text(
+            """
+            INSERT INTO regime_stats (
+                instrument_id,
+                timeframe_seconds,
+                candle_time,
+                regime_version,
+                computed_at,
+                regime
+            ) VALUES (
+                :instrument_id,
+                :timeframe_seconds,
+                :candle_time,
+                :regime_version,
+                :computed_at,
+                CAST(:regime AS JSONB)
+            )
+            ON CONFLICT (instrument_id, timeframe_seconds, candle_time, regime_version)
+            DO UPDATE SET
+                computed_at = EXCLUDED.computed_at,
+                regime = EXCLUDED.regime
+            """
+        ),
         {
-            "event_id": event_id,
-            "bot_id": bot_id,
-            "run_id": run_id,
-            "seq": seq,
-            "event_type": SERIES_STATE_SNAPSHOT,
-            "schema_version": 1,
-            "event_time": bar_time,
-            "known_at": bar_time,
-            "payload": {
-                "series_key": f"{symbol}|{timeframe}",
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "timeframe_seconds": timeframe_seconds,
-                "instrument_id": instrument_id,
-                "bar_index": 0,
-                "bar_time": bar_time,
-                "candle": {
-                    "time": bar_time,
-                    "open": 40000.0,
-                    "high": 40000.0,
-                    "low": 40000.0,
-                    "close": 40000.0,
-                },
-                "stats_version": STATS_VERSION,
-                "stats": dict(stats),
-                "regime_version": REGIME_VERSION,
-                "regime": dict(regime),
-            },
-        }
+            "instrument_id": instrument_id,
+            "timeframe_seconds": timeframe_seconds,
+            "candle_time": bar_time,
+            "regime_version": REGIME_VERSION,
+            "computed_at": bar_time,
+            "regime": json.dumps(dict(regime)),
+        },
     )
 
 
@@ -291,20 +357,20 @@ def test_report_export_contains_trades_and_events(monkeypatch):
             close_time="2024-01-01T03:00:00Z",
             close=40000.0,
         )
-    _record_series_state_snapshot(
-        run_id=run_id,
-        bot_id=bot_id,
-        event_id=f"{run_id}:series-state:1",
-        seq=1,
-        strategy_id="strategy-1",
-        instrument_id=instrument_id,
-        symbol="BTCUSD",
-        timeframe="1h",
-        timeframe_seconds=3600,
-        bar_time="2024-01-01T02:00:00Z",
-        stats=stats_payload,
-        regime=regime_payload,
-    )
+        _upsert_export_candle_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            bar_time="2024-01-01T02:00:00Z",
+            stats=stats_payload,
+        )
+        _upsert_export_regime_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            bar_time="2024-01-01T02:00:00Z",
+            regime=regime_payload,
+        )
     _record_runtime_signal_event(
         run_id=run_id,
         bot_id=bot_id,
@@ -446,20 +512,20 @@ def test_report_export_entry_metrics_falls_back_to_regime(monkeypatch):
             close_time="2024-01-01T03:00:00Z",
             close=2750.0,
         )
-    _record_series_state_snapshot(
-        run_id=run_id,
-        bot_id=bot_id,
-        event_id=f"{run_id}:series-state:1",
-        seq=1,
-        strategy_id="strategy-2",
-        instrument_id=instrument_id,
-        symbol="ETHUSD",
-        timeframe="1h",
-        timeframe_seconds=3600,
-        bar_time="2024-01-01T02:00:00Z",
-        stats={},
-        regime=regime_payload,
-    )
+        _upsert_export_candle_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            bar_time="2024-01-01T02:00:00Z",
+            stats={},
+        )
+        _upsert_export_regime_stats(
+            conn,
+            instrument_id=instrument_id,
+            timeframe_seconds=3600,
+            bar_time="2024-01-01T02:00:00Z",
+            regime=regime_payload,
+        )
 
     entry_time = "2024-01-01T02:00:00Z"
     storage.record_bot_trade(

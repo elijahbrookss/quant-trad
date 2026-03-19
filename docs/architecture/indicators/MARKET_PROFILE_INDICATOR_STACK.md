@@ -18,13 +18,13 @@ code_paths:
 ---
 # Market Profile Indicator Stack
 
-Market Profile uses an explicit layered stack. Each layer owns one artifact form and one timeline responsibility.
+Market Profile uses an explicit layered stack. The runtime indicator is a composite indicator that owns both typed outputs and optional overlays.
 
 ## Canonical contract
 
 - Compute owns the canonical domain objects: `Profile` and `ValueArea`.
-- Runtime owns snapshot/state progression and runtime payload emission.
-- Overlay owns projection of canonical payloads into chart boxes and markers.
+- Runtime owns state progression and typed output emission.
+- The indicator also owns canonical overlay emission for chart rendering.
 - Tests should target these seams directly instead of relying on legacy class-private helpers.
 
 ## Layer boundaries
@@ -41,37 +41,44 @@ Responsibilities:
 
 Rules:
 - `MarketProfileIndicator` is the compute boundary,
-- internal helpers may support compute, but downstream consumers should rely on typed `Profile` outputs,
-- compute does not own signal bubble or chart overlay construction.
+- internal helpers may support compute, but downstream consumers should rely on published typed outputs,
+- compute does not leak hidden mutable state to runtime consumers.
 
 ### Runtime
 
 Code path:
 - `src/indicators/market_profile/runtime`
-- `src/signals/engine/market_profile`
 
 Responsibilities:
-- maintain sequential `initialize -> apply_bar -> snapshot` semantics,
-- emit payloads that preserve known-at timing and source-session identity,
-- pass merge configuration through payloads explicitly.
+- maintain sequential `apply_bar -> snapshot -> overlay_snapshot` semantics,
+- publish manifest-declared typed outputs:
+  - `value_area_metrics`
+  - `value_location`
+  - `balance_state`
+  - `balance_breakout`
+- publish manifest-declared overlays:
+  - `value_area`
+  - `breakout_markers`
 
 Rules:
-- runtime payloads derive from canonical profiles,
+- runtime outputs derive from canonical profile state,
+- strategies consume typed outputs only,
+- overlay consumers consume canonical overlay payloads only,
 - runtime consumers do not reconstruct value areas from hidden engine state.
 
 ### Overlay
 
 Code path:
-- `src/indicators/market_profile/overlays`
+- `src/indicators/market_profile/runtime`
 
 Responsibilities:
-- project runtime payloads into display boxes/markers,
-- clamp projected artifacts to the visible chart window,
-- preserve runtime timing semantics when rendering merged or unmerged profiles.
+- emit canonical market-profile overlay payloads directly from indicator-owned state,
+- keep value-area boxes and breakout markers aligned with the same bar timeline as typed outputs.
 
 Rules:
-- overlay adapters consume payloads only,
-- chart-specific behavior stays outside compute.
+- overlays are optional and chart-only,
+- overlays are not strategy inputs,
+- runtime/BotLens may filter, trim, and stream overlays, but they do not reinterpret overlay meaning.
 
 ## Time normalization
 

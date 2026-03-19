@@ -51,7 +51,7 @@ Boundary:
 ```mermaid
 flowchart LR
     subgraph INSIDE["Quant-Trad Engine Boundary (Inside)"]
-        A[Indicator State Engine] --> B[Signal + Overlay Runtime]
+        A[Indicator Engine] --> B[Typed Outputs + Indicator Overlays]
         B --> C[Strategy Evaluation]
         C --> D[Bot Runtime Execution]
         D --> E[Playback/Audit]
@@ -77,10 +77,8 @@ Current series preparation layout:
 - `src/engines/bot_runtime/strategy/series_builder_parts/lifecycle.py`: builder lifecycle/reset/load concerns
 - `src/engines/bot_runtime/strategy/series_builder_parts/live_updates.py`: live refresh + strategy evaluation helpers
 - `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py`: series construction + incremental per-bar evaluation
-- `src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py`: overlay and regime projection helpers
 - `src/engines/bot_runtime/strategy/series_builder_parts/models.py`: `StrategySeries` runtime payload model
 - `portal/backend/service/bots/strategy_loader.py`: DB-backed strategy adapter for runtime-domain models
-- `portal/backend/service/bots/runtime_derived_state.py`: portal-side adapter for runtime-local stats/regime derivation
 
 Current storage layout:
 - `portal/backend/service/storage/repos/`: cohesive repository modules grouped by domain (`bots`, `runs`, `trades`, `runtime_events`, etc.)
@@ -104,9 +102,9 @@ Current storage layout:
 
 ## 4) Core components and data flow
 
-- Indicator state engines maintain per-bar state and emit snapshots.
-- Signal and overlay runtimes consume snapshots only.
-- Strategy evaluation consumes indicator outputs and emits intents.
+- Indicators maintain per-bar internal state and publish typed outputs plus optional overlays.
+- Strategy evaluation consumes typed outputs only and emits intents.
+- Overlay consumers consume canonical overlay payloads without recomputing indicator meaning.
 - Bot runtime applies execution realism and emits canonical events.
 - Playback consumes derived runtime state for audit/debug.
 

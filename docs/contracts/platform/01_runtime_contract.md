@@ -4,28 +4,45 @@
 
 All derived outputs should follow one timeline:
 
-1. `initialize(context)`
-2. `apply_bar(state, candle)`
-3. `snapshot(state)`
-4. consume snapshot payload
+1. initialize runtime components
+2. process one bar in dependency order
+3. mutate indicator-owned state via `apply_bar(bar, inputs)`
+4. publish typed outputs via `snapshot()`
+5. publish optional canonical overlays via `overlay_snapshot()`
+6. evaluate strategies from published typed outputs only
+7. build downstream read models from the same bar result
 
 ## Artifact Contract
 
-Derived artifacts should include timing metadata:
-- `known_at` (preferred)
-- `created_at`
-- `finalized_at`
+Indicators are computation units with internal state.
 
-Consumers must enforce timing gates before use/visibility.
+Public runtime surfaces are:
+- typed outputs for strategy/runtime truth,
+- optional canonical overlays for chart rendering.
+
+Rules:
+- outputs are the only strategy-visible indicator interface,
+- overlays are not strategy inputs,
+- indicator overlays represent the full current visual state for the bar, not producer-side deltas,
+- runtime transport may diff those full overlay snapshots and stream only deltas downstream,
+- every declared output must be returned every bar,
+- every declared overlay must be returned every bar,
+- `ready=False` means unusable now, not pending,
+- runtime never waits, retries, or substitutes missing values,
+- runtime and preview consumers must not fetch overlays through a parallel overlay service path.
 
 ## Cache Contract
 
 Caching is valid only when it preserves runtime semantics:
 - key includes semantic inputs
 - outputs match non-cached replay
-- timing gates are unchanged
+- output readiness and overlay visibility semantics are unchanged
 
 ## Single-Path Rule
 
 Do not add alternate reconstruction paths for the same artifact class.
-If required data is missing in snapshot payload, extend the snapshot contract.
+
+Rules:
+- strategies must not inspect indicator internals,
+- downstream overlay consumers must not reinterpret indicator-local overlay blobs,
+- if required data is missing from the public runtime surface, extend the contract instead of reading hidden state.

@@ -8,9 +8,10 @@ tags:
   - regime
   - classification
 code_paths:
-  - src/engines/bot_runtime/strategy/regime_overlay.py
-  - src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py
-  - portal/backend/service/bots/runtime_derived_state.py
+  - src/indicators/regime
+  - src/engines/indicator_engine/runtime_engine.py
+  - src/strategies/evaluator.py
+  - portal/backend/service/market/regime_stats_service.py
 ---
 # Regime Classification System
 
@@ -27,14 +28,14 @@ Audience: high/mid-level engineers who need implementation-level clarity.
 
 ## TL;DR
 
-- Regime classification has two valid ownership paths now:
-  - QuantLab / strategy-preview path: DB-backed async `candle_stats` and `regime_stats`.
-  - Bot runtime path: runtime-local derivation from the in-memory candle timeline.
+- Regime classification has two valid product surfaces now:
+  - QuantLab / reporting path: DB-backed `candle_stats`, `regime_stats`, and `regime_blocks`.
+  - Bot runtime path: `RegimeIndicator` publishes typed context outputs and optional overlays on the canonical runtime timeline.
 - New candles trigger async stats jobs.
 - Jobs compute `candle_stats` first, then `regime_stats` (versioned).
-- Strategy-preview/runtime filter code can still use persisted `regime_stats`.
-- Bot runtime overlays and entry-context metrics use runtime-local derived state, not DB rows.
-- Overlay geometry can be prebuilt and still be accurate because visibility is time-gated by `current_epoch` and `known_at`.
+- Strategies consume `regime.market_regime` as a typed context output rather than a separate filter runtime.
+- Bot runtime overlays come from indicator-owned overlay snapshots, not a separate runtime-derived cache.
+- Overlay visibility is still time-gated by `current_epoch` and `known_at`.
 
 ## Core Components
 
@@ -68,9 +69,9 @@ Audience: high/mid-level engineers who need implementation-level clarity.
 - Final stabilized regime is upserted into `regime_stats` (versioned by `regime_version`).
 - Key code:
   - [regime_stats_service.py](/home/elijah/dev/quant-trad/portal/backend/service/market/regime_stats_service.py:34)
-  - [regime_engine.py](/home/elijah/dev/quant-trad/portal/backend/service/market/regime_engine.py:22)
-  - [regime_stabilizer.py](/home/elijah/dev/quant-trad/portal/backend/service/market/regime_stabilizer.py:37)
-  - [regime_config.py](/home/elijah/dev/quant-trad/portal/backend/service/market/regime_config.py:8)
+  - [engine.py](/home/elijah/dev/quant-trad/src/indicators/regime/engine.py:24)
+  - [stabilizer.py](/home/elijah/dev/quant-trad/src/indicators/regime/stabilizer.py:37)
+  - [config.py](/home/elijah/dev/quant-trad/src/indicators/regime/config.py:7)
 
 ### 4) Regime Blocks and Confirmation Timing
 
@@ -115,81 +116,54 @@ Important nuance:
 
 ## Runtime Consumption Paths
 
-### A) Strategy/Decision Path (when filters use regime)
+### A) Strategy/Decision Path
 
-- Strategy filter runtime builds a `StatsSnapshot`.
-- For each signal, it resolves candle time and reads `regime_stats` by time/version.
-- Filter DSL can gate decisions on regime fields.
+- The bot runtime executes `RegimeIndicator` in dependency order after its declared dependencies are ready.
+- Strategies read the published typed output `regime.market_regime`.
+- `context_match` rules compare `state_key` and optional fields directly from that output.
 - Key code:
-  - [filter_runtime.py](/home/elijah/dev/quant-trad/portal/backend/service/strategies/strategy_service/filter_runtime.py:17)
-  - [filters.py](/home/elijah/dev/quant-trad/portal/backend/service/strategies/strategy_service/filters.py:72)
+  - [runtime.py](/home/elijah/dev/quant-trad/src/indicators/regime/runtime.py)
+  - [runtime_engine.py](/home/elijah/dev/quant-trad/src/engines/indicator_engine/runtime_engine.py)
+  - [evaluator.py](/home/elijah/dev/quant-trad/src/strategies/evaluator.py)
 
 ### B) BotLens Overlay Path (view layer)
 
-- Runtime derives stats/regime from the worker's in-memory candle timeline, then builds overlay payloads from that runtime-local state.
-- Overlays include boxes/segments/markers and block metadata without depending on async `regime_stats` table freshness.
+- `RegimeIndicator` may emit normalized canonical overlay payloads from `overlay_snapshot()`.
+- BotLens consumes those canonical overlays and applies visibility, trimming, delta, and transport only.
 - Key code:
-  - [runtime_derived_state.py](/home/elijah/dev/quant-trad/portal/backend/service/bots/runtime_derived_state.py)
-  - [overlays_regime.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/strategy/series_builder_parts/overlays_regime.py)
-  - [regime_overlay.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/strategy/regime_overlay.py)
+  - [runtime.py](/home/elijah/dev/quant-trad/src/indicators/regime/runtime.py)
+  - [state_streaming.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/mixins/state_streaming.py)
+  - [chart_state.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/components/chart_state.py)
 
-## Why Prebuilt Overlays Can Still Be Correct
+## Runtime Overlay Semantics
 
-In backtest/walk-forward mode, we can prebuild regime overlays once and reuse them because rendering still enforces time visibility.
+Regime overlays are no longer a separate rebuild contract in the core runtime.
 
-Visibility enforcement happens at render shaping:
+- overlay meaning originates from the indicator,
+- overlay payloads are already normalized when emitted,
+- runtime/BotLens only decides visibility at the current epoch.
 
-- overlays are trimmed to `current_epoch`,
-- entries with `known_at > current_epoch` are hidden,
-- future x2 endpoints are clipped to current time where needed.
+This preserves the single execution timeline:
 
-Key code:
-- [chart_state.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/components/chart_state.py:52)
-- [chart_state.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/components/chart_state.py:202)
-- [chart_state.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/components/chart_state.py:313)
-
-So:
-
-- prebuilding geometry != showing future information.
-- correctness comes from `known_at/current_epoch` gating, not from recomputing geometry every bar.
-
-## When Rebuild Is Actually Needed
-
-Use per-bar/periodic rebuild only when underlying regime rows can change during the run timeline:
-
-- live/sim modes with appended candles,
-- when the runtime-local candle window changes and you need immediate overlay refresh.
-
-In those cases, rebuild should be event-driven by new regime data availability, not unconditional every bar.
-
-## Runtime Modes and the Current Refactor
-
-Current runtime switch:
-
-- `runtime_regime_overlay_rebuild=false` (default): prebuild once at prepare-time.
-- `runtime_regime_overlay_rebuild=true`: rebuild from visible candles in bar loop.
-
-This switch affects overlay compute cost, not classifier semantics.
-
-Key code:
-- [setup_prepare.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/mixins/setup_prepare.py:234)
-- [setup_prepare.py](/home/elijah/dev/quant-trad/src/engines/bot_runtime/runtime/mixins/setup_prepare.py:875)
+- `apply_bar(...)`
+- `snapshot()`
+- `overlay_snapshot()`
 
 ## Known Tradeoffs
 
-- Async stats pipeline can create short freshness lag for newest candle regime in live contexts.
-- Runtime-local derivation duplicates some research-time computation, but preserves the single runtime timeline and avoids async lag leaking into execution semantics.
+- Async stats pipeline can create short freshness lag for newest candle regime rows in research/reporting contexts.
+- Bot runtime avoids that lag by computing regime on the same typed-output timeline as strategy decisions.
 - Recompute range + upsert is robust/idempotent but can be heavy under very high ingest throughput.
 - Larger confirmation/min-block settings improve stability but delay visible state transitions.
 
 ## Practical Guidance
 
-- For backtest/walk-forward playback correctness and speed:
-  - keep `runtime_regime_overlay_rebuild=false`.
-- For live "as-soon-as-available" regime visuals:
-  - keep async stats workers healthy,
-  - prefer targeted overlay refresh on new regime rows,
-  - avoid unconditional full-window rebuild every bar.
+- For runtime correctness:
+  - treat `regime.market_regime` as the strategy truth surface.
+- For reporting/export:
+  - read `regime_stats` / `regime_blocks` from persisted tables.
+- For visuals:
+  - keep regime overlays indicator-owned and downstream-only after emission.
 
 ## Debug Checklist
 
@@ -198,8 +172,7 @@ If regime looks stale or wrong:
 1. Confirm stats jobs are running and succeeding.
    - `stats_worker_job_succeeded` in backend logs.
 2. Verify `regime_stats` row exists for `(instrument_id, timeframe, candle_time, regime_version)`.
-3. Check strategy filter snapshot time alignment (signal epoch floored to timeframe).
+3. Check typed runtime output for `regime.market_regime` on the affected bar.
 4. Inspect `known_at` on regime blocks if transitions seem delayed.
 5. Confirm overlay visibility trimming vs current epoch.
-6. Check runtime mode:
-   - prebuilt static vs rebuild.
+6. Confirm the indicator emitted a ready regime overlay on that bar if the issue is visual only.

@@ -43,19 +43,15 @@ def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     def _fake_evaluate(*args, **kwargs):
         _ = args, kwargs
         return {
-            "chart_markers": {
-                "buy": [
-                    {"time": isoformat(now - timedelta(minutes=1))},
-                    {"time": isoformat(now)},
-                ],
-                "sell": [],
-            },
-            "perf": {"indicator_eval_ms": 3.5, "rule_eval_ms": 2.0},
+            "trigger_rows": [
+                {"epoch": int((now - timedelta(minutes=1)).timestamp()), "action": "buy"},
+                {"epoch": int(now.timestamp()), "action": "buy"},
+            ],
+            "overlays": [],
+            "perf": {"candle_fetch_ms": 3.5, "preview_replay_ms": 2.0},
         }
 
     builder._evaluate_strategy = _fake_evaluate  # type: ignore[assignment]
-    builder._indicator_overlay_entries = lambda *a, **k: []  # type: ignore[assignment]
-    builder._build_regime_overlays = lambda **k: []  # type: ignore[assignment]
 
     signals, overlays, metrics = builder.evaluate_incremental_for_bar(
         series=series,
@@ -71,8 +67,8 @@ def test_incremental_eval_emits_only_current_epoch_and_newer_than_cursor():
     assert overlays == []
     assert metrics["epochs_evaluated_this_tick"] == 1.0
     assert metrics["signals_emitted_count"] == 1.0
-    assert metrics["indicator_eval_ms"] == 3.5
-    assert metrics["rule_eval_ms"] == 2.0
+    assert metrics["candle_fetch_ms"] == 3.5
+    assert metrics["preview_replay_ms"] == 2.0
 
 
 def test_incremental_eval_uses_bounded_lookback_window():
@@ -99,11 +95,9 @@ def test_incremental_eval_uses_bounded_lookback_window():
         observed["start_iso"] = start_iso
         observed["end_iso"] = end_iso
         _ = timeframe, instrument_id, strategy, include_walk_forward_markers
-        return {"chart_markers": {"buy": [], "sell": []}, "perf": {}}
+        return {"trigger_rows": [], "overlays": [], "perf": {}}
 
     builder._evaluate_strategy = _fake_evaluate  # type: ignore[assignment]
-    builder._indicator_overlay_entries = lambda *a, **k: []  # type: ignore[assignment]
-    builder._build_regime_overlays = lambda **k: []  # type: ignore[assignment]
 
     builder.evaluate_incremental_for_bar(
         series=series,
@@ -117,32 +111,25 @@ def test_incremental_eval_uses_bounded_lookback_window():
     assert observed["end_iso"] == isoformat(now)
 
 
-def test_build_signals_from_markers_preserves_signal_time_without_shift() -> None:
+def test_build_signals_from_trigger_rows_preserves_signal_time_without_shift() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    markers = {
-        "buy": [
-            {
-                "time": int(ts.timestamp()),
-                "known_at": int((ts - timedelta(minutes=1)).timestamp()),
-            }
-        ],
-        "sell": [],
-    }
-    out = SeriesBuilder._build_signals_from_markers(markers)
+    rows = [
+        {
+            "epoch": int(ts.timestamp()),
+            "action": "buy",
+        }
+    ]
+    out = SeriesBuilder._build_signals_from_trigger_rows(rows)
     assert len(out) == 1
     assert out[0].epoch == int(ts.timestamp())
 
-
-def test_build_signals_from_markers_raises_when_known_at_after_signal_time() -> None:
+def test_build_signals_from_trigger_rows_ignores_unknown_actions() -> None:
     ts = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
-    markers = {
-        "buy": [
-            {
-                "time": int(ts.timestamp()),
-                "known_at": int((ts + timedelta(minutes=1)).timestamp()),
-            }
-        ],
-        "sell": [],
-    }
-    with pytest.raises(RuntimeError, match="known_at"):
-        SeriesBuilder._build_signals_from_markers(markers)
+    rows = [
+        {
+            "epoch": int(ts.timestamp()),
+            "action": "hold",
+        }
+    ]
+    out = SeriesBuilder._build_signals_from_trigger_rows(rows)
+    assert len(out) == 0

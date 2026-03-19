@@ -19,7 +19,7 @@ code_paths:
 
 - `Component`: Bot runtime execution engine
 - `Owner/Domain`: Bot Runtime
-- `Doc Version`: 2.1
+- `Doc Version`: 2.2
 - `Related Contracts`: [[BOT_RUNTIME_DOCS_HUB]], [[01_runtime_contract]], [[BOT_RUNTIME_SERVICE_ARCHITECTURE]], [[BOT_RUNTIME_SYMBOL_SHARDING_ARCHITECTURE]], [[RUNTIME_EVENT_MODEL_V1]], [[WALLET_GATEWAY_ARCHITECTURE]], `src/engines/bot_runtime/runtime/`, `src/engines/bot_runtime/core/`, `src/engines/bot_runtime/strategy/`, `portal/backend/service/bots/runtime_dependencies.py`
 
 ## 1) Problem and scope
@@ -47,7 +47,12 @@ Current package split:
 - `src/engines/bot_runtime/runtime/mixins/setup_prepare.py`: preparation, series bootstrap, indicator runtime state, overlay aggregation, intrabar setup.
 - `src/engines/bot_runtime/runtime/mixins/execution_loop.py`: blocking start/run loop, per-series stepping, intrabar stepping, completion handling.
 - `src/engines/bot_runtime/runtime/mixins/runtime_events.py`: canonical runtime event emission, decision trace, run artifact construction, shared wallet runtime context.
-- `src/engines/bot_runtime/runtime/mixins/state_streaming.py`: snapshots, chart payloads, persistence buffer flush, push subscribers, step-trace recording.
+- `src/engines/bot_runtime/runtime/mixins/runtime_projection.py`: snapshots, chart payloads, visible-state projection, and read-model shaping.
+- `src/engines/bot_runtime/runtime/mixins/runtime_persistence.py`: trade persistence, `series_bar.telemetry`, and step-trace recording/flush.
+- `src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py`: subscriber lifecycle, overlay delta generation, and live runtime push payloads.
+- `src/engines/bot_runtime/runtime/mixins/state_streaming.py`: compatibility shim that aggregates the split runtime projection/persistence/push mixins.
+- `src/engines/bot_runtime/runtime/overlay_types.py`: explicit runtime overlay-type registration invoked during runtime setup.
+- `src/engines/bot_runtime/runtime/components/overlay_delta.py`: pure overlay diff/fingerprint helpers used by live runtime streaming.
 - `src/engines/bot_runtime/runtime/components/`: helpers for run context, runtime policy, series runner, chart state, intrabar cache, settlement, signal consumption, event sinks, trade persistence, and step-trace buffering.
 - `src/engines/bot_runtime/strategy/`: runtime-domain strategy loading contracts, series construction, regime overlays, and incremental signal/overlay preparation.
 - `src/engines/bot_runtime/deps.py`: explicit boundary contract for portal-owned collaborators.
@@ -57,7 +62,10 @@ Current package split:
 Portal-owned adapters now live beside the service composition layer rather than inside a shadow runtime tree:
 - `portal/backend/service/bots/runtime_dependencies.py`: concrete dependency bundle for worker runtime construction.
 - `portal/backend/service/bots/strategy_loader.py`: DB-backed strategy adapter that returns runtime-domain strategy models.
-- `portal/backend/service/bots/runtime_derived_state.py`: runtime-local stats/regime derivation adapter built from in-memory candles.
+
+Indicator execution is now owned by:
+- `src/engines/indicator_engine/contracts.py`: manifest, typed output, overlay, and indicator base contracts.
+- `src/engines/indicator_engine/runtime_engine.py`: synchronous manifest validation, dependency ordering, per-bar execution, and frame building.
 
 ## 3) Runtime topology
 
@@ -79,12 +87,13 @@ flowchart LR
 `BotRuntime` is a composition root, not a monolith.
 
 Runtime assembly:
-- `BotRuntime` subclasses four mixins and adds no behavior of its own beyond assembly and overlay registration.
+- `BotRuntime` subclasses explicit execution/event/projection/persistence/push mixins and adds no behavior of its own beyond assembly.
 - `BotRuntime` requires an explicit `BotRuntimeDeps` bundle and does not import portal services directly.
+- Overlay-type registration is explicit during runtime setup; runtime import no longer performs hidden registry side effects.
 
 Preparation boundary:
 - `RuntimeSetupPrepareMixin` owns strategy loading, series construction, indicator engine initialization, warmup replay, overlay bootstrap, and building `SeriesExecutionState`.
-- Runtime preparation depends on injected collaborators for strategy loading, market data fetch, indicator metadata, derived-state building, and persistence.
+- Runtime preparation depends on injected collaborators for strategy loading, market data fetch, indicator metadata, and persistence.
 
 Execution boundary:
 - `RuntimeExecutionLoopMixin` owns `warm_up()`, `start()`, `_execute_loop()`, `_step_series_state()`, intrabar stepping, and final status transitions.
@@ -93,7 +102,10 @@ Event boundary:
 - `RuntimeEventsMixin` owns append-only canonical runtime events, correlation IDs, decision trace entries, shared wallet projection hooks, and final run artifact payloads.
 
 Read-model boundary:
-- `RuntimeStateStreamingMixin` owns `snapshot()`, `chart_payload()`, subscriber updates, batched trade persistence, and asynchronous step-trace metrics.
+- `RuntimeProjectionMixin` owns `snapshot()` and `chart_payload()` read models.
+- `RuntimePersistenceMixin` owns trade persistence, `series_bar.telemetry`, and step-trace buffering.
+- `RuntimePushStreamMixin` owns subscriber updates and live overlay/runtime delta payload assembly.
+- `RuntimeStateStreamingMixin` remains only as a compatibility shim and should not accumulate new behavior.
 
 Component boundary:
 - `RunContext` is the in-memory per-run holder for `run_id`, status, wallet gateway, runtime events, and decision trace.
@@ -114,9 +126,13 @@ Preparation does the following:
 1. Validate that `strategy_ids` are present.
 2. Build `StrategySeries` instances through `src/engines/bot_runtime/strategy/series_builder.py`.
 3. Build `SeriesExecutionState` for each series.
-4. Initialize indicator plugin engines and replay warmup candles into each indicator engine using the canonical `initialize -> apply_bar -> snapshot` engine contract.
-5. Bootstrap indicator overlays and runtime regime overlays.
-6. Aggregate overlays into the runtime cache and mark the runtime `idle`.
+4. Build runtime indicator instances and initialize `IndicatorExecutionEngine`.
+5. Replay warmup candles through the canonical indicator contract:
+   - `apply_bar(bar, dependency_outputs)`
+   - `snapshot()`
+   - `overlay_snapshot()`
+6. Capture the last `EngineFrame(outputs, overlays)` on the series state.
+7. Treat overlays as full current-state snapshots, diff them only at the runtime transport boundary, and mark the runtime `idle`.
 
 Preparation is single-flight and guarded by `_prepare_lock`. Read paths must not implicitly build partial runtime state.
 
@@ -134,15 +150,17 @@ Preparation is single-flight and guarded by `_prepare_lock`. Read paths must not
 
 Each due series state runs through `_step_series_state()`:
 1. Read the next candle.
-2. Update indicator runtime state and project overlays.
-3. Evaluate rules from the latest state snapshots.
-4. Consume pending signals up to the current epoch.
-5. Emit `SIGNAL_EMITTED` when a direction is chosen.
-6. Attempt entry through `LadderRiskEngine.maybe_enter(...)`.
-7. Emit `DECISION_ACCEPTED` or `DECISION_REJECTED`.
-8. Persist trade-entry rows and canonical `ENTRY_FILLED` / `EXIT_FILLED` events as execution occurs.
-9. If an active trade exists on a coarse timeframe, switch into intrabar stepping with cached 1-minute candles.
-10. Finalize the bar, refresh state, and push a chart/runtime update.
+2. Execute `IndicatorExecutionEngine.step(...)` in topological dependency order.
+3. Store the returned `EngineFrame.outputs` and `EngineFrame.overlays` on `SeriesExecutionState`.
+4. Evaluate typed strategy rules from the flattened output map only.
+5. Convert full current overlay snapshots into transport deltas for BotLens/runtime subscribers.
+6. Consume pending signals up to the current epoch.
+7. Emit `SIGNAL_EMITTED` when a direction is chosen.
+8. Attempt entry through `LadderRiskEngine.maybe_enter(...)`.
+9. Emit `DECISION_ACCEPTED` or `DECISION_REJECTED`.
+10. Persist trade-entry rows and canonical `ENTRY_FILLED` / `EXIT_FILLED` events as execution occurs.
+11. If an active trade exists on a coarse timeframe, switch into intrabar stepping with cached 1-minute candles.
+12. Finalize the bar, refresh state, and push a chart/runtime update.
 
 ### Complete
 
@@ -175,7 +193,7 @@ Important invariants:
 ## 7) Runtime state and read models
 
 Authoritative runtime state is split across:
-- worker-local sequential series state (`SeriesExecutionState`, active trades, indicator runtime state),
+- worker-local sequential series state (`SeriesExecutionState`, active trades, indicator outputs, indicator overlays),
 - append-only canonical runtime events,
 - shared wallet reservations/runtime events when running in symbol-sharded mode.
 
@@ -186,6 +204,12 @@ Derived read models:
 - final run artifact: serialized runtime event stream plus projected wallet start/end state.
 
 `chart_payload()` is not a second execution path. It is a read model derived from the same runtime state timeline.
+
+Indicator boundary rules in runtime:
+- strategies consume typed outputs only,
+- overlays remain separate from typed outputs,
+- overlay meaning originates from the indicator,
+- runtime only filters, trims, diffs, and streams overlay payloads.
 
 ## 8) Known-at and visibility contract
 

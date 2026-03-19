@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from engines.bot_runtime.runtime.components.series_state_buffer import SeriesStatePersistenceBuffer
+from engines.bot_runtime.runtime.components.series_bar_telemetry_buffer import SeriesBarTelemetryBuffer
 
 
-def test_series_state_buffer_batches_and_flushes():
+def test_series_bar_telemetry_buffer_batches_and_flushes():
     batches: list[int] = []
 
     def _batch_handler(payloads):
         batches.append(len(payloads))
         return len(payloads)
 
-    buffer = SeriesStatePersistenceBuffer(
+    buffer = SeriesBarTelemetryBuffer(
         queue_max=64,
         batch_size=3,
         flush_interval_s=0.02,
@@ -26,7 +26,7 @@ def test_series_state_buffer_batches_and_flushes():
                 "bot_id": "bot-1",
                 "run_id": "run-1",
                 "seq": index + 1,
-                "event_type": "series_state.snapshot",
+                "event_type": "series_bar.telemetry",
                 "payload": {"bar_index": index},
             }
         )
@@ -37,7 +37,7 @@ def test_series_state_buffer_batches_and_flushes():
     assert max(batches) <= 3
 
 
-def test_series_state_buffer_retries_failed_batch():
+def test_series_bar_telemetry_buffer_retries_failed_batch():
     attempts = 0
     persisted = 0
 
@@ -49,7 +49,7 @@ def test_series_state_buffer_retries_failed_batch():
         persisted += len(payloads)
         return len(payloads)
 
-    buffer = SeriesStatePersistenceBuffer(
+    buffer = SeriesBarTelemetryBuffer(
         queue_max=32,
         batch_size=2,
         flush_interval_s=0.02,
@@ -64,7 +64,7 @@ def test_series_state_buffer_retries_failed_batch():
             "bot_id": "bot-1",
             "run_id": "run-1",
             "seq": 1,
-            "event_type": "series_state.snapshot",
+            "event_type": "series_bar.telemetry",
             "payload": {"bar_index": 1},
         }
     )
