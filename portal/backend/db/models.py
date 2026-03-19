@@ -127,6 +127,12 @@ class StrategyRuleRecord(Base):
     def to_dict(self) -> Dict[str, Any]:
         """Return a serialisable payload for the stored rule."""
 
+        raw_conditions = self.conditions if self.conditions is not None else []
+        when = None
+        if isinstance(raw_conditions, dict) and str(raw_conditions.get("kind") or "").strip() == "typed_rule_v1":
+            when = raw_conditions.get("when")
+        elif isinstance(raw_conditions, dict):
+            when = raw_conditions
         return {
             "id": self.id,
             "strategy_id": self.strategy_id,
@@ -135,65 +141,8 @@ class StrategyRuleRecord(Base):
             "match": self.match,
             "description": self.description,
             "enabled": bool(self.enabled),
-            "conditions": list(self.conditions or []),
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
-            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
-
-class StrategyFilterRecord(Base):
-    """Database record describing a strategy-wide filter definition."""
-
-    __tablename__ = "portal_strategy_filters"
-
-    id = Column(String(64), primary_key=True)
-    strategy_id = Column(String(64), ForeignKey("portal_strategies.id", ondelete="CASCADE"), nullable=False)
-    scope = Column(String(16), nullable=False, default="GLOBAL")
-    enabled = Column(Boolean, nullable=False, default=True)
-    name = Column(String(255), nullable=False)
-    description = Column(String(1024), nullable=True)
-    dsl = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "strategy_id": self.strategy_id,
-            "scope": self.scope,
-            "enabled": bool(self.enabled),
-            "name": self.name,
-            "description": self.description,
-            "dsl": dict(self.dsl or {}),
-            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
-            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
-        }
-
-
-class RuleFilterRecord(Base):
-    """Database record describing a rule-scoped filter definition."""
-
-    __tablename__ = "portal_rule_filters"
-
-    id = Column(String(64), primary_key=True)
-    rule_id = Column(String(64), ForeignKey("portal_strategy_rules.id", ondelete="CASCADE"), nullable=False)
-    scope = Column(String(16), nullable=False, default="RULE")
-    enabled = Column(Boolean, nullable=False, default=True)
-    name = Column(String(255), nullable=False)
-    description = Column(String(1024), nullable=True)
-    dsl = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "rule_id": self.rule_id,
-            "scope": self.scope,
-            "enabled": bool(self.enabled),
-            "name": self.name,
-            "description": self.description,
-            "dsl": dict(self.dsl or {}),
+            "conditions": raw_conditions,
+            "when": when,
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }

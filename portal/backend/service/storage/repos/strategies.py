@@ -41,22 +41,9 @@ def load_strategies() -> List[Dict[str, Any]]:
                     StrategyRuleRecord.strategy_id == strategy_id
                 )
             ).scalars().all()
-            strategy_filters = session.execute(
-                select(StrategyFilterRecord).where(
-                    StrategyFilterRecord.strategy_id == strategy_id
-                )
-            ).scalars().all()
-            rule_ids = [rule.id for rule in rules]
-            rule_filters: List[RuleFilterRecord] = []
-            if rule_ids:
-                rule_filters = session.execute(
-                    select(RuleFilterRecord).where(RuleFilterRecord.rule_id.in_(rule_ids))
-                ).scalars().all()
             record["indicator_links"] = [link.to_dict() for link in links]
             record["instrument_links"] = [link.to_dict() for link in inst_links]
             record["rules_raw"] = [rule.to_dict() for rule in rules]
-            record["strategy_filters_raw"] = [flt.to_dict() for flt in strategy_filters]
-            record["rule_filters_raw"] = [flt.to_dict() for flt in rule_filters]
             payload.append(record)
         return payload
 
@@ -131,9 +118,6 @@ def delete_strategy(strategy_id: str) -> None:
             ).delete(synchronize_session=False)
             session.query(StrategyRuleRecord).filter(
                 StrategyRuleRecord.strategy_id == strategy_id
-            ).delete(synchronize_session=False)
-            session.query(StrategyFilterRecord).filter(
-                StrategyFilterRecord.strategy_id == strategy_id
             ).delete(synchronize_session=False)
     except SQLAlchemyError as exc:
         logger.warning("strategy_delete_failed | id=%s | error=%s", strategy_id, exc)
@@ -338,131 +322,6 @@ def delete_strategy_rule(rule_id: str) -> None:
     except SQLAlchemyError as exc:
         logger.warning("strategy_rule_delete_failed | id=%s | error=%s", rule_id, exc)
 
-
-def list_strategy_filters(strategy_id: str) -> List[Dict[str, Any]]:
-    """Return global filters for a strategy."""
-
-    if not db.available or not strategy_id:
-        return []
-    with db.session() as session:
-        filters = session.execute(
-            select(StrategyFilterRecord).where(StrategyFilterRecord.strategy_id == strategy_id)
-        ).scalars().all()
-        return [flt.to_dict() for flt in filters]
-
-
-def list_rule_filters(rule_id: str) -> List[Dict[str, Any]]:
-    """Return filters attached to a rule."""
-
-    if not db.available or not rule_id:
-        return []
-    with db.session() as session:
-        filters = session.execute(
-            select(RuleFilterRecord).where(RuleFilterRecord.rule_id == rule_id)
-        ).scalars().all()
-        return [flt.to_dict() for flt in filters]
-
-
-def upsert_strategy_filter(payload: Dict[str, Any]) -> None:
-    """Persist a strategy-wide filter definition."""
-
-    if not db.available:
-        return
-    filter_id = payload.get("id")
-    strategy_id = payload.get("strategy_id")
-    if not filter_id or not strategy_id:
-        raise ValueError("Strategy filter id and strategy_id are required")
-    try:
-        with db.session() as session:
-            record = session.get(StrategyFilterRecord, filter_id)
-            now = _utcnow()
-            if record is None:
-                record = StrategyFilterRecord(
-                    id=str(filter_id),
-                    strategy_id=str(strategy_id),
-                    scope=str(payload.get("scope") or "GLOBAL"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(record)
-            record.name = payload.get("name") or record.name
-            record.description = payload.get("description")
-            record.enabled = bool(payload.get("enabled", True))
-            record.scope = str(payload.get("scope") or record.scope or "GLOBAL")
-            record.dsl = dict(payload.get("dsl") or {})
-            record.updated_at = now
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "strategy_filter_persist_failed | strategy=%s | filter=%s | error=%s",
-            strategy_id,
-            filter_id,
-            exc,
-        )
-
-
-def upsert_rule_filter(payload: Dict[str, Any]) -> None:
-    """Persist a rule-scoped filter definition."""
-
-    if not db.available:
-        return
-    filter_id = payload.get("id")
-    rule_id = payload.get("rule_id")
-    if not filter_id or not rule_id:
-        raise ValueError("Rule filter id and rule_id are required")
-    try:
-        with db.session() as session:
-            record = session.get(RuleFilterRecord, filter_id)
-            now = _utcnow()
-            if record is None:
-                record = RuleFilterRecord(
-                    id=str(filter_id),
-                    rule_id=str(rule_id),
-                    scope=str(payload.get("scope") or "RULE"),
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(record)
-            record.name = payload.get("name") or record.name
-            record.description = payload.get("description")
-            record.enabled = bool(payload.get("enabled", True))
-            record.scope = str(payload.get("scope") or record.scope or "RULE")
-            record.dsl = dict(payload.get("dsl") or {})
-            record.updated_at = now
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "rule_filter_persist_failed | rule=%s | filter=%s | error=%s",
-            rule_id,
-            filter_id,
-            exc,
-        )
-
-
-def delete_strategy_filter(filter_id: str) -> None:
-    """Delete a strategy-wide filter."""
-
-    if not db.available or not filter_id:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(StrategyFilterRecord, filter_id)
-            if record:
-                session.delete(record)
-    except SQLAlchemyError as exc:
-        logger.warning("strategy_filter_delete_failed | filter=%s | error=%s", filter_id, exc)
-
-
-def delete_rule_filter(filter_id: str) -> None:
-    """Delete a rule-scoped filter."""
-
-    if not db.available or not filter_id:
-        return
-    try:
-        with db.session() as session:
-            record = session.get(RuleFilterRecord, filter_id)
-            if record:
-                session.delete(record)
-    except SQLAlchemyError as exc:
-        logger.warning("rule_filter_delete_failed | filter=%s | error=%s", filter_id, exc)
 
 
 

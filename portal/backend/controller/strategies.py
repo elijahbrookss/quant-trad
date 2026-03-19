@@ -47,26 +47,16 @@ def _attach_market_aliases(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
-class RuleConditionOut(BaseModel):
-    """Condition that must be satisfied for a rule."""
-
-    indicator_id: str
-    signal_type: str
-    rule_id: Optional[str] = None
-    direction: Optional[str] = None
-
-
 class StrategyRuleOut(BaseModel):
     """Response model describing a stored strategy rule."""
 
     id: str
     name: str
     action: str
-    conditions: List[RuleConditionOut]
-    match: str
+    when: Dict[str, Any]
+    flow: Dict[str, Any] = Field(default_factory=dict)
     description: Optional[str] = None
     enabled: bool
-    filters: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str
     updated_at: str
 
@@ -98,7 +88,6 @@ class StrategyOut(BaseModel):
     instruments: List[Dict[str, Any]] = Field(default_factory=list)
     instrument_messages: List[Dict[str, Any]] = Field(default_factory=list)
     rules: List[StrategyRuleOut]
-    global_filters: List[Dict[str, Any]] = Field(default_factory=list)
     atm_template: Dict[str, Any] = Field(default_factory=dict)
     atm_template_id: Optional[str] = None
     base_risk_per_trade: Optional[float] = None
@@ -146,33 +135,14 @@ class StrategyUpdateRequest(BaseModel):
     risk_overrides: Optional[Dict[str, Any]] = None
 
 
-class RuleConditionCreate(BaseModel):
-    """Definition of a single rule condition."""
-
-    indicator_id: str
-    signal_type: str
-    rule_id: Optional[str] = None
-    direction: Optional[str] = Field(default=None)
-
-
 class StrategyRuleCreateRequest(BaseModel):
     """Payload for creating a strategy rule."""
 
     name: str
     action: str
-    conditions: List[RuleConditionCreate] = Field(default_factory=list)
-    match: str = Field(default="all")
+    when: Dict[str, Any]
     description: Optional[str] = None
     enabled: bool = True
-
-
-class RuleConditionUpdate(BaseModel):
-    """Mutable condition definition."""
-
-    indicator_id: str
-    signal_type: str
-    rule_id: Optional[str] = None
-    direction: Optional[str] = None
 
 
 class StrategyRuleUpdateRequest(BaseModel):
@@ -180,41 +150,9 @@ class StrategyRuleUpdateRequest(BaseModel):
 
     name: Optional[str] = None
     action: Optional[str] = None
-    conditions: Optional[List[RuleConditionUpdate]] = None
-    match: Optional[str] = None
+    when: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
-
-
-class StrategyFilterOut(BaseModel):
-    """Response model describing a filter."""
-
-    id: str
-    scope: str
-    name: str
-    description: Optional[str] = None
-    enabled: bool
-    dsl: Dict[str, Any]
-    created_at: str
-    updated_at: str
-
-
-class StrategyFilterCreateRequest(BaseModel):
-    """Payload for creating a filter."""
-
-    name: str
-    description: Optional[str] = None
-    enabled: bool = True
-    dsl: Dict[str, Any]
-
-
-class StrategyFilterUpdateRequest(BaseModel):
-    """Payload for updating a filter."""
-
-    name: Optional[str] = None
-    description: Optional[str] = None
-    enabled: Optional[bool] = None
-    dsl: Optional[Dict[str, Any]] = None
 
 
 class ATMTemplateRequest(BaseModel):
@@ -489,8 +427,7 @@ async def create_rule(strategy_id: str, body: StrategyRuleCreateRequest) -> Dict
             strategy_id,
             name=body.name,
             action=body.action,
-            conditions=[condition.dict(exclude_none=True) for condition in body.conditions],
-            match=body.match,
+            when=body.when,
             description=body.description,
             enabled=body.enabled,
         )
@@ -507,11 +444,6 @@ async def update_rule(strategy_id: str, rule_id: str, body: StrategyRuleUpdateRe
 
     try:
         payload = body.dict(exclude_unset=True)
-        if "conditions" in payload and payload["conditions"] is not None:
-            payload["conditions"] = [
-                {k: v for k, v in condition.items() if v is not None}
-                for condition in payload["conditions"]
-            ]
         return strategy_service.update_rule(strategy_id, rule_id, **payload)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -529,134 +461,12 @@ async def delete_rule(strategy_id: str, rule_id: str) -> Dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
 
 
-@router.get("/{strategy_id}/filters", response_model=List[StrategyFilterOut])
-async def list_strategy_filters(strategy_id: str) -> List[Dict[str, Any]]:
-    """List global filters attached to a strategy."""
+@router.post("/{strategy_id}/preview")
+async def run_preview(strategy_id: str, body: StrategySignalRequest) -> Dict[str, Any]:
+    """Run a rule-logic preview for a strategy."""
 
     try:
-        return strategy_service.list_strategy_filters(strategy_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-
-
-@router.post("/{strategy_id}/filters", response_model=StrategyFilterOut, status_code=201)
-async def create_strategy_filter(strategy_id: str, body: StrategyFilterCreateRequest) -> Dict[str, Any]:
-    """Create a strategy-wide filter."""
-
-    try:
-        return strategy_service.create_strategy_filter(
-            strategy_id,
-            name=body.name,
-            description=body.description,
-            enabled=body.enabled,
-            dsl=body.dsl,
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("strategy_filter_create_failed")
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.put("/{strategy_id}/filters/{filter_id}", response_model=StrategyFilterOut)
-async def update_strategy_filter(
-    strategy_id: str,
-    filter_id: str,
-    body: StrategyFilterUpdateRequest,
-) -> Dict[str, Any]:
-    """Update a strategy-wide filter."""
-
-    try:
-        payload = body.dict(exclude_unset=True)
-        return strategy_service.update_strategy_filter(strategy_id, filter_id, **payload)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("strategy_filter_update_failed")
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.delete("/{strategy_id}/filters/{filter_id}", status_code=204, response_class=Response)
-async def delete_strategy_filter(strategy_id: str, filter_id: str) -> Response:
-    """Delete a strategy-wide filter."""
-
-    try:
-        strategy_service.delete_strategy_filter(strategy_id, filter_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    return Response(status_code=204)
-
-
-@router.get("/{strategy_id}/rules/{rule_id}/filters", response_model=List[StrategyFilterOut])
-async def list_rule_filters(strategy_id: str, rule_id: str) -> List[Dict[str, Any]]:
-    """List filters attached to a rule."""
-
-    try:
-        return strategy_service.list_rule_filters(strategy_id, rule_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-
-
-@router.post("/{strategy_id}/rules/{rule_id}/filters", response_model=StrategyFilterOut, status_code=201)
-async def create_rule_filter(
-    strategy_id: str,
-    rule_id: str,
-    body: StrategyFilterCreateRequest,
-) -> Dict[str, Any]:
-    """Create a rule-scoped filter."""
-
-    try:
-        return strategy_service.create_rule_filter(
-            strategy_id,
-            rule_id,
-            name=body.name,
-            description=body.description,
-            enabled=body.enabled,
-            dsl=body.dsl,
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("rule_filter_create_failed")
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.put("/{strategy_id}/rules/{rule_id}/filters/{filter_id}", response_model=StrategyFilterOut)
-async def update_rule_filter(
-    strategy_id: str,
-    rule_id: str,
-    filter_id: str,
-    body: StrategyFilterUpdateRequest,
-) -> Dict[str, Any]:
-    """Update a rule-scoped filter."""
-
-    try:
-        payload = body.dict(exclude_unset=True)
-        return strategy_service.update_rule_filter(strategy_id, rule_id, filter_id, **payload)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("rule_filter_update_failed")
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.delete("/{strategy_id}/rules/{rule_id}/filters/{filter_id}", status_code=204, response_class=Response)
-async def delete_rule_filter(strategy_id: str, rule_id: str, filter_id: str) -> Response:
-    """Delete a rule-scoped filter."""
-
-    try:
-        strategy_service.delete_rule_filter(strategy_id, rule_id, filter_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    return Response(status_code=204)
-
-
-@router.post("/{strategy_id}/signals")
-async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dict[str, Any]:
-    """Generate buy/sell signal summaries for a strategy."""
-
-    try:
-        return strategy_service.generate_strategy_signals(
+        return strategy_service.run_strategy_preview(
             strategy_id,
             start=body.start,
             end=body.end,
@@ -667,7 +477,7 @@ async def generate_signals(strategy_id: str, body: StrategySignalRequest) -> Dic
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("strategy_signal_failed")
+        logger.exception("strategy_preview_failed")
         raise HTTPException(400, str(exc)) from exc
 
 
