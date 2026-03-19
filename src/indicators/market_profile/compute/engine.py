@@ -21,6 +21,7 @@ from utils.log_context import build_log_context, with_log_context
 from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 from .models import Profile, ValueArea
+from ..params import DEFAULT_DAYS_BACK, DEFAULT_MIN_MERGE_SESSIONS, DEFAULT_PARAMS
 from .internal.computation import build_tpo_histogram, extract_value_area
 from .internal.bin_size import select_bin_size, infer_precision_from_step
 from .internal.merging import merge_profiles
@@ -51,8 +52,8 @@ class MarketProfileIndicator(ComputeIndicator):
     """
 
     NAME = "market_profile"
-    DEFAULT_MIN_MERGE_SESSIONS = 3
-    DEFAULT_DAYS_BACK = 180
+    DEFAULT_MIN_MERGE_SESSIONS = DEFAULT_MIN_MERGE_SESSIONS
+    DEFAULT_DAYS_BACK = DEFAULT_DAYS_BACK
 
     # Define required params with defaults (used during creation only)
     # These params MUST be present in stored indicator records
@@ -63,6 +64,7 @@ class MarketProfileIndicator(ComputeIndicator):
         "extend_value_area_to_chart_end": True,
         "days_back": DEFAULT_DAYS_BACK,
     }
+    DEFAULT_PARAMS = DEFAULT_PARAMS
     RUNTIME_INPUT_SPECS = [
         {
             "source_timeframe": "30m",
@@ -224,6 +226,26 @@ class MarketProfileIndicator(ComputeIndicator):
             symbol=ctx.symbol,
             bot_id=kwargs.get("bot_id"),
             strategy_id=kwargs.get("strategy_id"),
+        )
+
+    @classmethod
+    def build_runtime_indicator(
+        cls,
+        *,
+        indicator_id: str,
+        meta: Mapping[str, Any],
+        strategy_indicator_metas: Mapping[str, Mapping[str, Any]],
+    ):
+        from indicators.market_profile.runtime.typed_indicator import TypedMarketProfileIndicator
+
+        raw_params = meta.get("params")
+        resolved = dict(cls.DEFAULT_PARAMS)
+        if isinstance(raw_params, Mapping):
+            resolved.update(dict(raw_params))
+        return TypedMarketProfileIndicator(
+            indicator_id=indicator_id,
+            version=str(meta.get("version") or "v1"),
+            params=resolved,
         )
 
     @classmethod

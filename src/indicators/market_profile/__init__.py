@@ -1,39 +1,24 @@
-"""
-Market Profile Indicator Package
+"""Market profile package with lazy exports."""
 
-Every indicator needs 3 core components:
-1. compute/      - Compute indicator state and domain models
-2. signals/      - Runtime signal logic
-3. overlays/     - Overlay adapters/projectors
+from __future__ import annotations
 
-Everything else is internal implementation details.
-"""
+from typing import Any
 
-# ============================================================================
-# CORE COMPONENTS (what every indicator needs)
-# ============================================================================
+__all__ = ["MarketProfileIndicator", "Profile", "ValueArea", "market_profile_overlay_adapter"]
 
-# 1. Indicator - Computation
-from .compute import MarketProfileIndicator, Profile, ValueArea
 
-# 2. Signals - Runtime signal evaluation logic
-# See src/indicators/market_profile/signals/
+def __getattr__(name: str) -> Any:
+    if name in {"MarketProfileIndicator", "Profile", "ValueArea"}:
+        from .compute import MarketProfileIndicator, Profile, ValueArea
 
-# 3. Overlays - Visualization
-from .overlays import market_profile_overlay_adapter
+        exports = {
+            "MarketProfileIndicator": MarketProfileIndicator,
+            "Profile": Profile,
+            "ValueArea": ValueArea,
+        }
+        return exports[name]
+    if name == "market_profile_overlay_adapter":
+        from .overlays import market_profile_overlay_adapter
 
-# ============================================================================
-# EXPORTS (only expose what users need)
-# ============================================================================
-
-__all__ = [
-    # Indicator computation
-    "MarketProfileIndicator",
-
-    # Domain types
-    "Profile",
-    "ValueArea",
-
-    # Visualization
-    "market_profile_overlay_adapter",
-]
+        return market_profile_overlay_adapter
+    raise AttributeError(name)

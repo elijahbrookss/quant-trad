@@ -1,54 +1,35 @@
-"""Shared indicator runtime engine contracts and registry."""
+"""Typed-output indicator engine exports."""
 
-from .basic_engines import (
-    RollingWindowEngineConfig,
-    RollingWindowStateEngine,
-    VWAPStateEngine,
-    build_pivot_engine,
-    build_trendline_engine,
-)
 from .contracts import (
-    INDICATOR_SNAPSHOT_SCHEMA_VERSION,
-    IndicatorStateDelta,
-    IndicatorStateEngine,
-    IndicatorStateSnapshot,
-    OverlayProjectionInput,
-    ProjectionDelta,
-    SignalEvaluationInput,
+    EngineFrame,
+    Indicator,
+    IndicatorManifest,
+    OverlayDefinition,
+    OutputDefinition,
+    OutputRef,
+    OutputType,
+    RuntimeOverlay,
+    RuntimeOutput,
+    validate_overlay_definitions,
+    validate_runtime_overlay,
+    validate_output_definitions,
+    validate_runtime_output,
 )
-from .overlay_projection import OverlayEntryProjector, project_overlay_delta
-from .plugins import (
-    IndicatorPluginManifest,
-    IndicatorPluginRegistry,
-    SignalCatalogEntry,
-    SignalDirectionSpec,
-    ensure_builtin_indicator_plugins_registered,
-    plugin_registry,
-    register_plugin,
-)
-from .signal_evaluator import evaluate_rules_from_state_snapshots
+from .runtime_engine import IndicatorExecutionEngine
 
 __all__ = [
-    "INDICATOR_SNAPSHOT_SCHEMA_VERSION",
-    "IndicatorStateDelta",
-    "IndicatorStateEngine",
-    "IndicatorStateSnapshot",
-    "OverlayProjectionInput",
-    "ProjectionDelta",
-    "SignalEvaluationInput",
-    "RollingWindowEngineConfig",
-    "RollingWindowStateEngine",
-    "VWAPStateEngine",
-    "build_pivot_engine",
-    "build_trendline_engine",
-    "OverlayEntryProjector",
-    "IndicatorPluginManifest",
-    "IndicatorPluginRegistry",
-    "SignalCatalogEntry",
-    "SignalDirectionSpec",
-    "register_plugin",
-    "plugin_registry",
-    "ensure_builtin_indicator_plugins_registered",
-    "evaluate_rules_from_state_snapshots",
-    "project_overlay_delta",
+    "EngineFrame",
+    "Indicator",
+    "IndicatorManifest",
+    "OverlayDefinition",
+    "OutputDefinition",
+    "OutputRef",
+    "OutputType",
+    "RuntimeOverlay",
+    "RuntimeOutput",
+    "IndicatorExecutionEngine",
+    "validate_overlay_definitions",
+    "validate_runtime_overlay",
+    "validate_output_definitions",
+    "validate_runtime_output",
 ]

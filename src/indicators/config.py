@@ -11,6 +11,7 @@ class DataContext:
     end: Optional[str]
     interval: Optional[str]
     instrument_id: Optional[str] = None
+    schedule_stats: bool = True
 
     def __post_init__(self):
         self.validate()

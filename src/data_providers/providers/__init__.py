@@ -1,13 +1,11 @@
-"""Provider implementations and base interfaces."""
+"""Provider package with lazy exports."""
 
-from .alpaca import AlpacaProvider
+from __future__ import annotations
+
+from typing import Any
+
 from .base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType, ProviderInterface
-from .ccxt import CCXTProvider
-from .coinbase import CoinbaseProvider
 from .factory import get_provider
-from .interactive_brokers import InteractiveBrokersProvider
-from .yahoo import YahooFinanceProvider
-
 
 __all__ = [
     "AlpacaProvider",
@@ -22,3 +20,27 @@ __all__ = [
     "ProviderInterface",
     "YahooFinanceProvider",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "AlpacaProvider":
+        from .alpaca import AlpacaProvider
+
+        return AlpacaProvider
+    if name == "CCXTProvider":
+        from .ccxt import CCXTProvider
+
+        return CCXTProvider
+    if name == "CoinbaseProvider":
+        from .coinbase import CoinbaseProvider
+
+        return CoinbaseProvider
+    if name == "InteractiveBrokersProvider":
+        from .interactive_brokers import InteractiveBrokersProvider
+
+        return InteractiveBrokersProvider
+    if name == "YahooFinanceProvider":
+        from .yahoo import YahooFinanceProvider
+
+        return YahooFinanceProvider
+    raise AttributeError(name)

@@ -1,19 +1,8 @@
 """Data provider package exposing providers, configuration, and services."""
 
 from .config import PersistenceConfig, ProviderRuntimeConfig, runtime_config_from_env
-from .providers import (
-    AlpacaProvider,
-    BaseDataProvider,
-    CCXTProvider,
-    CoinbaseProvider,
-    DataSource,
-    InstrumentMetadata,
-    InstrumentType,
-    InteractiveBrokersProvider,
-    ProviderInterface,
-    YahooFinanceProvider,
-    get_provider,
-)
+from .providers.base import BaseDataProvider, DataSource, InstrumentMetadata, InstrumentType, ProviderInterface
+from .providers.factory import get_provider
 from .services import DataPersistence, NullPersistence
 from .utils import (
     collect_missing_ranges,
@@ -24,21 +13,16 @@ from .utils import (
 )
 
 __all__ = [
-    "AlpacaProvider",
     "BaseDataProvider",
-    "CCXTProvider",
-    "CoinbaseProvider",
     "DataPersistence",
     "NullPersistence",
     "get_provider",
     "DataSource",
     "InstrumentMetadata",
     "InstrumentType",
-    "InteractiveBrokersProvider",
     "PersistenceConfig",
     "ProviderInterface",
     "ProviderRuntimeConfig",
-    "YahooFinanceProvider",
     "collect_missing_ranges",
     "compute_tr_atr",
     "interval_to_timedelta",

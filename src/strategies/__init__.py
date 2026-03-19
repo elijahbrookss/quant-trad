@@ -1,8 +1,7 @@
 """Strategy evaluation helpers."""
 
-from . import evaluator, markers
+from . import evaluator
 
 __all__ = [
     "evaluator",
-    "markers",
 ]
