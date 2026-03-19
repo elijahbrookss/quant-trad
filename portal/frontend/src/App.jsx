@@ -1,17 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { ChartStateProvider, useChartState, useChartValue } from './contexts/ChartStateContext'
-import { ChartComponent } from './components/ChartComponent/ChartComponent'
-import { IndicatorSection } from './components/IndicatorTab.jsx'
-import StrategyTab from './components/StrategyTab.jsx'
-import { BotPanel } from './components/bots/BotPanel.jsx'
 import { createLogger } from './utils/logger.js'
 import { Bot, ChevronLeft, ChevronRight, FileText, FlaskConical, Layers, Menu, RefreshCw, Settings, X } from 'lucide-react'
 import { pingApi } from './adapters/health.adapter.js'
-import { ReportsPage } from './components/reports/ReportsPage.jsx'
-import { GlobalSettingsModal } from './components/GlobalSettingsModal.jsx'
 import { usePortalSettings } from './contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from './contexts/AccentColorContext.jsx'
+
+const ChartComponent = lazy(() =>
+  import('./components/ChartComponent/ChartComponent').then((module) => ({ default: module.ChartComponent })),
+)
+const IndicatorSection = lazy(() =>
+  import('./components/IndicatorTab.jsx').then((module) => ({ default: module.IndicatorSection })),
+)
+const StrategyTab = lazy(() => import('./components/StrategyTab.jsx'))
+const BotPanel = lazy(() =>
+  import('./components/bots/BotPanel.jsx').then((module) => ({ default: module.BotPanel })),
+)
+const ReportsPage = lazy(() =>
+  import('./components/reports/ReportsPage.jsx').then((module) => ({ default: module.ReportsPage })),
+)
+const GlobalSettingsModal = lazy(() =>
+  import('./components/GlobalSettingsModal.jsx').then((module) => ({ default: module.GlobalSettingsModal })),
+)
 
 const navItems = [
   {
@@ -85,6 +96,14 @@ function SectionHeading({ title, description, kicker, actions }) {
         <p className="max-w-2xl text-sm text-slate-400">{description}</p>
       </div>
       {actions ? <div className="w-full max-w-sm">{actions}</div> : null}
+    </div>
+  )
+}
+
+function RouteSectionFallback({ title }) {
+  return (
+    <div className="rounded-3xl border border-white/10 bg-[#151924]/70 p-6 text-sm text-slate-400">
+      Loading {title.toLowerCase()}…
     </div>
   )
 }
@@ -371,7 +390,9 @@ function AppShell({ chartId }) {
                       />
 
                       <div className="space-y-6">
-                        <ChartComponent chartId={chartId} />
+                        <Suspense fallback={<RouteSectionFallback title="QuantLab chart" />}>
+                          <ChartComponent chartId={chartId} />
+                        </Suspense>
 
                         <section className="rounded-3xl border border-white/10 bg-gradient-to-br from-[#0f1320]/95 via-[#0c101a]/95 to-[#0b0f18]/95 p-5 shadow-[0_40px_140px_-90px_rgba(0,0,0,0.85)]">
                           <header className="flex items-center justify-between border-b border-white/5 pb-3">
@@ -381,7 +402,9 @@ function AppShell({ chartId }) {
                             </div>
                           </header>
                           <div className="pt-3">
-                            <IndicatorSection chartId={chartId} />
+                            <Suspense fallback={<RouteSectionFallback title="indicator panel" />}>
+                              <IndicatorSection chartId={chartId} />
+                            </Suspense>
                           </div>
                         </section>
                       </div>
@@ -405,7 +428,9 @@ function AppShell({ chartId }) {
                         }
                       />
                       <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                        <StrategyTab chartId={chartId} />
+                        <Suspense fallback={<RouteSectionFallback title="strategy workspace" />}>
+                          <StrategyTab chartId={chartId} />
+                        </Suspense>
                       </section>
                     </div>
                   }
@@ -427,7 +452,9 @@ function AppShell({ chartId }) {
                         }
                       />
                       <section className="rounded-3xl border border-white/8 bg-[#1a1d27]/80 p-6 shadow-[0_40px_120px_-70px_rgba(0,0,0,0.85)]">
-                        <BotPanel />
+                        <Suspense fallback={<RouteSectionFallback title="bot panel" />}>
+                          <BotPanel />
+                        </Suspense>
                       </section>
                     </div>
                   }
@@ -448,7 +475,9 @@ function AppShell({ chartId }) {
                           </div>
                         }
                       />
-                      <ReportsPage />
+                      <Suspense fallback={<RouteSectionFallback title="reports" />}>
+                        <ReportsPage />
+                      </Suspense>
                     </div>
                   }
                 />
@@ -456,7 +485,9 @@ function AppShell({ chartId }) {
               </Routes>
             </div>
           </main>
-          <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <Suspense fallback={null}>
+            <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          </Suspense>
         </div>
       </div>
     </div>

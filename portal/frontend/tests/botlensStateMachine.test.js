@@ -32,6 +32,11 @@ test('seq gap enters resyncing instead of replaying backlog', () => {
   assert.equal(next.phase, BOTLENS_PHASES.RESYNCING)
 })
 
+test('continuity unavailable enters terminal live fault phase', () => {
+  const next = botlensReducer(initialBotLensState, { type: 'CONTINUITY_UNAVAILABLE' })
+  assert.equal(next.phase, BOTLENS_PHASES.CONTINUITY_UNAVAILABLE)
+})
+
 
 test('re-bootstrap replaces queued/live state instead of replaying backlog', () => {
   const live = {

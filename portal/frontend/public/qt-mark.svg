@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="QuantTrad">
+  <defs>
+    <linearGradient id="qtGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa" />
+      <stop offset="100%" stop-color="#22c55e" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="#0f172a" />
+  <path d="M18 22h12c7.732 0 14 6.268 14 14s-6.268 14-14 14H18zm12 22c4.418 0 8-3.582 8-8s-3.582-8-8-8h-6v16z" fill="url(#qtGradient)" />
+  <path d="M34 18h14v6h-4v24h-6V24h-4z" fill="#f8fafc" />
+</svg>

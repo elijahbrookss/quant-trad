@@ -8,6 +8,7 @@ import {
   buildProjectionFromWindow,
   canonicalSeriesKey,
   mergeCanonicalCandles,
+  normalizeSeriesKey,
 } from '../src/components/bots/botlensProjection.js'
 
 test('buildProjectionFromWindow preserves canonical series identity and projection fields', () => {
@@ -88,7 +89,7 @@ test('history paging prepends overlapping candles without duplication', () => {
   assert.equal(next.series[0].candles[1].close, 1)
 })
 
-test('live tail continuity and same-time replacement are enforced at projection boundary', () => {
+test('applyLiveTail materializes typed series_delta payloads incrementally', () => {
   const seeded = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 10,
@@ -99,41 +100,63 @@ test('live tail continuity and same-time replacement are enforced at projection 
           {
             symbol: 'BTC',
             timeframe: '1m',
-            candles: [
-              { time: 1767225600, open: 1, high: 1, low: 1, close: 1 },
-            ],
+            candles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+            overlays: [],
+            stats: { total_trades: 0 },
           },
         ],
         runtime: { status: 'running' },
+        trades: [],
+        logs: [],
+        decisions: [],
       },
     },
   })
 
-  const continuity = assessLiveContinuity({
-    projection: seeded,
-    message: { runId: 'run-1', seriesKey: 'BTC|1m', seq: 11 },
-    seriesKey: 'BTC|1m',
-  })
-  assert.equal(continuity.action, 'apply')
-
-  const updated = applyLiveTail({
+  const next = applyLiveTail({
     projection: seeded,
     seriesKey: 'BTC|1m',
     message: {
       runId: 'run-1',
       seriesKey: 'BTC|1m',
       seq: 11,
-      messageType: 'bar_update',
-      payload: { bar: { time: 1767225600, open: 1, high: 1, low: 1, close: 2 } },
+      messageType: 'series_delta',
+      payload: {
+        runtime: { status: 'running', warnings: ['slow consumer'] },
+        logs: [{ message: 'delta log' }],
+        decisions: [{ event: 'decision' }],
+        seriesDelta: {
+          symbol: 'BTC',
+          timeframe: '1m',
+          candle: { time: 1767225660, open: 2, high: 2, low: 2, close: 2 },
+          overlay_delta: {
+            ops: [
+              {
+                op: 'upsert',
+                key: 'overlay:regime',
+                overlay: { type: 'regime_overlay', payload: { state: 'risk_on' } },
+              },
+            ],
+          },
+          stats: { total_trades: 1 },
+          trades: [{ trade_id: 't-1', symbol: 'BTC' }],
+        },
+      },
     },
   })
 
-  assert.deepEqual(updated.series[0].candles.map((row) => row.time), [1767225600])
-  assert.equal(updated.series[0].candles[0].close, 2)
-  assert.equal(updated.seq, 11)
+  assert.equal(next.seq, 11)
+  assert.deepEqual(next.series[0].candles.map((row) => row.time), [1767225600, 1767225660])
+  assert.equal(next.series[0].overlays[0].overlay_id, 'overlay:regime')
+  assert.equal(next.series[0].stats.total_trades, 1)
+  assert.equal(next.trades[0].trade_id, 't-1')
+  assert.equal(next.logs[0].message, 'delta log')
+  assert.equal(next.decisions[0].event, 'decision')
+  assert.deepEqual(next.warnings, ['slow consumer'])
+  assert.equal(next.runtime.last_bar.time, 1767225660)
 })
 
-test('continuity check forces resync on sequence gaps', () => {
+test('live continuity check forces resync on sequence gaps', () => {
   const seeded = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 10,
@@ -153,4 +176,11 @@ test('continuity check forces resync on sequence gaps', () => {
 
   assert.equal(continuity.action, 'resync')
   assert.equal(continuity.reason, 'seq_gap')
+})
+
+test('series identity helpers reject non-canonical legacy keys', () => {
+  assert.equal(normalizeSeriesKey('bot'), '')
+  assert.equal(normalizeSeriesKey('BOT|'), '')
+  assert.equal(canonicalSeriesKey('BTC', ''), '')
+  assert.equal(canonicalSeriesKey('btc', '1M'), 'BTC|1m')
 })

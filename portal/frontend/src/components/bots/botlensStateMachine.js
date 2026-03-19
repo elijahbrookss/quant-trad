@@ -8,6 +8,7 @@ export const BOTLENS_PHASES = {
   PAGING_HISTORY: 'paging_history',
   RESYNCING: 'resyncing',
   STALE: 'stale',
+  CONTINUITY_UNAVAILABLE: 'continuity_unavailable',
 }
 
 export const initialBotLensState = {
@@ -86,6 +87,11 @@ export function botlensReducer(state, action) {
       return {
         ...state,
         phase: BOTLENS_PHASES.STALE,
+      }
+    case 'CONTINUITY_UNAVAILABLE':
+      return {
+        ...state,
+        phase: BOTLENS_PHASES.CONTINUITY_UNAVAILABLE,
       }
     case 'LIVE_CONNECTED':
       return {

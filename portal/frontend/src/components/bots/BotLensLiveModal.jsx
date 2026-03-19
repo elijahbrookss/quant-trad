@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { LocateFixed, Maximize2, Minimize2, X } from 'lucide-react'
+import { History, LocateFixed, Maximize2, Minimize2, X } from 'lucide-react'
 import { BotLensChart } from './BotLensChart.jsx'
 import { OverlayToggleBar } from './OverlayToggleBar.jsx'
 import { ActiveTradeChip } from './ActiveTradeChip.jsx'
@@ -7,6 +7,7 @@ import DecisionTrace from './DecisionTrace/index.jsx'
 import { useOverlayControls } from './hooks/useOverlayControls.js'
 import { createLogger } from '../../utils/logger.js'
 import {
+  fetchBotActiveRun,
   fetchBotRuns,
   fetchBotLensSeriesCatalog,
   fetchBotLensSeriesHistory,
@@ -15,7 +16,9 @@ import {
   openBotLensSeriesLiveStream,
 } from '../../adapters/bot.adapter.js'
 import { describeBotLifecycle, getBotRunId, getBotStatus, normalizeBotStatus } from './botStatusModel.js'
+import { consumeRetryBudget } from './botlensRetryBudget.js'
 import { BOTLENS_PHASES, botlensReducer, initialBotLensState } from './botlensStateMachine.js'
+import { chooseBotLensRunSelection } from './botlensRunSelection.js'
 import {
   applyHistoryPage,
   applyLiveTail,
@@ -41,15 +44,64 @@ function formatNumber(value, digits = 2) {
   return value.toFixed(digits)
 }
 
-function normalizeEventPayload(message) {
+function normalizeBootstrapPayload(message) {
   if (!message || typeof message !== 'object') return null
-  if (String(message.type || '') !== 'botlens_live_tail') return null
+  if (String(message.type || '') !== 'botlens_live_bootstrap') return null
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+  const windowPayload = payload?.window && typeof payload.window === 'object' ? payload.window : {}
   return {
     runId: message?.run_id ? String(message.run_id) : null,
     seriesKey: normalizeSeriesKey(message?.series_key || ''),
     seq: Number(message?.seq || 0),
+    streamSessionId: message?.stream_session_id ? String(message.stream_session_id) : null,
+    window: windowPayload,
+  }
+}
+
+function normalizeStreamError(message) {
+  if (!message || typeof message !== 'object') return null
+  if (String(message.type || '') !== 'botlens_live_error') return null
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+  return {
+    runId: message?.run_id ? String(message.run_id) : null,
+    seriesKey: normalizeSeriesKey(message?.series_key || ''),
+    message: String(payload?.message || 'BotLens stream failed'),
+  }
+}
+
+function normalizeResyncControl(message) {
+  if (!message || typeof message !== 'object') return null
+  if (String(message.type || '') !== 'botlens_live_resync_required') return null
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+  return {
+    runId: message?.run_id ? String(message.run_id) : null,
+    seriesKey: normalizeSeriesKey(message?.series_key || ''),
+    streamSessionId: message?.stream_session_id ? String(message.stream_session_id) : null,
+    previousStreamSessionId: payload?.previous_stream_session_id ? String(payload.previous_stream_session_id) : null,
+    reason: String(payload?.reason || 'continuity_lost'),
+    details: payload?.details && typeof payload.details === 'object' ? payload.details : {},
+  }
+}
+
+function normalizeLiveTailPayload(message) {
+  if (!message || typeof message !== 'object') return null
+  if (String(message.type || '') !== 'botlens_live_tail') return null
+  const rawPayload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+  return {
+    runId: message?.run_id ? String(message.run_id) : null,
+    seriesKey: normalizeSeriesKey(message?.series_key || ''),
+    seq: Number(message?.seq || 0),
+    streamSessionId: message?.stream_session_id ? String(message.stream_session_id) : null,
     messageType: String(message?.message_type || ''),
-    payload: message?.payload && typeof message.payload === 'object' ? message.payload : {},
+    payload: {
+      ...rawPayload,
+      seriesDelta:
+        rawPayload?.series_delta && typeof rawPayload.series_delta === 'object'
+          ? rawPayload.series_delta
+          : rawPayload?.seriesDelta && typeof rawPayload.seriesDelta === 'object'
+            ? rawPayload.seriesDelta
+            : {},
+    },
   }
 }
 
@@ -78,6 +130,8 @@ const SNAP_TO_LATEST_CANDLE_LAG = readPositiveInt('VITE_BOTLENS_SNAP_CANDLES_BEH
 const LEDGER_POLL_INTERVAL_MS = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_MS', 800)
 const LEDGER_POLL_LIMIT = readPositiveInt('VITE_BOTLENS_LEDGER_POLL_LIMIT', 500)
 const LEDGER_MAX_EVENTS = readPositiveInt('VITE_BOTLENS_LEDGER_MAX_EVENTS', 3000)
+const LIVE_RESUBSCRIBE_LIMIT = readPositiveInt('VITE_BOTLENS_LIVE_RESUBSCRIBE_LIMIT', 3)
+const LIVE_RESUBSCRIBE_WINDOW_MS = readPositiveInt('VITE_BOTLENS_LIVE_RESUBSCRIBE_WINDOW_MS', 30000)
 
 function selectedProjectionSeries(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null
@@ -284,7 +338,13 @@ function buildLensStages({ botLifecycle, selectedRun, snapshotReady, streamState
       key: 'bridge',
       label: liveTarget ? 'Live bridge' : 'History mode',
       status: liveConnected ? 'done' : hasSnapshot ? 'current' : 'upcoming',
-      detail: liveTarget ? (streamState === 'open' ? 'Streaming deltas into chart' : 'Connecting websocket') : 'Viewing archived state only',
+      detail: liveTarget
+        ? streamState === 'open'
+          ? 'Streaming deltas into chart'
+          : streamState === 'continuity_unavailable'
+            ? 'Continuity unavailable'
+            : 'Connecting websocket'
+        : 'Viewing archived state only',
     },
   ]
 }
@@ -298,6 +358,8 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const [runCatalog, setRunCatalog] = useState([])
   const [runCatalogState, setRunCatalogState] = useState('idle')
   const [selectedRunId, setSelectedRunId] = useState(null)
+  const [runSelectionMode, setRunSelectionMode] = useState('auto')
+  const [runHistoryOpen, setRunHistoryOpen] = useState(false)
   const [cursor, setCursor] = useState({ runId: null, seq: 0 })
   const [renderCursor, setRenderCursor] = useState({ runId: null, seq: 0 })
   const [ledgerEvents, setLedgerEvents] = useState([])
@@ -311,6 +373,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const [overlayPanelCollapsed, setOverlayPanelCollapsed] = useState(false)
   const [followLive, setFollowLive] = useState(true)
   const [fullScreen, setFullScreen] = useState(false)
+  const [liveRetryVersion, setLiveRetryVersion] = useState(0)
   const [availableSeriesKeys, setAvailableSeriesKeys] = useState([])
   const [selectedSeriesKey, setSelectedSeriesKey] = useState(null)
   const [hoveredTradeId, setHoveredTradeId] = useState(null)
@@ -330,6 +393,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const syncInFlightRef = useRef(false)
   const syncTokenRef = useRef(0)
   const mountedRef = useRef(false)
+  const previousActiveRunIdRef = useRef(null)
   const pendingFramesRef = useRef([])
   const animationFrameRef = useRef(0)
   const lastApplyAtRef = useRef(0)
@@ -341,6 +405,9 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   const ledgerSyncTokenRef = useRef(0)
   const lastCursorPublishRef = useRef(0)
   const activeSeriesKeyRef = useRef(null)
+  const activeStreamSessionIdRef = useRef(null)
+  const continuityRetryHistoryRef = useRef([])
+  const continuityBlockedRef = useRef(false)
   const botLifecycle = useMemo(() => describeBotLifecycle(bot), [bot])
   const activeBotRunId = getBotRunId(bot)
   const botStatus = getBotStatus(bot)
@@ -364,6 +431,12 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     }),
     [botLifecycle, selectedRun, snapshot, streamState, selectedRunIsLiveTarget],
   )
+  const currentLifecycleStage = useMemo(() => {
+    const current = lifecycleStages.find((stage) => stage.status === 'current')
+    if (current) return current
+    const latestDone = [...lifecycleStages].reverse().find((stage) => stage.status === 'done')
+    return latestDone || lifecycleStages[0] || null
+  }, [lifecycleStages])
 
   useEffect(() => {
     cursorRef.current = cursor
@@ -376,6 +449,30 @@ export function BotLensLiveModal({ bot, open, onClose }) {
   useEffect(() => {
     streamStateRef.current = streamState
   }, [streamState])
+
+  useEffect(() => {
+    previousActiveRunIdRef.current = activeBotRunId
+  }, [activeBotRunId, bot?.id])
+
+  useEffect(() => {
+    if (!open) {
+      continuityRetryHistoryRef.current = []
+      continuityBlockedRef.current = false
+      activeStreamSessionIdRef.current = null
+      setRunHistoryOpen(false)
+      setRunSelectionMode('auto')
+      setSelectedRunId(null)
+      previousActiveRunIdRef.current = activeBotRunId
+      return
+    }
+    continuityRetryHistoryRef.current = []
+    continuityBlockedRef.current = false
+    activeStreamSessionIdRef.current = null
+    setRunHistoryOpen(false)
+    setRunSelectionMode('auto')
+    setSelectedRunId(null)
+    previousActiveRunIdRef.current = activeBotRunId
+  }, [activeBotRunId, bot?.id, open])
 
   useEffect(() => {
     if (!open) {
@@ -393,6 +490,9 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     pendingFramesRef.current = []
     renderedSnapshotRef.current = null
     canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+    activeStreamSessionIdRef.current = null
+    continuityRetryHistoryRef.current = []
+    continuityBlockedRef.current = false
     setAvailableSeriesKeys([])
     setSnapshot(null)
     setError(null)
@@ -410,16 +510,29 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     const loadRuns = async () => {
       try {
         setRunCatalogState((current) => (current === 'open' ? current : 'loading'))
-        const payload = await fetchBotRuns(bot.id, { limit: 30 })
+        const [payload, activePayload] = await Promise.all([
+          fetchBotRuns(bot.id, { limit: 30 }),
+          fetchBotActiveRun(bot.id).catch(() => null),
+        ])
         if (cancelled) return
         const runs = Array.isArray(payload?.runs) ? payload.runs : []
+        const activeRunHint = String(activePayload?.run_id || activeBotRunId || '').trim() || null
         setRunCatalog(runs)
         setRunCatalogState('open')
         setSelectedRunId((current) => {
-          if (current && runs.some((entry) => String(entry?.run_id || '') === current)) return current
-          const active = runs.find((entry) => entry?.is_active)
-          return String(active?.run_id || runs[0]?.run_id || activeBotRunId || '') || null
+          const nextSelection = chooseBotLensRunSelection({
+            currentRunId: current,
+            runs,
+            activeRunId: activeRunHint,
+            selectionMode: runSelectionMode,
+            previousActiveRunId: previousActiveRunIdRef.current,
+          })
+          if (nextSelection.selectionMode !== runSelectionMode) {
+            setRunSelectionMode(nextSelection.selectionMode)
+          }
+          return nextSelection.runId
         })
+        previousActiveRunIdRef.current = activeRunHint
       } catch (err) {
         if (cancelled) return
         setRunCatalogState('error')
@@ -433,7 +546,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       cancelled = true
       window.clearInterval(pollId)
     }
-  }, [activeBotRunId, bot?.id, logger, open])
+  }, [activeBotRunId, bot?.id, logger, open, runSelectionMode])
 
 
   useEffect(() => {
@@ -590,19 +703,132 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     }
   }, [])
 
-  const connectSocket = useCallback(
-    ({ botId, runId, seq, token }) => {
+  const resetLiveContinuityControl = useCallback(() => {
+    continuityRetryHistoryRef.current = []
+    continuityBlockedRef.current = false
+    activeStreamSessionIdRef.current = null
+  }, [])
+
+  const requestLiveResubscribe = useCallback(
+    ({ botId, runId, seriesKey, reason, details = {}, source = 'live_stream' }) => {
+      const budget = consumeRetryBudget(continuityRetryHistoryRef.current, Date.now(), {
+        limit: LIVE_RESUBSCRIBE_LIMIT,
+        windowMs: LIVE_RESUBSCRIBE_WINDOW_MS,
+      })
+      continuityRetryHistoryRef.current = budget.history
+      activeStreamSessionIdRef.current = null
       closeSocket()
+
+      if (budget.blocked) {
+        continuityBlockedRef.current = true
+        const message = `BotLens live continuity unavailable. Retry budget exhausted after ${budget.attemptCount} attempts in ${Math.round(budget.windowMs / 1000)}s.`
+        setStreamState('continuity_unavailable')
+        setStaleMode(true)
+        setError(message)
+        setStatusMessage(message)
+        dispatchLens({ type: 'CONTINUITY_UNAVAILABLE' })
+        logger.warn('botlens_stream_retry_budget_exhausted', {
+          bot_id: botId,
+          run_id: runId,
+          series_key: seriesKey,
+          reason,
+          source,
+          attempt_count: budget.attemptCount,
+          retry_limit: budget.limit,
+          retry_window_ms: budget.windowMs,
+          details,
+        })
+        return
+      }
+
+      continuityBlockedRef.current = false
+      setError(null)
+      setStreamState('resyncing')
+      setStaleMode(true)
+      setStatusMessage(`BotLens continuity lost (${reason}). Re-subscribing live stream…`)
+      dispatchLens({ type: 'SEQ_GAP' })
+      logger.warn('botlens_stream_resubscribe_requested', {
+        bot_id: botId,
+        run_id: runId,
+        series_key: seriesKey,
+        reason,
+        source,
+        attempt_count: budget.attemptCount,
+        retry_limit: budget.limit,
+        retry_window_ms: budget.windowMs,
+        details,
+      })
+      setLiveRetryVersion((current) => current + 1)
+    },
+    [closeSocket, logger],
+  )
+
+  const requestManualLiveRetry = useCallback(() => {
+    resetLiveContinuityControl()
+    setError(null)
+    setStatusMessage('Retrying live BotLens stream…')
+    setStreamState('resyncing')
+    dispatchLens({ type: 'BOOTSTRAP_START' })
+    closeSocket()
+    setLiveRetryVersion((current) => current + 1)
+  }, [closeSocket, resetLiveContinuityControl])
+
+  const applyBootstrapWindow = useCallback(
+    ({ runId, seriesKey, seq, streamSessionId, window, live }) => {
+      const seeded = buildProjectionFromWindow({
+        runId,
+        seq,
+        seriesKey,
+        window,
+      })
+      activeStreamSessionIdRef.current = streamSessionId || null
+      pendingFramesRef.current = []
+      renderedSnapshotRef.current = seeded
+      canonicalFrameRef.current = { runId, seq, snapshot: seeded }
+      lastSnapCursorRef.current = { runId: null, seq: 0 }
+      cursorRef.current = { runId, seq }
+      renderCursorRef.current = { runId, seq }
+      setSnapshot(seeded)
+      setCursor({ runId, seq })
+      setRenderCursor({ runId, seq })
+      setRenderMetrics({
+        mode: 'smooth',
+        queueDepth: 0,
+        seqBehind: 0,
+        candlesBehind: 0,
+        lagMs: 0,
+        appliedRate: 0,
+      })
+      setError(null)
+      setStaleMode(false)
+      dispatchLens({
+        type: 'BOOTSTRAP_SUCCESS',
+        runId,
+        seriesKey,
+        seq,
+        live,
+      })
+    },
+    [],
+  )
+
+  const connectSocket = useCallback(
+    ({ botId, runId, token }) => {
+      closeSocket()
+      const seriesKey = activeSeriesKeyRef.current || selectedProjectionSeriesKey(renderedSnapshotRef.current) || 'UNKNOWN|1m'
       const socket = openBotLensSeriesLiveStream(
         runId,
-        activeSeriesKeyRef.current || selectedProjectionSeriesKey(renderedSnapshotRef.current) || 'UNKNOWN|1m',
-        { afterSeq: seq },
+        seriesKey,
+        { limit: 320 },
       )
       if (!socket) {
-        setStreamState('stale')
-        setStaleMode(true)
-        setStatusMessage('WebSocket unavailable. Retrying bootstrap...')
-        dispatchLens({ type: 'STREAM_STALE' })
+        requestLiveResubscribe({
+          botId,
+          runId,
+          seriesKey,
+          reason: 'websocket_unavailable',
+          source: 'socket_open',
+        })
         return
       }
       socketRef.current = socket
@@ -611,18 +837,98 @@ export function BotLensLiveModal({ bot, open, onClose }) {
 
       socket.onopen = () => {
         if (syncTokenRef.current !== token || !mountedRef.current) return
-        setStreamState('open')
-        setStatusMessage('Live stream connected.')
-        dispatchLens({ type: 'LIVE_CONNECTED' })
-        logger.info('botlens_ws_open', { bot_id: botId, run_id: runId, seq })
+        setStatusMessage('Live stream connected. Waiting for BotLens baseline…')
+        logger.info('botlens_ws_open', { bot_id: botId, run_id: runId, series_key: seriesKey })
       }
 
       socket.onmessage = (event) => {
         if (syncTokenRef.current !== token || !mountedRef.current) return
         try {
           const message = JSON.parse(event.data)
-          const next = normalizeEventPayload(message)
+          const streamError = normalizeStreamError(message)
+          if (streamError) {
+            logger.warn('botlens_ws_stream_error', {
+              bot_id: botId,
+              run_id: streamError.runId || runId,
+              series_key: streamError.seriesKey || seriesKey,
+              message: streamError.message,
+            })
+            requestLiveResubscribe({
+              botId,
+              runId: streamError.runId || runId,
+              seriesKey: streamError.seriesKey || seriesKey,
+              reason: 'stream_error',
+              details: { message: streamError.message },
+              source: 'server_error',
+            })
+            return
+          }
+
+          const resyncControl = normalizeResyncControl(message)
+          if (resyncControl) {
+            requestLiveResubscribe({
+              botId,
+              runId: resyncControl.runId || runId,
+              seriesKey: resyncControl.seriesKey || seriesKey,
+              reason: resyncControl.reason,
+              details: {
+                ...resyncControl.details,
+                stream_session_id: resyncControl.streamSessionId,
+                previous_stream_session_id: resyncControl.previousStreamSessionId,
+              },
+              source: 'server_control',
+            })
+            return
+          }
+
+          const bootstrap = normalizeBootstrapPayload(message)
+          if (bootstrap && bootstrap.runId && bootstrap.seq > 0) {
+            activeSeriesKeyRef.current = bootstrap.seriesKey || seriesKey
+            setSelectedSeriesKey(bootstrap.seriesKey || seriesKey)
+            applyBootstrapWindow({
+              runId: bootstrap.runId,
+              seriesKey: bootstrap.seriesKey || seriesKey,
+              seq: bootstrap.seq,
+              streamSessionId: bootstrap.streamSessionId,
+              window: bootstrap.window,
+              live: true,
+            })
+            setStreamState('open')
+            setStatusMessage('Live BotLens baseline established.')
+            return
+          }
+
+          const next = normalizeLiveTailPayload(message)
           if (!next || !next.runId || next.seq <= 0) return
+          if (!activeStreamSessionIdRef.current || !renderedSnapshotRef.current) {
+            requestLiveResubscribe({
+              botId,
+              runId: next.runId,
+              seriesKey: next.seriesKey || seriesKey,
+              reason: 'baseline_missing',
+              details: {
+                stream_session_id: next.streamSessionId,
+                expected_stream_session_id: activeStreamSessionIdRef.current,
+              },
+              source: 'live_tail',
+            })
+            return
+          }
+          if (next.streamSessionId && next.streamSessionId !== activeStreamSessionIdRef.current) {
+            requestLiveResubscribe({
+              botId,
+              runId: next.runId,
+              seriesKey: next.seriesKey || seriesKey,
+              reason: 'stream_session_changed',
+              details: {
+                stream_session_id: next.streamSessionId,
+                expected_stream_session_id: activeStreamSessionIdRef.current,
+                seq: next.seq,
+              },
+              source: 'live_tail',
+            })
+            return
+          }
 
           const baseProjection = (
             pendingFramesRef.current.length > 0
@@ -637,21 +943,30 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           })
           if (continuity.action === 'ignore') return
           if (continuity.action === 'resync') {
-            pendingFramesRef.current = []
-            renderedSnapshotRef.current = null
-            canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
-            setStaleMode(true)
-            setStreamState('resyncing')
-            setStatusMessage(`BotLens continuity lost (${continuity.reason}). Re-syncing canonical baseline...`)
-            dispatchLens({ type: 'SEQ_GAP' })
-            logger.warn('botlens_stream_resync_required', {
+            logger.warn('botlens_stream_resync_detected', {
               bot_id: botId,
               run_id: next.runId,
+              previous_run_id: baseProjection?.run_id || null,
               seq: next.seq,
+              previous_seq: Number(baseProjection?.seq || 0),
+              stream_state: streamStateRef.current,
+              series_key: activeSeriesKeyRef.current,
+              incoming_series_key: next.seriesKey,
+              pending_queue_depth: pendingFramesRef.current.length,
               reason: continuity.reason,
             })
-            syncTokenRef.current += 1
-            closeSocket()
+            requestLiveResubscribe({
+              botId,
+              runId: next.runId,
+              seriesKey: next.seriesKey || seriesKey,
+              reason: continuity.reason,
+              details: {
+                previous_seq: Number(baseProjection?.seq || 0),
+                incoming_seq: next.seq,
+                pending_queue_depth: pendingFramesRef.current.length,
+              },
+              source: 'continuity_check',
+            })
             return
           }
 
@@ -697,23 +1012,28 @@ export function BotLensLiveModal({ bot, open, onClose }) {
 
       socket.onerror = (err) => {
         if (syncTokenRef.current !== token || !mountedRef.current) return
-        setStaleMode(true)
-        setStreamState('stale')
-        setStatusMessage('WebSocket error. Keeping stale snapshot and retrying bootstrap...')
-        dispatchLens({ type: 'STREAM_STALE' })
         logger.warn('botlens_ws_error', { bot_id: botId, run_id: runId }, err)
+        requestLiveResubscribe({
+          botId,
+          runId,
+          seriesKey,
+          reason: 'websocket_error',
+          source: 'socket_error',
+        })
       }
 
       socket.onclose = () => {
         if (syncTokenRef.current !== token || !mountedRef.current) return
-        setStaleMode(true)
-        setStreamState('stale')
-        setStatusMessage('WebSocket closed. Keeping stale snapshot and retrying bootstrap...')
-        dispatchLens({ type: 'STREAM_STALE' })
-        syncTokenRef.current += 1
+        requestLiveResubscribe({
+          botId,
+          runId,
+          seriesKey,
+          reason: 'websocket_closed',
+          source: 'socket_close',
+        })
       }
     },
-    [closeSocket, logger],
+    [applyBootstrapWindow, closeSocket, logger, requestLiveResubscribe],
   )
 
   useEffect(() => {
@@ -721,6 +1041,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     mountedRef.current = true
     let cancelled = false
     const bootstrapAndConnect = async (reason) => {
+      if (selectedRunIsLiveTarget && continuityBlockedRef.current) return
       if (syncInFlightRef.current) return
       syncInFlightRef.current = true
       const token = ++syncTokenRef.current
@@ -749,9 +1070,14 @@ export function BotLensLiveModal({ bot, open, onClose }) {
           const catalog = await fetchBotLensSeriesCatalog(runId)
           const availableSeries = (Array.isArray(catalog?.series) ? catalog.series : []).map((value) => normalizeSeriesKey(value)).filter(Boolean)
           setAvailableSeriesKeys(availableSeries)
-          const retainedSeriesKey = activeSeriesKeyRef.current
-          const bootSeriesKey = retainedSeriesKey && availableSeries.includes(retainedSeriesKey) ? retainedSeriesKey : availableSeries[0] || null
-          if (!bootSeriesKey) {
+          const candidateSeriesKeys = Array.from(
+            new Set([
+              normalizeSeriesKey(selectedSeriesKey || ''),
+              normalizeSeriesKey(activeSeriesKeyRef.current || ''),
+              ...availableSeries,
+            ].filter(Boolean)),
+          )
+          if (!candidateSeriesKeys.length) {
             dispatchLens({ type: 'WAITING_FOR_SNAPSHOT' })
             setStreamState(selectedRunIsLiveTarget ? 'waiting' : 'historical')
             if (!selectedRunIsLiveTarget) setStaleMode(false)
@@ -769,44 +1095,52 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             syncInFlightRef.current = false
             return
           }
+          const bootSeriesKey = candidateSeriesKeys[0]
           activeSeriesKeyRef.current = bootSeriesKey
-          const window = await fetchBotLensSeriesWindow(runId, bootSeriesKey, { to: 'now', limit: 320 })
-          const startSeq = Number(window?.seq || 0)
-          const seeded = buildProjectionFromWindow({
-            runId,
-            seq: startSeq,
-            seriesKey: bootSeriesKey,
-            window: window?.window,
-          })
-          setSnapshot(seeded)
-          renderedSnapshotRef.current = seeded
-          canonicalFrameRef.current = { runId, seq: startSeq, snapshot: seeded }
-          dispatchLens({
-            type: 'BOOTSTRAP_SUCCESS',
-            runId,
-            seriesKey: bootSeriesKey,
-            seq: startSeq,
-            live: selectedRunIsLiveTarget,
-          })
-          lastSnapCursorRef.current = { runId: null, seq: 0 }
-          cursorRef.current = { runId, seq: startSeq }
-          renderCursorRef.current = { runId, seq: startSeq }
-          setCursor({ runId, seq: startSeq })
-          setRenderCursor({ runId, seq: startSeq })
-          setRenderMetrics({
-            mode: 'smooth',
-            queueDepth: 0,
-            seqBehind: 0,
-            candlesBehind: 0,
-            lagMs: 0,
-            appliedRate: 0,
-          })
-          setError(null)
-          setStaleMode(false)
+          setSelectedSeriesKey(bootSeriesKey)
           if (selectedRunIsLiveTarget) {
-            setStatusMessage('Baseline loaded. Connecting live stream…')
-            connectSocket({ botId: bot.id, runId, seq: startSeq, token })
+            if (!reason || !renderedSnapshotRef.current) {
+              renderedSnapshotRef.current = null
+              canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+              cursorRef.current = { runId: null, seq: 0 }
+              renderCursorRef.current = { runId: null, seq: 0 }
+              setSnapshot(null)
+              setCursor({ runId: null, seq: 0 })
+              setRenderCursor({ runId: null, seq: 0 })
+            }
+            setError(null)
+            setStaleMode(false)
+            setStatusMessage('Subscribing to live BotLens stream…')
+            connectSocket({ botId: bot.id, runId, token })
           } else {
+            let window = null
+            let lastSeriesError = null
+            for (const candidateSeriesKey of candidateSeriesKeys) {
+              try {
+                window = await fetchBotLensSeriesWindow(runId, candidateSeriesKey, { to: 'now', limit: 320 })
+                activeSeriesKeyRef.current = candidateSeriesKey
+                setSelectedSeriesKey(candidateSeriesKey)
+                applyBootstrapWindow({
+                  runId,
+                  seriesKey: candidateSeriesKey,
+                  seq: Number(window?.seq || 0),
+                  window: window?.window,
+                  live: false,
+                })
+                break
+              } catch (err) {
+                if (!String(err?.message || '').includes('was not found')) throw err
+                lastSeriesError = err
+                logger.warn('botlens_series_window_missing', {
+                  bot_id: bot.id,
+                  run_id: runId,
+                  series_key: candidateSeriesKey,
+                }, err)
+              }
+            }
+            if (!window) {
+              throw lastSeriesError || new Error(`No BotLens series window could be loaded for run_id=${runId}`)
+            }
             setStreamState('historical')
             setStatusMessage('Historical run loaded from BotLens runtime records. Live stream is disabled for archived runs.')
           }
@@ -830,7 +1164,8 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     const monitor = setInterval(() => {
       if (!mountedRef.current || cancelled) return
       if (!selectedRunId) return
-      if (selectedRunIsLiveTarget && streamStateRef.current === 'open') return
+      if (selectedRunIsLiveTarget && continuityBlockedRef.current) return
+      if (selectedRunIsLiveTarget && ['connecting', 'open'].includes(streamStateRef.current)) return
       if (!selectedRunIsLiveTarget && renderedSnapshotRef.current) return
       bootstrapAndConnect('Re-syncing BotLens baseline…')
     }, 2500)
@@ -844,17 +1179,23 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     }
   }, [
     bot?.id,
+    applyBootstrapWindow,
     botLifecycle.detail,
     closeSocket,
     connectSocket,
     logger,
     open,
+    selectedSeriesKey,
     selectedRunId,
     selectedRunIsLiveTarget,
     selectedRunStatus,
+    liveRetryVersion,
   ])
 
   const activeRunId = selectedRunId || cursor.runId || renderCursor.runId || null
+  const isViewingArchivedRun = Boolean(selectedRunId) && Boolean(activeBotRunId) && selectedRunId !== activeBotRunId
+  const hasHistoricalRuns = runCatalog.some((run) => !run?.is_active)
+  const liveContinuityUnavailable = streamState === 'continuity_unavailable' && selectedRunIsLiveTarget
 
   useEffect(() => {
     if (!open || !bot?.id) {
@@ -1020,11 +1361,13 @@ export function BotLensLiveModal({ bot, open, onClose }) {
     const nextSeriesKey = normalizeSeriesKey(selectedSeriesKey || '')
     if (!nextSeriesKey) return
     if (activeSeriesKeyRef.current === nextSeriesKey) return
+    resetLiveContinuityControl()
     activeSeriesKeyRef.current = nextSeriesKey
     if (cursorRef.current?.runId) {
       pendingFramesRef.current = []
       renderedSnapshotRef.current = null
       canonicalFrameRef.current = { runId: null, seq: 0, snapshot: null }
+      activeStreamSessionIdRef.current = null
       setSnapshot(null)
       syncTokenRef.current += 1
       closeSocket()
@@ -1032,7 +1375,7 @@ export function BotLensLiveModal({ bot, open, onClose }) {
       setStreamState('resyncing')
       setStatusMessage(`Switching series to ${nextSeriesKey}...`)
     }
-  }, [closeSocket, selectedSeriesKey])
+  }, [closeSocket, resetLiveContinuityControl, selectedSeriesKey])
 
 
   const loadOlderHistory = useCallback(async () => {
@@ -1152,65 +1495,113 @@ export function BotLensLiveModal({ bot, open, onClose }) {
                   <p className="mt-1 text-lg font-semibold text-slate-100">{botLifecycle.label}</p>
                   <p className="mt-1 text-sm text-slate-300">{statusMessage || botLifecycle.detail}</p>
                 </div>
-                <div className="flex min-w-[18rem] flex-col gap-1">
-                  <label className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">Run</label>
-                  <select
-                    value={selectedRunId || ''}
-                    onChange={(event) => setSelectedRunId(event.target.value || null)}
-                    className="rounded-xl border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-500/60"
-                  >
-                    <option value="" disabled>Select a run</option>
-                    {runCatalog.map((run) => (
-                      <option key={run.run_id} value={run.run_id}>
-                        {`${run.is_active ? 'LIVE' : 'RUN '} · ${shortRunId(run.run_id)} · ${normalizeBotStatus(run.runtime_status || run.status || 'idle')}`}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-slate-400">{describeRunRow(selectedRun)}</p>
+                <div className="flex flex-col items-start gap-2 lg:items-end">
+                  <div className="rounded-full border border-slate-700/80 bg-slate-950/70 px-3 py-1 text-[11px] font-medium text-slate-300">
+                    {currentLifecycleStage ? `${currentLifecycleStage.label}: ${currentLifecycleStage.detail}` : 'Waiting for BotLens state'}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-right">
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">Run</p>
+                      <p className="mt-1 text-sm font-medium text-slate-100">
+                        {selectedRunIsLiveTarget ? 'Latest active run' : isViewingArchivedRun ? 'Archived run' : 'Current run'}
+                        {' · '}
+                        {shortRunId(selectedRunId || activeRunId)}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">{describeRunRow(selectedRun)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setRunHistoryOpen((prev) => !prev)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+                    >
+                      <History className="size-3.5" />
+                      {hasHistoricalRuns ? 'View old runs' : 'Run history'}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-            <div className="grid gap-2 px-4 py-4 md:grid-cols-4">
-              {lifecycleStages.map((stage, index) => {
-                const stageClass =
-                  stage.status === 'done'
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100'
-                    : stage.status === 'current'
-                      ? 'border-sky-500/40 bg-sky-500/10 text-sky-100'
-                      : 'border-slate-800 bg-slate-950/40 text-slate-500'
-                return (
-                  <div key={stage.key} className={`rounded-2xl border p-3 ${stageClass}`}>
-                    <div className="flex items-center gap-2">
-                      <div className={`relative flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold ${
-                        stage.status === 'done'
-                          ? 'border-emerald-400/70 bg-emerald-400/15 text-emerald-200'
-                          : stage.status === 'current'
-                            ? 'border-sky-400/70 bg-sky-400/15 text-sky-200'
-                            : 'border-slate-700 bg-slate-900/80 text-slate-500'
-                      }`}>
-                        {stage.status === 'current' ? <span className="absolute inset-0 rounded-full animate-pulse bg-sky-400/10" /> : null}
-                        <span className="relative">{index + 1}</span>
-                      </div>
-                      <div>
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.24em]">{stage.label}</p>
-                        <p className="mt-1 text-xs opacity-80">{stage.detail}</p>
-                      </div>
+            {runHistoryOpen ? (
+              <div className="border-t border-slate-800/80 px-4 py-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-500">Run History</p>
+                  {isViewingArchivedRun ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRunSelectionMode('auto')
+                        setSelectedRunId(activeBotRunId || null)
+                        setRunHistoryOpen(false)
+                      }}
+                      className="text-xs font-medium text-sky-300 transition hover:text-sky-200"
+                    >
+                      Back to latest
+                    </button>
+                  ) : null}
+                </div>
+                <div className="space-y-2">
+                  {runCatalog.length ? (
+                    runCatalog.map((run) => {
+                      const runId = String(run?.run_id || '')
+                      const selected = runId === selectedRunId
+                      const runStatus = normalizeBotStatus(run.runtime_status || run.status || 'idle')
+                      return (
+                        <button
+                          key={runId}
+                          type="button"
+                          onClick={() => {
+                            setRunSelectionMode(run?.is_active ? 'auto' : 'manual')
+                            setSelectedRunId(runId || null)
+                            setRunHistoryOpen(false)
+                          }}
+                          className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition ${
+                            selected
+                              ? 'border-sky-500/50 bg-sky-500/10 text-slate-100'
+                              : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-slate-700 hover:text-slate-100'
+                          }`}
+                        >
+                          <div>
+                            <p className="text-sm font-medium">
+                              {run?.is_active ? 'Latest active run' : 'Archived run'} · {shortRunId(runId)}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-400">{describeRunRow(run)}</p>
+                          </div>
+                          <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+                            {runStatus}
+                          </span>
+                        </button>
+                      )
+                    })
+                  ) : (
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-sm text-slate-400">
+                      No BotLens runs are available yet.
                     </div>
-                  </div>
-                )
-              })}
-            </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
           </div>
           {statusMessage ? (
             <div
-              className={`mb-3 rounded border px-3 py-2 text-sm ${
+              className={`mb-3 flex items-center justify-between gap-3 rounded border px-3 py-2 text-sm ${
                 showStaleStatus
                   ? 'border-amber-700/70 bg-amber-950/30 text-amber-200'
                   : 'border-slate-800 bg-slate-900/40 text-slate-300'
               }`}
             >
-              {showStaleStatus ? 'Read-only stale mode: ' : ''}
-              {statusMessage}
+              <span>
+                {showStaleStatus ? 'Read-only stale mode: ' : ''}
+                {statusMessage}
+              </span>
+              {liveContinuityUnavailable ? (
+                <button
+                  type="button"
+                  onClick={requestManualLiveRetry}
+                  className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-100 transition hover:border-amber-400 hover:bg-amber-500/20"
+                >
+                  Retry live
+                </button>
+              ) : null}
             </div>
           ) : null}
           {runCatalogState === 'error' ? (
@@ -1225,35 +1616,29 @@ export function BotLensLiveModal({ bot, open, onClose }) {
             </div>
           ) : null}
           {!snapshot ? (
-            <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/50 px-6 py-8">
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.12),transparent_40%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.10),transparent_35%)]" />
-              <div className="relative flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl border border-sky-500/30 bg-sky-500/10">
-                    <span className="absolute inset-2 rounded-xl border border-sky-400/20 animate-pulse" />
-                    <span className="absolute h-3 w-3 rounded-full bg-sky-300 shadow-[0_0_24px_rgba(125,211,252,0.75)]" />
-                    <span className="absolute h-7 w-7 rounded-full border border-sky-300/40 animate-ping" />
-                  </div>
-                  <div>
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-sky-300/80">
-                      {selectedRunIsLiveTarget ? 'Joining live runtime' : 'Loading archived run'}
-                    </p>
-                    <p className="mt-1 text-xl font-semibold text-slate-100">
-                      {selectedRunIsLiveTarget ? botLifecycle.label : selectedRun ? 'Historical snapshot bootstrap' : 'Waiting for run selection'}
-                    </p>
-                    <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-300">
-                      {statusMessage || botLifecycle.detail}
-                    </p>
-                  </div>
+            <div className="rounded-3xl border border-slate-800 bg-slate-900/50 px-6 py-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500">
+                    {selectedRunIsLiveTarget ? 'Joining live runtime' : 'Loading archived run'}
+                  </p>
+                  <p className="mt-1 text-xl font-semibold text-slate-100">
+                    {selectedRunIsLiveTarget ? botLifecycle.label : selectedRun ? 'Historical snapshot bootstrap' : 'Waiting for run selection'}
+                  </p>
+                  <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-300">
+                    {statusMessage || botLifecycle.detail}
+                  </p>
                 </div>
-                <div className="grid gap-2 text-xs text-slate-300 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                <div className="space-y-2 text-xs text-slate-300">
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
                     <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Selected Run</p>
                     <p className="mt-1 font-semibold text-slate-100">{shortRunId(selectedRunId)}</p>
                   </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3">
-                    <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">Lifecycle Reason</p>
-                    <p className="mt-1 font-semibold text-slate-100">{botLifecycle.reason.replaceAll('_', ' ')}</p>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-[0.24em] text-slate-500">State</p>
+                    <p className="mt-1 font-semibold text-slate-100">
+                      {currentLifecycleStage ? currentLifecycleStage.label : botLifecycle.reason.replaceAll('_', ' ')}
+                    </p>
                   </div>
                 </div>
               </div>

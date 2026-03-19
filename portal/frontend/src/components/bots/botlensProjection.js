@@ -1,13 +1,17 @@
 import { toFiniteNumber, toSec } from './chartDataUtils.js'
 
 export function canonicalSeriesKey(symbol, timeframe) {
-  return `${String(symbol || '').trim().toUpperCase()}|${String(timeframe || '').trim().toLowerCase()}`
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase()
+  const normalizedTimeframe = String(timeframe || '').trim().toLowerCase()
+  if (!normalizedSymbol || !normalizedTimeframe) return ''
+  return `${normalizedSymbol}|${normalizedTimeframe}`
 }
 
 export function normalizeSeriesKey(value) {
   const text = String(value || '').trim()
   if (!text) return ''
-  const [symbol, timeframe] = text.split('|')
+  const [symbol, timeframe, ...rest] = text.split('|')
+  if (rest.length || !text.includes('|')) return ''
   return canonicalSeriesKey(symbol, timeframe)
 }
 
@@ -86,7 +90,9 @@ function sortValue(value) {
 
 function overlayIdentity(overlay, index) {
   if (!overlay || typeof overlay !== 'object') return `index:${index}`
-  for (const key of ['overlay_id', 'id', 'name', 'key', 'slug', 'indicator_id', 'type']) {
+  const explicitOverlayId = String(overlay.overlay_id || '').trim()
+  if (explicitOverlayId) return explicitOverlayId
+  for (const key of ['id', 'name', 'key', 'slug', 'indicator_id', 'type']) {
     const value = String(overlay[key] || '').trim()
     if (value) return `${key}:${value}`
   }
@@ -105,6 +111,42 @@ export function projectOverlayState(overlays = []) {
     })
   })
   return Array.from(projected.values())
+}
+
+export function applyOverlayDelta(overlays = [], delta = null) {
+  const current = projectOverlayState(overlays)
+  const ops = Array.isArray(delta?.ops) ? delta.ops : []
+  const overlayMap = new Map()
+  current.forEach((overlay, index) => {
+    if (!overlay || typeof overlay !== 'object') return
+    const overlayId = String(overlay.overlay_id || overlayIdentity(overlay, index)).trim()
+    overlayMap.set(overlayId, {
+      ...overlay,
+      overlay_id: overlayId,
+      overlay_revision: stableOverlayRevision({ ...overlay, overlay_id: overlayId }),
+    })
+  })
+  ops.forEach((op) => {
+    if (!op || typeof op !== 'object') return
+    const opName = String(op.op || '').trim().toLowerCase()
+    const key = String(op.key || '').trim()
+    if (!key) return
+    if (opName === 'remove') {
+      overlayMap.delete(key)
+      return
+    }
+    if (opName === 'upsert' && op.overlay && typeof op.overlay === 'object') {
+      const overlay = {
+        ...op.overlay,
+        overlay_id: key,
+      }
+      overlayMap.set(key, {
+        ...overlay,
+        overlay_revision: stableOverlayRevision({ ...overlay, overlay_id: key }),
+      })
+    }
+  })
+  return Array.from(overlayMap.values())
 }
 
 export function normalizeSeriesEntry(entry, index = 0) {
@@ -250,6 +292,64 @@ export function applyLiveTail({ projection, message, seriesKey }) {
   if (!series) return current
 
   let nextSeries = series
+  if (message?.messageType === 'series_delta') {
+    const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
+    const seriesDelta = payload?.seriesDelta && typeof payload.seriesDelta === 'object' ? payload.seriesDelta : {}
+    if (seriesDelta?.candle) {
+      nextSeries = normalizeSeriesEntry(
+        {
+          ...nextSeries,
+          candles: mergeCanonicalCandles(nextSeries.candles || [], [seriesDelta.candle]),
+        },
+        0,
+      )
+    }
+    if (seriesDelta?.overlay_delta && typeof seriesDelta.overlay_delta === 'object') {
+      nextSeries = normalizeSeriesEntry(
+        {
+          ...nextSeries,
+          overlays: applyOverlayDelta(nextSeries.overlays || [], seriesDelta.overlay_delta),
+        },
+        0,
+      )
+    }
+    if (seriesDelta?.stats && typeof seriesDelta.stats === 'object') {
+      nextSeries = normalizeSeriesEntry(
+        {
+          ...nextSeries,
+          stats: { ...seriesDelta.stats },
+        },
+        0,
+      )
+    }
+    const runtime = {
+      ...(current.runtime || {}),
+      ...(payload?.runtime && typeof payload.runtime === 'object' ? payload.runtime : {}),
+    }
+    if (Array.isArray(nextSeries?.candles) && nextSeries.candles.length > 0) {
+      runtime.last_bar = { ...nextSeries.candles[nextSeries.candles.length - 1] }
+    }
+    return normalizeProjection(
+      {
+        ...current,
+        seq: Number(message?.seq || current.seq || 0),
+        series_key: targetSeriesKey,
+        series: replaceProjectionSeries(current, nextSeries),
+        trades: Array.isArray(seriesDelta?.trades)
+          ? seriesDelta.trades.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry }))
+          : current.trades,
+        logs: Array.isArray(payload?.logs) ? [...payload.logs] : current.logs,
+        decisions: Array.isArray(payload?.decisions) ? [...payload.decisions] : current.decisions,
+        warnings: Array.isArray(runtime?.warnings) ? [...runtime.warnings] : current.warnings,
+        runtime,
+      },
+      {
+        runId: current.run_id,
+        seq: Number(message?.seq || current.seq || 0),
+        seriesKey: targetSeriesKey,
+      },
+    )
+  }
   if ((message?.messageType === 'bar_append' || message?.messageType === 'bar_update') && message?.payload?.bar) {
     nextSeries = normalizeSeriesEntry(
       {
