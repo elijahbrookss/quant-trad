@@ -1,6 +1,6 @@
 import { createLogger } from '../utils/logger.js';
 
-import { API_ORIGIN as BASE } from '../config/appConfig.js'
+import { API_BASE_URL } from '../config/appConfig.js'
 const adapterLogger = createLogger('IndicatorAdapter');
 
 async function handleResponse(res) {
@@ -41,36 +41,36 @@ async function handleResponse(res) {
 }
 
 export async function fetchIndicators() {
-  const res = await fetch(`${BASE}/api/indicators/`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/`, { mode: 'cors' })
   return handleResponse(res)
 }
 
 export async function fetchIndicatorTypes() {
-  const res = await fetch(`${BASE}/api/indicators-types/`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/types`, { mode: 'cors' })
   return handleResponse(res)
 }
 
 export async function fetchIndicatorType(id) {
-    const res = await fetch(`${BASE}/api/indicators-types/${id}`, { mode: 'cors' })
+    const res = await fetch(`${API_BASE_URL}/indicators/types/${id}`, { mode: 'cors' })
     return handleResponse(res)
 }
 
 export async function fetchIndicator(id) {
-  const res = await fetch(`${BASE}/api/indicators/${id}`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}`, { mode: 'cors' })
   return handleResponse(res)
 }
 
-export async function createIndicator({ type, name, params, color }) {
+export async function createIndicator({ type, name, params, dependencies = [], color }) {
   adapterLogger.debug('create_indicator_request', {
     type,
     hasName: Boolean(name),
     paramKeys: Object.keys(params || {}),
   })
-  const body = { type, name, params }
+  const body = { type, name, params, dependencies }
   if (color !== undefined) {
     body.color = color
   }
-  const res = await fetch(`${BASE}/api/indicators/`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -79,12 +79,12 @@ export async function createIndicator({ type, name, params, color }) {
   return handleResponse(res)
 }
 
-export async function updateIndicator(id, { type, name, params, color }) {
-  const body = { type, name, params }
+export async function updateIndicator(id, { type, name, params, dependencies = [], color }) {
+  const body = { type, name, params, dependencies }
   if (color !== undefined) {
     body.color = color
   }
-  const res = await fetch(`${BASE}/api/indicators/${id}`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -94,7 +94,7 @@ export async function updateIndicator(id, { type, name, params, color }) {
 }
 
 export async function deleteIndicator(id) {
-  const res = await fetch(`${BASE}/api/indicators/${id}`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}`, {
     method: 'DELETE',
     mode: 'cors',
   })
@@ -102,7 +102,7 @@ export async function deleteIndicator(id) {
 }
 
 export async function setIndicatorEnabled(id, enabled) {
-  const res = await fetch(`${BASE}/api/indicators/${id}/enabled`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}/enabled`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled }),
@@ -112,7 +112,7 @@ export async function setIndicatorEnabled(id, enabled) {
 }
 
 export async function bulkToggleIndicators(ids = [], enabled) {
-  const res = await fetch(`${BASE}/api/indicators/bulk/toggle`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/bulk/toggle`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids, enabled }),
@@ -122,7 +122,7 @@ export async function bulkToggleIndicators(ids = [], enabled) {
 }
 
 export async function bulkDeleteIndicators(ids = []) {
-  const res = await fetch(`${BASE}/api/indicators/bulk/delete`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/bulk/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids }),
@@ -139,7 +139,7 @@ export async function duplicateIndicator(id, { name } = {}) {
   const hasBody = Object.keys(payload).length > 0
   const headers = hasBody ? { 'Content-Type': 'application/json' } : undefined
   const body = hasBody ? JSON.stringify(payload) : undefined
-  const res = await fetch(`${BASE}/api/indicators/${id}/duplicate`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}/duplicate`, {
     method: 'POST',
     headers,
     body,
@@ -159,7 +159,7 @@ export async function fetchIndicatorOverlays(id, { start, end, interval, symbol,
     exchange,
     instrument_id,
   })
-  const res = await fetch(`${BASE}/api/indicators/${id}/overlays`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}/overlays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ start, end, interval, symbol, datasource, exchange, instrument_id }),
@@ -187,7 +187,7 @@ export async function generateIndicatorSignals(
     payload.config = Object.fromEntries(cfgEntries);
   }
 
-  const res = await fetch(`${BASE}/api/indicators/${id}/signals`, {
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}/signals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -198,6 +198,6 @@ export async function generateIndicatorSignals(
 }
 
 export async function fetchIndicatorStrategies(id) {
-  const res = await fetch(`${BASE}/api/indicators/${id}/strategies`, { mode: 'cors' })
+  const res = await fetch(`${API_BASE_URL}/indicators/${id}/strategies`, { mode: 'cors' })
   return handleResponse(res)
 }

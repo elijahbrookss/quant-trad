@@ -6,22 +6,15 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-import pandas as pd
-
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
-from indicators.config import DataContext
+from indicators.config import DataContext, IndicatorExecutionContext
 from signals.contract import assert_no_execution_fields, assert_signal_contract
 
 from .context import IndicatorServiceContext, _context
+from .runtime_graph import build_runtime_indicator_graph
 from .runtime_contract import SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
-from .utils import ensure_color, get_indicator_entry, resolve_data_provider
-from ..indicator_factory import (
-    INDICATOR_MAP,
-    resolve_indicator_params,
-    runtime_indicator_builder_for_type,
-)
-from ...market import instrument_service
+from .utils import ensure_color, resolve_data_provider
 
 logger = logging.getLogger(__name__)
 _SIGNAL_EXEC_CACHE: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
@@ -32,6 +25,8 @@ def _iso_utc(value: datetime) -> str:
 
 
 def _build_candles(df: pd.DataFrame) -> List[Candle]:
+    import pandas as pd
+
     if df is None or getattr(df, "empty", False):
         return []
     candles: List[Candle] = []
@@ -69,55 +64,57 @@ class IndicatorSignalExecutor:
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         t0 = perf_counter()
-        entry = self._load_entry(inst_id, start, end, interval, symbol, datasource, exchange)
-        meta = dict(entry.meta)
+        meta = dict(self._load_meta(inst_id))
         if not bool(meta.get("runtime_supported")):
             raise RuntimeError(f"Indicator is not runtime-supported: {inst_id}")
 
-        resolved_symbol = self._resolve_symbol(entry, symbol)
-        runtime_plan = self._ctx.factory.build_runtime_input_plan(
-            meta,
-            strategy_interval=interval,
+        resolved_symbol = self._resolve_symbol(meta, symbol)
+        execution_context = self._build_execution_context(
+            meta=meta,
+            symbol=resolved_symbol,
             start=start,
             end=end,
+            interval=interval,
+            datasource=datasource,
+            exchange=exchange,
         )
-        plan_start = str(runtime_plan.get("start") or start)
-        plan_end = str(runtime_plan.get("end") or end)
-        plan_interval = str(runtime_plan.get("source_timeframe") or interval)
         enabled_event_keys = self._normalise_enabled_event_keys(dict(config or {}))
+        graph_metas, indicators = build_runtime_indicator_graph(
+            [inst_id],
+            execution_context=execution_context,
+            ctx=self._ctx,
+            preloaded_metas={inst_id: meta},
+        )
 
         cache_key = self._build_cache_key(
             inst_id=inst_id,
-            meta=meta,
+            graph_metas=graph_metas,
             symbol=resolved_symbol,
-            datasource=datasource,
-            exchange=exchange,
-            plan_start=plan_start,
-            plan_end=plan_end,
-            plan_interval=plan_interval,
+            datasource=execution_context.datasource,
+            exchange=execution_context.exchange,
+            plan_start=str(execution_context.start or ""),
+            plan_end=str(execution_context.end or ""),
+            plan_interval=str(execution_context.interval or ""),
             enabled_event_keys=enabled_event_keys,
         )
         cached_payload = _SIGNAL_EXEC_CACHE.get(cache_key)
         if cached_payload is not None:
             return deepcopy(cached_payload)
 
-        provider, data_ctx = self._prepare_provider(
-            meta=meta,
-            symbol=resolved_symbol,
-            start=plan_start,
-            end=plan_end,
-            interval=plan_interval,
-            datasource=datasource,
-            exchange=exchange,
+        provider, data_ctx = self._prepare_provider(execution_context=execution_context)
+        df = self._load_candles(
+            provider,
+            data_ctx,
+            inst_id,
+            resolved_symbol,
+            str(execution_context.interval or ""),
         )
-        df = self._load_candles(provider, data_ctx, inst_id, resolved_symbol, plan_interval)
         candles = _build_candles(df)
-        indicator = self._build_runtime_indicator(inst_id=inst_id, meta=meta)
-        engine = IndicatorExecutionEngine([indicator])
+        engine = IndicatorExecutionEngine(indicators)
 
         signals: List[Dict[str, Any]] = []
         for candle in candles:
-            frame = engine.step(bar=candle, bar_time=candle.time)
+            frame = engine.step(bar=candle, bar_time=candle.time, include_overlays=False)
             signals.extend(
                 self._collect_frame_signals(
                     indicator_id=inst_id,
@@ -133,7 +130,7 @@ class IndicatorSignalExecutor:
         payload["signals"] = signals
         payload["runtime_path"] = SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
         payload["runtime_invariants"] = {
-            "source_timeframe": plan_interval,
+            "source_timeframe": str(execution_context.interval or ""),
             "bars_used": len(candles),
             "signals_count": len(signals),
         }
@@ -144,7 +141,7 @@ class IndicatorSignalExecutor:
             meta.get("type"),
             resolved_symbol,
             interval,
-            plan_interval,
+            execution_context.interval,
             len(candles),
             len(signals),
             (perf_counter() - t0) * 1000.0,
@@ -155,7 +152,7 @@ class IndicatorSignalExecutor:
         self,
         *,
         inst_id: str,
-        meta: Mapping[str, Any],
+        graph_metas: Mapping[str, Mapping[str, Any]],
         symbol: str,
         datasource: Optional[str],
         exchange: Optional[str],
@@ -164,46 +161,63 @@ class IndicatorSignalExecutor:
         plan_interval: str,
         enabled_event_keys: Set[str],
     ) -> Tuple[Any, ...]:
-        params = meta.get("params") if isinstance(meta, Mapping) else {}
-        if isinstance(params, Mapping):
-            params_items = tuple(sorted((str(key), repr(value)) for key, value in params.items()))
-        else:
-            params_items = tuple()
+        graph_items = []
+        for indicator_id, meta in sorted(graph_metas.items()):
+            params = meta.get("params") if isinstance(meta, Mapping) else {}
+            params_items = (
+                tuple(sorted((str(key), repr(value)) for key, value in params.items()))
+                if isinstance(params, Mapping)
+                else tuple()
+            )
+            dependency_items = tuple(
+                sorted(
+                    (
+                        str(item.get("indicator_id") or ""),
+                        str(item.get("output_name") or ""),
+                        str(item.get("indicator_type") or ""),
+                    )
+                    for item in (meta.get("dependencies") or [])
+                    if isinstance(item, Mapping)
+                )
+            )
+            graph_items.append(
+                (
+                    str(indicator_id),
+                    str(meta.get("type") if isinstance(meta, Mapping) else ""),
+                    str(meta.get("updated_at") if isinstance(meta, Mapping) else ""),
+                    params_items,
+                    dependency_items,
+                )
+            )
         return (
             str(inst_id),
-            str(meta.get("type") if isinstance(meta, Mapping) else ""),
             str(symbol),
             str(datasource or ""),
             str(exchange or ""),
             str(plan_start),
             str(plan_end),
             str(plan_interval),
-            params_items,
+            tuple(graph_items),
             tuple(sorted(enabled_event_keys)),
             SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
         )
 
-    def _load_entry(
+    def _load_meta(
         self,
         inst_id: str,
-        start: str,
-        end: str,
-        interval: str,
-        symbol: Optional[str],
-        datasource: Optional[str] = None,
-        exchange: Optional[str] = None,
-    ):
-        _ = start, end, interval, symbol, datasource, exchange
-        return get_indicator_entry(inst_id, datasource=datasource, exchange=exchange, build_instance=False, ctx=self._ctx)
+    ) -> Mapping[str, Any]:
+        from .api import get_instance_meta
+
+        return get_instance_meta(inst_id, ctx=self._ctx)
 
     @staticmethod
-    def _resolve_symbol(entry: Any, symbol: Optional[str]) -> str:
-        value = str(symbol or entry.meta.get("params", {}).get("symbol") or "").strip()
+    def _resolve_symbol(meta: Mapping[str, Any], symbol: Optional[str]) -> str:
+        value = str(symbol or "").strip()
         if not value:
             raise ValueError("Indicator signal preview requires symbol.")
         return value
 
-    def _prepare_provider(
+    def _build_execution_context(
         self,
         *,
         meta: Mapping[str, Any],
@@ -213,26 +227,30 @@ class IndicatorSignalExecutor:
         interval: str,
         datasource: Optional[str] = None,
         exchange: Optional[str] = None,
-    ):
-        effective_datasource = datasource or meta.get("datasource") or meta.get("params", {}).get("datasource")
-        effective_exchange = exchange or meta.get("exchange") or meta.get("params", {}).get("exchange")
-        provider = resolve_data_provider(
-            effective_datasource,
-            exchange=effective_exchange,
-            ctx=self._ctx,
-        )
-        instrument_id = instrument_service.require_instrument_id(
-            effective_datasource,
-            effective_exchange,
-            symbol,
-        )
-        data_ctx = DataContext(
+    ) -> IndicatorExecutionContext:
+        effective_datasource = datasource or meta.get("datasource")
+        effective_exchange = exchange or meta.get("exchange")
+        return IndicatorExecutionContext(
             symbol=symbol,
             start=start,
             end=end,
             interval=interval,
-            instrument_id=instrument_id,
+            datasource=str(effective_datasource or "").strip() or None,
+            exchange=effective_exchange,
+            instrument_id=None,
         )
+
+    def _prepare_provider(
+        self,
+        *,
+        execution_context: IndicatorExecutionContext,
+    ):
+        provider = resolve_data_provider(
+            execution_context.datasource,
+            exchange=execution_context.exchange,
+            ctx=self._ctx,
+        )
+        data_ctx = execution_context.data_context()
         return provider, data_ctx
 
     def _load_candles(self, provider, data_ctx: DataContext, inst_id: str, symbol: str, interval: str):
@@ -248,20 +266,6 @@ class IndicatorSignalExecutor:
         if df is None or df.empty:
             raise LookupError("No candles available for given window")
         return df
-
-    def _build_runtime_indicator(self, *, inst_id: str, meta: Mapping[str, Any]) -> Any:
-        indicator_type = str(meta.get("type") or "").strip()
-        indicator_cls = INDICATOR_MAP.get(indicator_type)
-        if indicator_cls is None:
-            raise KeyError(f"Unknown indicator type: {indicator_type}")
-        builder = runtime_indicator_builder_for_type(indicator_type)
-        resolved_params = resolve_indicator_params(indicator_cls, meta.get("params"))
-        return builder(
-            indicator_id=inst_id,
-            meta=meta,
-            resolved_params=resolved_params,
-            strategy_indicator_metas={inst_id: dict(meta)},
-        )
 
     def _collect_frame_signals(
         self,

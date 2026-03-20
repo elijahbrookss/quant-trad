@@ -1,37 +1,41 @@
 import { Dialog, DialogPanel, DialogTitle, Switch } from '@headlessui/react'
 import { useEffect, useMemo, useState } from 'react'
 
-import { fetchIndicatorTypes, fetchIndicatorType } from '../adapters/indicator.adapter.js'
+import { fetchIndicatorTypes, fetchIndicatorType, fetchIndicators } from '../adapters/indicator.adapter.js'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const EMPTY_META = {
-  required_params: [],
-  default_params: {},
-  field_types: {},
-  ui_descriptions: {},
-  ui_order: [],
-  ui_enums: {},
-  typed_outputs: [],
-  overlay_outputs: [],
+  type: '',
+  version: '',
+  label: '',
+  description: '',
+  params: [],
+  outputs: [],
+  overlays: [],
+  dependencies: [],
 }
 
-const NUMBER_FIELDS = new Set(['int', 'float', 'number'])
-const RUNTIME_CONTEXT_KEYS = new Set([
-  'symbol',
-  'interval',
-  'start',
-  'end',
-  'timeframe',
-  'datasource',
-  'exchange',
-  'provider_id',
-  'venue_id',
-  'instrument_id',
-  'bot_id',
-  'strategy_id',
-  'bot_mode',
-  'run_id',
-])
+const NUMBER_FIELDS = new Set(['int', 'float'])
+const LIST_FIELDS = new Set(['int_list', 'float_list', 'string_list'])
+
+const toOptionEntry = (entry) => {
+  if (entry && typeof entry === 'object' && 'value' in entry) {
+    return {
+      value: entry.value,
+      label: entry.label ?? String(entry.value),
+      description: entry.description ?? '',
+      badge: entry.badge ?? undefined,
+      disabled: Boolean(entry.disabled),
+    }
+  }
+  return {
+    value: entry,
+    label: String(entry),
+    description: '',
+    badge: undefined,
+    disabled: false,
+  }
+}
 
 const toInt = (value) => {
   if (typeof value === 'number') {
@@ -77,6 +81,37 @@ const toIntList = (value) => {
   return single === null ? [] : [single]
 }
 
+const toFloatList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(toFloat).filter((item) => item !== null)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\s,;]+/)
+      .filter(Boolean)
+      .map(toFloat)
+      .filter((item) => item !== null)
+  }
+  if (value == null) {
+    return []
+  }
+  const single = toFloat(value)
+  return single === null ? [] : [single]
+}
+
+const toStringList = (value) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean)
+  }
+  if (value == null) {
+    return []
+  }
+  return [String(value).trim()].filter(Boolean)
+}
+
 const listToString = (value) => {
   if (Array.isArray(value)) {
     return value.join(', ')
@@ -87,62 +122,84 @@ const listToString = (value) => {
   return String(value)
 }
 
+const editableParams = (meta) => (
+  Array.isArray(meta.params) ? meta.params.filter((param) => param?.editable !== false) : []
+)
+
 const normaliseString = (value) => {
   if (value == null) return ''
   return String(value)
 }
 
-const buildFieldOrder = (meta, params) => {
-  const required = Array.isArray(meta.required_params) ? meta.required_params : []
-  const defaults = Object.keys(meta.default_params || {})
-  const current = Object.keys(params || {})
-  const explicit = Array.isArray(meta.ui_order) ? meta.ui_order : []
-
-  const ordered = [...explicit, ...required, ...defaults, ...current]
-  return Array.from(new Set(ordered))
+const formatIndicatorType = (type) => {
+  if (!type) return 'Custom'
+  return String(type)
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ')
 }
 
-const deriveIntListKeys = (meta) => {
-  const keys = new Set()
-  const fieldTypes = meta.field_types || {}
-  Object.entries(fieldTypes).forEach(([key, value]) => {
-    const lower = String(value || '').toLowerCase()
-    if (lower.includes('list') && lower.includes('int')) {
-      keys.add(key)
-    }
-  })
-  Object.entries(meta.default_params || {}).forEach(([key, value]) => {
-    if (Array.isArray(value) && value.every((entry) => Number.isFinite(entry))) {
-      keys.add(key)
-    }
-  })
-  return keys
-}
+const compatibleIndicatorsForDependency = (dependency, indicators, currentIndicatorId) => (
+  Array.isArray(indicators)
+    ? indicators.filter((indicator) => (
+        indicator?.id &&
+        indicator.id !== currentIndicatorId &&
+        String(indicator?.type || '').trim() === String(dependency?.indicator_type || '').trim()
+      ))
+    : []
+)
 
-const prepareInitialParams = (meta, initialParams) => {
-  const intListKeys = deriveIntListKeys(meta)
-  const merged = { ...meta.default_params, ...(initialParams || {}) }
-  const output = {}
+const prepareInitialDependencies = (meta, initialDependencies, availableIndicators, currentIndicatorId) => {
+  const definitions = Array.isArray(meta?.dependencies) ? meta.dependencies : []
+  const existingBindings = Array.isArray(initialDependencies) ? initialDependencies : []
+  const prepared = {}
 
-  for (const key of buildFieldOrder(meta, merged)) {
-    if (intListKeys.has(key)) {
-      output[key] = listToString(merged[key])
+  for (const dependency of definitions) {
+    const outputName = String(dependency?.output_name || '').trim()
+    if (!outputName) continue
+    const existing = existingBindings.find((item) => (
+      String(item?.output_name || '').trim() === outputName &&
+      String(item?.indicator_id || '').trim()
+    ))
+    if (existing) {
+      prepared[outputName] = String(existing.indicator_id).trim()
       continue
     }
-
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-    if (fieldType === 'bool') {
-      output[key] = Boolean(merged[key])
-    } else if (NUMBER_FIELDS.has(fieldType)) {
-      output[key] = normaliseString(merged[key] ?? '')
-    } else {
-      output[key] = normaliseString(merged[key] ?? '')
+    const candidates = compatibleIndicatorsForDependency(
+      dependency,
+      availableIndicators,
+      currentIndicatorId,
+    )
+    if (candidates.length === 1) {
+      prepared[outputName] = String(candidates[0].id)
     }
   }
 
-  for (const key of meta.required_params || []) {
-    if (!(key in output)) {
-      output[key] = ''
+  return prepared
+}
+
+const prepareInitialParams = (meta, initialParams) => {
+  const definitions = editableParams(meta)
+  const output = {}
+
+  for (const param of definitions) {
+    const key = param.key
+    const fieldType = String(param.type || '').toLowerCase()
+    const hasDefault = Boolean(param.has_default)
+    const rawValue = initialParams?.[key] ?? (hasDefault ? param.default : undefined)
+
+    if (LIST_FIELDS.has(fieldType)) {
+      output[key] = listToString(rawValue)
+      continue
+    }
+
+    if (fieldType === 'bool') {
+      output[key] = Boolean(rawValue)
+    } else if (NUMBER_FIELDS.has(fieldType)) {
+      output[key] = normaliseString(rawValue ?? '')
+    } else {
+      output[key] = normaliseString(rawValue ?? '')
     }
   }
 
@@ -150,22 +207,34 @@ const prepareInitialParams = (meta, initialParams) => {
 }
 
 const convertParamsForSave = (meta, params) => {
-  const intListKeys = deriveIntListKeys(meta)
+  const definitions = editableParams(meta)
   const prepared = {}
 
-  for (const [key, raw] of Object.entries(params || {})) {
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-
-    if (intListKeys.has(key)) {
-      const values = toIntList(raw)
-      if (values.length) {
-        prepared[key] = values
-      }
-      continue
-    }
+  for (const param of definitions) {
+    const key = param.key
+    const raw = params?.[key]
+    const fieldType = String(param.type || '').toLowerCase()
 
     if (fieldType === 'bool') {
       prepared[key] = Boolean(raw)
+      continue
+    }
+
+    if (fieldType === 'int_list') {
+      const values = toIntList(raw)
+      if (values.length) prepared[key] = values
+      continue
+    }
+
+    if (fieldType === 'float_list') {
+      const values = toFloatList(raw)
+      if (values.length) prepared[key] = values
+      continue
+    }
+
+    if (fieldType === 'string_list') {
+      const values = toStringList(raw)
+      if (values.length) prepared[key] = values
       continue
     }
 
@@ -188,17 +257,22 @@ const convertParamsForSave = (meta, params) => {
 
 export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSave }) {
   const [types, setTypes] = useState([])
+  const [availableIndicators, setAvailableIndicators] = useState([])
   const [typeId, setTypeId] = useState(initial?.type || '')
   const [name, setName] = useState(initial?.name || '')
   const [params, setParams] = useState({})
+  const [dependencyBindings, setDependencyBindings] = useState({})
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
     if (!isOpen) return
-    fetchIndicatorTypes()
-      .then((payload) => setTypes(Array.isArray(payload) ? payload : []))
+    Promise.all([fetchIndicatorTypes(), fetchIndicators()])
+      .then(([typePayload, indicatorPayload]) => {
+        setTypes(Array.isArray(typePayload) ? typePayload : [])
+        setAvailableIndicators(Array.isArray(indicatorPayload) ? indicatorPayload : [])
+      })
       .catch((err) => setMetaError(err?.message || 'Failed to load indicator types'))
   }, [isOpen])
 
@@ -209,6 +283,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMeta(EMPTY_META)
     setMetaError(null)
     setParams(initial?.params || {})
+    setDependencyBindings({})
     setShowAdvanced(false)
   }, [initial, isOpen])
 
@@ -223,6 +298,14 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
         setMeta(nextMeta)
         const preparedParams = prepareInitialParams(nextMeta, initial?.params)
         setParams(preparedParams)
+        setDependencyBindings(
+          prepareInitialDependencies(
+            nextMeta,
+            initial?.dependencies,
+            availableIndicators,
+            initial?.id,
+          ),
+        )
         setShowAdvanced(false)
 
       })
@@ -234,31 +317,20 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     return () => {
       cancelled = true
     }
-  }, [initial?.params, isOpen, typeId])
+  }, [availableIndicators, initial?.dependencies, initial?.id, initial?.params, isOpen, typeId])
 
-  const fieldOrder = useMemo(() => buildFieldOrder(meta, params), [meta, params])
-  const intListKeys = useMemo(() => deriveIntListKeys(meta), [meta])
-
-  const { coreKeys, optionalKeys, requiredKeys } = useMemo(() => {
-    if (!fieldOrder.length) return { coreKeys: [], optionalKeys: [], requiredKeys: [] }
-
-    const requiredList = Array.isArray(meta.required_params) ? meta.required_params : []
-    const preferredList = Array.isArray(meta.ui_basic_keys) ? meta.ui_basic_keys : []
-    const filteredOrder = fieldOrder.filter((key) => !RUNTIME_CONTEXT_KEYS.has(key))
-
-    const requiredOnly = filteredOrder.filter((key) => requiredList.includes(key))
-    const preferredOnly = filteredOrder.filter((key) => preferredList.includes(key) && !requiredOnly.includes(key))
-
-    const fallbackPrimary = filteredOrder.slice(
-      0,
-      Math.min(filteredOrder.length, Math.max(requiredOnly.length || 2, 4)),
-    )
-
-    const core = Array.from(new Set([...requiredOnly, ...preferredOnly, ...fallbackPrimary]))
-    const optional = filteredOrder.filter((key) => !core.includes(key))
-
-    return { coreKeys: core, optionalKeys: optional, requiredKeys: requiredOnly }
-  }, [fieldOrder, meta])
+  const fields = useMemo(() => editableParams(meta), [meta])
+  const { coreFields, optionalFields, requiredKeys } = useMemo(() => {
+    if (!fields.length) return { coreFields: [], optionalFields: [], requiredKeys: [] }
+    const requiredOnly = fields.filter((field) => field?.required)
+    const core = fields.filter((field) => !field?.advanced)
+    const optional = fields.filter((field) => field?.advanced)
+    return {
+      coreFields: core,
+      optionalFields: optional,
+      requiredKeys: requiredOnly.map((field) => field.key),
+    }
+  }, [fields])
 
   const handleParamChange = (key) => (input) => {
     let value = input
@@ -272,18 +344,21 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setParams((prev) => ({ ...prev, [key]: Boolean(value) }))
   }
 
-  const renderField = (key) => {
-    const fieldType = String(meta.field_types?.[key] || '').toLowerCase()
-    const isRequired = Array.isArray(meta.required_params) && meta.required_params.includes(key)
-    const description = meta.ui_descriptions?.[key]
+  const renderField = (param) => {
+    const key = param.key
+    const fieldType = String(param.type || '').toLowerCase()
+    const isRequired = Boolean(param.required)
+    const description = param.description
     const value = params[key] ?? (fieldType === 'bool' ? false : '')
-    const enumValues = Array.isArray(meta.ui_enums?.[key]) ? meta.ui_enums[key] : null
+    const enumValues = Array.isArray(param.options) && param.options.length
+      ? param.options.map(toOptionEntry)
+      : null
 
     return (
       <div key={key} className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <label className="text-sm font-semibold text-white">
-            {key}
+            {param.label || key}
             {isRequired && <span className="ml-1 text-rose-300">*</span>}
           </label>
         </div>
@@ -304,15 +379,15 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
           <DropdownSelect
             value={value}
             onChange={handleParamChange(key)}
-            options={enumValues.map((entry) => ({ value: entry, label: String(entry) }))}
+            options={enumValues}
             className="w-full"
           />
-        ) : intListKeys.has(key) ? (
+        ) : LIST_FIELDS.has(fieldType) ? (
           <input
             className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-[color:var(--accent-alpha-40)] focus:outline-none"
             value={value}
             onChange={handleParamChange(key)}
-            placeholder="e.g. 5, 10, 20"
+            placeholder={fieldType === 'string_list' ? 'e.g. one, two, three' : 'e.g. 5, 10, 20'}
           />
         ) : NUMBER_FIELDS.has(fieldType) ? (
           <input
@@ -333,6 +408,15 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     )
   }
 
+  const dependencyFields = useMemo(
+    () => (Array.isArray(meta.dependencies) ? meta.dependencies : []),
+    [meta.dependencies],
+  )
+
+  const handleDependencyChange = (outputName) => (indicatorId) => {
+    setDependencyBindings((prev) => ({ ...prev, [outputName]: indicatorId }))
+  }
+
   const handleSubmit = () => {
     if (!typeId) {
       setMetaError('Please select an indicator type.')
@@ -342,8 +426,29 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       setMetaError('Please provide an indicator name.')
       return
     }
+    const preparedDependencies = dependencyFields.map((dependency) => {
+      const outputName = String(dependency?.output_name || '').trim()
+      return {
+        indicator_id: String(dependencyBindings?.[outputName] || '').trim(),
+        indicator_type: String(dependency?.indicator_type || '').trim(),
+        output_name: outputName,
+      }
+    })
+    const missingDependency = preparedDependencies.find((dependency) => !dependency.indicator_id)
+    if (missingDependency) {
+      setMetaError(
+        `Please select a ${missingDependency.indicator_type} dependency for ${missingDependency.output_name}.`,
+      )
+      return
+    }
     const preparedParams = convertParamsForSave(meta, params)
-    onSave({ id: initial?.id, type: typeId, name: name.trim(), params: preparedParams })
+    onSave({
+      id: initial?.id,
+      type: typeId,
+      name: name.trim(),
+      params: preparedParams,
+      dependencies: preparedDependencies,
+    })
   }
 
   if (!isOpen) return null
@@ -398,7 +503,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
 
             {typeId ? (
               <div className="space-y-5">
-                {fieldOrder.length ? (
+                {fields.length ? (
                   <div className="space-y-5">
                     <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
                       <div className="flex items-start justify-between">
@@ -417,20 +522,20 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         )}
                       </div>
 
-                      {coreKeys.length > 0 ? (
-                        <div className="grid gap-3 md:grid-cols-2">{coreKeys.map(renderField)}</div>
+                      {coreFields.length > 0 ? (
+                        <div className="grid gap-3 md:grid-cols-2">{coreFields.map(renderField)}</div>
                       ) : (
                         <p className="text-sm text-slate-400">No configurable parameters for this indicator.</p>
                       )}
                     </div>
 
-                    {optionalKeys.length > 0 && (
+                    {optionalFields.length > 0 && (
                       <div className="space-y-3 rounded-lg border border-dashed border-white/12 bg-slate-900/40 p-4">
                         <div className="flex items-center justify-between">
                           <div>
                             <h4 className="text-sm font-semibold text-white">Additional parameters</h4>
                             <p className="text-xs text-slate-400">
-                              {optionalKeys.length} optional setting{optionalKeys.length > 1 ? 's' : ''} kept separate for clarity.
+                              {optionalFields.length} optional setting{optionalFields.length > 1 ? 's' : ''} kept separate for clarity.
                             </p>
                           </div>
                           <button
@@ -443,7 +548,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                         </div>
 
                         {showAdvanced && (
-                          <div className="grid gap-3 md:grid-cols-2">{optionalKeys.map(renderField)}</div>
+                          <div className="grid gap-3 md:grid-cols-2">{optionalFields.map(renderField)}</div>
                         )}
                       </div>
                     )}
@@ -452,6 +557,61 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                   <p className="rounded-lg border border-dashed border-white/10 bg-slate-900/50 p-4 text-sm text-slate-400">
                     No editable parameters for this indicator.
                   </p>
+                )}
+
+                {dependencyFields.length > 0 && (
+                  <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
+                    <div>
+                      <h4 className="text-sm font-semibold text-white">Indicator dependencies</h4>
+                      <p className="text-xs text-slate-400">
+                        Dependent indicators must bind to a specific upstream indicator instance.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {dependencyFields.map((dependency) => {
+                        const outputName = String(dependency?.output_name || '').trim()
+                        const candidates = compatibleIndicatorsForDependency(
+                          dependency,
+                          availableIndicators,
+                          initial?.id,
+                        )
+                        const value = dependencyBindings?.[outputName] || ''
+                        return (
+                          <div
+                            key={`${dependency.indicator_type}.${outputName}`}
+                            className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <label className="text-sm font-semibold text-white">
+                                {dependency.label || `${formatIndicatorType(dependency.indicator_type)} Dependency`}
+                                <span className="ml-1 text-rose-300">*</span>
+                              </label>
+                            </div>
+                            {dependency.description && (
+                              <p className="text-xs text-slate-300/80">{dependency.description}</p>
+                            )}
+                            {candidates.length ? (
+                              <DropdownSelect
+                                value={value}
+                                onChange={handleDependencyChange(outputName)}
+                                placeholder={`Select ${formatIndicatorType(dependency.indicator_type)}…`}
+                                options={candidates.map((indicator) => ({
+                                  value: indicator.id,
+                                  label: indicator.name || indicator.id,
+                                  description: `${formatIndicatorType(indicator.type)} · ${indicator.id}`,
+                                }))}
+                                className="w-full"
+                              />
+                            ) : (
+                              <p className="text-sm text-amber-200">
+                                No compatible {formatIndicatorType(dependency.indicator_type)} indicators are available.
+                              </p>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
                 )}
 
               </div>

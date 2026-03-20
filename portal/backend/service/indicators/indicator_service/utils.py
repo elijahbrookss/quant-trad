@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import inspect
 import logging
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-
-from data_providers import DataSource
 
 from .context import IndicatorServiceContext, _context
 
@@ -22,10 +16,6 @@ def build_meta_from_record(
     return ctx.factory.build_meta_from_record(record)
 
 
-def build_indicator_instance(meta: Mapping[str, Any], *, ctx: IndicatorServiceContext = _context):
-    return ctx.factory.build_indicator_instance(meta)
-
-
 def load_indicator_record(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> Dict[str, Any]:
     record = ctx.repository.get(inst_id)
     if not record:
@@ -33,68 +23,28 @@ def load_indicator_record(inst_id: str, *, ctx: IndicatorServiceContext = _conte
     return record
 
 
-def get_indicator_entry(
-    inst_id: str,
-    *,
-    datasource: Optional[str] = None,
-    exchange: Optional[str] = None,
-    build_instance: bool = True,
-    ctx: IndicatorServiceContext = _context,
-):
-    """Build indicator entry directly from DB without caching.
-
-    This ensures we always use fresh parameters from the database,
-    avoiding stale cached instances with outdated configuration.
-    """
-    from dataclasses import dataclass
-    from typing import Any
-
-    @dataclass
-    class IndicatorEntry:
-        """Temporary container for indicator metadata and instance."""
-        meta: Dict[str, Any]
-        instance: Optional[Any]
-        updated_at: Optional[str] = None
-
-    # Load fresh record from DB
-    record = ctx.repository.get(inst_id)
-    if not record:
-        raise KeyError("Indicator not found")
-
-    # Build meta and instance fresh from DB record
-    meta = ctx.factory.build_meta_from_record(record)
-
-    instance = None
-    if build_instance:
-        instance = ctx.factory.build_indicator_instance(
-            meta,
-            datasource=datasource,
-            exchange=exchange,
-        )
-
-    return IndicatorEntry(
-        meta=meta,
-        instance=instance,
-        updated_at=str(record.get("updated_at") or "")
-    )
-
-
-# REMOVED: refresh_strategy_links function
-# Strategies now load indicators fresh from DB, no snapshot refresh needed
-
-
 # Runtime params that should NOT be stored in indicator config
 # - datasource, exchange: stored in separate fields at top level
-# - symbol, start, end, interval: DataContext fields (runtime context, not config)
-_RUNTIME_PARAM_KEYS = {"datasource", "exchange", "symbol", "start", "end", "interval"}
+# - symbol/start/end/interval and execution ids are runtime context, not config
+_RUNTIME_PARAM_KEYS = {
+    "datasource",
+    "exchange",
+    "symbol",
+    "start",
+    "end",
+    "interval",
+    "provider_id",
+    "venue_id",
+    "instrument_id",
+    "bot_id",
+    "strategy_id",
+    "bot_mode",
+    "run_id",
+}
 
 
 def purge_overlay_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
     ctx.overlay_cache.purge_indicator(inst_id)
-
-
-def purge_incremental_cache(inst_id: str, *, ctx: IndicatorServiceContext = _context) -> None:
-    ctx.incremental_cache.purge_indicator(inst_id)
 
 
 def scrub_runtime_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -192,36 +142,10 @@ def pull_datasource_exchange(
     return datasource, exchange
 
 
-def extract_ctor_params(inst) -> Dict[str, Any]:
-    """Extract constructor params from indicator instance.
-
-    IMPORTANT: Filters out DataContext fields (symbol, start, end, interval) which are
-    runtime context, not indicator configuration. These should not be persisted.
-    """
-    # DataContext fields that should NOT be stored in indicator params
-    CONTEXT_FIELDS = {"symbol", "start", "end", "interval"}
-
-    sig = inspect.signature(inst.__class__.__init__)
-    out: Dict[str, Any] = {}
-    for name, param in sig.parameters.items():
-        if name in ("self", "df"):
-            continue
-        # Skip DataContext fields - they're runtime context, not config
-        if name in CONTEXT_FIELDS:
-            continue
-        if not hasattr(inst, name):
-            continue
-        if (
-            name == "bin_size"
-            and hasattr(inst, "_bin_size_locked")
-            and not getattr(inst, "_bin_size_locked")
-        ):
-            continue
-        out[name] = getattr(inst, name)
-    return out
-
-
 def sanitize_json(obj):
+    import numpy as np
+    import pandas as pd
+
     if isinstance(obj, (int,)) or isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, (float, np.floating)):
@@ -242,20 +166,16 @@ def sanitize_json(obj):
 __all__ = [
     "_context",
     "IndicatorServiceContext",
-    "build_indicator_instance",
     "build_meta_from_record",
     "coerce_float",
     "coerce_int",
     "ensure_color",
-    "extract_ctor_params",
-    "get_indicator_entry",
     "load_indicator_record",
     "normalize_color",
     "normalize_datasource",
     "normalize_exchange",
     "pull_datasource_exchange",
     "purge_overlay_cache",
-    # REMOVED: "refresh_strategy_links" - no longer needed
     "resolve_data_provider",
     "sanitize_json",
     "scrub_runtime_params",

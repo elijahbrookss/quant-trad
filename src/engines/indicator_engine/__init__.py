@@ -3,7 +3,7 @@
 from .contracts import (
     EngineFrame,
     Indicator,
-    IndicatorManifest,
+    IndicatorRuntimeSpec,
     OverlayDefinition,
     OutputDefinition,
     OutputRef,
@@ -20,7 +20,7 @@ from .runtime_engine import IndicatorExecutionEngine
 __all__ = [
     "EngineFrame",
     "Indicator",
-    "IndicatorManifest",
+    "IndicatorRuntimeSpec",
     "OverlayDefinition",
     "OutputDefinition",
     "OutputRef",
