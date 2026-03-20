@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from queue import Queue
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from indicators.config import IndicatorExecutionContext
 from engines.bot_runtime.deps import BotRuntimeDeps
 from engines.bot_runtime.core.domain import normalize_epoch
 from engines.bot_runtime.runtime.reporting import (
@@ -165,6 +166,7 @@ class RuntimeSetupPrepareMixin:
             self.config,
             record_batch=self._deps.record_bot_run_steps_batch,
         )
+        self._report_artifact_bundle = None
         self._intrabar_manager = IntrabarManager(
             self.bot_id,
             fetcher=self._deps.fetch_ohlcv,
@@ -624,14 +626,33 @@ class RuntimeSetupPrepareMixin:
                 ctx=self._indicator_ctx,
             )
 
-        indicators = [
-            self._deps.indicator_build_runtime_instance(
-                indicator_id,
-                meta=meta,
-                strategy_indicator_metas=indicator_metas,
-            )
-            for indicator_id, meta in indicator_metas.items()
-        ]
+        series_start = (
+            series.window_start
+            or (series.candles[0].time.isoformat() if series.candles else None)
+        )
+        series_end = (
+            series.window_end
+            or (series.candles[-1].time.isoformat() if series.candles else None)
+        )
+        instrument_id = None
+        if isinstance(series.instrument, Mapping):
+            instrument_id = series.instrument.get("id")
+        execution_context = IndicatorExecutionContext(
+            symbol=series.symbol,
+            start=series_start,
+            end=series_end,
+            interval=series.timeframe,
+            datasource=series.datasource,
+            exchange=series.exchange,
+            instrument_id=str(instrument_id) if instrument_id is not None else None,
+        )
+
+        indicator_metas, indicators = self._deps.indicator_build_runtime_graph(
+            list(indicator_metas.keys()),
+            strategy_indicator_metas=indicator_metas,
+            execution_context=execution_context,
+            ctx=self._indicator_ctx,
+        )
         state.indicator_engine = IndicatorExecutionEngine(indicators)
         state.indicator_output_types = state.indicator_engine.output_types
         state.indicator_outputs = {}
@@ -640,8 +661,12 @@ class RuntimeSetupPrepareMixin:
         warmup_count = max(int(state.bar_index or 0), 0)
         if warmup_count > 0 and state.indicator_engine is not None:
             last_frame = None
-            for warmup_candle in series.candles[:warmup_count]:
-                last_frame = state.indicator_engine.step(bar=warmup_candle, bar_time=warmup_candle.time)
+            for index, warmup_candle in enumerate(series.candles[:warmup_count]):
+                last_frame = state.indicator_engine.step(
+                    bar=warmup_candle,
+                    bar_time=warmup_candle.time,
+                    include_overlays=index == (warmup_count - 1),
+                )
             if last_frame is not None:
                 state.indicator_outputs = dict(last_frame.outputs)
                 state.indicator_overlays = dict(last_frame.overlays)

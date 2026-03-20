@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["MarketProfileIndicator", "Profile", "ValueArea", "market_profile_overlay_adapter"]
+__all__ = [
+    "MANIFEST",
+    "MarketProfileIndicator",
+    "Profile",
+    "ValueArea",
+    "market_profile_overlay_adapter",
+]
 
 
 def __getattr__(name: str) -> Any:
@@ -17,6 +23,10 @@ def __getattr__(name: str) -> Any:
             "ValueArea": ValueArea,
         }
         return exports[name]
+    if name == "MANIFEST":
+        from .manifest import MANIFEST
+
+        return MANIFEST
     if name == "market_profile_overlay_adapter":
         from .overlays import market_profile_overlay_adapter
 

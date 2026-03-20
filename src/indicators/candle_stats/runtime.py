@@ -10,10 +10,14 @@ from typing import Any, Mapping
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
     Indicator,
-    IndicatorManifest,
-    OutputDefinition,
+    RuntimeOverlay,
     RuntimeOutput,
 )
+from indicators.manifest import build_runtime_spec
+from signals.overlays.builders import build_line_overlay
+
+from . import overlays as _overlay_registrations
+from .manifest import MANIFEST
 
 HISTORY_LIMIT = 600
 
@@ -86,11 +90,11 @@ def _finite_float(value: Any) -> float | None:
 
 class TypedCandleStatsIndicator(Indicator):
     def __init__(self, *, indicator_id: str, version: str, params: Mapping[str, Any]) -> None:
-        self.manifest = IndicatorManifest(
-            id=indicator_id,
+        _ = _overlay_registrations
+        self.runtime_spec = build_runtime_spec(
+            MANIFEST,
+            instance_id=indicator_id,
             version=version,
-            dependencies=(),
-            outputs=(OutputDefinition(name="candle_stats", type="metric"),),
         )
         self._atr_short_window = _as_positive_int("atr_short_window", params.get("atr_short_window"))
         self._atr_long_window = _as_positive_int("atr_long_window", params.get("atr_long_window"))
@@ -113,11 +117,28 @@ class TypedCandleStatsIndicator(Indicator):
         self._true_ranges: list[float] = []
         self._atr_short_history: list[float] = []
         self._atr_long_history: list[float] = []
+        self._atr_zscore_history: list[float] = []
         self._slope_history: list[float] = []
         self._slope_std_history: list[float] = []
         self._range_width_history: list[float] = []
         self._body_overlap_history: list[float] = []
+        self._atr_short_points: list[dict[str, float | int]] = []
+        self._atr_long_points: list[dict[str, float | int]] = []
+        self._atr_zscore_points: list[dict[str, float | int]] = []
+        self._overlay_history_limit_bars = HISTORY_LIMIT
+        self._current_bar_time = datetime.min
         self._output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
+
+    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
+        if history_bars is None:
+            return
+        try:
+            parsed = int(history_bars)
+        except (TypeError, ValueError):
+            return
+        if parsed <= 0:
+            return
+        self._overlay_history_limit_bars = max(parsed, 1)
 
     def apply_bar(self, bar: Any, inputs: Mapping[Any, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
@@ -125,6 +146,7 @@ class TypedCandleStatsIndicator(Indicator):
         if inputs:
             raise RuntimeError("candle_stats_apply_failed: candle_stats has no dependencies")
 
+        self._current_bar_time = bar.time
         self._bars.append(bar)
         _trim(self._bars)
 
@@ -151,6 +173,27 @@ class TypedCandleStatsIndicator(Indicator):
         self._atr_long_history.append(atr_long)
         _trim(self._atr_short_history)
         _trim(self._atr_long_history)
+        atr_zscore = _zscore(list(self._atr_short_history[-self._atr_z_window:]))
+        self._atr_zscore_history.append(atr_zscore)
+        _trim(self._atr_zscore_history)
+        self._append_point(
+            self._atr_short_points,
+            bar=bar,
+            value=atr_short,
+            limit=self._overlay_history_limit_bars,
+        )
+        self._append_point(
+            self._atr_long_points,
+            bar=bar,
+            value=atr_long,
+            limit=self._overlay_history_limit_bars,
+        )
+        self._append_point(
+            self._atr_zscore_points,
+            bar=bar,
+            value=atr_zscore,
+            limit=self._overlay_history_limit_bars,
+        )
 
         slope = self._current_slope()
         if slope is not None:
@@ -173,10 +216,45 @@ class TypedCandleStatsIndicator(Indicator):
             self._output = RuntimeOutput(bar_time=bar.time, ready=False, value={})
             return
 
-        self._output = RuntimeOutput(bar_time=bar.time, ready=True, value=self._build_metrics(bar))
+        metrics = self._build_metrics(bar)
+        self._output = RuntimeOutput(bar_time=bar.time, ready=True, value=metrics)
 
     def snapshot(self) -> Mapping[str, RuntimeOutput]:
         return {"candle_stats": self._output}
+
+    def overlay_snapshot(self) -> Mapping[str, RuntimeOverlay]:
+        return {
+            "atr_short": RuntimeOverlay(
+                bar_time=self._current_bar_time,
+                ready=bool(self._atr_short_points),
+                value=self._build_line_overlay(
+                    overlay_type="candle_stats_atr_short",
+                    role="atr_short",
+                    points=self._atr_short_points,
+                    color="#22c55e",
+                ) if self._atr_short_points else {},
+            ),
+            "atr_long": RuntimeOverlay(
+                bar_time=self._current_bar_time,
+                ready=bool(self._atr_long_points),
+                value=self._build_line_overlay(
+                    overlay_type="candle_stats_atr_long",
+                    role="atr_long",
+                    points=self._atr_long_points,
+                    color="#f59e0b",
+                ) if self._atr_long_points else {},
+            ),
+            "atr_zscore": RuntimeOverlay(
+                bar_time=self._current_bar_time,
+                ready=len(self._atr_short_history) >= self._atr_z_window and bool(self._atr_zscore_points),
+                value=self._build_line_overlay(
+                    overlay_type="candle_stats_atr_zscore",
+                    role="atr_zscore",
+                    points=self._atr_zscore_points,
+                    color="#38bdf8",
+                ) if len(self._atr_short_history) >= self._atr_z_window and self._atr_zscore_points else {},
+            ),
+        }
 
     @staticmethod
     def _next_ema(previous: float | None, value: float, window: int) -> float:
@@ -261,7 +339,7 @@ class TypedCandleStatsIndicator(Indicator):
             "atr_short": atr_short,
             "atr_long": atr_long,
             "atr_ratio": _safe_div(atr_short, atr_long),
-            "atr_zscore": _zscore(recent_atr_short),
+            "atr_zscore": float(self._atr_zscore_history[-1]),
             "directional_efficiency": _safe_div(
                 abs(recent_closes[-1] - recent_closes[0]),
                 sum(close_diffs),
@@ -279,6 +357,39 @@ class TypedCandleStatsIndicator(Indicator):
             "volume_zscore": _zscore(recent_volumes),
             "volume_vs_median": _safe_div(recent_volumes[-1], _median(recent_volumes)),
         }
+
+    @staticmethod
+    def _append_point(
+        points: list[dict[str, float | int]],
+        *,
+        bar: Candle,
+        value: float,
+        limit: int,
+    ) -> None:
+        points.append(
+            {
+                "time": int(bar.time.timestamp()),
+                "price": float(value),
+            }
+        )
+        _trim(points, limit=max(int(limit), 1))
+
+    def _build_line_overlay(
+        self,
+        *,
+        overlay_type: str,
+        role: str,
+        points: list[dict[str, float | int]],
+        color: str,
+    ) -> dict[str, Any]:
+        return build_line_overlay(
+            overlay_type,
+            points=points,
+            line_style=0,
+            line_width=1.5,
+            color=color,
+            role=role,
+        )
 
 
 __all__ = ["TypedCandleStatsIndicator"]

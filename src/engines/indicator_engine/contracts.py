@@ -34,13 +34,12 @@ class OverlayDefinition:
 
 
 @dataclass(frozen=True)
-class IndicatorManifest:
-    id: str
+class IndicatorRuntimeSpec:
+    instance_id: str
+    manifest_type: str
     version: str
     dependencies: Tuple[OutputRef, ...]
     outputs: Tuple[OutputDefinition, ...]
-    engine_factory: Any | None = None
-    evaluation_mode: str | None = None
     overlays: Tuple[OverlayDefinition, ...] = ()
 
 
@@ -79,7 +78,7 @@ class EngineFrame:
 
 
 class Indicator(ABC):
-    manifest: IndicatorManifest
+    runtime_spec: IndicatorRuntimeSpec
 
     @abstractmethod
     def apply_bar(
@@ -96,6 +95,10 @@ class Indicator(ABC):
     def overlay_snapshot(self) -> Mapping[str, RuntimeOverlay]:
         """Return all declared overlays for the current bar."""
         return {}
+
+    def configure_replay_window(self, *, history_bars: int | None = None) -> None:
+        """Allow replay consumers to provide window-specific execution hints."""
+        _ = history_bars
 
 
 def output_ref_key(indicator_id: str, output_name: str) -> str:

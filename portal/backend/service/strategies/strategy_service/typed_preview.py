@@ -7,13 +7,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-import pandas as pd
-
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
+from indicators.config import IndicatorExecutionContext
+from signals.overlays.transformers import apply_overlay_transform
 from signals.overlays.schema import build_overlay
 from portal.backend.service.indicators.indicator_service import (
-    build_runtime_indicator_instance,
+    build_runtime_indicator_graph,
     get_instance_meta,
 )
 from portal.backend.service.market import candle_service, instrument_service
@@ -34,6 +34,8 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _build_candles(df: pd.DataFrame) -> List[Candle]:
+    import pandas as pd
+
     if df is None or getattr(df, "empty", False):
         return []
     candles: List[Candle] = []
@@ -164,7 +166,11 @@ def _build_trigger_rows(
     return rows
 
 
-def _collect_ready_overlays(overlays: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _collect_ready_overlays(
+    overlays: Mapping[str, Any],
+    *,
+    current_epoch: int,
+) -> List[Dict[str, Any]]:
     collected: List[Dict[str, Any]] = []
     for overlay_key in sorted(overlays.keys()):
         runtime_overlay = overlays.get(overlay_key)
@@ -172,11 +178,22 @@ def _collect_ready_overlays(overlays: Mapping[str, Any]) -> List[Dict[str, Any]]
             continue
         indicator_id, _, overlay_name = str(overlay_key).partition(".")
         payload = dict(getattr(runtime_overlay, "value", {}) or {})
+        transformed = apply_overlay_transform(payload, current_epoch=current_epoch)
+        if transformed is None:
+            continue
+        payload = dict(transformed)
         payload.setdefault("overlay_id", overlay_key)
         payload.setdefault("indicator_id", indicator_id)
         payload.setdefault("overlay_name", overlay_name)
         collected.append(payload)
     return collected
+
+
+def _configure_replay_window(indicators: Sequence[Any], *, history_bars: int) -> None:
+    for indicator in indicators:
+        configure = getattr(indicator, "configure_replay_window", None)
+        if callable(configure):
+            configure(history_bars=history_bars)
 
 
 def evaluate_strategy_preview(
@@ -227,14 +244,19 @@ def evaluate_strategy_preview(
                 raise RuntimeError(f"Indicator is not runtime-supported: {indicator_id}")
             indicator_metas[indicator_id] = meta
 
-        indicators = [
-            build_runtime_indicator_instance(
-                indicator_id,
-                meta=meta,
-                strategy_indicator_metas=indicator_metas,
-            )
-            for indicator_id, meta in indicator_metas.items()
-        ]
+        _, indicators = build_runtime_indicator_graph(
+            list(indicator_metas.keys()),
+            execution_context=IndicatorExecutionContext(
+                symbol=symbol,
+                start=start,
+                end=end,
+                interval=interval,
+                datasource=datasource,
+                exchange=exchange,
+                instrument_id=instrument_id,
+            ),
+            preloaded_metas=indicator_metas,
+        )
         engine = IndicatorExecutionEngine(indicators)
 
         fetch_started = time.perf_counter()
@@ -243,21 +265,29 @@ def evaluate_strategy_preview(
             start,
             end,
             interval,
-            schedule_stats=False,
         )
         candles = _build_candles(df)
         candle_fetch_ms = max((time.perf_counter() - fetch_started) * 1000.0, 0.0)
         if not candles:
             raise ValueError(f"No candles returned for {instrument_id}")
+        _configure_replay_window(indicators, history_bars=len(candles))
 
         strategy_markers: List[Dict[str, Any]] = []
         trigger_rows: List[Dict[str, Any]] = []
         preview_overlays: List[Dict[str, Any]] = []
 
         replay_started = time.perf_counter()
-        for candle in candles:
-            frame = engine.step(bar=candle, bar_time=candle.time)
-            preview_overlays = _collect_ready_overlays(frame.overlays)
+        last_index = len(candles) - 1
+        for index, candle in enumerate(candles):
+            frame = engine.step(
+                bar=candle,
+                bar_time=candle.time,
+                include_overlays=index == last_index,
+            )
+            preview_overlays = _collect_ready_overlays(
+                frame.overlays,
+                current_epoch=int(candle.time.timestamp()),
+            )
             matches = evaluate_typed_rules(
                 rules=record.rules,
                 outputs=frame.outputs,
