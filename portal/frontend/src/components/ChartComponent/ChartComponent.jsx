@@ -221,8 +221,10 @@ export const ChartComponent = ({ chartId }) => {
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [chartStateNotice, setChartStateNotice] = useState({
     state: 'idle',
-    message: 'Preparing chart…',
+    message: 'Preparing chart',
   });
+  const [resolvedInstrument, setResolvedInstrument] = useState(null);
+  const [paneLegendEntries, setPaneLegendEntries] = useState({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const markChartState = useCallback((state, message = null) => {
     setChartStateNotice({ state, message });
@@ -437,6 +439,7 @@ export const ChartComponent = ({ chartId }) => {
     logger,
     setDataLoading,
     signalDetailsRef,
+    setPaneLegendEntries,
   });
 
   useEffect(() => {
@@ -513,10 +516,10 @@ export const ChartComponent = ({ chartId }) => {
     let loadOutcome = 'pending';
     if (!hasStreamingBaseline) {
       const loadingCopy = loaderReason === 'initial'
-        ? 'Preparing chart…'
+        ? 'Preparing chart'
         : behavior === 'append'
-          ? 'Fetching live candles…'
-          : 'Loading chart window…';
+          ? 'Fetching live candles'
+          : 'Loading chart window';
       markChartState('loading', loadingCopy);
     }
 
@@ -596,6 +599,9 @@ export const ChartComponent = ({ chartId }) => {
         });
         resp = result.candles;
         resolvedInstrumentId = result.instrumentId;
+        if (result.instrument) {
+          setResolvedInstrument(result.instrument);
+        }
         instrumentIdRef.current = resolvedInstrumentId;
         instrumentKeyRef.current = instrumentKey;
       } catch (resolveError) {
@@ -1108,6 +1114,7 @@ export const ChartComponent = ({ chartId }) => {
     if (isSeriesChange) {
       lastBarRef.current = null;
       barSpacingRef.current = null;
+      setResolvedInstrument(null);
       setCandleTimes([]);
       try {
         seriesRef.current?.setData?.([]);
@@ -1115,6 +1122,7 @@ export const ChartComponent = ({ chartId }) => {
         // ignore failures caused by interim series resets
       }
     }
+    setPaneLegendEntries({});
     syncOverlays([]); // clear overlays on apply
     updateChart?.(chartId, {
       symbol: nextSymbol,
@@ -1305,24 +1313,24 @@ export const ChartComponent = ({ chartId }) => {
   const busyState = chartState?.overlayLoading || chartState?.signalsLoading || dataLoading;
   const loaderActive = useBusyDelay(busyState, dataLoaderContext === 'symbol-change' ? 0 : 250);
   const loaderMessage = chartState?.signalsLoading
-    ? 'Generating signals…'
+    ? 'Generating signals'
     : chartState?.overlayLoading
-      ? 'Loading overlays…'
+      ? 'Loading overlays'
       : dataLoading
         ? dataLoaderContext === 'symbol-change'
-          ? 'Loading new instrument…'
+          ? 'Loading new instrument'
           : dataLoaderContext === 'initial'
-            ? 'Preparing chart…'
-            : 'Loading chart…'
+            ? 'Preparing chart'
+            : 'Loading chart'
         : mode === 'live'
-          ? 'Streaming latest data…'
-          : 'Loading chart…';
+          ? 'Streaming latest data'
+          : 'Loading chart';
 
   const statusTextClass = statusStyles.text ?? 'text-slate-300';
 
   const lastRefreshCopy = useMemo(() => {
     if (dataLoading) {
-      return mode === 'live' ? 'Streaming latest data…' : 'Refreshing data…';
+      return mode === 'live' ? 'Streaming latest data' : 'Refreshing data';
     }
 
     if (!lastRefreshAt) {
@@ -1365,9 +1373,20 @@ export const ChartComponent = ({ chartId }) => {
   }, [providerMgmt.selectedVenueValue, providerMgmt.venueOptions]);
 
   const instrumentMeta = useMemo(() => {
-    const parts = [datasourceDisplay, venueDisplay].filter(Boolean);
+    const normalizedType = String(resolvedInstrument?.instrument_type || '').trim().toLowerCase();
+    const instrumentClass = normalizedType
+      ? (
+        ['future', 'futures', 'perp', 'perps', 'swap'].includes(normalizedType)
+          ? 'Derivative'
+          : normalizedType === 'spot'
+            ? 'Spot'
+            : normalizedType.charAt(0).toUpperCase() + normalizedType.slice(1)
+      )
+      : null;
+    const sourceLabel = venueDisplay || datasourceDisplay;
+    const parts = [sourceLabel, instrumentClass].filter(Boolean);
     return parts.join(' • ');
-  }, [datasourceDisplay, venueDisplay]);
+  }, [datasourceDisplay, venueDisplay, resolvedInstrument?.instrument_type]);
 
   const chartSurface = (
     <ChartSurface
@@ -1381,6 +1400,7 @@ export const ChartComponent = ({ chartId }) => {
       symbolDisplay={symbolDisplay}
       intervalDisplay={intervalDisplay}
       instrumentMeta={instrumentMeta}
+      paneLegendEntries={paneLegendEntries}
       chartStateNotice={chartStateNotice}
       windowSummary={windowConfig.windowSummary}
       palOpen={palOpen}

@@ -1,7 +1,7 @@
 import { fetchCandleData } from '../adapters/candle.adapter.js'
 import { resolveInstrument } from '../adapters/instrument.adapter.js'
 
-export async function resolveInstrumentId({
+export async function resolveInstrumentRecord({
   symbol,
   datasource,
   exchange,
@@ -11,13 +11,17 @@ export async function resolveInstrumentId({
   if (!symbol || !datasource) {
     throw new Error('symbol and datasource are required to resolve instrument.')
   }
-  const resolved = await resolveInstrument({
+  return resolveInstrument({
     symbol,
     datasource,
     exchange: exchange ?? undefined,
     provider_id: providerId ?? undefined,
     venue_id: venueId ?? undefined,
   })
+}
+
+export async function resolveInstrumentId(args) {
+  const resolved = await resolveInstrumentRecord(args)
   return resolved?.id || null
 }
 
@@ -34,14 +38,16 @@ export async function fetchInstrumentCandles({
   resolveIfMissing = false,
 }) {
   let resolvedInstrumentId = instrumentId
+  let resolvedInstrument = null
   if (!resolvedInstrumentId && resolveIfMissing) {
-    resolvedInstrumentId = await resolveInstrumentId({
+    resolvedInstrument = await resolveInstrumentRecord({
       symbol,
       datasource,
       exchange,
       providerId,
       venueId,
     })
+    resolvedInstrumentId = resolvedInstrument?.id || null
   }
   if (!resolvedInstrumentId) {
     throw new Error('instrument_id is required to fetch candles.')
@@ -58,5 +64,5 @@ export async function fetchInstrumentCandles({
     provider_id: providerId,
     venue_id: venueId,
   })
-  return { candles, instrumentId: resolvedInstrumentId }
+  return { candles, instrumentId: resolvedInstrumentId, instrument: resolvedInstrument }
 }

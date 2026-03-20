@@ -3,6 +3,7 @@ import { Maximize2, Minimize2 } from 'lucide-react';
 import SymbolPalette from '../SymbolPalette.jsx';
 import HotkeyHint from '../HotkeyHint.jsx';
 import LoadingOverlay from '../LoadingOverlay.jsx';
+import { getPaneDefinition, listPaneDefinitions } from '../../chart/panes/registry.js';
 
 const DEFAULT_ARM_TIMEOUT_MS = 10000;
 const MIN_RECT_SIDE_PX = 4;
@@ -92,6 +93,7 @@ export function ChartSurface({
   symbolDisplay,
   intervalDisplay,
   instrumentMeta,
+  paneLegendEntries,
   chartStateNotice,
   windowSummary,
   palOpen,
@@ -272,6 +274,45 @@ export function ChartSurface({
     : loaderMessage;
 
   const interactionLayerActive = selectionArmed || Boolean(dragRect);
+  const legendSections = useMemo(
+    () =>
+      Object.entries(paneLegendEntries || {})
+        .map(([paneKey, entries]) => {
+          const pane = getPaneDefinition(paneKey);
+          const filtered = (entries || []).filter((entry) => entry?.label);
+          if (!pane?.showLegend || !filtered.length) return null;
+          return {
+            key: pane.key,
+            label: pane.label,
+            entries: filtered,
+          };
+        })
+        .filter(Boolean),
+    [paneLegendEntries],
+  );
+  const paneLegendLayout = useMemo(() => {
+    if (!legendSections.length) return [];
+    const paneSections = legendSections
+      .map((section) => ({ section, pane: getPaneDefinition(section.key) }))
+      .sort((left, right) => left.pane.index - right.pane.index);
+    const activeAuxPanes = listPaneDefinitions()
+      .filter((pane) => pane.key !== 'price' && paneSections.some((section) => section.pane.key === pane.key))
+      .sort((left, right) => left.index - right.index);
+    if (!activeAuxPanes.length) return [];
+
+    const priceStretch = getPaneDefinition('price').stretchFactor;
+    const totalStretch = priceStretch + activeAuxPanes.reduce((total, pane) => total + pane.stretchFactor, 0);
+    let cursor = priceStretch;
+
+    return paneSections.map(({ section, pane }) => {
+      const topPercent = (cursor / totalStretch) * 100;
+      cursor += pane.stretchFactor;
+      return {
+        ...section,
+        top: `calc(${topPercent}% + 8px)`,
+      };
+    });
+  }, [legendSections]);
 
   const chartShellClasses = useMemo(() => {
     const base =
@@ -293,48 +334,71 @@ export function ChartSurface({
         startSelectionArm();
       }}
     >
-      <div className="pointer-events-none absolute left-6 top-6 z-10 flex max-w-[70%] flex-col gap-1.5 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
-        <div className="flex flex-wrap items-baseline gap-2">
-          <span className="text-2xl font-semibold tracking-tight text-white">{symbolDisplay}</span>
-          <span className="rounded-full border border-white/20 bg-black/60 px-3 py-0.5 text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-100">
+      <div className="pointer-events-none absolute left-6 top-6 z-10 flex max-w-[70%] flex-col gap-1 text-slate-200 drop-shadow-[0_10px_30px_rgba(0,0,0,0.65)]">
+        <div className="flex flex-wrap items-baseline gap-1.5">
+          <span className="text-[17px] font-semibold tracking-[-0.02em] text-white">{symbolDisplay}</span>
+          <span className="rounded-full border border-white/14 bg-black/48 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.24em] text-slate-100/92">
             {intervalDisplay}
           </span>
         </div>
         {instrumentMeta ? (
-          <div className="text-[11px] font-semibold uppercase tracking-[0.32em] text-slate-300/90">
+          <div className="text-[9px] font-semibold uppercase tracking-[0.28em] text-slate-300/78">
             {instrumentMeta}
           </div>
         ) : null}
       </div>
-      <div className="pointer-events-none absolute right-6 top-6 z-10 flex translate-y-1 flex-col items-end gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100 focus-within:translate-y-0 focus-within:opacity-100">
+      {paneLegendLayout.length ? (
+        <div className="pointer-events-none absolute inset-0 z-10 text-slate-200">
+          {paneLegendLayout.map((section) => (
+            <div
+              key={section.key}
+              className="absolute left-3 rounded-md border border-white/7 bg-black/26 px-1.5 py-1 backdrop-blur-[6px]"
+              style={{ top: section.top }}
+            >
+              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                {section.entries.map((entry) => (
+                  <div key={`${section.key}:${entry.overlayType || entry.label}`} className="flex items-center gap-1">
+                    <span
+                      className="inline-block h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: entry.color || '#cbd5e1' }}
+                    />
+                    <span className="text-[9px] font-medium text-slate-200/84">
+                      {entry.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {savedRects.length || dragRect ? (
+        <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            data-chart-ui-control="true"
+            onClick={clearSelections}
+            className="pointer-events-auto inline-flex items-center rounded-full border border-white/10 bg-black/34 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-100/86 transition hover:border-white/20 hover:bg-black/52 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+            title="Clear temporary selections (Esc)"
+          >
+            Clear marks
+          </button>
+        </div>
+      ) : null}
+      <div className="pointer-events-none absolute bottom-3 right-3 z-10 flex translate-y-1 flex-col items-end gap-2 opacity-0 transition group-hover:translate-y-0 group-hover:opacity-100 focus-within:translate-y-0 focus-within:opacity-100">
         <button
           type="button"
           data-chart-ui-control="true"
           aria-pressed={isFullscreen}
           onClick={toggleFullscreen}
-          className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-100 shadow-lg shadow-black/30 transition hover:border-white/40 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+          className="pointer-events-auto inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-black/42 text-slate-100/90 shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition hover:border-white/24 hover:bg-black/58 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)]"
+          title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
         >
           {isFullscreen ? (
-            <>
-              <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Exit Fullscreen
-            </>
+            <Minimize2 className="h-3.5 w-3.5" aria-hidden="true" />
           ) : (
-            <>
-              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Fullscreen
-            </>
+            <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
           )}
-        </button>
-        <button
-          type="button"
-          data-chart-ui-control="true"
-          onClick={clearSelections}
-          className="pointer-events-auto inline-flex items-center rounded-full border border-white/20 bg-black/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-100 transition hover:border-white/40 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--accent-ring-strong)] disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={!savedRects.length && !dragRect}
-          title="Clear temporary selections (Esc)"
-        >
-          Clear marks
         </button>
       </div>
       <div ref={containerRef} className="h-full w-full" />
@@ -368,7 +432,7 @@ export function ChartSurface({
 
       <SymbolPalette open={palOpen} onClose={() => setPalOpen(false)} onPick={applySymbol} />
       <HotkeyHint />
-      <LoadingOverlay show={effectiveLoaderActive} message={effectiveLoaderMessage} className="right-6 top-[68px]" />
+      <LoadingOverlay show={effectiveLoaderActive} message={effectiveLoaderMessage} className="right-3 top-3" />
     </div>
   );
 }
