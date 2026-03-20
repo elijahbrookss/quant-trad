@@ -240,6 +240,7 @@ def tick_metadata(
             )
 
     metadata = {
+        "instrument_id": instrument.get("id"),
         "tick_size": instrument.get("tick_size"),
         "tick_value": instrument.get("tick_value"),
         "contract_size": instrument.get("contract_size"),
@@ -261,7 +262,16 @@ def tick_metadata(
     metadata["exchange"] = exchange
     metadata["symbol"] = normalized_symbol
     metadata["timeframe"] = timeframe
-    return {"metadata": metadata}
+    runtime_status = instrument_service.instrument_runtime_status(instrument)
+    metadata["research_ready"] = runtime_status.get("research_ready")
+    metadata["runtime_ready"] = runtime_status.get("runtime_ready")
+    metadata["runtime_message"] = runtime_status.get("runtime_message")
+    metadata["runtime_policy"] = runtime_status.get("runtime_policy")
+    return {
+        "metadata": metadata,
+        "instrument": instrument_service.instrument_api_payload(instrument),
+        "runtime": runtime_status,
+    }
 
 
 def upsert_provider_secrets(provider_id: Optional[str], venue_id: Optional[str], credentials: Dict[str, str]) -> Dict[str, object]:
