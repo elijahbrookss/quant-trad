@@ -8,17 +8,16 @@ from typing import Any, Mapping
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import (
     Indicator,
-    IndicatorManifest,
-    OverlayDefinition,
-    OutputDefinition,
     OutputRef,
     RuntimeOverlay,
     RuntimeOutput,
 )
+from indicators.manifest import build_runtime_spec
 from signals.overlays.schema import build_overlay
 
 from .config import RegimeStabilizerConfig
 from .engine import RegimeEngineV1
+from .manifest import MANIFEST
 from .overlays import build_regime_overlays
 from .stabilizer import RegimeStabilizer
 
@@ -29,37 +28,26 @@ def resolve_regime_dependency(
     meta: Mapping[str, Any],
     strategy_indicator_metas: Mapping[str, Mapping[str, Any]],
 ) -> str:
+    _ = strategy_indicator_metas
     raw_dependencies = meta.get("dependencies")
-    if isinstance(raw_dependencies, (list, tuple)):
-        refs = [
-            item
-            for item in raw_dependencies
-            if isinstance(item, Mapping)
-            and str(item.get("output_name") or "").strip() == "candle_stats"
-            and str(item.get("indicator_id") or "").strip()
-        ]
-        if len(refs) == 1:
-            return str(refs[0].get("indicator_id") or "").strip()
-        if len(refs) > 1:
-            raise RuntimeError(
-                f"regime_dependency_invalid: multiple candle_stats dependencies indicator_id={indicator_id}"
-            )
-    candidates = [
-        attached_id
-        for attached_id, attached_meta in strategy_indicator_metas.items()
-        if attached_id != indicator_id
-        and str((attached_meta or {}).get("type") or "").strip().lower() == "candle_stats"
-    ]
-    if len(candidates) == 1:
-        return str(candidates[0])
-    if not candidates:
+    if not isinstance(raw_dependencies, (list, tuple)):
         raise RuntimeError(
-            f"regime_dependency_missing: no candle_stats indicator attached for indicator_id={indicator_id}"
+            "regime_dependency_missing: explicit candle_stats dependency binding required "
+            f"indicator_id={indicator_id}"
         )
-    raise RuntimeError(
-        "regime_dependency_ambiguous: multiple candle_stats indicators attached "
-        f"indicator_id={indicator_id} candidates={sorted(candidates)}"
-    )
+    refs = [
+        item
+        for item in raw_dependencies
+        if isinstance(item, Mapping)
+        and str(item.get("output_name") or "").strip() == "candle_stats"
+        and str(item.get("indicator_id") or "").strip()
+    ]
+    if len(refs) != 1:
+        raise RuntimeError(
+            "regime_dependency_invalid: exactly one candle_stats dependency binding required "
+            f"indicator_id={indicator_id}"
+        )
+    return str(refs[0].get("indicator_id") or "").strip()
 
 
 def _as_positive_int(name: str, value: Any) -> int:
@@ -88,16 +76,17 @@ class TypedRegimeIndicator(Indicator):
         params: Mapping[str, Any],
         candle_stats_indicator_id: str,
     ) -> None:
-        self.manifest = IndicatorManifest(
-            id=indicator_id,
-            version=version,
-            dependencies=(OutputRef(indicator_id=candle_stats_indicator_id, output_name="candle_stats"),),
-            outputs=(OutputDefinition(name="market_regime", type="context"),),
-            overlays=(
-                OverlayDefinition(name="regime", overlay_type="regime_overlay"),
-                OverlayDefinition(name="regime_markers", overlay_type="regime_markers"),
-            ),
+        dependency_ref = OutputRef(
+            indicator_id=candle_stats_indicator_id,
+            output_name="candle_stats",
         )
+        self.runtime_spec = build_runtime_spec(
+            MANIFEST,
+            instance_id=indicator_id,
+            version=version,
+            dependencies=(dependency_ref,),
+        )
+        self._dependency_ref = dependency_ref
         config = RegimeStabilizerConfig(
             min_confidence=_as_float("min_confidence", params.get("min_confidence")),
             structure_min_confidence=_as_float(
@@ -127,30 +116,29 @@ class TypedRegimeIndicator(Indicator):
         self._engine = RegimeEngineV1()
         self._stabilizer = RegimeStabilizer(config)
         self._output = RuntimeOutput(bar_time=datetime.min, ready=False, value={})
-        self._overlays = {
-            "regime": RuntimeOverlay(bar_time=datetime.min, ready=False, value={}),
-            "regime_markers": RuntimeOverlay(bar_time=datetime.min, ready=False, value={}),
-        }
         self._candles: list[Candle] = []
         self._regime_rows: dict[datetime, Mapping[str, Any]] = {}
         self._timeframe_seconds = 60
+        self._current_bar_time = datetime.min
+        self._overlay_ready = False
+        self._overlay_cache_bar_time: datetime | None = None
+        self._overlay_cache: dict[str, RuntimeOverlay] | None = None
 
     def apply_bar(self, bar: Any, inputs: Mapping[OutputRef, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
             raise RuntimeError("regime_apply_failed: Candle input required")
-        dependency_ref = self.manifest.dependencies[0]
-        dependency_output = inputs.get(dependency_ref)
+        self._current_bar_time = bar.time
+        dependency_output = inputs.get(self._dependency_ref)
         if dependency_output is None:
             raise RuntimeError(
                 "regime_apply_failed: dependency output missing "
-                f"dependency={dependency_ref.indicator_id}.{dependency_ref.output_name}"
+                f"dependency={self._dependency_ref.indicator_id}.{self._dependency_ref.output_name}"
             )
         if not dependency_output.ready:
+            self._overlay_ready = False
+            self._overlay_cache = None
+            self._overlay_cache_bar_time = None
             self._output = RuntimeOutput(bar_time=bar.time, ready=False, value={})
-            self._overlays = {
-                "regime": RuntimeOverlay(bar_time=bar.time, ready=False, value={}),
-                "regime_markers": RuntimeOverlay(bar_time=bar.time, ready=False, value={}),
-            }
             return
 
         if self._candles:
@@ -188,48 +176,58 @@ class TypedRegimeIndicator(Indicator):
                 },
             },
         )
-        built = build_regime_overlays(
-            candles=list(self._candles),
-            regime_rows=self._regime_rows,
-            timeframe_seconds=max(int(self._timeframe_seconds), 1),
-            regime_version="v1",
-            include_change_markers=True,
-            include_marker_overlay=True,
-        )
-        regime_overlay = next(
-            (
-                dict(overlay)
-                for overlay in built
-                if isinstance(overlay, Mapping) and str(overlay.get("type") or "") == "regime_overlay"
-            ),
-            build_overlay("regime_overlay", {"boxes": [], "segments": [], "summary": {}}),
-        )
-        marker_overlay = next(
-            (
-                dict(overlay)
-                for overlay in built
-                if isinstance(overlay, Mapping) and str(overlay.get("type") or "") == "regime_markers"
-            ),
-            build_overlay("regime_markers", {"markers": []}),
-        )
-        self._overlays = {
-            "regime": RuntimeOverlay(
-                bar_time=bar.time,
-                ready=True,
-                value=dict(regime_overlay),
-            ),
-            "regime_markers": RuntimeOverlay(
-                bar_time=bar.time,
-                ready=True,
-                value=dict(marker_overlay),
-            ),
-        }
+        self._overlay_ready = True
+        self._overlay_cache = None
+        self._overlay_cache_bar_time = None
 
     def snapshot(self) -> Mapping[str, RuntimeOutput]:
         return {"market_regime": self._output}
 
     def overlay_snapshot(self) -> Mapping[str, RuntimeOverlay]:
-        return dict(self._overlays)
+        if not self._overlay_ready:
+            return {
+                "regime": RuntimeOverlay(bar_time=self._current_bar_time, ready=False, value={}),
+                "regime_markers": RuntimeOverlay(bar_time=self._current_bar_time, ready=False, value={}),
+            }
+        if self._overlay_cache is None or self._overlay_cache_bar_time != self._current_bar_time:
+            built = build_regime_overlays(
+                candles=list(self._candles),
+                regime_rows=self._regime_rows,
+                timeframe_seconds=max(int(self._timeframe_seconds), 1),
+                regime_version="v1",
+                include_change_markers=True,
+                include_marker_overlay=True,
+            )
+            regime_overlay = next(
+                (
+                    dict(overlay)
+                    for overlay in built
+                    if isinstance(overlay, Mapping) and str(overlay.get("type") or "") == "regime_overlay"
+                ),
+                build_overlay("regime_overlay", {"boxes": [], "segments": [], "summary": {}}),
+            )
+            marker_overlay = next(
+                (
+                    dict(overlay)
+                    for overlay in built
+                    if isinstance(overlay, Mapping) and str(overlay.get("type") or "") == "regime_markers"
+                ),
+                build_overlay("regime_markers", {"markers": []}),
+            )
+            self._overlay_cache = {
+                "regime": RuntimeOverlay(
+                    bar_time=self._current_bar_time,
+                    ready=True,
+                    value=dict(regime_overlay),
+                ),
+                "regime_markers": RuntimeOverlay(
+                    bar_time=self._current_bar_time,
+                    ready=True,
+                    value=dict(marker_overlay),
+                ),
+            }
+            self._overlay_cache_bar_time = self._current_bar_time
+        return dict(self._overlay_cache)
 
 
 __all__ = ["TypedRegimeIndicator", "resolve_regime_dependency"]

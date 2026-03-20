@@ -2,7 +2,23 @@
 
 from __future__ import annotations
 
+from ...indicators.persistence_payload import merge_indicator_payload, split_indicator_payload
 from ._shared import *
+
+
+def _record_to_indicator_payload(record: IndicatorRecord) -> Dict[str, Any]:
+    params, dependencies = split_indicator_payload(record.params)
+    return {
+        "id": record.id,
+        "name": record.name,
+        "type": record.type,
+        "params": params,
+        "dependencies": dependencies,
+        "color": record.color,
+        "enabled": bool(record.enabled),
+        "created_at": (record.created_at or _utcnow()).isoformat() + "Z",
+        "updated_at": (record.updated_at or _utcnow()).isoformat() + "Z",
+    }
 
 def load_indicators() -> List[Dict[str, Any]]:
     """Return all persisted indicator records."""
@@ -11,7 +27,7 @@ def load_indicators() -> List[Dict[str, Any]]:
         return []
     with db.session() as session:
         rows = session.execute(select(IndicatorRecord)).scalars().all()
-        return [row.to_dict() for row in rows]
+        return [_record_to_indicator_payload(row) for row in rows]
 
 
 def get_indicator(indicator_id: str) -> Optional[Dict[str, Any]]:
@@ -21,7 +37,7 @@ def get_indicator(indicator_id: str) -> Optional[Dict[str, Any]]:
         return None
     with db.session() as session:
         record = session.get(IndicatorRecord, indicator_id)
-        return record.to_dict() if record else None
+        return _record_to_indicator_payload(record) if record else None
 
 
 
@@ -50,7 +66,10 @@ def upsert_indicator(meta: Dict[str, Any]) -> None:
                 session.add(record)
             record.name = meta.get("name") or record.name
             record.type = meta.get("type") or record.type
-            params_to_store = dict(meta.get("params") or {})
+            params_to_store = merge_indicator_payload(
+                meta.get("params"),
+                meta.get("dependencies"),
+            )
             logger.info(
                 "event=upsert_indicator_params_assignment indicator_id=%s params_keys=%s params=%s",
                 meta.get("id"),
@@ -121,7 +140,5 @@ def strategies_for_indicator(indicator_id: str) -> List[Dict[str, Any]]:
             }
             for strategy in strategies
         ]
-
-
 
 
