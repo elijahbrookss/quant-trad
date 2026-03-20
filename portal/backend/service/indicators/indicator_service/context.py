@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 from ...providers.data_provider_resolver import DataProviderResolver, default_resolver
 from indicators.runtime.indicator_overlay_cache import IndicatorOverlayCache, default_overlay_cache
-from indicators.runtime.incremental_cache import IncrementalCache, default_incremental_cache
 from ..indicator_factory import IndicatorFactory
 from ..indicator_repository import IndicatorRepository, default_repository
 
@@ -21,17 +20,20 @@ class IndicatorServiceContext:
     resolver: DataProviderResolver
     factory: IndicatorFactory
     overlay_cache: IndicatorOverlayCache
-    incremental_cache: IncrementalCache
     cache_owner: str
     cache_scope_id: str
 
     @classmethod
-    def for_quantlab_worker(cls, *, cache_scope_id: str) -> "IndicatorServiceContext":
-        return cls._build(cache_owner="quantlab_worker", cache_scope_id=cache_scope_id)
+    def for_indicator_worker(cls, *, cache_scope_id: str) -> "IndicatorServiceContext":
+        return cls._build(cache_owner="indicator_worker", cache_scope_id=cache_scope_id)
 
     @classmethod
     def for_bot_runtime(cls, *, cache_scope_id: str) -> "IndicatorServiceContext":
         return cls._build(cache_owner="bot_runtime", cache_scope_id=cache_scope_id)
+
+    @classmethod
+    def for_portal_api(cls, *, cache_scope_id: str = "portal_api") -> "IndicatorServiceContext":
+        return cls._build(cache_owner="portal_api", cache_scope_id=cache_scope_id)
 
     @classmethod
     def _build(cls, *, cache_owner: str, cache_scope_id: str) -> "IndicatorServiceContext":
@@ -43,7 +45,6 @@ class IndicatorServiceContext:
             resolver=resolver,
             factory=factory,
             overlay_cache=default_overlay_cache(),
-            incremental_cache=default_incremental_cache(),
             cache_owner=cache_owner,
             cache_scope_id=cache_scope_id,
         )
@@ -67,7 +68,6 @@ class IndicatorServiceContext:
             resolver=resolver,
             factory=factory,
             overlay_cache=overlay_cache,
-            incremental_cache=base.incremental_cache,
             cache_owner="series_process",
             cache_scope_id=base.cache_scope_id,
         )
@@ -79,5 +79,4 @@ class IndicatorServiceContext:
         )
         return context
 
-# Backward-compatible explicit process context for API-only call paths.
-_context = IndicatorServiceContext.for_quantlab_worker(cache_scope_id="portal_api")
+_context = IndicatorServiceContext.for_portal_api()
