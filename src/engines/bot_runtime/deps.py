@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class BotRuntimeDeps:
     strategy_evaluate: Callable[..., Dict[str, Any]]
     strategy_run_preview: Callable[..., Dict[str, Any]]
     indicator_get_instance_meta: Callable[..., Dict[str, Any]]
+    indicator_build_runtime_graph: Callable[..., tuple[dict[str, dict[str, Any]], list[Any]]]
     indicator_build_runtime_instance: Callable[..., Any]
     indicator_runtime_input_plan_for_instance: Callable[..., Dict[str, Any]]
     build_indicator_context: Callable[[str, Any], Any]
@@ -25,6 +26,6 @@ class BotRuntimeDeps:
     record_bot_trade_event: Callable[[Mapping[str, Any]], None]
     record_bot_run_steps_batch: Callable[[list[dict[str, Any]]], int]
     update_bot_run_artifact: Callable[[str, Mapping[str, Any]], None]
-    record_run_report: Callable[..., None]
+    build_run_artifact_bundle: Callable[[str, str, Mapping[str, Any], Sequence[Any]], Any]
 
 __all__ = ["BotRuntimeDeps"]

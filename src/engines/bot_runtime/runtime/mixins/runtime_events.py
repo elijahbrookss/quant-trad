@@ -271,6 +271,11 @@ class RuntimeEventsMixin:
             trace_entry = self._decision_trace_entry(event)
             self._run_context.decision_trace.append(trace_entry)
             sinks = list(self._event_sinks)
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.record_runtime_event(
+                serialized=serialized,
+                decision_entry=trace_entry,
+            )
         for sink in sinks:
             sink.record_decision(serialized)
         if (
@@ -770,16 +775,8 @@ class RuntimeEventsMixin:
 
         artifact = self._run_artifact_payload(status)
         self._deps.update_bot_run_artifact(self.bot_id, artifact)
-        self._deps.record_run_report(
-            bot_id=self.bot_id,
-            run_id=artifact.get("run_id"),
-            status=status,
-            started_at=artifact.get("started_at"),
-            ended_at=artifact.get("ended_at"),
-            config=self.config,
-            series=list(self._series),
-            decision_ledger=list(artifact.get("decision_trace") or []),
-        )
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.finalize(runtime_status=status, artifact=artifact)
 
     def _run_artifact_payload(self, status: str) -> Dict[str, Any]:
         if self._run_context is None:

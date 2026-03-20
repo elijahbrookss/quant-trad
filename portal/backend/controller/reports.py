@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..service.reports import compare_reports as _compare_reports, get_report as _get_report, list_reports as _list_reports
-from ..service.reports.export import build_run_export
+from ..service.reports.artifacts import build_run_archive
 from utils.log_context import build_log_context, with_log_context
 
 
@@ -24,10 +24,7 @@ class ReportCompareRequest(BaseModel):
 
 
 class ReportExportRequest(BaseModel):
-    pre_roll_hours: Optional[int] = 48
-    post_roll_hours: Optional[int] = 48
-    stats_versions: Optional[List[str]] = None
-    stats_key_limit: Optional[int] = 20
+    pass
 
 
 @router.get("/")
@@ -121,22 +118,11 @@ async def get_report(run_id: str) -> Dict[str, Any]:
 async def export_report(run_id: str, payload: ReportExportRequest) -> StreamingResponse:
     """Export run data as a bounded LLM-ready archive."""
 
-    context = build_log_context(
-        run_id=run_id,
-        pre_roll_hours=payload.pre_roll_hours,
-        post_roll_hours=payload.post_roll_hours,
-        stats_versions=payload.stats_versions or [],
-        stats_key_limit=payload.stats_key_limit,
-    )
+    _ = payload
+    context = build_log_context(run_id=run_id)
     logger.info(with_log_context("report_export_request", context))
     try:
-        archive, filename = build_run_export(
-            run_id,
-            pre_roll_hours=payload.pre_roll_hours if payload.pre_roll_hours is not None else 48,
-            post_roll_hours=payload.post_roll_hours if payload.post_roll_hours is not None else 48,
-            stats_versions=payload.stats_versions,
-            stats_key_limit=payload.stats_key_limit if payload.stats_key_limit is not None else 20,
-        )
+        archive, filename = build_run_archive(run_id)
         logger.info(with_log_context("report_export_success", context))
         return StreamingResponse(
             io.BytesIO(archive),

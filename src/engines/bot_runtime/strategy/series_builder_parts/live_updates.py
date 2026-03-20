@@ -32,7 +32,6 @@ class SeriesBuilderLiveUpdatesMixin:
                 series.timeframe,
                 datasource=series.datasource,
                 exchange=series.exchange,
-                schedule_stats=False,
             )
             perf.add_fields(rows_returned=len(df) if df is not None else 0)
         if df is None or getattr(df, "empty", False):
@@ -174,7 +173,6 @@ class SeriesBuilderLiveUpdatesMixin:
                     timeframe,
                     datasource=datasource,
                     exchange=exchange,
-                    schedule_stats=False,
                 )
                 perf.add_fields(rows_returned=len(df) if df is not None else 0)
         except Exception as exc:

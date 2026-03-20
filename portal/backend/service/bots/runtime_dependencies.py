@@ -9,13 +9,14 @@ from engines.bot_runtime.deps import BotRuntimeDeps
 from .strategy_loader import StrategyLoader
 from ..indicators.indicator_service import (
     IndicatorServiceContext,
+    build_runtime_indicator_graph,
     build_runtime_indicator_instance,
     get_instance_meta,
     runtime_input_plan_for_instance,
 )
 from ..market.candle_service import fetch_ohlcv
 from ..market.instrument_service import resolve_instrument
-from ..reports.report_service import record_run_report
+from ..reports.artifacts import build_run_artifact_bundle
 from ..storage.storage import (
     record_bot_run_steps_batch,
     record_bot_runtime_event,
@@ -43,11 +44,34 @@ def _build_runtime_indicator_instance(
     *,
     meta: dict[str, Any],
     strategy_indicator_metas: dict[str, dict[str, Any]] | None = None,
+    execution_context: Any = None,
 ) -> Any:
     return build_runtime_indicator_instance(
         indicator_id,
         meta=meta,
         strategy_indicator_metas=strategy_indicator_metas or {},
+        execution_context=execution_context,
+    )
+
+
+def _build_runtime_indicator_graph(
+    indicator_ids: list[str],
+    *,
+    strategy_indicator_metas: dict[str, dict[str, Any]] | None = None,
+    execution_context: Any = None,
+    ctx: Any = None,
+) -> tuple[dict[str, dict[str, Any]], list[Any]]:
+    if ctx is None:
+        return build_runtime_indicator_graph(
+            indicator_ids,
+            preloaded_metas=strategy_indicator_metas or {},
+            execution_context=execution_context,
+        )
+    return build_runtime_indicator_graph(
+        indicator_ids,
+        preloaded_metas=strategy_indicator_metas or {},
+        execution_context=execution_context,
+        ctx=ctx,
     )
 
 
@@ -83,6 +107,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         strategy_evaluate=evaluate,
         strategy_run_preview=run_strategy_preview,
         indicator_get_instance_meta=_get_indicator_instance_meta,
+        indicator_build_runtime_graph=_build_runtime_indicator_graph,
         indicator_build_runtime_instance=_build_runtime_indicator_instance,
         indicator_runtime_input_plan_for_instance=_runtime_input_plan_for_indicator,
         build_indicator_context=_build_indicator_context,
@@ -92,7 +117,7 @@ def build_bot_runtime_deps() -> BotRuntimeDeps:
         record_bot_trade_event=record_bot_trade_event,
         record_bot_run_steps_batch=record_bot_run_steps_batch,
         update_bot_run_artifact=update_bot_run_artifact,
-        record_run_report=record_run_report,
+        build_run_artifact_bundle=build_run_artifact_bundle,
     )
 
 

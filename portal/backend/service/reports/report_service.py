@@ -11,8 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from utils.log_context import build_log_context, with_log_context
 
-from ..bots.strategy_loader import StrategyLoader
-from ..storage import storage
 from . import report_data
 from .metrics import (
     compute_expectancy,
@@ -856,102 +854,4 @@ def compare_reports(run_ids: Sequence[str]) -> Dict[str, Any]:
     return payload
 
 
-def record_run_report(
-    *,
-    bot_id: str,
-    run_id: str,
-    status: str,
-    started_at: Optional[str],
-    ended_at: Optional[str],
-    config: Dict[str, Any],
-    series: Sequence[Any],
-    decision_ledger: Optional[List[Dict[str, Any]]] = None,
-) -> None:
-    """Persist a completed run snapshot and summary."""
-
-    if status != "completed":
-        return
-    if not run_id:
-        return
-    try:
-        strategy_ids = {getattr(entry, "strategy_id", None) for entry in series}
-        strategy_ids.discard(None)
-        strategies = []
-        for strategy_id in strategy_ids:
-            strategy = StrategyLoader.fetch_strategy(strategy_id)
-            indicator_params = []
-            for indicator_id in strategy.indicator_ids:
-                record = storage.get_indicator(indicator_id)
-                if record:
-                    indicator_params.append(record)
-            strategies.append(
-                {
-                    "id": strategy.id,
-                    "name": strategy.name,
-                    "timeframe": strategy.timeframe,
-                    "datasource": strategy.datasource,
-                    "exchange": strategy.exchange,
-                    "atm_template_id": strategy.atm_template_id,
-                    "atm_template": strategy.atm_template,
-                    "rules": strategy.rules,
-                    "indicator_ids": strategy.indicator_ids,
-                    "indicator_params": indicator_params,
-                    "instruments": [link.instrument_snapshot for link in strategy.instrument_links],
-                }
-            )
-        symbols = []
-        for entry in series:
-            symbol = getattr(entry, "symbol", None)
-            if symbol and symbol not in symbols:
-                symbols.append(symbol)
-        timeframe = series[0].timeframe if series else None
-        datasource = series[0].datasource if series else None
-        exchange = series[0].exchange if series else None
-        run_config = {
-            "wallet_start": config.get("wallet_config") or {},
-            "risk_settings": config.get("risk") or {},
-            "date_range": {
-                "start": config.get("backtest_start"),
-                "end": config.get("backtest_end"),
-            },
-            "symbols": symbols,
-            "timeframe": timeframe,
-            "fee_model": (config.get("risk") or {}).get("fee_model"),
-            "slippage_model": (config.get("risk") or {}).get("slippage_model"),
-            "strategies": strategies,
-        }
-        trades = report_data.list_trades_for_run(run_id)
-        summary = _compute_summary(
-            _closed_trades(trades),
-            run_config,
-            start_time=_parse_iso(config.get("backtest_start") or started_at),
-            end_time=_parse_iso(config.get("backtest_end") or ended_at),
-        )
-        storage.upsert_bot_run(
-            {
-                "run_id": run_id,
-                "bot_id": bot_id,
-                "bot_name": config.get("name"),
-                "strategy_id": strategies[0]["id"] if strategies else None,
-                "strategy_name": strategies[0]["name"] if strategies else None,
-                "run_type": config.get("run_type") or "backtest",
-                "status": status,
-                "timeframe": timeframe,
-                "datasource": datasource,
-                "exchange": exchange,
-                "symbols": symbols,
-                "backtest_start": config.get("backtest_start"),
-                "backtest_end": config.get("backtest_end"),
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "summary": summary,
-                "config_snapshot": run_config,
-                "decision_ledger": list(decision_ledger or []),
-            }
-        )
-    except Exception as exc:  # noqa: BLE001 - logging boundary
-        context = build_log_context(bot_id=bot_id, run_id=run_id)
-        logger.error(with_log_context("report_record_failed", context), exc_info=exc)
-
-
-__all__ = ["list_reports", "get_report", "compare_reports", "record_run_report"]
+__all__ = ["list_reports", "get_report", "compare_reports"]

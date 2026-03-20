@@ -64,6 +64,7 @@ class RuntimeExecutionLoopMixin:
             self._push_logs_revision = -1
             self._push_decisions_revision = -1
             self._push_payload_size_probe_count = 0
+            self._report_artifact_bundle = None
             self.state = {"status": "idle", "progress": 0.0, "paused": False}
         self._stop.clear()
         self._pause_event.set()
@@ -121,6 +122,14 @@ class RuntimeExecutionLoopMixin:
         self._paused = False
         self._run_started_at = datetime.now(timezone.utc)
         self._run_context = self._build_run_context()
+        self._report_artifact_bundle = self._deps.build_run_artifact_bundle(
+            self.bot_id,
+            self._run_context.run_id,
+            self.config,
+            list(self._series),
+        )
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.start(started_at=self._run_context.started_at)
         wallet_config = self.config.get("wallet_config") if isinstance(self.config.get("wallet_config"), Mapping) else {}
         balances = wallet_config.get("balances") if isinstance(wallet_config, Mapping) else {}
         if isinstance(balances, Mapping):
@@ -160,9 +169,10 @@ class RuntimeExecutionLoopMixin:
                 logger.exception(with_log_context("bot_runtime_runtime_error_emit_failed", context))
             self._set_error_state(str(exc))
             self._push_update("error")
-            self._persist_runtime_state("error")
             self._flush_persistence_buffer("runtime_loop_failed")
             self._flush_step_trace_buffer("runtime_loop_failed", shutdown=True)
+            self._persist_runtime_state("error")
+            self._persist_run_artifact("error")
 
     def _execute_loop(self) -> None:
         self._require_prepared("execute_loop")
@@ -222,12 +232,11 @@ class RuntimeExecutionLoopMixin:
         else:
             with self._lock:
                 self.state.update({"status": status})
-        self._push_update(status)
-        self._persist_runtime_state(status)
-        if status in {"completed", "stopped"}:
-            self._persist_run_artifact(status)
         self._flush_persistence_buffer("runtime_loop_complete")
         self._flush_step_trace_buffer("runtime_loop_complete", shutdown=True)
+        self._push_update(status)
+        self._persist_runtime_state(status)
+        self._persist_run_artifact(status)
 
     def _step_series_state(self, state: SeriesExecutionState) -> None:
         if state.done:
@@ -1023,6 +1032,8 @@ class RuntimeExecutionLoopMixin:
         outputs = frame.outputs
         state.indicator_outputs = outputs
         state.indicator_overlays = frame.overlays
+        if self._report_artifact_bundle is not None:
+            self._report_artifact_bundle.record_indicator_frame(state=state, candle=candle)
         indicator_state_update_ms = max((time.perf_counter() - indicator_started) * 1000.0, 0.0)
 
         signal_started = time.perf_counter()
