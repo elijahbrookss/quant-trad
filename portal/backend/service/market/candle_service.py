@@ -7,13 +7,11 @@ from typing import Optional
 import pandas as pd
 
 from data_providers.providers.factory import get_provider
-from data_providers.utils.ohlcv import interval_to_timedelta
 from indicators.config import DataContext
 from utils.perf_log import get_obs_enabled, get_obs_step_sample_rate, should_sample
 
 from ..providers import persistence_bootstrap  # noqa: F401
 from . import instrument_service
-from .stats_queue import enqueue_stats_job
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,6 @@ def fetch_ohlcv(
     *,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
-    schedule_stats: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV data for a given symbol and time range.
@@ -39,7 +36,6 @@ def fetch_ohlcv(
         end=end,
         interval=interval,
         instrument_id=instrument_id,
-        schedule_stats=bool(schedule_stats),
     )
     provider = get_provider(datasource, exchange=exchange)
     should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
@@ -60,7 +56,6 @@ def fetch_ohlcv(
             start,
             end,
         )
-    _schedule_stats_for_context(df, ctx)
     return df
 
 
@@ -69,8 +64,6 @@ def fetch_ohlcv_by_instrument(
     start: str,
     end: str,
     interval: str,
-    *,
-    schedule_stats: bool = True,
 ) -> pd.DataFrame:
     """Fetch OHLCV data for a canonical instrument."""
 
@@ -90,7 +83,6 @@ def fetch_ohlcv_by_instrument(
         end=end,
         interval=interval,
         instrument_id=instrument_id,
-        schedule_stats=bool(schedule_stats),
     )
     provider = get_provider(datasource, exchange=exchange)
     should_log = get_obs_enabled() and should_sample(get_obs_step_sample_rate())
@@ -112,39 +104,29 @@ def fetch_ohlcv_by_instrument(
             end,
             instrument_id,
         )
-    _schedule_stats_for_context(df, ctx)
     return df
 
 
-def _schedule_stats_for_context(df: pd.DataFrame, ctx: DataContext) -> None:
-    """Enqueue asynchronous stats work for the requested range once candles are available."""
+def fetch_ohlcv_for_context(
+    ctx: DataContext,
+    *,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+) -> pd.DataFrame:
+    """Fetch OHLCV through the canonical candle service using an indicator/runtime data context."""
 
-    if not bool(getattr(ctx, "schedule_stats", True)):
-        return
-    if ctx.instrument_id is None or not ctx.interval or df is None or df.empty:
-        return
-
-    try:
-        timeframe_seconds = int(interval_to_timedelta(ctx.interval).total_seconds())
-    except Exception as exc:
-        logger.warning(
-            "stats_job_interval_invalid | instrument_id=%s interval=%s error=%s",
-            ctx.instrument_id,
-            ctx.interval,
-            exc,
+    if ctx.instrument_id:
+        return fetch_ohlcv_by_instrument(
+            str(ctx.instrument_id),
+            str(ctx.start),
+            str(ctx.end),
+            str(ctx.interval),
         )
-        return
-
-    if timeframe_seconds <= 0:
-        return
-
-    timestamps = pd.to_datetime(df.index, utc=True)
-    if timestamps.empty:
-        return
-
-    enqueue_stats_job(
-        instrument_id=ctx.instrument_id,
-        timeframe_seconds=timeframe_seconds,
-        time_min=timestamps.min(),
-        time_max=timestamps.max(),
+    return fetch_ohlcv(
+        str(ctx.symbol),
+        str(ctx.start),
+        str(ctx.end),
+        str(ctx.interval),
+        datasource=datasource,
+        exchange=exchange,
     )

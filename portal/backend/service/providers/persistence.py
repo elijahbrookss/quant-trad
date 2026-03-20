@@ -9,8 +9,6 @@ from indicators.config import DataContext
 from data_providers.config.runtime import PersistenceConfig
 from data_providers.utils.ohlcv import interval_to_timedelta
 
-from ..market.stats_queue import enqueue_stats_job
-
 class DataPersistenceService:
     """Handle storage, schema management, and closure bookkeeping for OHLCV data."""
 
@@ -31,7 +29,7 @@ class DataPersistenceService:
         return self._engine is not None
 
     def ensure_schema(self):
-        """Create candle, stats, derivatives, and closure tables if they are missing."""
+        """Create candle, derivatives, and closure tables if they are missing."""
 
         if not self._engine:
             logger.warning(
@@ -63,52 +61,6 @@ class DataPersistenceService:
             CHECK (low <= close AND close <= high),
             CHECK (volume IS NULL OR volume >= 0),
             CHECK (trade_count IS NULL OR trade_count >= 0)
-        );
-        """
-        ddl_stats = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.candle_stats_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            candle_time TIMESTAMPTZ NOT NULL,
-            stats_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            stats JSONB NOT NULL,
-            PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, stats_version),
-            FOREIGN KEY (instrument_id, timeframe_seconds, candle_time)
-                REFERENCES {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time)
-                ON DELETE CASCADE,
-            CHECK (jsonb_typeof(stats) = 'object')
-        );
-        """
-        ddl_regime = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.regime_stats_table} (
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            candle_time TIMESTAMPTZ NOT NULL,
-            regime_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            regime JSONB NOT NULL,
-            PRIMARY KEY (instrument_id, timeframe_seconds, candle_time, regime_version),
-            FOREIGN KEY (instrument_id, timeframe_seconds, candle_time)
-                REFERENCES {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time)
-                ON DELETE CASCADE,
-            CHECK (jsonb_typeof(regime) = 'object')
-        );
-        """
-        ddl_regime_blocks = f"""
-        CREATE TABLE IF NOT EXISTS {self._config.regime_blocks_table} (
-            block_id TEXT NOT NULL,
-            instrument_id TEXT NOT NULL,
-            timeframe_seconds INTEGER NOT NULL,
-            start_ts TIMESTAMPTZ NOT NULL,
-            end_ts TIMESTAMPTZ NOT NULL,
-            regime_version TEXT NOT NULL,
-            computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            block JSONB NOT NULL,
-            PRIMARY KEY (block_id),
-            CHECK (timeframe_seconds > 0),
-            CHECK (end_ts >= start_ts),
-            CHECK (jsonb_typeof(block) = 'object')
         );
         """
         ddl_derivatives = f"""
@@ -149,26 +101,6 @@ class DataPersistenceService:
             ON {self._config.candles_raw_table} (instrument_id, timeframe_seconds, candle_time DESC);
             """,
             f"""
-            CREATE INDEX IF NOT EXISTS idx_candle_stats_instrument_tf_time
-            ON {self._config.candle_stats_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_stats_instrument_tf_time
-            ON {self._config.regime_stats_table} (instrument_id, timeframe_seconds, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_stats_instrument_tf_version_time
-            ON {self._config.regime_stats_table} (instrument_id, timeframe_seconds, regime_version, candle_time DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_blocks_instrument_tf_start
-            ON {self._config.regime_blocks_table} (instrument_id, timeframe_seconds, start_ts DESC);
-            """,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_regime_blocks_instrument_tf_version_start
-            ON {self._config.regime_blocks_table} (instrument_id, timeframe_seconds, regime_version, start_ts DESC);
-            """,
-            f"""
             CREATE INDEX IF NOT EXISTS idx_derivatives_state_instrument_time
             ON {self._config.derivatives_state_table} (instrument_id, observed_at DESC);
             """,
@@ -185,31 +117,22 @@ class DataPersistenceService:
         try:
             with self._engine.begin() as conn:
                 conn.execute(text(ddl_create))
-                conn.execute(text(ddl_stats))
-                conn.execute(text(ddl_regime))
-                conn.execute(text(ddl_regime_blocks))
                 conn.execute(text(ddl_derivatives))
                 conn.execute(text(ddl_closures))
                 for ddl in ddl_indexes:
                     conn.execute(text(ddl))
             if not self._schema_logged:
                 logger.info(
-                    "schema_ensured | raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s",
+                    "schema_ensured | raw=%s derivatives=%s closures=%s",
                     self._config.candles_raw_table,
-                    self._config.candle_stats_table,
-                    self._config.regime_stats_table,
-                    self._config.regime_blocks_table,
                     self._config.derivatives_state_table,
                     self._config.closures_table,
                 )
                 self._schema_logged = True
         except SQLAlchemyError as e:
             logger.exception(
-                "Failed to ensure schema for raw=%s stats=%s regime=%s regime_blocks=%s derivatives=%s closures=%s: %s",
+                "Failed to ensure schema for raw=%s derivatives=%s closures=%s: %s",
                 self._config.candles_raw_table,
-                self._config.candle_stats_table,
-                self._config.regime_stats_table,
-                self._config.regime_blocks_table,
                 self._config.derivatives_state_table,
                 self._config.closures_table,
                 e,
@@ -548,13 +471,6 @@ class DataPersistenceService:
                 candle_time.min().isoformat(),
                 candle_time.max().isoformat(),
             )
-            if bool(getattr(ctx, "schedule_stats", True)):
-                enqueue_stats_job(
-                    instrument_id=instrument_id,
-                    timeframe_seconds=timeframe_seconds,
-                    time_min=candle_time.min(),
-                    time_max=candle_time.max(),
-                )
             return len(prepared)
 
         except SQLAlchemyError as exc:
