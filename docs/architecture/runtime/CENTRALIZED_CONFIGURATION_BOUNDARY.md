@@ -41,6 +41,7 @@ This replaces scattered `os.getenv(...)` lookups and duplicated fallback values 
 - Defaults belong in YAML, not repeated in leaf modules.
 - `PG_DSN` remains the only canonical non-prefixed env variable.
 - Canonical application env names use single underscores, for example `QT_BOT_RUNTIME_IMAGE`.
+- Every canonical application env binding must map to a path declared in `config/defaults.yaml` or a profile overlay.
 - Frontend build-time env access is centralized in `portal/frontend/src/config/appConfig.js`.
 
 ## Precedence
@@ -52,7 +53,7 @@ Configuration resolves in this order:
 3. optional file from `QT_CONFIG_FILE`
 4. canonical environment overrides
 
-`QT_CONFIG_PROFILE` selects the profile. If unset, the default profile is `dev`.
+`QT_CONFIG_PROFILE` selects the profile. If unset, the default profile comes from `config/defaults.yaml` and is currently `dev`.
 
 ## Design Intent
 
@@ -60,6 +61,8 @@ Configuration resolves in this order:
 - Preserve container and deployment ergonomics through env overrides.
 - Make runtime behavior testable by loading one typed settings object at startup.
 - Allow UI and service catalogs to render from the same source of truth instead of re-declaring defaults.
+- Keep backend worker topology explicit in YAML. Indicator-related async jobs now share one `workers.indicators` pool, with a default process cap of `5`.
+- Keep report artifact policy explicit in YAML under `reports.artifacts`, including output format, capture scope, and bundle contents.
 
 ## Migration Guidance
 

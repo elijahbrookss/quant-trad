@@ -23,7 +23,11 @@ Public runtime surfaces are:
 Rules:
 - outputs are the only strategy-visible indicator interface,
 - overlays are not strategy inputs,
-- indicator overlays represent the full current visual state for the bar, not producer-side deltas,
+- indicator overlays represent the full current visual state for the bar,
+- indicators may prepare immutable source facts before replay when those facts are true source inputs rather than replayed chart history,
+- indicators must not prebuild full chart-history overlays before replay starts,
+- `apply_bar()` advances indicator-owned state only; it must not rebuild full-history overlay payloads on every bar,
+- `overlay_snapshot()` is a read of current indicator state and may be requested selectively by consumers,
 - runtime transport may diff those full overlay snapshots and stream only deltas downstream,
 - every declared output must be returned every bar,
 - every declared overlay must be returned every bar,
@@ -45,4 +49,5 @@ Do not add alternate reconstruction paths for the same artifact class.
 Rules:
 - strategies must not inspect indicator internals,
 - downstream overlay consumers must not reinterpret indicator-local overlay blobs,
+- if a surface needs overlay history, it must assemble that history from the runtime timeline instead of asking indicators to rebuild it inside `apply_bar()`,
 - if required data is missing from the public runtime surface, extend the contract instead of reading hidden state.

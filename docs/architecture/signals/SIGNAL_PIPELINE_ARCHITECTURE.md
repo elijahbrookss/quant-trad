@@ -53,7 +53,7 @@ Boundary:
 ```mermaid
 flowchart TD
     A[QuantLab POST /indicators/{id}/signals] --> B[enqueue_signal_job]
-    B --> C[quantlab_worker _process_signals]
+    B --> C[indicator_worker _process_signals]
     C --> D[generate_signals_for_instance]
     D --> E[IndicatorSignalExecutor execute]
     E --> F[signals + runtime_path=engine_snapshot_v1]
@@ -106,7 +106,7 @@ Side effects:
 
 QuantLab indicator signals:
 - Controller enqueues `JOB_TYPE_SIGNALS` with partition key `datasource|exchange|symbol|interval|inst_id`.
-- Worker claims by `created_at` (with partition slot), runs `generate_signals_for_instance`, enforces `runtime_path == engine_snapshot_v1`.
+- Shared indicator workers claim signal and stats jobs from the same async queue pool by `created_at` (with partition slot), run `generate_signals_for_instance` for signal jobs, and enforce `runtime_path == engine_snapshot_v1`.
 - Response returns once async job reaches `succeeded`; failed/timeout/not-found map to HTTP errors.
 
 Strategy preview signals:
@@ -205,7 +205,7 @@ Canonical error codes/reasons:
 - Bot runtime uses `ReasonCode` values including `SIGNAL_STRATEGY_SIGNAL`, `DECISION_REJECTED_*`, `EXEC_ENTRY_FILLED`, `EXEC_EXIT_*`, `RUNTIME_EXCEPTION`, `RUNTIME_PARENT_MISSING`, `SYMBOL_DEGRADED`.
 
 Validation hooks:
-- Tests: `tests/test_portal/test_indicator_runtime_contract.py`, `tests/test_portal/test_quantlab_worker_runtime_contract.py`, `tests/test_bot_runtime_snapshot_signal_runtime.py`.
+- Tests: `tests/test_portal/test_indicator_runtime_contract.py`, `tests/test_portal/test_indicator_worker_runtime_contract.py`, `tests/test_bot_runtime_snapshot_signal_runtime.py`.
 - Logs: `indicator_signal_runtime_*`, `strategy_signal_preview_*`, `bot_runtime_*` and runtime event logs.
 - Storage: async job status rows and persisted bot runtime event rows with `seq`.
 

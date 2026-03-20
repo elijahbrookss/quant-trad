@@ -17,6 +17,23 @@ Historical span does not imply early availability.
 Signals and overlays should consume the same profile timeline.
 A profile influences output when `known_at <= evaluation_time`.
 
+## Strategy-Timeframe Projection Rule
+
+Market Profile profiles are built from source-session data on the source timeframe.
+
+When consumed on a strategy timeframe:
+- `formed_at` remains the original source-session end,
+- profile boundaries are projected to the strategy timeframe,
+- `known_at` becomes the first closed strategy bar that can observe the profile.
+
+Example:
+- source session/profile ends at `2025-01-01T10:30:00Z`
+- strategy timeframe is `1h`
+- `formed_at = 10:30`
+- projected profile end / `known_at = 11:00`
+
+This preserves source-session computation while keeping runtime truth aligned to the strategy bar timeline.
+
 ## Merge Rule
 
 Merged profiles become valid when merge criteria are satisfied in time.

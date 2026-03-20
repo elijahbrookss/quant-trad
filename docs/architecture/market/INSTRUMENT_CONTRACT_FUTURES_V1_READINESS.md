@@ -27,6 +27,7 @@ This component enforces one canonical instrument contract for runtime behavior a
 
 In scope:
 - canonical instrument fields used by runtime,
+- research-time instrument discovery and canonical persistence,
 - preflight readiness checks at bot start,
 - strategy-time warning behavior.
 
@@ -67,6 +68,7 @@ See the architecture diagram in the detailed sections below.
 ## 4) Core components and data flow
 
 - Provider/instrument services map source metadata into canonical instrument fields.
+- Research surfaces persist canonical instruments only through explicit validation/discovery flows.
 - Runtime preflight compiles execution profiles from canonical fields.
 - Strategy editing surfaces warnings; bot start enforces hard blockers.
 - Runtime engine consumes compiled profile only, not provider raw payloads.
@@ -144,6 +146,28 @@ For v1 runtime, we also want strict execution readiness:
 
 ## What was implemented now
 
+### 0) Research discovery is separate from runtime readiness
+
+QuantLab and other research surfaces may validate and persist instruments before any strategy or bot exists.
+
+That means:
+
+- canonical instrument creation is no longer coupled to strategy construction,
+- research/chart/indicator flows can resolve a symbol into a persisted instrument record,
+- runtime readiness remains a separate gate and is not implied by successful discovery.
+
+Successful discovery means:
+
+- provider validation succeeded,
+- canonical instrument metadata was persisted,
+- research/chart flows may use that instrument.
+
+It does **not** mean:
+
+- the instrument is valid for runtime v1 execution,
+- the engine supports that instrument type for bot execution,
+- bot start will be allowed.
+
 ### 1) Canonical instrument fields are expanded
 
 Provider implementations now populate these engine fields in `metadata.instrument_fields`:
@@ -171,6 +195,14 @@ Strategy instrument sync still allows save/update, but adds warnings when:
 - margin rates are missing for derivatives instruments
 
 Warnings are visible in strategy instrument messages.
+
+Research surfaces may also display a small readiness note such as:
+
+- instrument is research-ready but runtime-unsupported,
+- runtime v1 currently supports futures/perps only,
+- or required runtime metadata is incomplete.
+
+Those notes are informational only. They do not block charting or research execution.
 
 ### 4) Bot start has hard readiness blockers
 

@@ -168,6 +168,7 @@ Each child worker process:
 - receives the shared `run_id`,
 - constructs a `BotRuntime` with `degrade_series_on_error=True` and an explicit `BotRuntimeDeps` bundle,
 - forces `series_runner="inline"`,
+- resolves the attached indicator set into a dependency-closed runtime graph,
 - computes typed indicator outputs, indicator-owned overlays, strategy decisions, and trades on the same series timeline,
 - persists `series_bar.telemetry` ledger events asynchronously from that same series timeline,
 - emits one `botlens_series_bootstrap` after warm-up,
@@ -180,6 +181,12 @@ The parent process treats worker failures as degraded-symbol events:
 - telemetry is marked degraded,
 - container execution only hard-fails on parent-level exceptions.
 
+Dependency semantics:
+- attached indicators are the root set for the series,
+- explicit indicator-instance dependency bindings are followed transitively,
+- upstream dependencies do not need to be reattached manually if they are already referenced by a dependent indicator,
+- and runtime initialization fails loud if a dependency binding is missing, ambiguous, or points to the wrong indicator type.
+
 ## 8) Persistence boundaries
 
 The service/runtime split is important.
@@ -188,11 +195,11 @@ Worker runtime persistence:
 - canonical execution events via injected `BotRuntimeDeps.record_bot_runtime_event(...)` with `event_type=runtime.*`,
 - per-series runtime telemetry via `BotRuntimeDeps.record_bot_runtime_events_batch(...)` with `event_type=series_bar.telemetry`,
   - telemetry payloads are compact per-bar runtime facts: series/bar identity plus candle payload,
-  - they are not a second analytics schema for candle stats, regime rows, or flattened indicator outputs,
+  - they are not a second analytics schema for background candle/regime tables,
 - trade rows via `BotRuntimeDeps.record_bot_trade(...)`,
 - trade-event rows via `BotRuntimeDeps.record_bot_trade_event(...)`,
 - worker run artifacts via `BotRuntimeDeps.update_bot_run_artifact(...)`,
-- worker reports via `BotRuntimeDeps.record_run_report(...)`,
+- worker report bundles via `BotRuntimeDeps.build_run_artifact_bundle(...)`,
 - runtime step traces via `BotRuntimeDeps.record_bot_run_steps_batch(...)`.
 
 Container/runtime telemetry persistence:
@@ -210,29 +217,20 @@ Important semantics:
 - BotLens persistence only accepts canonical per-series keys of the form `SYMBOL|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
 - report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_bar.*`, and `botlens.*`.
 
-## 8.1) Stats and regime ownership
+## 8.1) Indicator-owned analytics and report capture
 
-Stats/regime ownership is split deliberately by product surface.
+Indicator-derived analytics are now owned by indicators on the canonical runtime timeline.
 
-QuantLab path:
-- backend OHLCV persistence may enqueue async stats/regime work,
-- those tables exist for research, browsing, export, and precompute.
-
-Bot runtime path:
-- each series worker evaluates indicators and strategies from the synchronous typed-output engine,
-- BotLens consumes indicator-owned overlays and per-bar snapshot events from that same timeline,
-- bot runtime OHLCV fetches set `schedule_stats=False`,
-- and the live bot does not depend on `candle_stats` / `regime_stats` tables.
-
-Reporting/export path:
-- reports should read `candle_stats`, `regime_stats`, and `regime_blocks` from persisted DB tables when they need analytical exports,
-- `series_bar.telemetry` remains a runtime telemetry/read-model surface,
-- and runtime snapshots are not the authoritative reporting source for candle/regime analytics.
+- backend OHLCV persistence does not enqueue candle-stats or regime-stats background work,
+- `candle_stats` and `regime` run only when those indicators are attached to the active series,
+- report capture records indicator outputs from the same runtime frames that drove decisions and overlays,
+- and post-run reporting may enrich that bundle with DB-derived trades and trade events, but not alternate indicator-history tables.
 
 This preserves the system contract:
 - one runtime state-engine timeline,
 - no alternate reconstruction path for bot execution artifacts,
-- and no async stats lag leaking into live execution semantics.
+- no async stats lag leaking into live execution semantics,
+- and clear provenance between runtime-emitted artifacts and post-run DB enrichments.
 
 ## 9) Telemetry contract
 
