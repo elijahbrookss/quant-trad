@@ -13,6 +13,7 @@ import {
   generateIndicatorSignals,
 } from '../adapters/indicator.adapter'
 import { applyIndicatorColors, runSignalGeneration } from './indicatorSignals.js'
+import { replaceIndicatorOverlaySlice, retainActiveIndicatorOverlays } from './indicatorOverlaySlices.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
 const IndicatorModal = IndicatorModalV2; // for now, swap in new version under old name
@@ -94,7 +95,6 @@ const stripRuntimeParams = (params) => {
   const runtimeKeys = [
     'symbol',
     'interval',
-    'timeframe',
     'start',
     'end',
     'datasource',
@@ -177,6 +177,7 @@ export const IndicatorSection = ({ chartId }) => {
   const [notice, setNotice] = useState('');
   const noticeTimerRef = useRef(null);
   const [deleteModal, setDeleteModal] = useState({ open: false, indicatorId: null, indicatorName: '' });
+  const overlayRefreshSeqRef = useRef(0);
 
 
   const { updateChart, getChart } = useChartState()
@@ -360,13 +361,17 @@ export const IndicatorSection = ({ chartId }) => {
 
   const requireContextPayload = useCallback(
     (reason = 'unknown') => {
-      if (missingContext.length) {
-        const msg = `Missing required context param${missingContext.length > 1 ? 's' : ''}: ${missingContext.join(', ')}`;
+      const overlayRequired = [];
+      if (!contextPayload.datasource) overlayRequired.push('datasource');
+      if (!contextPayload.instrument_id) overlayRequired.push('instrument_id');
+      const allMissing = [...missingContext, ...overlayRequired];
+      if (allMissing.length) {
+        const msg = `Missing required context param${allMissing.length > 1 ? 's' : ''}: ${allMissing.join(', ')}`;
         setError(msg);
         warn('indicator_context_missing', {
           reason,
           chartId,
-          missing: missingContext,
+          missing: allMissing,
           context: contextPayload,
         });
         return null;
@@ -385,13 +390,20 @@ export const IndicatorSection = ({ chartId }) => {
 
     // Wait for all required context fields before triggering overlay refresh
     // This prevents race conditions where _version bumps before datasource is set
-    if (!chartState.datasource || !chartState.symbol || !chartState.interval) {
+    if (!chartState.datasource || !chartState.symbol || !chartState.interval || !chartState.instrument_id) {
       warn('indicator_refresh_skipped_context', {
         datasource: chartState.datasource,
         exchange: chartState.exchange,
         symbol: chartState.symbol,
         interval: chartState.interval,
-        reason: !chartState.datasource ? 'no_datasource' : !chartState.symbol ? 'no_symbol' : 'no_interval',
+        instrument_id: chartState.instrument_id,
+        reason: !chartState.datasource
+          ? 'no_datasource'
+          : !chartState.symbol
+            ? 'no_symbol'
+            : !chartState.interval
+              ? 'no_interval'
+              : 'no_instrument_id',
       });
       setIsLoading(false);
       return;
@@ -417,7 +429,7 @@ export const IndicatorSection = ({ chartId }) => {
     })();
 
     return () => { isMounted = false; };
-  }, [chartId, chartState?._version, chartState?.datasource, chartState?.exchange]);
+  }, [chartId, chartState?._version, chartState?.datasource, chartState?.exchange, chartState?.instrument_id]);
 
   // When indicator colors change, recolor overlays in chart context (post-render).
   useEffect(() => {
@@ -433,7 +445,8 @@ export const IndicatorSection = ({ chartId }) => {
   // re-fetch indicators and ensure enabled indicators' params match current chart before overlays
   // patch enabled indicators to current chart symbol/interval, then compute overlays
   const refreshEnabledOverlays = async (list = indicators) => {
-    updateChart(chartId, { overlayLoading: true }); // show loading state
+    const refreshSeq = ++overlayRefreshSeqRef.current;
+    const refreshStartedAt = performance.now();
 
     const ctx = requireContextPayload('overlay_refresh');
     if (!chartState || !ctx) {
@@ -460,17 +473,36 @@ export const IndicatorSection = ({ chartId }) => {
     // patch params for enabled indicators if symbol/interval mismatch
     const enabled = working.filter(i => i?.enabled && !i?._local);
     info('overlay_refresh_start', {
+      refreshSeq,
       enabled: enabled.length,
       symbol: ctx.symbol,
       interval: ctx.interval,
     });
     const active = enabled;
+    const activeIndicatorIds = new Set(active.map((indicator) => indicator.id));
+    const nextColorMap = buildColorMap(working);
+    setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
+
+    const retained = retainActiveIndicatorOverlays(getChart(chartId)?.overlays || [], activeIndicatorIds);
+    updateChart(chartId, {
+      overlays: applyIndicatorColors(retained, nextColorMap),
+      overlayLoading: true,
+    });
 
     // compute overlays for enabled indicators using current chart window
     const body = { ...ctx };
 
-    const results = await Promise.all(
+    await Promise.all(
       active.map(async (ind) => {
+        const requestStartedAt = performance.now();
+        info('overlay_fetch_start', {
+          refreshSeq,
+          indicatorId: ind.id,
+          indicatorType: ind.type,
+          instrument_id: chartState?.instrument_id,
+          symbol: ctx.symbol,
+          interval: ctx.interval,
+        });
         try {
           const response = await fetchIndicatorOverlays(ind.id, body);
           const overlays = normalizeIndicatorOverlayResponse(ind, response);
@@ -479,6 +511,7 @@ export const IndicatorSection = ({ chartId }) => {
             total + (Array.isArray(entry?.payload?.[key]) ? entry.payload[key].length : 0)
           ), 0)
           info('overlay_fetch_success', {
+            refreshSeq,
             indicatorId: ind.id,
             indicatorType: ind.type,
             instrument_id: chartState?.instrument_id,
@@ -490,8 +523,26 @@ export const IndicatorSection = ({ chartId }) => {
             segments: count('segments'),
             polylines: count('polylines'),
             profiles: count('profiles'),
+            durationMs: Number((performance.now() - requestStartedAt).toFixed(3)),
           });
-          return overlays;
+          if (overlayRefreshSeqRef.current !== refreshSeq) {
+            warn('overlay_fetch_stale_ignored', {
+              refreshSeq,
+              indicatorId: ind.id,
+            });
+            return;
+          }
+          const currentOverlays = getChart(chartId)?.overlays || [];
+          const merged = replaceIndicatorOverlaySlice(currentOverlays, {
+            indicatorId: ind.id,
+            nextSlice: overlays,
+            activeIndicatorIds,
+          });
+          updateChart(chartId, {
+            overlays: applyIndicatorColors(merged, nextColorMap),
+            overlayLoading: true,
+          });
+          return;
         } catch (e) {
           const msg = String(e?.message ?? e);
           if (
@@ -499,29 +550,72 @@ export const IndicatorSection = ({ chartId }) => {
             msg.includes('No candles available') ||
             msg.includes('No overlays computed')
           ) {
-            warn('overlay_fetch_skipped', { indicatorId: ind.id, message: msg });
+            warn('overlay_fetch_skipped', {
+              refreshSeq,
+              indicatorId: ind.id,
+              message: msg,
+              durationMs: Number((performance.now() - requestStartedAt).toFixed(3)),
+            });
             if (msg.includes('No candles available')) {
               const label = ind?.name || formatIndicatorType(ind?.type);
               setError(`No candles were available for ${label}. Adjust the chart range, timeframe, or datasource and try again.`);
             }
-            return null;
+            if (overlayRefreshSeqRef.current === refreshSeq) {
+              const currentOverlays = getChart(chartId)?.overlays || [];
+              const merged = replaceIndicatorOverlaySlice(currentOverlays, {
+                indicatorId: ind.id,
+                nextSlice: [],
+                activeIndicatorIds,
+              });
+              updateChart(chartId, {
+                overlays: applyIndicatorColors(merged, nextColorMap),
+                overlayLoading: true,
+              });
+            }
+            return;
           }
-          logError('overlay_fetch_failed', { indicatorId: ind.id, instrument_id: chartState?.instrument_id }, e);
-          return null;
+          logError(
+            'overlay_fetch_failed',
+            {
+              refreshSeq,
+              indicatorId: ind.id,
+              instrument_id: chartState?.instrument_id,
+              durationMs: Number((performance.now() - requestStartedAt).toFixed(3)),
+            },
+            e,
+          );
+          if (overlayRefreshSeqRef.current === refreshSeq) {
+            const currentOverlays = getChart(chartId)?.overlays || [];
+            const merged = replaceIndicatorOverlaySlice(currentOverlays, {
+              indicatorId: ind.id,
+              nextSlice: [],
+              activeIndicatorIds,
+            });
+            updateChart(chartId, {
+              overlays: applyIndicatorColors(merged, nextColorMap),
+              overlayLoading: true,
+            });
+          }
+          return;
         }
       })
     );
 
-    const overlaysPayload = results.flatMap((entry) => (Array.isArray(entry) ? entry : entry ? [entry] : []));
-    const nextColorMap = buildColorMap(working);
-    setIndColors((prev) => (shallowEqualMap(prev, nextColorMap) ? prev : nextColorMap));
+    if (overlayRefreshSeqRef.current !== refreshSeq) {
+      return;
+    }
 
-    const colored = applyIndicatorColors(overlaysPayload, nextColorMap);
-    updateChart(chartId, { overlays: colored, overlayLoading: false });
+    const finalOverlays = applyIndicatorColors(
+      retainActiveIndicatorOverlays(getChart(chartId)?.overlays || [], activeIndicatorIds),
+      nextColorMap,
+    );
+    updateChart(chartId, { overlays: finalOverlays, overlayLoading: false });
     info('overlay_refresh_complete', {
-      overlays: colored.length,
+      refreshSeq,
+      overlays: finalOverlays.length,
       indicatorsProcessed: active.length,
       enabledCount: enabled.length,
+      durationMs: Number((performance.now() - refreshStartedAt).toFixed(3)),
     });
   };
 
@@ -539,20 +633,21 @@ export const IndicatorSection = ({ chartId }) => {
     }
   }, [fetchAndSyncIndicators, refreshEnabledOverlays, guardBusy, logError]);
 
-  const createIndicatorOptimistic = useCallback(async (meta, params, reuseId = null) => {
+  const createIndicatorOptimistic = useCallback(async (meta, params, dependencies = [], reuseId = null) => {
     const tempId = reuseId || `temp-${Date.now()}`;
     const optimisticIndicator = {
       id: tempId,
       name: meta.name,
       type: meta.type,
       params,
+      dependencies,
       enabled: true,
       color: meta.color || DEFAULT_INDICATOR_COLOR,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       _local: true,
       _status: 'creating',
-      _draft: { type: meta.type, params, name: meta.name, color: meta.color || null },
+      _draft: { type: meta.type, params, dependencies, name: meta.name, color: meta.color || null },
     };
 
     setIndicators((prev) => {
@@ -564,7 +659,12 @@ export const IndicatorSection = ({ chartId }) => {
 
     startJob('Creating indicator…', { indicatorId: tempId, type: 'create' });
     try {
-      const created = await createIndicator({ type: meta.type, params, name: meta.name });
+      const created = await createIndicator({
+        type: meta.type,
+        params,
+        dependencies,
+        name: meta.name,
+      });
       const createdIndicator = {
         ...created,
         _status: 'computing',
@@ -603,8 +703,7 @@ export const IndicatorSection = ({ chartId }) => {
   // Handlers for modal save/delete
   const handleSave = async (meta) => {
     const core = stripRuntimeParams(normalizeParams(meta.params));
-    const ctx = requireContextPayload('save_indicator');
-    if (!ctx) return;
+    const dependencies = Array.isArray(meta.dependencies) ? meta.dependencies : [];
     if (guardBusy('save_indicator')) return;
 
     if ('lookbacks' in core) {
@@ -614,7 +713,7 @@ export const IndicatorSection = ({ chartId }) => {
       }
     }
 
-    const params = { ...core, ...ctx };
+    const params = { ...core };
 
     setError(null);
     setModalOpen(false);
@@ -629,15 +728,16 @@ export const IndicatorSection = ({ chartId }) => {
         if (existing) {
           const existingCore = stripRuntimeParams(existing.params || {});
           const coreParamsChanged = JSON.stringify(existingCore) !== JSON.stringify(core);
+          const dependenciesChanged = JSON.stringify(existing.dependencies || []) !== JSON.stringify(dependencies);
           const nameChanged = meta.name !== existing.name;
-          needsIndicatorUpdate = coreParamsChanged || nameChanged;
+          needsIndicatorUpdate = coreParamsChanged || dependenciesChanged || nameChanged;
         }
       }
 
       if (!needsIndicatorUpdate) return;
 
       if (!meta.id) {
-        await createIndicatorOptimistic(meta, params);
+        await createIndicatorOptimistic(meta, params, dependencies);
         return;
       }
 
@@ -653,6 +753,7 @@ export const IndicatorSection = ({ chartId }) => {
       const payload = await updateIndicator(meta.id, {
         type: meta.type,
         params,
+        dependencies,
         name: meta.name,
         color: existing?.color ?? null,
       });
@@ -912,6 +1013,7 @@ export const IndicatorSection = ({ chartId }) => {
         type: indicator.type,
         name: indicator.name,
         params: indicator.params,
+        dependencies: indicator.dependencies || [],
         color: normalizedColor,
       });
       if (updated) {
@@ -1009,14 +1111,14 @@ export const IndicatorSection = ({ chartId }) => {
 
   const retryCreate = async (indicator) => {
     if (!indicator?._local || !indicator?._draft) return;
-    const ctx = requireContextPayload('retry_indicator');
-    if (!ctx || guardBusy('retry_indicator')) return;
-    const draftParams = stripRuntimeParams(indicator._draft.params || {});
-    const params = { ...draftParams, ...ctx };
+    if (guardBusy('retry_indicator')) return;
+    const params = stripRuntimeParams(indicator._draft.params || {});
+    const dependencies = Array.isArray(indicator._draft.dependencies) ? indicator._draft.dependencies : [];
     try {
       await createIndicatorOptimistic(
         { type: indicator._draft.type, name: indicator._draft.name, color: indicator._draft.color },
         params,
+        dependencies,
         indicator.id
       );
     } catch {
