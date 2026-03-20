@@ -1,2 +1,6 @@
+profile: dev
+
 logging:
   env_name: dev
+  debug: true
+  loki_url: http://loki:3100

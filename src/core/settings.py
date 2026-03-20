@@ -49,16 +49,11 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
-    ("QT_WORKERS_QUANTLAB_PROCESSES", ("workers", "quantlab", "processes")),
-    ("QT_WORKERS_QUANTLAB_INDEX", ("workers", "quantlab", "index")),
-    ("QT_WORKERS_QUANTLAB_TOTAL", ("workers", "quantlab", "total")),
-    ("QT_WORKERS_QUANTLAB_IDLE_SLEEP_SECONDS", ("workers", "quantlab", "idle_sleep_seconds")),
-    ("QT_WORKERS_QUANTLAB_DB_WAIT_TIMEOUT_SECONDS", ("workers", "quantlab", "db_wait_timeout_seconds")),
-    ("QT_WORKERS_STATS_PROCESSES", ("workers", "stats", "processes")),
-    ("QT_WORKERS_STATS_INDEX", ("workers", "stats", "index")),
-    ("QT_WORKERS_STATS_TOTAL", ("workers", "stats", "total")),
-    ("QT_WORKERS_STATS_IDLE_SLEEP_SECONDS", ("workers", "stats", "idle_sleep_seconds")),
-    ("QT_WORKERS_STATS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "stats", "db_wait_timeout_seconds")),
+    ("QT_WORKERS_INDICATORS_PROCESSES", ("workers", "indicators", "processes")),
+    ("QT_WORKERS_INDICATORS_INDEX", ("workers", "indicators", "index")),
+    ("QT_WORKERS_INDICATORS_TOTAL", ("workers", "indicators", "total")),
+    ("QT_WORKERS_INDICATORS_IDLE_SLEEP_SECONDS", ("workers", "indicators", "idle_sleep_seconds")),
+    ("QT_WORKERS_INDICATORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "indicators", "db_wait_timeout_seconds")),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
     ("QT_BOT_RUNTIME_IMAGE", ("bot_runtime", "image")),
@@ -97,9 +92,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_WATCHDOG_RUNNER_ID", ("bot_runtime", "watchdog", "runner_id")),
     ("QT_PROVIDERS_RUNTIME_HISTORY_SEGMENT_POINTS", ("providers", "runtime", "history_segment_points")),
     ("QT_PROVIDERS_RUNTIME_CANDLES_RAW_TABLE", ("providers", "runtime", "persistence", "candles_raw_table")),
-    ("QT_PROVIDERS_RUNTIME_CANDLE_STATS_TABLE", ("providers", "runtime", "persistence", "candle_stats_table")),
-    ("QT_PROVIDERS_RUNTIME_REGIME_STATS_TABLE", ("providers", "runtime", "persistence", "regime_stats_table")),
-    ("QT_PROVIDERS_RUNTIME_REGIME_BLOCKS_TABLE", ("providers", "runtime", "persistence", "regime_blocks_table")),
     ("QT_PROVIDERS_RUNTIME_DERIVATIVES_STATE_TABLE", ("providers", "runtime", "persistence", "derivatives_state_table")),
     ("QT_PROVIDERS_RUNTIME_CLOSURES_TABLE", ("providers", "runtime", "persistence", "closures_table")),
     ("QT_PROVIDERS_IBKR_HOST", ("providers", "ibkr", "host")),
@@ -120,6 +112,19 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_PROVIDERS_ALPACA_SECRET_KEY", ("providers", "alpaca", "secret_key")),
     ("QT_PROVIDERS_ALPACA_PAPER", ("providers", "alpaca", "paper")),
     ("QT_SECURITY_PROVIDER_CREDENTIAL_KEY", ("security", "provider_credential_key")),
+    ("QT_REPORTS_ARTIFACTS_ENABLED", ("reports", "artifacts", "enabled")),
+    ("QT_REPORTS_ARTIFACTS_ROOT_DIR", ("reports", "artifacts", "root_dir")),
+    ("QT_REPORTS_ARTIFACTS_OUTPUT_FORMAT", ("reports", "artifacts", "output_format")),
+    ("QT_REPORTS_ARTIFACTS_COMPRESS_ZIP_ON_FINALIZE", ("reports", "artifacts", "compress_zip_on_finalize")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_RUNTIME_EVENTS", ("reports", "artifacts", "include_runtime_events")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_DECISION_TRACE", ("reports", "artifacts", "include_decision_trace")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_TRADES", ("reports", "artifacts", "include_trades")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_TRADE_EVENTS", ("reports", "artifacts", "include_trade_events")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_INDICATOR_OUTPUTS", ("reports", "artifacts", "include_indicator_outputs")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_CANDLES", ("reports", "artifacts", "include_candles")),
+    ("QT_REPORTS_ARTIFACTS_INCLUDE_OVERLAYS", ("reports", "artifacts", "include_overlays")),
+    ("QT_REPORTS_ARTIFACTS_CAPTURE_BACKTEST", ("reports", "artifacts", "capture_backtest")),
+    ("QT_REPORTS_ARTIFACTS_CAPTURE_LIVE", ("reports", "artifacts", "capture_live")),
 ]
 
 
@@ -253,6 +258,11 @@ def _profile_name() -> str:
     explicit = str(os.getenv("QT_CONFIG_PROFILE") or "").strip()
     if explicit:
         return explicit
+    if _DEFAULTS_FILE.exists():
+        defaults = _yaml_file(_DEFAULTS_FILE)
+        configured = _coerce_optional_str(defaults.get("profile"))
+        if configured:
+            return configured
     return "dev"
 
 
@@ -344,9 +354,6 @@ class ObservabilitySettings:
 @dataclass(frozen=True)
 class ProviderPersistenceSettings:
     candles_raw_table: str
-    candle_stats_table: str
-    regime_stats_table: str
-    regime_blocks_table: str
     derivatives_state_table: str
     closures_table: str
 
@@ -375,8 +382,7 @@ class WorkerGroupSettings:
 
 @dataclass(frozen=True)
 class WorkersSettings:
-    quantlab: WorkerGroupSettings
-    stats: WorkerGroupSettings
+    indicators: WorkerGroupSettings
 
 
 @dataclass(frozen=True)
@@ -518,6 +524,28 @@ class FrontendSettings:
 
 
 @dataclass(frozen=True)
+class ReportArtifactSettings:
+    enabled: bool
+    root_dir: str
+    output_format: str
+    compress_zip_on_finalize: bool
+    include_runtime_events: bool
+    include_decision_trace: bool
+    include_trades: bool
+    include_trade_events: bool
+    include_indicator_outputs: bool
+    include_candles: bool
+    include_overlays: bool
+    capture_backtest: bool
+    capture_live: bool
+
+
+@dataclass(frozen=True)
+class ReportSettings:
+    artifacts: ReportArtifactSettings
+
+
+@dataclass(frozen=True)
 class AppSettings:
     profile: str
     logging: LoggingSettings
@@ -530,6 +558,7 @@ class AppSettings:
     providers: ProviderSettings
     security: SecuritySettings
     frontend: FrontendSettings
+    reports: ReportSettings
 
 
 def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
@@ -539,8 +568,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     observability_payload = _coerce_mapping(payload.get("observability"))
     async_jobs_payload = _coerce_mapping(payload.get("async_jobs"))
     workers_payload = _coerce_mapping(payload.get("workers"))
-    quantlab_payload = _coerce_mapping(workers_payload.get("quantlab"))
-    stats_payload = _coerce_mapping(workers_payload.get("stats"))
+    indicator_workers_payload = _coerce_mapping(workers_payload.get("indicators"))
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
@@ -557,6 +585,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     security_payload = _coerce_mapping(payload.get("security"))
     frontend_payload = _coerce_mapping(payload.get("frontend"))
     frontend_botlens_payload = _coerce_mapping(frontend_payload.get("botlens"))
+    reports_payload = _coerce_mapping(payload.get("reports"))
+    report_artifacts_payload = _coerce_mapping(reports_payload.get("artifacts"))
 
     default_origins = [
         "http://localhost",
@@ -612,21 +642,16 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
         ),
         workers=WorkersSettings(
-            quantlab=WorkerGroupSettings(
-                processes=_coerce_int(quantlab_payload.get("processes"), 3, minimum=1),
-                index=_coerce_int(quantlab_payload.get("index"), 0, minimum=0),
-                total=_coerce_int(quantlab_payload.get("total"), 1, minimum=1),
-                idle_sleep_seconds=_coerce_float(quantlab_payload.get("idle_sleep_seconds"), 0.2, minimum=0.05),
-                db_wait_timeout_seconds=_coerce_float(
-                    quantlab_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+            indicators=WorkerGroupSettings(
+                processes=_coerce_int(indicator_workers_payload.get("processes"), 5, minimum=1),
+                index=_coerce_int(indicator_workers_payload.get("index"), 0, minimum=0),
+                total=_coerce_int(indicator_workers_payload.get("total"), 1, minimum=1),
+                idle_sleep_seconds=_coerce_float(
+                    indicator_workers_payload.get("idle_sleep_seconds"), 0.2, minimum=0.05
                 ),
-            ),
-            stats=WorkerGroupSettings(
-                processes=_coerce_int(stats_payload.get("processes"), 2, minimum=1),
-                index=_coerce_int(stats_payload.get("index"), 0, minimum=0),
-                total=_coerce_int(stats_payload.get("total"), 1, minimum=1),
-                idle_sleep_seconds=_coerce_float(stats_payload.get("idle_sleep_seconds"), 0.25, minimum=0.05),
-                db_wait_timeout_seconds=_coerce_float(stats_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5),
+                db_wait_timeout_seconds=_coerce_float(
+                    indicator_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+                ),
             ),
         ),
         bot_runtime=BotRuntimeSettings(
@@ -703,9 +728,6 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 ),
                 persistence=ProviderPersistenceSettings(
                     candles_raw_table=_coerce_str(persistence_payload.get("candles_raw_table"), "market_candles_raw"),
-                    candle_stats_table=_coerce_str(persistence_payload.get("candle_stats_table"), "candle_stats"),
-                    regime_stats_table=_coerce_str(persistence_payload.get("regime_stats_table"), "regime_stats"),
-                    regime_blocks_table=_coerce_str(persistence_payload.get("regime_blocks_table"), "regime_blocks"),
                     derivatives_state_table=_coerce_str(
                         persistence_payload.get("derivatives_state_table"), "derivatives_market_state"
                     ),
@@ -782,6 +804,33 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 ),
             ),
         ),
+        reports=ReportSettings(
+            artifacts=ReportArtifactSettings(
+                enabled=_coerce_bool(report_artifacts_payload.get("enabled"), True),
+                root_dir=_coerce_str(report_artifacts_payload.get("root_dir"), "reports"),
+                output_format=_coerce_str(report_artifacts_payload.get("output_format"), "parquet").lower(),
+                compress_zip_on_finalize=_coerce_bool(
+                    report_artifacts_payload.get("compress_zip_on_finalize"), True
+                ),
+                include_runtime_events=_coerce_bool(
+                    report_artifacts_payload.get("include_runtime_events"), True
+                ),
+                include_decision_trace=_coerce_bool(
+                    report_artifacts_payload.get("include_decision_trace"), True
+                ),
+                include_trades=_coerce_bool(report_artifacts_payload.get("include_trades"), True),
+                include_trade_events=_coerce_bool(
+                    report_artifacts_payload.get("include_trade_events"), True
+                ),
+                include_indicator_outputs=_coerce_bool(
+                    report_artifacts_payload.get("include_indicator_outputs"), True
+                ),
+                include_candles=_coerce_bool(report_artifacts_payload.get("include_candles"), True),
+                include_overlays=_coerce_bool(report_artifacts_payload.get("include_overlays"), False),
+                capture_backtest=_coerce_bool(report_artifacts_payload.get("capture_backtest"), True),
+                capture_live=_coerce_bool(report_artifacts_payload.get("capture_live"), False),
+            ),
+        ),
     )
 
 
@@ -813,16 +862,7 @@ def env_is_set(name: str) -> bool:
 
 
 def resolve_ccxt_credentials(exchange_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    ensure_env_loaded()
     settings = get_settings()
-    upper = str(exchange_id or "").strip().upper()
-    if upper:
-        prefix = f"QT_PROVIDERS_CCXT_{upper}_"
-        api_key = _coerce_optional_str(os.getenv(prefix + "API_KEY"))
-        api_secret = _coerce_optional_str(os.getenv(prefix + "API_SECRET"))
-        api_password = _coerce_optional_str(os.getenv(prefix + "API_PASSWORD"))
-        if api_key or api_secret or api_password:
-            return api_key, api_secret, api_password
     return settings.providers.ccxt.api_key, settings.providers.ccxt.api_secret or settings.providers.ccxt.secret, settings.providers.ccxt.password
 
 
@@ -838,6 +878,8 @@ __all__ = [
     "LoggingSettings",
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
+    "ReportArtifactSettings",
+    "ReportSettings",
     "SecuritySettings",
     "TelemetrySettings",
     "WatchdogSettings",

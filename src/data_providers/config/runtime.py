@@ -11,9 +11,6 @@ class PersistenceConfig:
 
     dsn: Optional[str]
     candles_raw_table: str
-    candle_stats_table: str
-    regime_stats_table: str
-    regime_blocks_table: str
     derivatives_state_table: str
     closures_table: str
 
@@ -42,9 +39,6 @@ def runtime_config_from_env() -> ProviderRuntimeConfig:
         persistence=PersistenceConfig(
             dsn=_SETTINGS.database.dsn,
             candles_raw_table=runtime_settings.persistence.candles_raw_table,
-            candle_stats_table=runtime_settings.persistence.candle_stats_table,
-            regime_stats_table=runtime_settings.persistence.regime_stats_table,
-            regime_blocks_table=runtime_settings.persistence.regime_blocks_table,
             derivatives_state_table=runtime_settings.persistence.derivatives_state_table,
             closures_table=runtime_settings.persistence.closures_table,
         ),

@@ -1,2 +1,4 @@
+profile: prod
+
 logging:
   env_name: prod

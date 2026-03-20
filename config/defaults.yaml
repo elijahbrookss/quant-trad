@@ -1,3 +1,5 @@
+profile: dev
+
 logging:
   level: INFO
   debug: false
@@ -39,17 +41,11 @@ async_jobs:
   quantlab_job_poll_interval_seconds: 0.2
 
 workers:
-  quantlab:
-    processes: 3
+  indicators:
+    processes: 5
     index: 0
     total: 1
     idle_sleep_seconds: 0.2
-    db_wait_timeout_seconds: 120
-  stats:
-    processes: 2
-    index: 0
-    total: 1
-    idle_sleep_seconds: 0.25
     db_wait_timeout_seconds: 120
 
 bot_runtime:
@@ -101,9 +97,6 @@ providers:
     history_segment_points: 1000
     persistence:
       candles_raw_table: market_candles_raw
-      candle_stats_table: candle_stats
-      regime_stats_table: regime_stats
-      regime_blocks_table: regime_blocks
       derivatives_state_table: derivatives_market_state
       closures_table: portal_candle_closures
   ibkr:
@@ -149,3 +142,19 @@ frontend:
     ledger_max_events: 3000
     live_resubscribe_limit: 3
     live_resubscribe_window_ms: 30000
+
+reports:
+  artifacts:
+    enabled: true
+    root_dir: reports
+    output_format: parquet
+    compress_zip_on_finalize: true
+    include_runtime_events: true
+    include_decision_trace: true
+    include_trades: true
+    include_trade_events: true
+    include_indicator_outputs: true
+    include_candles: true
+    include_overlays: false
+    capture_backtest: true
+    capture_live: false
