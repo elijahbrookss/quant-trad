@@ -1,4 +1,5 @@
 import { PaneViewType } from '../paneViews/factory';
+import { normalizePaneKey } from '../panes/registry.js';
 
 const toPaneView = (value) => {
   if (!value) return null;
@@ -23,6 +24,10 @@ export function getPaneViewsForOverlay(overlay) {
     });
   }
   return mapped;
+}
+
+export function getPaneKeyForOverlay(overlay) {
+  return normalizePaneKey(overlay?.pane_key);
 }
 
 const toSec = (value) => {
@@ -139,10 +144,10 @@ export function adaptPayload(type, payload, colorHex) {
         y1: toFiniteNumber(box.y1 ?? box.val ?? box.VAL),
         y2: toFiniteNumber(box.y2 ?? box.vah ?? box.VAH),
         // Apply subtle opacity to make boxes see-through
-        color: toRgba(baseColor, fillAlpha) || box.color,
+        color: box.fillColor || toRgba(baseColor, fillAlpha) || box.color,
         border: box.border || {
-          color: toRgba(baseColor, borderAlpha) || baseColor,
-          width: 1,
+          color: box.borderColor || toRgba(baseColor, borderAlpha) || baseColor,
+          width: box.borderWidth ?? 1,
         },
       };
     })

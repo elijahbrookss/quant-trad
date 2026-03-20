@@ -15,6 +15,7 @@ class OverlaySpec:
 
     type: str
     label: str
+    pane_key: str = "price"
     pane_views: Tuple[str, ...] = field(default_factory=tuple)
     description: Optional[str] = None
     renderers: Mapping[str, Any] = field(default_factory=dict)
@@ -30,6 +31,7 @@ def register_overlay_type(
     types: str | Iterable[str],
     *,
     label: Optional[str] = None,
+    pane_key: Optional[str] = None,
     pane_views: Optional[Sequence[str]] = None,
     description: Optional[str] = None,
     renderers: Optional[Mapping[str, Any]] = None,
@@ -47,6 +49,7 @@ def register_overlay_type(
         raise ValueError("pane_views are required for overlay registration")
 
     resolved_label = label or str(names[0])
+    resolved_pane_key = str(pane_key or "price").strip() or "price"
     view_tuple = tuple(str(view) for view in (pane_views or []))
     if not view_tuple:
         raise ValueError("pane_views are required for overlay registration")
@@ -61,6 +64,7 @@ def register_overlay_type(
         spec = OverlaySpec(
             type=overlay_type,
             label=resolved_label,
+            pane_key=resolved_pane_key,
             pane_views=view_tuple,
             description=description,
             renderers=renderer_payload,
@@ -81,6 +85,7 @@ def overlay_type(
     types: str | Iterable[str],
     *,
     label: Optional[str] = None,
+    pane_key: Optional[str] = None,
     pane_views: Optional[Sequence[str]] = None,
     description: Optional[str] = None,
     renderers: Optional[Mapping[str, Any]] = None,
@@ -94,6 +99,7 @@ def overlay_type(
         register_overlay_type(
             types,
             label=label,
+            pane_key=pane_key,
             pane_views=pane_views,
             description=description,
             renderers=renderers,

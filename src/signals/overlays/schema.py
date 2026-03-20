@@ -112,6 +112,7 @@ class OverlayPayload(TypedDict, total=False):
 
 class ChartOverlay(TypedDict, total=False):
     type: str
+    pane_key: str
     payload: OverlayPayload
     pane_views: Sequence[str]
     renderers: Mapping[str, Any]
@@ -158,6 +159,7 @@ _OVERLAY_SPEC_LOGGED_LOCK = threading.Lock()
 def _log_overlay_spec_resolved_once(
     *,
     indicator_type: str,
+    pane_key: str,
     pane_views: Sequence[str],
     payload_keys: Sequence[str],
     ui_color: str | None,
@@ -165,6 +167,7 @@ def _log_overlay_spec_resolved_once(
 ) -> None:
     signature = (
         indicator_type,
+        pane_key,
         tuple(str(v) for v in pane_views),
         tuple(str(v) for v in payload_keys),
         ui_color,
@@ -175,8 +178,9 @@ def _log_overlay_spec_resolved_once(
             return
         _OVERLAY_SPEC_LOGGED.add(signature)
     logger.debug(
-        "overlay_spec_resolved | type=%s | pane_views=%s | payload_keys=%s | ui_color=%s | ui_default_visible=%s",
+        "overlay_spec_resolved | type=%s | pane_key=%s | pane_views=%s | payload_keys=%s | ui_color=%s | ui_default_visible=%s",
         indicator_type,
+        pane_key,
         pane_views,
         payload_keys,
         ui_color,
@@ -202,6 +206,7 @@ def build_overlay(indicator_type: str, payload: Mapping[str, Any] | None) -> Cha
     if not spec.pane_views:
         logger.warning("overlay_spec_missing_pane_views | type=%s", indicator_type)
         raise ValueError(f"overlay spec missing pane_views for type '{indicator_type}'")
+    overlay["pane_key"] = str(spec.pane_key or "price")
     overlay["pane_views"] = list(spec.pane_views)
     if spec.renderers:
         overlay["renderers"] = dict(spec.renderers)
@@ -212,6 +217,7 @@ def build_overlay(indicator_type: str, payload: Mapping[str, Any] | None) -> Cha
     }
     _log_overlay_spec_resolved_once(
         indicator_type=indicator_type,
+        pane_key=str(spec.pane_key or "price"),
         pane_views=spec.pane_views,
         payload_keys=spec.payload_keys,
         ui_color=spec.ui_color,
@@ -237,6 +243,8 @@ def normalize_overlays(
             overlay_type = str(entry.get("type"))
             payload = coerce_overlay_payload(entry.get("payload"))
             overlay = build_overlay(overlay_type, payload)
+            if "pane_key" in entry:
+                overlay["pane_key"] = entry.get("pane_key")
             if "pane_views" in entry:
                 overlay["pane_views"] = entry.get("pane_views")
             if "renderers" in entry:

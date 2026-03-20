@@ -1,5 +1,6 @@
 import { useCallback, useRef } from 'react'
-import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/registry.js'
+import { collectActivePaneKeys } from '../../../chart/panes/registry.js'
+import { projectOverlayPayloads } from '../../../chart/overlays/projectOverlayPayloads.js'
 import { BOTLENS_DEBUG, coalesce, toFiniteNumber, toSec } from '../chartDataUtils.js'
 
 const toRgba = (hex, alpha = 0.16) => {
@@ -30,15 +31,11 @@ export const useOverlaySync = ({
   const computeArtifacts = useCallback(
     ({ overlayPayloads = [], tradeMarkers = [], tradeTooltips = [], tradeRegions = [], tradePriceLines = [], candleData = [] }) => {
       const markerDetails = Array.isArray(tradeTooltips) ? [...tradeTooltips] : []
-      const baseMarkers = [...tradeMarkers]
-      const overlayMarkers = []
-      const touchPoints = []
-      const boxes = [...tradeRegions]
-      const segments = []
+      const baseMarkersByPane = { price: [...tradeMarkers] }
+      const boxesByPane = { price: [...tradeRegions] }
       const tradeSegments = []
-      const polylines = []
-      const bubbles = []
       const priceLines = [...tradePriceLines]
+      const projectedTradeSegments = []
 
       const firstSeriesTime = candleData[0]?.time ?? null
       const lastSeriesTime = candleData[candleData.length - 1]?.time ?? null
@@ -55,7 +52,7 @@ export const useOverlaySync = ({
           if (Number.isFinite(barSpacingRef.current)) return Math.max(5, barSpacingRef.current / 2)
           return 15
         })()
-        boxes.unshift({
+        boxesByPane.price.unshift({
           x1: lastCandle.time - halfSpan,
           x2: lastCandle.time + halfSpan,
           y1: Math.min(lastCandle.low, lastCandle.high, lastCandle.open, lastCandle.close),
@@ -110,13 +107,16 @@ export const useOverlaySync = ({
         return out
       }
 
-      for (const overlay of overlayPayloads || []) {
-        const { type, payload, color, ind_id } = overlay || {}
-        const resolvedColor = color || overlay?.ui?.color || null
-        if (!payload) continue
-        const paneViews = getPaneViewsForOverlay(overlay)
-        const paneSet = new Set(paneViews || [])
-        if (BOTLENS_DEBUG && type === 'regime_overlay') {
+      const projected = projectOverlayPayloads({
+        overlays: overlayPayloads,
+        bubbleAlpha: 0.16,
+        normalizeTime: toSec,
+        onOverlayProjected: ({ overlay, paneViews, normalized }) => {
+          const { type, payload } = overlay || {}
+          if (type === 'bot_trade_rays' && Array.isArray(normalized?.segments) && normalized.segments.length) {
+            projectedTradeSegments.push(...normalized.segments)
+          }
+          if (!(BOTLENS_DEBUG && type === 'regime_overlay')) return
           const boxes = Array.isArray(payload?.boxes) ? payload.boxes.length : 0
           const segmentsLen = Array.isArray(payload?.segments) ? payload.segments.length : 0
           const markersLen = Array.isArray(payload?.markers) ? payload.markers.length : 0
@@ -146,107 +146,29 @@ export const useOverlaySync = ({
             instrument_id: overlay?.instrument_id,
             symbol: overlay?.symbol,
           })
-        }
-        const norm = adaptPayload(type, payload, resolvedColor)
-        if (Array.isArray(payload.price_lines)) {
-          payload.price_lines.forEach((pl) => {
-            const price = toFiniteNumber(pl?.price)
-            if (!Number.isFinite(price)) return
-            priceLines.push({
-              ...pl,
-              price,
-              color: pl.color ?? resolvedColor,
-              source: type || pl.title || 'overlay',
-            })
-          })
-        }
-        if (Array.isArray(norm.markers)) {
-          overlayMarkers.push(...norm.markers)
-        }
-        const wantsTouch = paneSet.has('touch') || (Array.isArray(norm.touchPoints) && norm.touchPoints.length > 0)
-        if (wantsTouch && Array.isArray(norm.touchPoints) && norm.touchPoints.length) {
-          touchPoints.push(
-            ...norm.touchPoints
-              .map((point) => ({
-                ...point,
-                time: toSec(point.time),
-                text: point.text || point.label || '',
-                textColor: point.textColor || resolvedColor,
-                ind_id,
-              }))
-              .filter((point) => Number.isFinite(point.time)),
-          )
-        }
-        const wantsBoxes = paneSet.has('va_box') || (Array.isArray(norm.boxes) && norm.boxes.length > 0)
-        if (wantsBoxes && Array.isArray(norm.boxes) && norm.boxes.length) {
-          const normalizedBoxes = norm.boxes
-            .map((box) => ({
-              ...box,
-              x1: toSec(box.x1 ?? box.start ?? box.start_date ?? box.startDate),
-              x2: toSec(box.x2 ?? box.end ?? box.end_date ?? box.endDate),
-            }))
-            .filter((box) => Number.isFinite(box?.x1) && Number.isFinite(box?.x2))
-          boxes.push(...normalizedBoxes)
-        }
-        const wantsSegments = paneSet.has('segment') || (Array.isArray(norm.segments) && norm.segments.length > 0)
-        if (wantsSegments && Array.isArray(norm.segments) && norm.segments.length) {
-          const normalisedSegments = norm.segments
-            .map((segment) => {
-              const normalised = normaliseSegment(segment)
-              if (!Number.isFinite(normalised.y2) && Number.isFinite(normalised.y1)) {
-                normalised.y2 = normalised.y1
-              }
-              if (!Number.isFinite(normalised.y1) && Number.isFinite(normalised.y2)) {
-                normalised.y1 = normalised.y2
-              }
-              if (!Number.isFinite(normalised.x2) && Number.isFinite(normalised.x1)) {
-                normalised.x2 = normalised.x1
-              }
-              if (!Number.isFinite(normalised.x1) && Number.isFinite(normalised.x2)) {
-                normalised.x1 = normalised.x2
-              }
-              return normalised
-            })
-            .filter(
-              (segment) =>
-                Number.isFinite(segment.x1) && Number.isFinite(segment.x2) && Number.isFinite(segment.y1) && Number.isFinite(segment.y2),
-            )
-          segments.push(...normalisedSegments)
-          if (type === 'bot_trade_rays') {
-            tradeSegments.push(...normalisedSegments)
-          }
-        }
-        const wantsPolylines = paneSet.has('polyline') || (Array.isArray(norm.polylines) && norm.polylines.length > 0)
-        if (wantsPolylines && Array.isArray(norm.polylines) && norm.polylines.length) {
-          polylines.push(...norm.polylines)
-        }
-        const wantsBubbles = paneSet.has('signal_bubble') || (Array.isArray(norm.bubbles) && norm.bubbles.length > 0)
-        if (wantsBubbles && Array.isArray(norm.bubbles) && norm.bubbles.length) {
-          const bubbleColor = resolvedColor ? toRgba(resolvedColor, 0.16) : undefined
-          const tinted = resolvedColor
-            ? norm.bubbles.map((bubble) => ({
-                ...bubble,
-                accentColor: resolvedColor,
-                backgroundColor: bubbleColor || bubble.backgroundColor,
-              }))
-            : norm.bubbles
-          bubbles.push(...tinted)
-          for (const bubble of tinted) {
-            const epoch = toSec(bubble?.time)
-            if (!Number.isFinite(epoch)) continue
-            const lines = []
-            const label = typeof bubble?.label === 'string' ? bubble.label.trim() : ''
-            const detail = typeof bubble?.detail === 'string' ? bubble.detail.trim() : ''
-            const meta = typeof bubble?.meta === 'string' ? bubble.meta.trim() : ''
-            if (label) lines.push(label)
-            if (detail) lines.push(detail)
-            if (meta) lines.push(meta)
-            // Keep signal tooltip minimal and high-signal only.
-            if (!lines.length) continue
-            markerDetails.push({ time: epoch, entries: lines, kind: 'signal' })
-          }
-        }
-      }
+        },
+      })
+
+      const overlayMarkersByPane = projected.markersByPane
+      const touchPointsByPane = projected.touchPointsByPane
+      const segmentsByPane = projected.segmentsByPane
+      const polylinesByPane = projected.polylinesByPane
+      const bubblesByPane = projected.bubblesByPane
+      markerDetails.push(...(projected.signalDetails || []))
+      Object.entries(projected.boxesByPane || {}).forEach(([paneKey, entries]) => {
+        if (!boxesByPane[paneKey]) boxesByPane[paneKey] = []
+        boxesByPane[paneKey].push(...entries)
+      })
+      projected.priceLines.forEach((pl) => {
+        const price = toFiniteNumber(pl?.price)
+        if (!Number.isFinite(price)) return
+        priceLines.push({
+          ...pl,
+          price,
+          source: pl?.source || pl?.title || 'overlay',
+        })
+      })
+      tradeSegments.push(...projectedTradeSegments)
 
       const toScopedSegment = (segment) => {
         const normalised = normaliseSegment(segment)
@@ -266,9 +188,22 @@ export const useOverlaySync = ({
         }
       }
 
-      const scopedMarkers = [...baseMarkers, ...overlayMarkers]
-        .map((marker) => ({ ...marker, time: toSec(marker?.time) }))
-        .filter((marker) => isWithinSeriesWindow(marker?.time))
+      const scopeEntriesByPane = (collection, mapper) =>
+        Object.fromEntries(
+          Object.entries(collection || {}).map(([paneKey, entries]) => [
+            paneKey,
+            (entries || []).map(mapper).filter(Boolean),
+          ]),
+        )
+
+      const scopedMarkersByPane = Object.fromEntries(
+        Object.entries({ ...baseMarkersByPane, ...overlayMarkersByPane }).map(([paneKey, entries]) => [
+          paneKey,
+          (entries || [])
+            .map((marker) => ({ ...marker, time: toSec(marker?.time) }))
+            .filter((marker) => isWithinSeriesWindow(marker?.time)),
+        ]),
+      )
 
       const scopedMarkerDetails = (markerDetails || [])
         .map((detail) => {
@@ -278,12 +213,19 @@ export const useOverlaySync = ({
         })
         .filter((detail) => detail && isWithinSeriesWindow(detail.time))
 
-      const scopedTouchPoints = (touchPoints || [])
-        .map((point) => ({ ...point, time: toSec(point?.time) }))
-        .filter((point) => isWithinSeriesWindow(point?.time))
+      const scopedTouchPointsByPane = scopeEntriesByPane(
+        touchPointsByPane,
+        (point) => {
+          const next = { ...point, time: toSec(point?.time) }
+          return isWithinSeriesWindow(next?.time) ? next : null
+        },
+      )
 
-      const scopedBoxes = dedupeByKey(
-        (boxes || [])
+      const scopedBoxesByPane = Object.fromEntries(
+        Object.entries(boxesByPane || {}).map(([paneKey, entries]) => [
+          paneKey,
+          dedupeByKey(
+            (entries || [])
           .map((box) => {
             const range = toScopedRange(
               toSec(coalesce(box?.x1, box?.start, box?.start_date, box?.startDate)),
@@ -301,13 +243,20 @@ export const useOverlaySync = ({
             }
           })
           .filter(Boolean),
-        (box) => `${box.x1}|${box.x2}|${box.y1}|${box.y2}|${box.color || ''}|${box?.border?.color || ''}|${box?.border?.width || 0}`,
+            (box) => `${box.x1}|${box.x2}|${box.y1}|${box.y2}|${box.color || ''}|${box?.border?.color || ''}|${box?.border?.width || 0}`,
+          ),
+        ]),
       )
 
-      const scopedSegments = dedupeByKey(
-        (segments || []).map((segment) => toScopedSegment(segment)).filter(Boolean),
-        (segment) =>
-          `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
+      const scopedSegmentsByPane = Object.fromEntries(
+        Object.entries(segmentsByPane || {}).map(([paneKey, entries]) => [
+          paneKey,
+          dedupeByKey(
+            (entries || []).map((segment) => toScopedSegment(segment)).filter(Boolean),
+            (segment) =>
+              `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
+          ),
+        ]),
       )
 
       const scopedTradeSegments = dedupeByKey(
@@ -316,23 +265,32 @@ export const useOverlaySync = ({
           `${segment.x1}|${segment.x2}|${segment.y1}|${segment.y2}|${segment.color || ''}|${segment.lineStyle || 0}|${segment.lineWidth || 1}`,
       )
 
-      const scopedPolylines = (polylines || [])
-        .map((polyline) => {
-          const points = (polyline?.points || [])
-            .map((point) => ({
-              ...point,
-              time: toSec(point?.time),
-              price: toFiniteNumber(point?.price),
-            }))
-            .filter((point) => isWithinSeriesWindow(point?.time) && Number.isFinite(point?.price))
-          if (!points.length) return null
-          return { ...polyline, points }
-        })
-        .filter(Boolean)
+      const scopedPolylinesByPane = Object.fromEntries(
+        Object.entries(polylinesByPane || {}).map(([paneKey, entries]) => [
+          paneKey,
+          (entries || [])
+            .map((polyline) => {
+              const points = (polyline?.points || [])
+                .map((point) => ({
+                  ...point,
+                  time: toSec(point?.time),
+                  price: toFiniteNumber(point?.price),
+                }))
+                .filter((point) => isWithinSeriesWindow(point?.time) && Number.isFinite(point?.price))
+              if (!points.length) return null
+              return { ...polyline, points }
+            })
+            .filter(Boolean),
+        ]),
+      )
 
-      const scopedBubbles = (bubbles || [])
-        .map((bubble) => ({ ...bubble, time: toSec(bubble?.time) }))
-        .filter((bubble) => isWithinSeriesWindow(bubble?.time))
+      const scopedBubblesByPane = scopeEntriesByPane(
+        bubblesByPane,
+        (bubble) => {
+          const next = { ...bubble, time: toSec(bubble?.time) }
+          return isWithinSeriesWindow(next?.time) ? next : null
+        },
+      )
 
       const groupedPriceLines = (() => {
         const normalised = []
@@ -399,13 +357,13 @@ export const useOverlaySync = ({
       })()
 
       return {
-        markers: scopedMarkers,
+        markersByPane: scopedMarkersByPane,
         markerDetails: scopedMarkerDetails,
-        touchPoints: scopedTouchPoints,
-        boxes: scopedBoxes,
-        segments: scopedSegments,
-        polylines: scopedPolylines,
-        bubbles: scopedBubbles,
+        touchPointsByPane: scopedTouchPointsByPane,
+        boxesByPane: scopedBoxesByPane,
+        segmentsByPane: scopedSegmentsByPane,
+        polylinesByPane: scopedPolylinesByPane,
+        bubblesByPane: scopedBubblesByPane,
         priceLines: groupedPriceLines,
         tradeSegments: scopedTradeSegments,
         lastSeriesTime,
@@ -418,11 +376,23 @@ export const useOverlaySync = ({
 
   const applyArtifacts = useCallback(
     (artifacts = {}) => {
-      const { markers, markerDetails, touchPoints, boxes, segments, polylines, bubbles, priceLines, extentSignature, extents, lastSeriesTime } = artifacts
+      const {
+        markersByPane,
+        markerDetails,
+        touchPointsByPane,
+        boxesByPane,
+        segmentsByPane,
+        polylinesByPane,
+        bubblesByPane,
+        priceLines,
+        extentSignature,
+        extents,
+        lastSeriesTime,
+      } = artifacts
       if (!seriesRef.current || !paneMgrRef.current) return { extentChanged: false }
 
       markerDetailsRef.current = markerDetails || []
-      markerManager?.setLayer('base', markers || [])
+      markerManager?.setLayer('base', markersByPane?.price || [])
       markerManager?.flush()
 
       const applyPriceLines = () => {
@@ -507,14 +477,33 @@ export const useOverlaySync = ({
 
       applyPriceLines()
 
-      paneMgrRef.current.setTouchPoints(touchPoints || [])
-      paneMgrRef.current.setVABlocks(boxes || [], {
-        lastSeriesTime,
-        barSpacing: barSpacingRef.current,
+      const paneKeys = new Set([
+        'price',
+        ...Object.keys(markersByPane || {}),
+        ...Object.keys(touchPointsByPane || {}),
+        ...Object.keys(boxesByPane || {}),
+        ...Object.keys(segmentsByPane || {}),
+        ...Object.keys(polylinesByPane || {}),
+        ...Object.keys(bubblesByPane || {}),
+      ])
+      paneMgrRef.current.syncActivePanes([...paneKeys])
+      paneKeys.forEach((paneKey) => {
+        if (paneKey !== 'price') {
+          paneMgrRef.current.setMarkers(markersByPane?.[paneKey] || [], paneKey)
+        }
+        paneMgrRef.current.setTouchPoints(touchPointsByPane?.[paneKey] || [], paneKey)
+        paneMgrRef.current.setVABlocks(
+          boxesByPane?.[paneKey] || [],
+          {
+            lastSeriesTime,
+            barSpacing: barSpacingRef.current,
+          },
+          paneKey,
+        )
+        paneMgrRef.current.setSegments(segmentsByPane?.[paneKey] || [], paneKey)
+        paneMgrRef.current.setPolylines(polylinesByPane?.[paneKey] || [], paneKey)
+        paneMgrRef.current.setSignalBubbles(bubblesByPane?.[paneKey] || [], paneKey)
       })
-      paneMgrRef.current.setSegments(segments || [])
-      paneMgrRef.current.setPolylines(polylines || [])
-      paneMgrRef.current.setSignalBubbles(bubbles || [])
 
       const extentChanged = extentSignature && extentSignature !== tradeViewportSignatureRef.current
       if (extentChanged && BOTLENS_DEBUG) {

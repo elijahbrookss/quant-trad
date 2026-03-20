@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/registry.js';
+import { collectActivePaneKeys } from '../../../chart/panes/registry.js';
+import { projectOverlayPayloads } from '../../../chart/overlays/projectOverlayPayloads.js';
 
 /**
  * useOverlaySync - Manages chart overlay synchronization
@@ -10,24 +11,6 @@ import { adaptPayload, getPaneViewsForOverlay } from '../../../chart/indicators/
  */
 
 // Helper functions
-const toRgba = (hex, alpha = 0.12) => {
-  if (typeof hex !== 'string') return null;
-  const trimmed = hex.trim().replace('#', '');
-  if (!(trimmed.length === 3 || trimmed.length === 6)) return null;
-
-  const expand = (value) => value.split('').map((c) => c + c).join('');
-  const normalized = trimmed.length === 3 ? expand(trimmed) : trimmed;
-
-  const r = Number.parseInt(normalized.slice(0, 2), 16);
-  const g = Number.parseInt(normalized.slice(2, 4), 16);
-  const b = Number.parseInt(normalized.slice(4, 6), 16);
-
-  if ([r, g, b].some((v) => Number.isNaN(v))) return null;
-
-  const clampedAlpha = Math.min(Math.max(alpha, 0), 1);
-  return `rgba(${r},${g},${b},${clampedAlpha})`;
-};
-
 const coalesce = (...values) => {
   for (const value of values) {
     if (value !== undefined && value !== null) return value;
@@ -100,6 +83,7 @@ export function useOverlaySync({
   logger,
   setDataLoading,
   signalDetailsRef,
+  setPaneLegendEntries,
 }) {
   // Overlay resource handles
   const overlayHandlesRef = useRef({ priceLines: [] });
@@ -107,6 +91,7 @@ export function useOverlaySync({
   const syncOverlays = useCallback((overlays = []) => {
     setDataLoading(true);
     if (signalDetailsRef) signalDetailsRef.current = [];
+    setPaneLegendEntries?.({});
     // Guard on required refs
     if (!seriesRef.current || !chartRef.current) return;
 
@@ -143,112 +128,60 @@ export function useOverlaySync({
 
     pvMgrRef.current?.clearFrame();
 
-    // 2) Build fresh markers and touch points
-    const markers = [];
-    const touchPoints = [];
-    const boxes = [];
-    const signalBubbles = [];
-    const signalDetails = [];
-    const allSegments = [];
-    const allPolylines = [];
-
-    // 3) Walk overlays and apply
-    for (const ov of overlays) {
-      const { type, payload, color, ind_id: indicatorId } = ov || {};
-      const resolvedColor = color || ov?.ui?.color || null;
-      if (!payload) continue;
-
-      const overlayLogger = logger.child({ indicatorId, indicatorType: type });
-      overlayLogger.debug('overlay_payload_received', {
-        priceLines: Array.isArray(payload.price_lines) ? payload.price_lines.length : 0,
-        markers: Array.isArray(payload.markers) ? payload.markers.length : 0,
-        boxes: Array.isArray(payload.boxes) ? payload.boxes.length : 0,
-        segments: Array.isArray(payload.segments) ? payload.segments.length : 0,
-        polylines: Array.isArray(payload.polylines) ? payload.polylines.length : 0,
-      });
-
-      const paneViews = getPaneViewsForOverlay(ov);
-      const norm = adaptPayload(type, payload, resolvedColor);
-      overlayLogger.debug('overlay_adapted', {
-        priceLines: Array.isArray(norm.priceLines) ? norm.priceLines.length : 0,
-        markers: Array.isArray(norm.markers) ? norm.markers.length : 0,
-        touchPoints: Array.isArray(norm.touchPoints) ? norm.touchPoints.length : 0,
-        boxes: Array.isArray(norm.boxes) ? norm.boxes.length : 0,
-        segments: Array.isArray(norm.segments) ? norm.segments.length : 0,
-        polylines: Array.isArray(norm.polylines) ? norm.polylines.length : 0,
-        bubbles: Array.isArray(norm.bubbles) ? norm.bubbles.length : 0,
-      });
-      const markerTimes = (norm.markers || []).map(m => m?.time).filter(t => Number.isFinite(t));
-      const bubbleTimes = (norm.bubbles || []).map(b => b?.time).filter(t => Number.isFinite(t));
-      if (markerTimes.length || bubbleTimes.length) {
-        overlayLogger.debug('overlay_time_bounds', {
-          markerMin: markerTimes.length ? Math.min(...markerTimes) : null,
-          markerMax: markerTimes.length ? Math.max(...markerTimes) : null,
-          bubbleMin: bubbleTimes.length ? Math.min(...bubbleTimes) : null,
-          bubbleMax: bubbleTimes.length ? Math.max(...bubbleTimes) : null,
+    const projected = projectOverlayPayloads({
+      overlays,
+      bubbleAlpha: 0.16,
+      normalizeTime: toSec,
+      onOverlayProjected: ({ overlay, normalized }) => {
+        const overlayLogger = logger.child({
+          indicatorId: overlay?.ind_id,
+          indicatorType: overlay?.type,
         });
-      }
+        overlayLogger.debug('overlay_payload_received', {
+          priceLines: Array.isArray(overlay?.payload?.price_lines) ? overlay.payload.price_lines.length : 0,
+          markers: Array.isArray(overlay?.payload?.markers) ? overlay.payload.markers.length : 0,
+          boxes: Array.isArray(overlay?.payload?.boxes) ? overlay.payload.boxes.length : 0,
+          segments: Array.isArray(overlay?.payload?.segments) ? overlay.payload.segments.length : 0,
+          polylines: Array.isArray(overlay?.payload?.polylines) ? overlay.payload.polylines.length : 0,
+        });
+        overlayLogger.debug('overlay_adapted', {
+          priceLines: Array.isArray(normalized.priceLines) ? normalized.priceLines.length : 0,
+          markers: Array.isArray(normalized.markers) ? normalized.markers.length : 0,
+          touchPoints: Array.isArray(normalized.touchPoints) ? normalized.touchPoints.length : 0,
+          boxes: Array.isArray(normalized.boxes) ? normalized.boxes.length : 0,
+          segments: Array.isArray(normalized.segments) ? normalized.segments.length : 0,
+          polylines: Array.isArray(normalized.polylines) ? normalized.polylines.length : 0,
+          bubbles: Array.isArray(normalized.bubbles) ? normalized.bubbles.length : 0,
+        });
+      },
+    });
 
-      // 3a) Price lines
-      if (Array.isArray(payload.price_lines)) {
-        for (const pl of payload.price_lines) {
-          const handle = seriesRef.current.createPriceLine({
-            price: pl.price,
-            color: pl.color ?? resolvedColor ?? undefined,
-            lineWidth: pl.lineWidth ?? 1,
-            lineStyle: pl.lineStyle ?? 0,
-            axisLabelVisible: pl.axisLabelVisible ?? false,
-            title: pl.title ?? type ?? '',
-          });
-          overlayHandlesRef.current.priceLines.push(handle);
-        }
-      }
+    const markersByPane = projected.markersByPane;
+    const touchPointsByPane = projected.touchPointsByPane;
+    const signalBubblesByPane = projected.bubblesByPane;
+    const segmentsByPane = projected.segmentsByPane;
+    const polylinesByPane = projected.polylinesByPane;
+    const signalDetails = projected.signalDetails;
+    const legendEntriesByPane = projected.legendEntriesByPane || {};
+    const boxesByPane = {};
 
-      // 3b) Markers
-      markers.push(...norm.markers);
+    projected.priceLines.forEach((pl) => {
+      const handle = seriesRef.current.createPriceLine({
+        price: pl.price,
+        color: pl.color ?? undefined,
+        lineWidth: pl.lineWidth ?? 1,
+        lineStyle: pl.lineStyle ?? 0,
+        axisLabelVisible: pl.axisLabelVisible ?? false,
+        title: pl.title ?? '',
+      });
+      overlayHandlesRef.current.priceLines.push(handle);
+    });
 
-      if (Array.isArray(norm.bubbles) && norm.bubbles.length) {
-        for (const bubble of norm.bubbles) {
-          const bubbleTime = toSec(bubble?.time);
-          if (!Number.isFinite(bubbleTime)) continue;
-          const lines = [];
-          if (typeof bubble?.label === 'string' && bubble.label.trim()) lines.push(bubble.label.trim());
-          if (typeof bubble?.detail === 'string' && bubble.detail.trim()) lines.push(bubble.detail.trim());
-          if (typeof bubble?.meta === 'string' && bubble.meta.trim()) lines.push(bubble.meta.trim());
-          // Keep signal tooltip minimal and high-signal only.
-          if (lines.length) {
-            signalDetails.push({ time: bubbleTime, kind: 'signal', entries: lines });
-          }
-        }
-        if (resolvedColor) {
-          signalBubbles.push(...norm.bubbles.map(b => {
-            const accentColor = resolvedColor;
-            const backgroundColor = toRgba(accentColor, 0.16) ?? undefined;
-            return {
-              ...b,
-              accentColor,
-              backgroundColor,
-            };
-          }));
-        } else {
-          signalBubbles.push(...norm.bubbles);
-        }
-      }
-
-      // 3c) Touch points
-      if (paneViews.includes('touch') && norm.touchPoints?.length) {
-        touchPoints.push(...norm.touchPoints.map(p => ({
-          ...p,
-          time: toSec(p.time),
-        })));
-      }
-
-      // 3d) VA Boxes
-      if (paneViews.includes('va_box') && norm.boxes?.length) {
-        const lastCandleSec = toSec(lastBarRef.current?.time);
-        const baseIndex = boxes.length;
-        const summaryEntries = [];
-        const normalizedBoxes = norm.boxes.map((box, idxInGroup) => {
+    Object.entries(projected.boxesByPane || {}).forEach(([paneKey, paneBoxes]) => {
+      const lastCandleSec = toSec(lastBarRef.current?.time);
+      const normalizedBoxes = [];
+      const summaryEntries = [];
+      (paneBoxes || []).forEach((box, idxInGroup) => {
           const x1 = box.x1;
           const requestedX2 = box.x2;
           const extendBox = box.extend !== undefined ? Boolean(box.extend) : false;
@@ -261,12 +194,6 @@ export function useOverlaySync({
               x2 = x1;
             }
           } else if (extendBox && Number.isFinite(lastCandleSec) && lastCandleSec > x2) {
-            overlayLogger.debug('va_box_span_extended', {
-              boxIndex: baseIndex + idxInGroup,
-              x1,
-              originalX2: requestedX2,
-              forcedX2: lastCandleSec,
-            });
             x2 = lastCandleSec;
           }
 
@@ -309,7 +236,7 @@ export function useOverlaySync({
             : undefined;
 
           summaryEntries.push({
-            index: baseIndex + idxInGroup + 1,
+            index: idxInGroup + 1,
             startSec: x1,
             endSec: x2,
             requestedEndSec: requestedX2,
@@ -324,7 +251,7 @@ export function useOverlaySync({
             precision,
           });
 
-          return {
+          normalizedBoxes.push({
             x1,
             x2,
             y1,
@@ -332,78 +259,61 @@ export function useOverlaySync({
             color: box.color,
             border: box.border,
             precision: box.precision,
-          };
-        }).filter(Boolean);
-        boxes.push(...normalizedBoxes);
-        normalizedBoxes.forEach((b, idx) => {
-          const width = Number.isFinite(b.x2) && Number.isFinite(b.x1)
-            ? Number(b.x2) - Number(b.x1)
-            : null;
-          overlayLogger.debug('va_box_applied', {
-            boxIndex: baseIndex + idx,
-            x1: b.x1,
-            x2: b.x2,
-            y1: b.y1,
-            y2: b.y2,
-            width,
+          });
+      });
+      boxesByPane[paneKey] = normalizedBoxes;
+      if (summaryEntries.length) {
+        logger.info('va_box_summary', {
+          appended: summaryEntries.length,
+          total: normalizedBoxes.length,
+          paneKey,
+        });
+        summaryEntries.forEach((entry) => {
+          logger.info('va_box_summary_entry', {
+            index: entry.index,
+            detail: buildVaBoxSummaryText(entry),
+            valueAreaId: entry.valueAreaId ?? null,
+            label: entry.label ?? null,
+            sourceStart: entry.sourceStart ?? null,
+            sourceEnd: entry.sourceEnd ?? null,
           });
         });
-
-        if (summaryEntries.length) {
-          overlayLogger.info('va_box_summary', {
-            appended: summaryEntries.length,
-            total: boxes.length,
-          });
-          summaryEntries.forEach((entry) => {
-            overlayLogger.info('va_box_summary_entry', {
-              index: entry.index,
-              detail: buildVaBoxSummaryText(entry),
-              valueAreaId: entry.valueAreaId ?? null,
-              label: entry.label ?? null,
-              sourceStart: entry.sourceStart ?? null,
-              sourceEnd: entry.sourceEnd ?? null,
-            });
-          });
-        }
       }
-
-      if (paneViews.includes('segment') && norm.segments?.length) {
-        allSegments.push(...norm.segments);
-      }
-      if (paneViews.includes('polyline') && norm.polylines?.length) {
-        allPolylines.push(...norm.polylines);
-      }
-    }
+    });
 
     // Group touch points by time, strictly 1 item per time
-    const grouped = new Map();
-    for (const p of touchPoints) {
-      if (p.time == null || Number.isNaN(p.time)) continue;
-      if (!grouped.has(p.time)) grouped.set(p.time, []);
-      grouped.get(p.time).push({
-        price:  p.originalData?.price ?? p.price,
-        color:  p.originalData?.color ?? p.color,
-        size:   (p.originalData?.size ?? p.size ?? 3),
-      });
-    }
-
-    // 4) Sort markers for deterministic rendering
-    markers.sort((a, b) => a.time - b.time);
+    Object.values(markersByPane).forEach((entries) => entries.sort((a, b) => a.time - b.time));
 
     // 5) Apply markers via pane view manager (proper UTC support)
     try {
-      pvMgrRef.current?.setMarkers(markers);
-      pvMgrRef.current?.setTouchPoints(touchPoints);
-      pvMgrRef.current?.setVABlocks(boxes, {
-        lastSeriesTime: lastBarRef.current?.time,
-        barSpacing: barSpacingRef.current,
+      const paneKeys = collectActivePaneKeys(
+        markersByPane,
+        touchPointsByPane,
+        boxesByPane,
+        segmentsByPane,
+        polylinesByPane,
+        signalBubblesByPane,
+      );
+      pvMgrRef.current?.syncActivePanes([...paneKeys]);
+      paneKeys.forEach((paneKey) => {
+        pvMgrRef.current?.setMarkers(markersByPane[paneKey] || [], paneKey);
+        pvMgrRef.current?.setTouchPoints(touchPointsByPane[paneKey] || [], paneKey);
+        pvMgrRef.current?.setVABlocks(
+          boxesByPane[paneKey] || [],
+          {
+            lastSeriesTime: lastBarRef.current?.time,
+            barSpacing: barSpacingRef.current,
+          },
+          paneKey,
+        );
+        pvMgrRef.current?.setSegments(segmentsByPane[paneKey] || [], paneKey);
+        pvMgrRef.current?.setPolylines(polylinesByPane[paneKey] || [], paneKey);
+        pvMgrRef.current?.setSignalBubbles(signalBubblesByPane[paneKey] || [], paneKey);
       });
-      pvMgrRef.current?.setSegments(allSegments);
-      pvMgrRef.current?.setPolylines(allPolylines);
-      pvMgrRef.current?.setSignalBubbles(signalBubbles);
       if (signalDetailsRef) {
         signalDetailsRef.current = signalDetails;
       }
+      setPaneLegendEntries?.(legendEntriesByPane);
     } catch (e) {
       logger.error('overlays_apply_failed', e);
     }
@@ -411,16 +321,16 @@ export function useOverlaySync({
     // 6) Log summary for quick tracing
     logger.info('overlays_applied', {
       priceLines: overlayHandlesRef.current.priceLines.length,
-      markers: markers.length,
-      touchPoints: touchPoints.length,
-      boxes: boxes.length,
-      bubbles: signalBubbles.length,
-      segments: allSegments.length,
-      polylines: allPolylines.length,
+      markers: Object.values(markersByPane).reduce((total, entries) => total + entries.length, 0),
+      touchPoints: Object.values(touchPointsByPane).reduce((total, entries) => total + entries.length, 0),
+      boxes: Object.values(boxesByPane).reduce((total, entries) => total + entries.length, 0),
+      bubbles: Object.values(signalBubblesByPane).reduce((total, entries) => total + entries.length, 0),
+      segments: Object.values(segmentsByPane).reduce((total, entries) => total + entries.length, 0),
+      polylines: Object.values(polylinesByPane).reduce((total, entries) => total + entries.length, 0),
     });
 
     setDataLoading(false);
-  }, [chartRef, seriesRef, pvMgrRef, lastBarRef, barSpacingRef, logger, setDataLoading]);
+  }, [chartRef, seriesRef, pvMgrRef, lastBarRef, barSpacingRef, logger, setDataLoading, setPaneLegendEntries]);
 
   return {
     syncOverlays,
