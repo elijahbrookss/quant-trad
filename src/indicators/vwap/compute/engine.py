@@ -5,7 +5,6 @@ from matplotlib import patches
 from mplfinance.plotting import make_addplot
 
 from indicators.base import ComputeIndicator
-from indicators.config import DataContext
 
 def _to_unix_s(ts) -> int:
     ts = pd.Timestamp(ts)
@@ -46,31 +45,6 @@ class VWAPIndicator(ComputeIndicator):
         self.stddev_multipliers = stddev_multipliers
         self.reset_by = reset_by
         self._compute()
-
-    @classmethod
-    def from_context(
-        cls,
-        provider,
-        ctx: DataContext,
-        stddev_window: int = 20,
-        stddev_multipliers: list[float] = [1.0, 2.0],
-        reset_by: str = "D"
-    ):
-        """
-        Instantiate from a DataContext and data provider.
-        Raises ValueError if no OHLCV data is returned.
-        """
-        df = provider.get_ohlcv(ctx)
-        if df is None or df.empty:
-            raise ValueError(
-                f"Missing OHLCV for {ctx.symbol} from {ctx.start} to {ctx.end}"
-            )
-        return cls(
-            df=df,
-            stddev_window=stddev_window,
-            stddev_multipliers=stddev_multipliers,
-            reset_by=reset_by
-        )
 
     def _compute(self):
         """

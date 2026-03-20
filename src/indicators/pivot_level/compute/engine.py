@@ -7,7 +7,6 @@ from mplfinance.plotting import make_addplot
 
 from core.logger import logger as core_logger
 from indicators.base import ComputeIndicator
-from indicators.config import DataContext
 
 log = core_logger.getChild("PivotLevelIndicator")
 
@@ -287,52 +286,6 @@ class PivotLevelIndicator(ComputeIndicator):
     def distance_to_level(self, level: Level, price: float) -> float:
         """Compute fractional distance between price and a level."""
         return abs(level.price - price) / price
-
-    @classmethod
-    def from_context(
-        cls,
-        provider,
-        ctx: DataContext,
-        timeframe: str,
-        days_back: int = 180,
-        pivot_breakout_confirmation_bars: int = 1,
-        **kwargs
-    ):
-        """
-        Instantiate from a DataContext 
-        :param provider: data provider with get_ohlcv method
-        :param ctx: DataContext with symbol, start, end, interval
-        :param level_timeframe: timeframe for the pivot levels (e.g., '1d', '4h')
-
-        """
-        end_ts = pd.Timestamp(ctx.end)
-        start_dt = end_ts - pd.Timedelta(days=days_back)
-        if start_dt.tz is None:
-            start_dt = start_dt.tz_localize("UTC")
-        else:
-            start_dt = start_dt.tz_convert("UTC")
-
-        level_ctx = DataContext(
-            symbol=ctx.symbol,
-            start=start_dt.isoformat(),
-            end=ctx.end,
-            interval=timeframe,
-            instrument_id=ctx.instrument_id,
-        )
-
-        df = provider.get_ohlcv(level_ctx)
-        if df is None or df.empty:
-            raise ValueError(
-                f"Data missing for {ctx.symbol} [{timeframe}]"
-            )
-        return cls(
-            df=df,
-            timeframe=timeframe,
-            days_back=days_back,
-            pivot_breakout_confirmation_bars=pivot_breakout_confirmation_bars,
-            **kwargs,
-        )
-
 
     def to_lightweight(
         self,

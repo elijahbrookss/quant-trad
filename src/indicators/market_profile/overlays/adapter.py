@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from indicators.market_profile.compute.engine import MarketProfileIndicator
+from indicators.market_profile.manifest import DEFAULT_MERGE_THRESHOLD, DEFAULT_MIN_MERGE_SESSIONS
 from signals.base import BaseSignal
 from signals.overlays.schema import build_overlay
 from signals.overlays.registry import overlay_type
@@ -830,15 +831,16 @@ def market_profile_overlay_transformer(
     )
     if bool(params.get("use_merged_value_areas")):
         if params.get("merge_threshold") is None:
-            params["merge_threshold"] = 0.6
+            params["merge_threshold"] = float(DEFAULT_MERGE_THRESHOLD)
             log.warning(
-                "event=market_profile_merge_param_defaulted param=merge_threshold default=0.6"
+                "event=market_profile_merge_param_defaulted param=merge_threshold default=%s",
+                float(DEFAULT_MERGE_THRESHOLD),
             )
         if params.get("min_merge_sessions") is None:
-            params["min_merge_sessions"] = int(MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS)
+            params["min_merge_sessions"] = int(DEFAULT_MIN_MERGE_SESSIONS)
             log.warning(
                 "event=market_profile_merge_param_defaulted param=min_merge_sessions default=%s",
-                int(MarketProfileIndicator.DEFAULT_MIN_MERGE_SESSIONS),
+                int(DEFAULT_MIN_MERGE_SESSIONS),
             )
     extend_to_end = bool(params.get("extend_value_area_to_chart_end"))
     window_start_epoch = to_epoch_seconds(params.get("start"))

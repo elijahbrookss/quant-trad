@@ -6,7 +6,8 @@ import pytest
 
 pd = pytest.importorskip("pandas")
 
-from indicators.config import DataContext
+from indicators.config import IndicatorExecutionContext
+from indicators.market_profile.definition import MarketProfileIndicator as MarketProfileDefinition
 from indicators.market_profile import MarketProfileIndicator, Profile, ValueArea
 from indicators.market_profile.compute.internal.bin_size import infer_precision_from_step
 from indicators.market_profile.compute.internal.computation import (
@@ -67,36 +68,29 @@ def _profile(
     )
 
 
-class _ProviderStub:
-    def __init__(self, df: pd.DataFrame) -> None:
-        self.df = df
-        self.last_ctx: DataContext | None = None
-
-    def get_ohlcv(self, ctx: DataContext) -> pd.DataFrame:
-        self.last_ctx = ctx
-        return self.df.copy()
-
-
-def test_from_context_normalizes_boundaries_to_utc() -> None:
-    provider = _ProviderStub(_sample_df())
-    ctx = DataContext(
+def test_build_runtime_data_request_normalizes_boundaries_to_utc() -> None:
+    ctx = IndicatorExecutionContext(
         symbol="ES",
         start="2025-01-01",
         end="2025-01-02",
         interval="1h",
     )
-
-    indicator = MarketProfileIndicator.from_context(
-        provider=provider,
-        ctx=ctx,
-        bin_size=1.0,
-        days_back=2,
+    resolved = MarketProfileDefinition.resolve_config(
+        {
+            "bin_size": 1.0,
+            "days_back": 2,
+        },
+        strict_unknown=True,
     )
 
-    assert provider.last_ctx is not None
-    assert pd.Timestamp(provider.last_ctx.start).tzinfo is not None
-    assert pd.Timestamp(provider.last_ctx.end).tzinfo is not None
-    assert all(profile.start.tzinfo is not None for profile in indicator.get_profiles())
+    request = MarketProfileDefinition.build_runtime_data_request(
+        resolved_params=resolved,
+        execution_context=ctx,
+    )
+
+    assert request.interval == "30m"
+    assert pd.Timestamp(request.start).tzinfo is not None
+    assert pd.Timestamp(request.end).tzinfo is not None
 
 
 def test_build_tpo_histogram_and_extract_value_area() -> None:
@@ -266,3 +260,43 @@ def test_overlay_transformer_builds_boxes_from_runtime_payload() -> None:
     assert boxes[0]["x2"] == int(chart_end.timestamp())
     assert boxes[0]["y1"] == pytest.approx(99.0)
     assert boxes[0]["y2"] == pytest.approx(101.0)
+
+
+def test_runtime_signal_payload_projects_profile_to_strategy_timeframe() -> None:
+    indicator = MarketProfileIndicator(
+        _sample_df(),
+        bin_size=1.0,
+        use_merged_value_areas=False,
+        extend_value_area_to_chart_end=False,
+    )
+    source_start = pd.Timestamp("2025-01-01T10:00:00+00:00")
+    source_end = pd.Timestamp("2025-01-01T10:30:00+00:00")
+    indicator._profiles = [
+        _profile(
+            start=source_start.isoformat(),
+            end=source_end.isoformat(),
+            val=99.0,
+            vah=101.0,
+            poc=100.0,
+        )
+    ]
+
+    payload = indicator.build_runtime_signal_payload(
+        indicator_id="ind-1",
+        params={
+            "use_merged_value_areas": False,
+            "extend_value_area_to_chart_end": False,
+        },
+        symbol="ES",
+        chart_timeframe="1h",
+    )
+
+    profile = payload["profiles"][0]
+
+    assert profile["source_start"] == int(source_start.timestamp())
+    assert profile["source_end"] == int(source_end.timestamp())
+    assert profile["start"] == int(pd.Timestamp("2025-01-01T10:00:00+00:00").timestamp())
+    assert profile["end"] == int(pd.Timestamp("2025-01-01T11:00:00+00:00").timestamp())
+    assert profile["formed_at"] == int(source_end.timestamp())
+    assert profile["known_at"] == int(pd.Timestamp("2025-01-01T11:00:00+00:00").timestamp())
+    assert payload["profile_boundary_semantics"] == "strategy_timeframe_projection"
