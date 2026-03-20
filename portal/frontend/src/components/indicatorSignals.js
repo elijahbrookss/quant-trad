@@ -18,28 +18,32 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     if (!color) return ov;
 
     const price_lines = Array.isArray(ov.payload.price_lines)
-      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color } : pl))
+      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color: pl.color || color } : pl))
       : ov.payload.price_lines;
 
     const markers = Array.isArray(ov.payload.markers)
-      ? ov.payload.markers.map(m => (m ? { ...m, color } : m))
+      ? ov.payload.markers.map(m => (m ? { ...m, color: m.color || color } : m))
       : ov.payload.markers;
 
     const boxes = Array.isArray(ov.payload.boxes)
       ? ov.payload.boxes.map(b => {
           if (!b) return b;
-          return { ...b, color: hexToRgba(color, 0.1), border: { color: hexToRgba(color, 0.7), width: 1 } };
+          return {
+            ...b,
+            color: b.color || hexToRgba(color, 0.1),
+            border: b.border || { color: hexToRgba(color, 0.7), width: 1 },
+          };
         })
       : ov.payload.boxes;
 
     const tintHex = hexToRgba(color, 0.7);
 
     const segments = Array.isArray(ov.payload.segments)
-      ? ov.payload.segments.map(s => (s ? { ...s, color: tintHex } : s))
+      ? ov.payload.segments.map(s => (s ? { ...s, color: s.color || tintHex } : s))
       : ov.payload.segments;
 
     const polylines = Array.isArray(ov.payload.polylines)
-      ? ov.payload.polylines.map(l => (l ? { ...l, color: tintHex } : l))
+      ? ov.payload.polylines.map(l => (l ? { ...l, color: l.color || tintHex } : l))
       : ov.payload.polylines;
 
     return {
