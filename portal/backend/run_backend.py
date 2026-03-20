@@ -84,17 +84,15 @@ def main() -> int:
 
     host = _SETTINGS.backend.host
     port = _SETTINGS.backend.port
-    quantlab_workers = _SETTINGS.workers.quantlab.processes
-    stats_workers = _SETTINGS.workers.stats.processes
+    indicator_workers = _SETTINGS.workers.indicators.processes
     node = socket.gethostname()
 
     logger.info(
-        "backend_supervisor_starting | node=%s api=%s:%s quantlab_workers=%s stats_workers=%s",
+        "backend_supervisor_starting | node=%s api=%s:%s indicator_workers=%s",
         node,
         host,
         str(port),
-        quantlab_workers,
-        stats_workers,
+        indicator_workers,
     )
 
     processes: List[ManagedProcess] = []
@@ -110,26 +108,14 @@ def main() -> int:
     ]
     processes.append(_spawn_process("api", api_cmd))
 
-    for idx in range(quantlab_workers):
+    for idx in range(indicator_workers):
         processes.append(
             _spawn_process(
-                f"quantlab-worker-{idx}",
-                [sys.executable, "-m", "portal.backend.workers.quantlab_worker"],
+                f"indicator-worker-{idx}",
+                [sys.executable, "-m", "portal.backend.workers.indicator_worker"],
                 env_overrides={
-                    "QT_WORKERS_QUANTLAB_INDEX": str(idx),
-                    "QT_WORKERS_QUANTLAB_TOTAL": str(quantlab_workers),
-                },
-            )
-        )
-
-    for idx in range(stats_workers):
-        processes.append(
-            _spawn_process(
-                f"stats-worker-{idx}",
-                [sys.executable, "-m", "portal.backend.workers.stats_worker"],
-                env_overrides={
-                    "QT_WORKERS_STATS_INDEX": str(idx),
-                    "QT_WORKERS_STATS_TOTAL": str(stats_workers),
+                    "QT_WORKERS_INDICATORS_INDEX": str(idx),
+                    "QT_WORKERS_INDICATORS_TOTAL": str(indicator_workers),
                 },
             )
         )

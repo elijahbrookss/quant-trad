@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import pytest
+
 pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
     SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
 )
-from portal.backend.workers import quantlab_worker
+from portal.backend.workers import indicator_worker
 
 
 def test_worker_process_signals_rejects_non_engine_runtime_path(monkeypatch) -> None:
     monkeypatch.setattr(
-        quantlab_worker,
+        indicator_worker,
         "generate_signals_for_instance",
         lambda **kwargs: {"signals": [], "runtime_path": "legacy"},
     )
 
     with pytest.raises(RuntimeError, match="runtime_path_mismatch"):
-        quantlab_worker._process_signals(
+        indicator_worker._process_signals(
             {
                 "inst_id": "ind-1",
                 "start": "2026-02-01T00:00:00Z",
@@ -34,12 +35,12 @@ def test_worker_process_signals_rejects_non_engine_runtime_path(monkeypatch) -> 
 
 def test_worker_process_signals_accepts_engine_runtime_path(monkeypatch) -> None:
     monkeypatch.setattr(
-        quantlab_worker,
+        indicator_worker,
         "generate_signals_for_instance",
         lambda **kwargs: {"signals": [], "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT},
     )
 
-    payload = quantlab_worker._process_signals(
+    payload = indicator_worker._process_signals(
         {
             "inst_id": "ind-1",
             "start": "2026-02-01T00:00:00Z",

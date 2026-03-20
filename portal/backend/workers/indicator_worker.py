@@ -18,9 +18,10 @@ from portal.backend.service.async_jobs import (
     fail_job,
     wait_for_database_ready,
 )
-from portal.backend.service.indicators.async_dispatch import JOB_TYPE_SIGNALS
+from portal.backend.service.indicators.async_dispatch import JOB_TYPE_OVERLAYS, JOB_TYPE_SIGNALS
 from portal.backend.service.indicators.indicator_service.api import (
     generate_signals_for_instance,
+    overlays_for_instance,
 )
 from portal.backend.service.indicators.indicator_service.context import IndicatorServiceContext
 from portal.backend.service.indicators.indicator_service.runtime_contract import (
@@ -31,7 +32,8 @@ from portal.backend.service.indicators.indicator_service.runtime_contract import
 logger = logging.getLogger(__name__)
 _STOP = False
 _SETTINGS = get_settings()
-_QUANTLAB_WORKER_SETTINGS = _SETTINGS.workers.quantlab
+_INDICATOR_WORKER_SETTINGS = _SETTINGS.workers.indicators
+_SUPPORTED_JOB_TYPES = [JOB_TYPE_OVERLAYS, JOB_TYPE_SIGNALS]
 
 
 def _configure_logging() -> None:
@@ -45,15 +47,15 @@ def _configure_logging() -> None:
 def _on_signal(signum: int, _frame: Any) -> None:
     global _STOP
     _STOP = True
-    logger.info("quantlab_worker_shutdown_signal | signum=%s", signum)
+    logger.info("indicator_worker_shutdown_signal | signum=%s", signum)
 
 
 def _worker_identity() -> tuple[str, int, int]:
     host = socket.gethostname()
     pid = os.getpid()
-    worker_id = f"quantlab:{host}:{pid}"
-    index = _QUANTLAB_WORKER_SETTINGS.index
-    total = _QUANTLAB_WORKER_SETTINGS.total
+    worker_id = f"indicator:{host}:{pid}"
+    index = _INDICATOR_WORKER_SETTINGS.index
+    total = _INDICATOR_WORKER_SETTINGS.total
     return worker_id, index, total
 
 
@@ -71,10 +73,27 @@ def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
     )
     assert_engine_signal_runtime_path(
         response,
-        context="quantlab_worker_signal_runtime_path_mismatch",
+        context="indicator_worker_signal_runtime_path_mismatch",
         indicator_id=str(payload["inst_id"]),
     )
     return response
+
+
+def _process_overlays(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -> Dict[str, Any]:
+    return overlays_for_instance(
+        inst_id=str(payload["inst_id"]),
+        start=str(payload["start"]),
+        end=str(payload["end"]),
+        interval=str(payload["interval"]),
+        symbol=payload.get("symbol"),
+        datasource=payload.get("datasource"),
+        exchange=payload.get("exchange"),
+        instrument_id=payload.get("instrument_id"),
+        overlay_options={"visibility_epoch": payload.get("visibility_epoch")}
+        if payload.get("visibility_epoch") is not None
+        else None,
+        ctx=ctx,
+    )
 
 
 def main() -> int:
@@ -85,23 +104,24 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     worker_id, partition_index, partition_total = _worker_identity()
-    idle_sleep = _QUANTLAB_WORKER_SETTINGS.idle_sleep_seconds
-    db_wait_timeout = _QUANTLAB_WORKER_SETTINGS.db_wait_timeout_seconds
+    idle_sleep = _INDICATOR_WORKER_SETTINGS.idle_sleep_seconds
+    db_wait_timeout = _INDICATOR_WORKER_SETTINGS.db_wait_timeout_seconds
 
     if not wait_for_database_ready(timeout_seconds=db_wait_timeout, poll_interval_seconds=0.5):
         logger.error(
-            "quantlab_worker_db_timeout | worker_id=%s timeout_seconds=%s",
+            "indicator_worker_db_timeout | worker_id=%s timeout_seconds=%s",
             worker_id,
             db_wait_timeout,
         )
         return 2
 
-    indicator_ctx = IndicatorServiceContext.for_quantlab_worker(cache_scope_id=worker_id)
+    indicator_ctx = IndicatorServiceContext.for_indicator_worker(cache_scope_id=worker_id)
     logger.info(
-        "quantlab_worker_ready | worker_id=%s partition_index=%s partition_total=%s | cache_owner=%s | cache_scope_id=%s",
+        "indicator_worker_ready | worker_id=%s partition_index=%s partition_total=%s job_types=%s | cache_owner=%s | cache_scope_id=%s",
         worker_id,
         partition_index,
         partition_total,
+        ",".join(_SUPPORTED_JOB_TYPES),
         indicator_ctx.cache_owner,
         indicator_ctx.cache_scope_id,
     )
@@ -110,12 +130,12 @@ def main() -> int:
         try:
             job = claim_next_job(
                 worker_id=worker_id,
-                job_types=[JOB_TYPE_SIGNALS],
+                job_types=_SUPPORTED_JOB_TYPES,
                 partition_index=partition_index,
                 partition_total=partition_total,
             )
         except RuntimeError as exc:
-            logger.warning("quantlab_worker_claim_retry | worker_id=%s error=%s", worker_id, exc)
+            logger.warning("indicator_worker_claim_retry | worker_id=%s error=%s", worker_id, exc)
             time.sleep(max(0.05, idle_sleep))
             continue
         if job is None:
@@ -124,32 +144,47 @@ def main() -> int:
 
         started = time.monotonic()
         logger.info(
-            "quantlab_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s symbol=%s interval=%s start=%s end=%s datasource=%s exchange=%s",
+            "indicator_worker_job_started | worker_id=%s job_id=%s job_type=%s indicator_id=%s instrument_id=%s symbol=%s interval=%s timeframe_seconds=%s start=%s end=%s datasource=%s exchange=%s",
             worker_id,
             job.id,
             job.job_type,
             job.payload.get("inst_id"),
+            job.payload.get("instrument_id"),
             job.payload.get("symbol"),
             job.payload.get("interval"),
+            job.payload.get("timeframe_seconds"),
             job.payload.get("start"),
             job.payload.get("end"),
             job.payload.get("datasource"),
             job.payload.get("exchange"),
         )
         try:
-            if job.job_type == JOB_TYPE_SIGNALS:
+            if job.job_type == JOB_TYPE_OVERLAYS:
+                result = _process_overlays(job.payload, ctx=indicator_ctx)
+            elif job.job_type == JOB_TYPE_SIGNALS:
                 result = _process_signals(job.payload, ctx=indicator_ctx)
             else:
                 raise RuntimeError(f"unknown_job_type: {job.job_type}")
-            payload_obj = result.get("payload") if isinstance(result, dict) else None
             complete_job(job.id, result=result if isinstance(result, dict) else {"result": result})
+            signals_count = (
+                len(result.get("signals"))
+                if isinstance(result, dict) and isinstance(result.get("signals"), list)
+                else None
+            )
+            overlays_count = (
+                len(result.get("overlays"))
+                if isinstance(result, dict) and isinstance(result.get("overlays"), list)
+                else None
+            )
             logger.info(
-                "quantlab_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s payload_keys=%s",
+                "indicator_worker_job_succeeded | worker_id=%s job_id=%s job_type=%s duration_ms=%s overlays=%s signals=%s runtime_path=%s",
                 worker_id,
                 job.id,
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
-                list(payload_obj.keys()) if isinstance(payload_obj, dict) else [],
+                overlays_count,
+                signals_count,
+                result.get("runtime_path") if isinstance(result, dict) else None,
             )
         except Exception as exc:
             fail_job(
@@ -158,14 +193,14 @@ def main() -> int:
                 retry_delay_seconds=0.5,
             )
             logger.exception(
-                "quantlab_worker_job_failed | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
+                "indicator_worker_job_failed | worker_id=%s job_id=%s job_type=%s duration_ms=%s",
                 worker_id,
                 job.id,
                 job.job_type,
                 int((time.monotonic() - started) * 1000),
             )
 
-    logger.info("quantlab_worker_stopped | worker_id=%s", worker_id)
+    logger.info("indicator_worker_stopped | worker_id=%s", worker_id)
     return 0
 
 

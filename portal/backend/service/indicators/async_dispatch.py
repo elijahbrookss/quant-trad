@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 JOB_TYPE_SIGNALS = "quantlab_signals"
+JOB_TYPE_OVERLAYS = "quantlab_overlays"
 
 
 _SETTINGS = get_settings().async_jobs
@@ -98,6 +99,38 @@ def enqueue_signal_job(
     return job_id
 
 
+def enqueue_overlay_job(
+    *,
+    inst_id: str,
+    start: str,
+    end: str,
+    interval: str,
+    symbol: Optional[str],
+    datasource: Optional[str],
+    exchange: Optional[str],
+    instrument_id: Optional[str],
+    visibility_epoch: Optional[int],
+) -> str:
+    payload: Dict[str, Any] = {
+        "inst_id": inst_id,
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "symbol": symbol,
+        "datasource": datasource,
+        "exchange": exchange,
+        "instrument_id": instrument_id,
+        "visibility_epoch": visibility_epoch,
+    }
+    job_id = enqueue_job(
+        job_type=JOB_TYPE_OVERLAYS,
+        payload=payload,
+        partition_key=_series_partition_key(payload),
+        max_attempts=2,
+    )
+    return job_id
+
+
 async def wait_for_job(
     job_id: str,
     *,
@@ -125,7 +158,9 @@ __all__ = [
     "AsyncJobFailedError",
     "AsyncJobNotFoundError",
     "AsyncJobTimeoutError",
+    "JOB_TYPE_OVERLAYS",
     "JOB_TYPE_SIGNALS",
+    "enqueue_overlay_job",
     "enqueue_signal_job",
     "wait_for_job",
 ]
