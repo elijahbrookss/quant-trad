@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Sequence
 
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from ..dependency_bindings import validate_dependency_bindings
+from ..output_prefs import normalize_output_prefs
 from .context import IndicatorServiceContext, _context
 from .utils import (
     build_meta_from_record,
@@ -32,6 +33,7 @@ class IndicatorInstanceCreator:
         params: Dict[str, Any],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
+        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         definition = self._resolve_type(type_str)
         params_copy = dict(params or {})
@@ -45,11 +47,16 @@ class IndicatorInstanceCreator:
             bindings=dependencies,
             ctx=self._ctx,
         )
+        resolved_output_prefs = normalize_output_prefs(
+            manifest=definition.MANIFEST,
+            output_prefs=output_prefs,
+        )
         meta = {
             "id": str(uuid.uuid4()),
             "type": type_str,
             "params": resolved_params,
             "dependencies": resolved_dependencies,
+            "output_prefs": resolved_output_prefs,
             "enabled": True,
             "name": name or type_str.replace("_", " ").title(),
             "color": normalize_color(color),
@@ -84,6 +91,7 @@ class IndicatorInstanceUpdater:
         params: Dict[str, Any],
         name: Optional[str],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
@@ -110,9 +118,14 @@ class IndicatorInstanceUpdater:
             ctx=self._ctx,
             indicator_id=inst_id,
         )
+        resolved_output_prefs = normalize_output_prefs(
+            manifest=definition.MANIFEST,
+            output_prefs=output_prefs,
+        )
 
         params_unchanged = dict(meta.get("params") or {}) == resolved_params
         dependencies_unchanged = list(meta.get("dependencies") or []) == resolved_dependencies
+        output_prefs_unchanged = dict(meta.get("output_prefs") or {}) == resolved_output_prefs
         name_unchanged = (name or meta.get("name")) == meta.get("name")
         color_unchanged = (
             not color_provided
@@ -123,6 +136,7 @@ class IndicatorInstanceUpdater:
         if (
             params_unchanged
             and dependencies_unchanged
+            and output_prefs_unchanged
             and name_unchanged
             and color_unchanged
             and datasource_unchanged
@@ -135,6 +149,7 @@ class IndicatorInstanceUpdater:
         meta_payload = dict(meta)
         meta_payload["params"] = resolved_params
         meta_payload["dependencies"] = resolved_dependencies
+        meta_payload["output_prefs"] = resolved_output_prefs
         meta_payload["name"] = name or meta.get("name") or type_str.replace("_", " ").title()
         if color_provided:
             meta_payload["color"] = normalize_color(color)

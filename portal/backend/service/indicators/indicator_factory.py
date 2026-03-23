@@ -12,12 +12,12 @@ from data_providers.utils.ohlcv import interval_to_timedelta
 
 from indicators.definition_contract import definition_supports_compute, definition_supports_runtime
 from indicators.manifest import (
-    manifest_output_catalog,
     manifest_overlay_catalog,
     manifest_runtime_input_specs,
     serialize_indicator_manifest,
 )
 from indicators.registry import INDICATOR_MAP, get_indicator_definition, get_indicator_manifest
+from .output_prefs import typed_outputs_with_prefs
 
 from ..providers.data_provider_resolver import DataProviderResolver, default_resolver
 
@@ -93,7 +93,12 @@ class IndicatorFactory:
             except Exception:
                 return meta
             meta["manifest"] = serialize_indicator_manifest(manifest)
-            meta["typed_outputs"] = manifest_output_catalog(manifest)
+            typed_outputs, output_prefs = typed_outputs_with_prefs(
+                manifest=manifest,
+                output_prefs=meta.get("output_prefs"),
+            )
+            meta["typed_outputs"] = typed_outputs
+            meta["output_prefs"] = output_prefs
             meta["overlay_outputs"] = manifest_overlay_catalog(manifest)
             meta["runtime_supported"] = definition_supports_runtime(definition)
             meta["compute_supported"] = definition_supports_compute(definition)

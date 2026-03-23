@@ -14,6 +14,7 @@ from portal.backend.service.indicators.persistence_payload import (
     merge_indicator_payload,
     split_indicator_payload,
 )
+from portal.backend.service.indicators.output_prefs import typed_outputs_with_prefs
 
 
 def _ctx_with_records(records):
@@ -69,7 +70,7 @@ def test_indicator_storage_round_trips_dependencies_outside_public_params() -> N
         ],
     )
 
-    params, dependencies = split_indicator_payload(stored)
+    params, dependencies, output_prefs = split_indicator_payload(stored)
 
     assert params == {"days_back": 180}
     assert dependencies == [
@@ -79,6 +80,46 @@ def test_indicator_storage_round_trips_dependencies_outside_public_params() -> N
             "output_name": "candle_stats",
         }
     ]
+    assert output_prefs is None
+
+
+def test_indicator_storage_round_trips_signal_output_prefs() -> None:
+    stored = merge_indicator_payload(
+        {"days_back": 180},
+        [],
+        output_prefs={
+            "balance_breakout": {"enabled": False},
+            "ignored": {"enabled": True},
+        },
+    )
+
+    params, dependencies, output_prefs = split_indicator_payload(stored)
+
+    assert params == {"days_back": 180}
+    assert dependencies == []
+    assert output_prefs == {
+        "balance_breakout": {"enabled": False},
+        "ignored": {"enabled": True},
+    }
+
+
+def test_typed_outputs_with_prefs_marks_only_signal_outputs() -> None:
+    manifest = get_indicator_manifest("market_profile")
+
+    typed_outputs, normalized = typed_outputs_with_prefs(
+        manifest=manifest,
+        output_prefs={
+            "balance_breakout": {"enabled": False},
+            "not_real": {"enabled": False},
+        },
+    )
+
+    by_name = {entry["name"]: entry for entry in typed_outputs}
+
+    assert normalized == {"balance_breakout": {"enabled": False}}
+    assert by_name["balance_breakout"]["enabled"] is False
+    assert by_name["value_area_metrics"]["type"] == "metric"
+    assert "enabled" not in by_name["value_area_metrics"]
 
 
 def test_delete_is_blocked_when_other_indicators_depend_on_target() -> None:
