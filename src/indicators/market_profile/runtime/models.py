@@ -19,6 +19,7 @@ class MarketProfileBarState:
     val: float
     vah: float
     poc: float
+    precision: int
 
 
 __all__ = ["MarketProfileBarState"]

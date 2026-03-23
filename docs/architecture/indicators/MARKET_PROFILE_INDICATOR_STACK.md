@@ -67,6 +67,7 @@ Rules:
 - `apply_bar()` resolves which profiles are known on the current bar and updates current indicator state only,
 - known-at profile resolution is incremental: once a non-overlapping profile breaks a merge chain, earlier merged clusters are closed and must not be reopened by later profiles,
 - `overlay_snapshot()` materializes the current value-area overlay from that current state when a consumer asks for it,
+- `balance_breakout` signal events carry a generic `metadata.reference` contract pointing at the canonical referenced level (`VAH` or `VAL`) plus additive context such as active value-area bounds and trigger price,
 - strategies consume typed outputs only,
 - overlay consumers consume canonical overlay payloads only,
 - runtime consumers do not reconstruct value areas from hidden engine state.

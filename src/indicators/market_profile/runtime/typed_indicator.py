@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -15,6 +16,8 @@ from ..compute.internal.runtime_profiles import IncrementalRuntimeProfileResolve
 from ..manifest import MANIFEST
 from .outputs import build_market_profile_outputs, build_not_ready_outputs
 from .state import derive_market_profile_bar_state
+
+log = logging.getLogger(__name__)
 
 
 register_overlay_type(
@@ -110,6 +113,30 @@ class TypedMarketProfileIndicator(Indicator):
         }
         self._overlay_ready = True
         self._outputs = build_market_profile_outputs(bar_state)
+        breakout_output = self._outputs.get("balance_breakout")
+        breakout_events = breakout_output.value.get("events") if breakout_output is not None else None
+        if isinstance(breakout_events, list):
+            for event in breakout_events:
+                if not isinstance(event, Mapping):
+                    continue
+                metadata = event.get("metadata")
+                metadata_map = metadata if isinstance(metadata, Mapping) else {}
+                reference = metadata_map.get("reference")
+                reference_map = reference if isinstance(reference, Mapping) else {}
+                log.info(
+                    "event=market_profile_balance_breakout_emitted indicator_id=%s symbol=%s bar_time=%s direction=%s profile_key=%s level_name=%s level_price=%s trigger_price=%s active_vah=%s active_val=%s active_poc=%s",
+                    self._indicator_id,
+                    self._symbol or None,
+                    bar.time.isoformat(),
+                    event.get("direction"),
+                    reference_map.get("key") or bar_state.active_profile_key,
+                    reference_map.get("label") or reference_map.get("name"),
+                    reference_map.get("price"),
+                    metadata_map.get("trigger_price"),
+                    bar_state.vah,
+                    bar_state.val,
+                    bar_state.poc,
+                )
 
     def _reset_outputs(self, bar_time: datetime) -> None:
         self._current_effective_profiles = []

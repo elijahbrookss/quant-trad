@@ -43,6 +43,7 @@ def derive_market_profile_bar_state(
         val=val,
         vah=vah,
         poc=poc,
+        precision=int(getattr(active_profile, "precision", 2) or 2),
     )
 
 

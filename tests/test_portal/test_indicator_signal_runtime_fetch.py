@@ -233,6 +233,7 @@ def test_signal_executor_enriches_contract_fields_from_replay_context(monkeypatc
     assert overlay["overlay_name"] == "balance_breakout"
     assert overlay["payload"]["bubbles"][0]["time"] == 1769904000
     assert overlay["payload"]["bubbles"][0]["price"] == 100.5
+    assert overlay["payload"]["bubbles"][0]["meta"] == "Balance Breakout"
 
 
 def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypatch) -> None:
@@ -256,6 +257,20 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
                                     "known_at": "2026-02-01T00:00:00Z",
                                     "metadata": {
                                         "trace_id": "trace-1",
+                                        "trigger_price": 100.5,
+                                        "reference": {
+                                            "kind": "price_level",
+                                            "family": "value_area",
+                                            "name": "VAH",
+                                            "label": "VAH",
+                                            "price": 101.25,
+                                            "precision": 2,
+                                            "source": "market_profile",
+                                            "key": "profile-1",
+                                            "context": {
+                                                "profile_key": "profile-1",
+                                            },
+                                        },
                                     },
                                 }
                             ]
@@ -311,7 +326,38 @@ def test_signal_executor_preserves_event_contract_metadata_when_present(monkeypa
     assert "rule_id" not in event
     assert event["metadata"] == {
         "trace_id": "trace-1",
+        "trigger_price": 100.5,
+        "reference": {
+            "kind": "price_level",
+            "family": "value_area",
+            "name": "VAH",
+            "label": "VAH",
+            "price": 101.25,
+            "precision": 2,
+            "source": "market_profile",
+            "key": "profile-1",
+            "context": {
+                "profile_key": "profile-1",
+            },
+        },
         "datasource": "ALPACA",
         "exchange": "cme",
     }
-    assert payload["overlays"][0]["payload"]["bubbles"][0]["label"] == "Balance Breakout Long"
+    bubble = payload["overlays"][0]["payload"]["bubbles"][0]
+    assert bubble["label"] == "Balance Breakout Long"
+    assert bubble["meta"] == "VAH 101.25"
+    assert bubble["detail"] == "Trigger 100.50"
+    assert bubble["trigger_price"] == 100.5
+    assert bubble["reference"] == {
+        "kind": "price_level",
+        "family": "value_area",
+        "name": "VAH",
+        "label": "VAH",
+        "price": 101.25,
+        "precision": 2,
+        "source": "market_profile",
+        "key": "profile-1",
+        "context": {
+            "profile_key": "profile-1",
+        },
+    }

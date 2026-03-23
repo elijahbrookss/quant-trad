@@ -35,6 +35,9 @@ class BubblePayload(TypedDict, total=False):
     label: str
     detail: Optional[str]
     meta: Optional[str]
+    known_at: Optional[int | float | str]
+    trigger_price: Optional[float]
+    reference: Optional[Mapping[str, Any]]
     bias: Optional[str]
     direction: Optional[str]
     accentColor: Optional[str]

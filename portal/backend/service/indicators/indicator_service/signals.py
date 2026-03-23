@@ -11,7 +11,7 @@ from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.signal_output import (
     assert_signal_output_event,
     assert_signal_output_has_no_execution_fields,
-    signal_output_known_at_epoch,
+    signal_output_reference,
 )
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import DataContext, IndicatorExecutionContext
@@ -42,6 +42,69 @@ def _signal_bubble_direction(event_direction: Any) -> str:
     if normalized in {"long", "buy", "bull", "bullish", "up"}:
         return "below"
     return "above"
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric == numeric and numeric not in {float("inf"), float("-inf")} else None
+
+
+def _format_price(value: Any, *, precision: Optional[int] = None) -> Optional[str]:
+    numeric = _finite_float(value)
+    if numeric is None:
+        return None
+    digits = int(precision) if precision is not None and int(precision) >= 0 else 2
+    return f"{numeric:.{digits}f}"
+
+
+def _signal_reference_meta(event: Mapping[str, Any]) -> Optional[str]:
+    reference = signal_output_reference(event)
+    if not reference:
+        return None
+    label = str(
+        reference.get("label")
+        or reference.get("name")
+        or reference.get("family")
+        or reference.get("kind")
+        or ""
+    ).strip()
+    precision = reference.get("precision")
+    try:
+        resolved_precision = int(precision) if precision is not None else None
+    except (TypeError, ValueError):
+        resolved_precision = None
+    price_text = _format_price(reference.get("price"), precision=resolved_precision)
+    if label and price_text:
+        return f"{label} {price_text}"
+    if label:
+        return label
+    return price_text
+
+
+def _signal_reference_detail(event: Mapping[str, Any]) -> Optional[str]:
+    metadata = event.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    reference = signal_output_reference(event)
+    precision = reference.get("precision") if reference else None
+    try:
+        resolved_precision = int(precision) if precision is not None else None
+    except (TypeError, ValueError):
+        resolved_precision = None
+    trigger_price_text = _format_price(metadata.get("trigger_price"), precision=resolved_precision)
+    if trigger_price_text:
+        return f"Trigger {trigger_price_text}"
+    return None
+
+
+def _signal_reference_payload(event: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    reference = signal_output_reference(event)
+    if not reference:
+        return None
+    return dict(reference)
 
 
 def _build_candles(df: pd.DataFrame) -> List[Candle]:
@@ -389,16 +452,25 @@ class IndicatorSignalExecutor:
                 "time": bubble_time,
                 "price": bubble_price,
                 "label": _humanize_signal_label(event_key),
-                "meta": str(output_name_labels.get(output_name) or output_name),
+                "meta": _signal_reference_meta(event) or str(output_name_labels.get(output_name) or output_name),
                 "direction": _signal_bubble_direction(event.get("direction")),
                 "subtype": "bubble",
             }
+            detail = _signal_reference_detail(event)
+            if detail:
+                bubble["detail"] = detail
             known_at = event.get("known_at")
             if known_at is not None:
                 bubble["known_at"] = known_at
             event_direction = event.get("direction")
             if event_direction is not None:
                 bubble["bias"] = str(event_direction)
+            reference = _signal_reference_payload(event)
+            if reference:
+                bubble["reference"] = reference
+            trigger_price = _finite_float((event.get("metadata") or {}).get("trigger_price") if isinstance(event.get("metadata"), Mapping) else None)
+            if trigger_price is not None:
+                bubble["trigger_price"] = trigger_price
             bucket.append(bubble)
 
     @staticmethod

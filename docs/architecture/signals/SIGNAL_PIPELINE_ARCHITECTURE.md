@@ -100,6 +100,23 @@ Outputs:
 - Strategy preview: per-instrument `trigger_rows` and canonical `overlays`.
 - Bot runtime: queued `StrategySignal` objects and runtime events (`SIGNAL_EMITTED`, `DECISION_*`, `ENTRY_FILLED`, `EXIT_FILLED`, wallet projections).
 
+Canonical signal-output event item:
+- required `key`,
+- optional `direction`, `pattern_id`, `known_at`, `confidence`,
+- optional `metadata`,
+- `metadata.reference` is the generic level/reference contract for UI/debug consumers when a signal refers to a concrete price level.
+
+`metadata.reference` contract:
+- `kind`: semantic class such as `price_level`,
+- optional `family`: indicator/domain grouping such as `value_area` or `pivot`,
+- optional `name` / `label`: level display identity such as `VAH`, `VAL`, `R1`,
+- optional `price`: referenced price level,
+- optional `precision`: display precision for the referenced price,
+- optional `source`: producer/source identifier,
+- optional `key`: stable reference identity,
+- optional `formed_at` / `known_at`,
+- optional `context`: additive indicator-specific fields.
+
 Side effects:
 - QuantLab writes async job rows and worker status transitions.
 - QuantLab signal display uses standard overlay-contract artifacts; no client-only signal render path exists.
@@ -115,8 +132,10 @@ QuantLab indicator signals:
   - a recent succeeded result within the QuantLab result-cache TTL.
 - Shared indicator workers claim signal and stats jobs from the same async queue pool by `created_at` (with partition slot), run `generate_signals_for_instance` for signal jobs, and enforce `runtime_path == engine_snapshot_v1`.
 - `IndicatorSignalExecutor` loads candles through the canonical candle service using the same instrument-aware `DataContext` semantics as runtime graph construction and strategy preview.
-- QuantLab signal adaptation does not publish a separate top-level signal contract module. It flattens occurrences from canonical indicator `signal` outputs into research preview rows, derives `event_time`, `timeframe_seconds`, and canonical `series_key` from walk-forward execution context, requires `instrument_id`, and preserves signal-output fields like `event_key`, optional `pattern_id`, and `known_at`.
+- QuantLab signal adaptation does not publish a separate top-level signal contract module. It flattens occurrences from canonical indicator `signal` outputs into research preview rows, derives `event_time`, `timeframe_seconds`, and canonical `series_key` from walk-forward execution context, requires `instrument_id`, and preserves signal-output fields like `event_key`, optional `pattern_id`, `known_at`, and additive `metadata.reference`.
 - QuantLab signal responses emit standard overlay entries in the same response path (`type=indicator_signal`, `source=signal`) so chart rendering stays on the shared overlay contract rather than a separate client projection.
+- Indicator signal bubbles are projection-only: they render text and copied reference facts from canonical signal output metadata; the bubble is not the source of truth.
+- QuantLab signal-time overlay inspection must resolve overlays through the canonical overlay worker path at `cursor_epoch = signal.known_at || signal.event_time`; it must not infer historical overlay state from the current chart or from signal metadata alone.
 - Response returns once async job reaches `succeeded`; failed/timeout/not-found map to HTTP errors.
 
 Strategy preview signals:
@@ -184,6 +203,7 @@ Persistence boundaries:
 Non-negotiable invariants:
 - QuantLab and strategy preview indicator signals must pass `runtime_path == engine_snapshot_v1`; mismatch fails loud.
 - Indicator runtime strategy-driving signals must come from typed `signal` outputs published by the indicator execution engine.
+- If a signal refers to a concrete level, that reference must be emitted by the indicator in `metadata.reference`; consumers must not infer it from unrelated overlays or chart geometry.
 - Bot runtime can emit execution-driving signals only for current bar epoch (`signal_epoch == current_epoch`).
 - `SIGNAL_EMITTED` is the causal parent for `DECISION_*`; `DECISION_ACCEPTED` is parent for `ENTRY_FILLED`; entry/decision chain parents `EXIT_FILLED`.
 
