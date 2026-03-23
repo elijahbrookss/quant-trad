@@ -29,6 +29,7 @@ def test_signals_endpoint_rejects_non_engine_runtime_path(monkeypatch) -> None:
             "interval": "1h",
             "symbol": "ES",
             "datasource": "ALPACA",
+            "instrument_id": "instrument-1",
         },
     )
     assert response.status_code == 500
@@ -38,10 +39,20 @@ def test_signals_endpoint_rejects_non_engine_runtime_path(monkeypatch) -> None:
 def test_signals_endpoint_accepts_engine_runtime_path(monkeypatch) -> None:
     from portal.backend.controller import indicators as controller
 
-    monkeypatch.setattr(controller, "enqueue_signal_job", lambda **kwargs: "job-1")
+    captured = {}
+
+    def _fake_enqueue_signal_job(**kwargs):
+        captured.update(kwargs)
+        return "job-1"
+
+    monkeypatch.setattr(controller, "enqueue_signal_job", _fake_enqueue_signal_job)
 
     async def _fake_wait_for_job(job_id: str):
-        return {"signals": [], "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT}
+        return {
+            "signals": [],
+            "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
+            "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+        }
 
     monkeypatch.setattr(controller, "wait_for_job", _fake_wait_for_job)
 
@@ -54,8 +65,11 @@ def test_signals_endpoint_accepts_engine_runtime_path(monkeypatch) -> None:
             "interval": "1h",
             "symbol": "ES",
             "datasource": "ALPACA",
+            "instrument_id": "instrument-1",
         },
     )
     assert response.status_code == 200
     body = response.json()
     assert body.get("runtime_path") == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
+    assert body.get("overlays") == [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]
+    assert captured["instrument_id"] == "instrument-1"

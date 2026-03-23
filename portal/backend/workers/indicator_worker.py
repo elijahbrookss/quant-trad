@@ -9,8 +9,7 @@ from typing import Any, Dict
 
 from core.settings import get_settings
 import indicators  # noqa: F401
-import signals  # noqa: F401
-from signals.overlays.builtins import ensure_builtin_overlays_registered
+from overlays.builtins import ensure_builtin_overlays_registered
 
 from portal.backend.service.async_jobs import (
     claim_next_job,
@@ -68,6 +67,7 @@ def _process_signals(payload: Dict[str, Any], *, ctx: IndicatorServiceContext) -
         symbol=payload.get("symbol"),
         datasource=payload.get("datasource"),
         exchange=payload.get("exchange"),
+        instrument_id=payload.get("instrument_id"),
         config=payload.get("config") if isinstance(payload.get("config"), dict) else None,
         ctx=ctx,
     )

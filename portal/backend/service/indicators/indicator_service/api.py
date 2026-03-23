@@ -12,7 +12,7 @@ from indicators.config import IndicatorExecutionContext
 from indicators.definition_contract import definition_supports_compute, definition_supports_runtime
 from indicators.manifest import serialize_indicator_manifest
 from indicators.registry import get_indicator_definition, get_indicator_manifest
-from signals.overlays.transformers import apply_overlay_transform
+from overlays.transformers import apply_overlay_transform
 from ..dependency_bindings import assert_indicator_delete_allowed
 from .context import IndicatorServiceContext, _context
 from .instances import IndicatorInstanceCreator, IndicatorInstanceUpdater
@@ -144,11 +144,12 @@ def create_instance(
     params: Dict[str, Any],
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
     color: Optional[str] = None,
+    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     creator = IndicatorInstanceCreator(ctx)
-    return creator.create(type_str, name, params, dependencies, color)
+    return creator.create(type_str, name, params, dependencies, color, output_prefs)
 
 
 def update_instance(
@@ -157,6 +158,7 @@ def update_instance(
     params: Dict[str, Any],
     name: Optional[str],
     dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     color: Optional[str] = None,
     color_provided: bool = False,
@@ -169,6 +171,7 @@ def update_instance(
         params,
         name,
         dependencies,
+        output_prefs,
         color=color,
         color_provided=color_provided,
     )
@@ -392,6 +395,7 @@ def generate_signals_for_instance(
     symbol: Optional[str] = None,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    instrument_id: str = "",
     config: Optional[Dict[str, Any]] = None,
     *,
     ctx: IndicatorServiceContext = _context,
@@ -405,6 +409,7 @@ def generate_signals_for_instance(
         symbol=symbol,
         datasource=datasource,
         exchange=exchange,
+        instrument_id=instrument_id,
         config=config,
     )
     assert_engine_signal_runtime_path(
@@ -461,8 +466,9 @@ class IndicatorService:
         params: Dict[str, Any],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
+        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        return create_instance(type_str, name, params, dependencies, color, ctx=self._ctx)
+        return create_instance(type_str, name, params, dependencies, color, output_prefs, ctx=self._ctx)
 
     def update_instance(
         self,
@@ -471,6 +477,7 @@ class IndicatorService:
         params: Dict[str, Any],
         name: Optional[str],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
+        output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
@@ -481,6 +488,7 @@ class IndicatorService:
             params,
             name,
             dependencies,
+            output_prefs,
             color=color,
             color_provided=color_provided,
             ctx=self._ctx,
@@ -534,6 +542,7 @@ class IndicatorService:
         symbol: Optional[str] = None,
         datasource: Optional[str] = None,
         exchange: Optional[str] = None,
+        instrument_id: str = "",
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return generate_signals_for_instance(
@@ -544,6 +553,7 @@ class IndicatorService:
             symbol,
             datasource,
             exchange,
+            instrument_id,
             config,
             ctx=self._ctx,
         )

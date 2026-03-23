@@ -10,8 +10,13 @@ from portal.backend.service.indicators.async_dispatch import (
     AsyncJobFailedError,
     AsyncJobNotFoundError,
     AsyncJobTimeoutError,
+    JOB_TYPE_OVERLAYS,
+    JOB_TYPE_SIGNALS,
     enqueue_overlay_job,
     enqueue_signal_job,
+    quantlab_partition_key,
+    quantlab_request_fingerprint,
+    reuse_quantlab_job,
     wait_for_job,
 )
 from portal.backend.service.indicators.indicator_service import (
@@ -147,6 +152,7 @@ class IndicatorInstanceIn(BaseModel):
     name: Optional[str] = None
     params: Dict[str, Any]
     dependencies: List[Dict[str, Any]] = Field(default_factory=list)
+    output_prefs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     color: Optional[str] = None
 
 class IndicatorInstanceOut(BaseModel):
@@ -159,6 +165,7 @@ class IndicatorInstanceOut(BaseModel):
     color: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    output_prefs: Optional[Dict[str, Dict[str, Any]]] = None
     typed_outputs: Optional[List[Dict[str, Any]]] = None
     overlay_outputs: Optional[List[Dict[str, Any]]] = None
     runtime_supported: Optional[bool] = None
@@ -180,6 +187,7 @@ class SignalRequest(BaseModel):
     symbol: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
+    instrument_id: str
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -231,6 +239,7 @@ async def create(body: IndicatorInstanceIn):
             dict(body.params),
             dependencies=list(body.dependencies or []),
             color=body.color,
+            output_prefs=dict(body.output_prefs or {}),
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -247,6 +256,7 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
             dict(body.params),
             body.name,
             dependencies=list(body.dependencies or []),
+            output_prefs=dict(body.output_prefs or {}),
             color=body.color,
             color_provided=color_provided,
         )
@@ -344,8 +354,11 @@ async def overlays(inst_id: str, req: OverlayRequest):
         req.visibility_epoch,
     )
     try:
-        job_id = enqueue_overlay_job(
-            inst_id=inst_id,
+        meta = get_instance_meta(inst_id)
+        request_fingerprint = quantlab_request_fingerprint(
+            job_type=JOB_TYPE_OVERLAYS,
+            indicator_id=inst_id,
+            indicator_updated_at=str(meta.get("updated_at") or ""),
             start=req.start,
             end=req.end,
             interval=req.interval,
@@ -355,10 +368,60 @@ async def overlays(inst_id: str, req: OverlayRequest):
             instrument_id=req.instrument_id,
             visibility_epoch=req.visibility_epoch,
         )
+        request_payload = {
+            "inst_id": inst_id,
+            "start": req.start,
+            "end": req.end,
+            "interval": req.interval,
+            "symbol": req.symbol,
+            "datasource": req.datasource,
+            "exchange": req.exchange,
+            "instrument_id": req.instrument_id,
+            "visibility_epoch": req.visibility_epoch,
+        }
+        partition_key = quantlab_partition_key(request_payload)
+        reusable = reuse_quantlab_job(
+            job_type=JOB_TYPE_OVERLAYS,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if reusable and reusable.get("status") == "succeeded":
+            payload = reusable.get("result")
+            logger.info(
+                "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=true start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+                inst_id,
+                (perf_counter() - t0) * 1000.0,
+                len(payload.get("overlays")) if isinstance(payload, dict) and isinstance(payload.get("overlays"), list) else None,
+                payload.get("runtime_path") if isinstance(payload, dict) else None,
+                req.start,
+                req.end,
+                req.interval,
+                req.symbol,
+                req.datasource,
+                req.exchange,
+                req.instrument_id,
+            )
+            return payload
+
+        if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
+            job_id = str(reusable["id"])
+        else:
+            job_id = enqueue_overlay_job(
+                inst_id=inst_id,
+                start=req.start,
+                end=req.end,
+                interval=req.interval,
+                symbol=req.symbol,
+                datasource=req.datasource,
+                exchange=req.exchange,
+                instrument_id=req.instrument_id,
+                visibility_epoch=req.visibility_epoch,
+                request_fingerprint=request_fingerprint,
+            )
         payload = await wait_for_job(job_id)
         overlays = payload.get("overlays") if isinstance(payload, dict) else None
         logger.info(
-            "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+            "event=indicator_overlay_request_finished indicator_id=%s status_code=200 duration_ms=%.3f overlays=%s runtime_path=%s cache_hit=false start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
             inst_id,
             (perf_counter() - t0) * 1000.0,
             len(overlays) if isinstance(overlays, list) else None,
@@ -495,24 +558,77 @@ async def overlays(inst_id: str, req: OverlayRequest):
 @router.post("/{inst_id}/signals")
 async def signals(inst_id: str, req: SignalRequest):
     logger.info(
-        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s",
+        "event=signals_endpoint_called inst_id=%s req_datasource=%s req_exchange=%s req_symbol=%s req_interval=%s req_instrument_id=%s",
         inst_id,
         req.datasource,
         req.exchange,
         req.symbol,
         req.interval,
+        req.instrument_id,
     )
     try:
-        job_id = enqueue_signal_job(
-            inst_id=inst_id,
+        meta = get_instance_meta(inst_id)
+        request_fingerprint = quantlab_request_fingerprint(
+            job_type=JOB_TYPE_SIGNALS,
+            indicator_id=inst_id,
+            indicator_updated_at=str(meta.get("updated_at") or ""),
             start=req.start,
             end=req.end,
             interval=req.interval,
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
             config=req.config,
         )
+        request_payload = {
+            "inst_id": inst_id,
+            "start": req.start,
+            "end": req.end,
+            "interval": req.interval,
+            "symbol": req.symbol,
+            "datasource": req.datasource,
+            "exchange": req.exchange,
+            "instrument_id": req.instrument_id,
+            "config": dict(req.config or {}),
+        }
+        partition_key = quantlab_partition_key(request_payload)
+        reusable = reuse_quantlab_job(
+            job_type=JOB_TYPE_SIGNALS,
+            partition_key=partition_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if reusable and reusable.get("status") == "succeeded":
+            payload = reusable.get("result")
+            if isinstance(payload, dict):
+                assert_engine_signal_runtime_path(
+                    payload,
+                    context="signals_endpoint_runtime_path_mismatch",
+                    indicator_id=inst_id,
+                )
+            logger.info(
+                "event=signals_endpoint_complete inst_id=%s cache_hit=true runtime_path=%s signals=%s",
+                inst_id,
+                payload.get("runtime_path") if isinstance(payload, dict) else None,
+                len(payload.get("signals")) if isinstance(payload, dict) and isinstance(payload.get("signals"), list) else None,
+            )
+            return payload
+
+        if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
+            job_id = str(reusable["id"])
+        else:
+            job_id = enqueue_signal_job(
+                inst_id=inst_id,
+                start=req.start,
+                end=req.end,
+                interval=req.interval,
+                symbol=req.symbol,
+                datasource=req.datasource,
+                exchange=req.exchange,
+                instrument_id=req.instrument_id,
+                config=req.config,
+                request_fingerprint=request_fingerprint,
+            )
         payload = await wait_for_job(job_id)
         if isinstance(payload, dict):
             assert_engine_signal_runtime_path(
@@ -520,6 +636,12 @@ async def signals(inst_id: str, req: SignalRequest):
                 context="signals_endpoint_runtime_path_mismatch",
                 indicator_id=inst_id,
             )
+        logger.info(
+            "event=signals_endpoint_complete inst_id=%s cache_hit=false runtime_path=%s signals=%s",
+            inst_id,
+            payload.get("runtime_path") if isinstance(payload, dict) else None,
+            len(payload.get("signals")) if isinstance(payload, dict) and isinstance(payload.get("signals"), list) else None,
+        )
         return payload
     except AsyncJobNotFoundError:
         _raise_indicator_http_error(
@@ -533,6 +655,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except AsyncJobTimeoutError as e:
         _raise_indicator_http_error(
@@ -546,6 +669,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except AsyncJobFailedError as e:
         _raise_failed_job(
@@ -558,6 +682,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except KeyError:
         _raise_indicator_http_error(
@@ -571,6 +696,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except LookupError as e:
         _raise_indicator_http_error(
@@ -584,6 +710,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except ValueError as e:
         _raise_indicator_http_error(
@@ -597,6 +724,7 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except RuntimeError as e:
         _raise_indicator_http_error(
@@ -610,7 +738,18 @@ async def signals(inst_id: str, req: SignalRequest):
             symbol=req.symbol,
             datasource=req.datasource,
             exchange=req.exchange,
+            instrument_id=req.instrument_id,
         )
     except Exception:
-        logger.exception("Unexpected signal generation error")
+        logger.exception(
+            "event=indicator_signal_request_failed indicator_id=%s status_code=500 detail=unexpected_error start=%s end=%s interval=%s symbol=%s datasource=%s exchange=%s instrument_id=%s",
+            inst_id,
+            req.start,
+            req.end,
+            req.interval,
+            req.symbol,
+            req.datasource,
+            req.exchange,
+            req.instrument_id,
+        )
         raise HTTPException(500, "Unexpected error generating signals")

@@ -49,6 +49,7 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
+    ("QT_ASYNC_JOBS_QUANTLAB_RESULT_CACHE_TTL_SECONDS", ("async_jobs", "quantlab_result_cache_ttl_seconds")),
     ("QT_WORKERS_INDICATORS_PROCESSES", ("workers", "indicators", "processes")),
     ("QT_WORKERS_INDICATORS_INDEX", ("workers", "indicators", "index")),
     ("QT_WORKERS_INDICATORS_TOTAL", ("workers", "indicators", "total")),
@@ -369,6 +370,7 @@ class AsyncJobSettings:
     running_timeout_seconds: float
     quantlab_job_wait_timeout_seconds: float
     quantlab_job_poll_interval_seconds: float
+    quantlab_result_cache_ttl_seconds: float
 
 
 @dataclass(frozen=True)
@@ -639,6 +641,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             quantlab_job_poll_interval_seconds=_coerce_float(
                 async_jobs_payload.get("quantlab_job_poll_interval_seconds"), 0.2, minimum=0.05
+            ),
+            quantlab_result_cache_ttl_seconds=_coerce_float(
+                async_jobs_payload.get("quantlab_result_cache_ttl_seconds"), 300.0, minimum=0.0
             ),
         ),
         workers=WorkersSettings(

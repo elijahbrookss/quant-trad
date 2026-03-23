@@ -39,6 +39,7 @@ async_jobs:
   running_timeout_seconds: 1800
   quantlab_job_wait_timeout_seconds: 180
   quantlab_job_poll_interval_seconds: 0.2
+  quantlab_result_cache_ttl_seconds: 300
 
 workers:
   indicators:

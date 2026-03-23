@@ -27,6 +27,7 @@ def test_worker_process_signals_rejects_non_engine_runtime_path(monkeypatch) -> 
                 "symbol": "ES",
                 "datasource": "ALPACA",
                 "exchange": None,
+                "instrument_id": "instrument-1",
                 "config": {},
             },
             ctx=None,  # unused by monkeypatched generator
@@ -34,10 +35,20 @@ def test_worker_process_signals_rejects_non_engine_runtime_path(monkeypatch) -> 
 
 
 def test_worker_process_signals_accepts_engine_runtime_path(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_generate_signals_for_instance(**kwargs):
+        captured.update(kwargs)
+        return {
+            "signals": [],
+            "overlays": [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}],
+            "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT,
+        }
+
     monkeypatch.setattr(
         indicator_worker,
         "generate_signals_for_instance",
-        lambda **kwargs: {"signals": [], "runtime_path": SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT},
+        _fake_generate_signals_for_instance,
     )
 
     payload = indicator_worker._process_signals(
@@ -49,8 +60,11 @@ def test_worker_process_signals_accepts_engine_runtime_path(monkeypatch) -> None
             "symbol": "ES",
             "datasource": "ALPACA",
             "exchange": None,
+            "instrument_id": "instrument-1",
             "config": {},
         },
         ctx=None,  # unused by monkeypatched generator
     )
     assert payload.get("runtime_path") == SIGNAL_RUNTIME_PATH_ENGINE_SNAPSHOT
+    assert payload.get("overlays") == [{"type": "indicator_signal", "source": "signal", "payload": {"bubbles": []}}]
+    assert captured["instrument_id"] == "instrument-1"
