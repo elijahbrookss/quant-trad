@@ -14,7 +14,6 @@ code_paths:
   - src/indicators/market_profile/compute
   - src/indicators/market_profile/runtime
   - src/indicators/market_profile/overlays
-  - src/signals/engine/market_profile
 ---
 # Market Profile Indicator Stack
 
@@ -51,7 +50,7 @@ Code path:
 
 Responsibilities:
 - maintain sequential `apply_bar -> snapshot -> overlay_snapshot` semantics,
-- consume immutable Market Profile source facts prepared before replay,
+- consume immutable Market Profile source facts prepared before walk-forward execution,
 - publish manifest-declared typed outputs:
   - `value_area_metrics`
   - `value_location`
@@ -63,8 +62,10 @@ Responsibilities:
 
 Rules:
 - runtime outputs derive from canonical profile state,
-- runtime construction may prepare profile source facts before replay, but it must not prebuild final chart-history overlays,
+- runtime construction may prepare raw profile source facts before walk-forward execution, but merged profile clusters must still form on the walk-forward timeline as new profiles become known,
+- runtime construction must not prebuild final chart-history overlays,
 - `apply_bar()` resolves which profiles are known on the current bar and updates current indicator state only,
+- known-at profile resolution is incremental: once a non-overlapping profile breaks a merge chain, earlier merged clusters are closed and must not be reopened by later profiles,
 - `overlay_snapshot()` materializes the current value-area overlay from that current state when a consumer asks for it,
 - strategies consume typed outputs only,
 - overlay consumers consume canonical overlay payloads only,
@@ -94,18 +95,17 @@ The Market Profile stack normalizes time at the boundary before profile computat
 
 This prevents tz-naive/tz-aware drift and keeps merge/visibility decisions deterministic.
 
-## Source facts vs replay
+## Source facts vs walk-forward execution
 
-Market Profile is allowed one explicit pre-replay seam because it requires alternate source data (`30m`) and profile-domain preprocessing.
+Market Profile is allowed one explicit pre-walk-forward seam because it requires alternate source data (`30m`) and profile-domain preprocessing.
 
-Allowed before replay:
+Allowed before walk-forward execution:
 - fetch `30m` source candles,
 - compute source session profiles,
-- apply merge policy if configured,
 - project profile boundaries to the strategy timeframe,
 - assign `formed_at` and strategy-timeframe `known_at`.
 
-Not allowed before replay:
+Not allowed before walk-forward execution:
 - prebuilding final rendered box histories,
 - bypassing the runtime timeline with a chart-only overlay payload,
 - returning a parallel overlay artifact that QuantLab/BotLens use instead of runtime state.

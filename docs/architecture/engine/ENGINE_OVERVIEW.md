@@ -97,7 +97,7 @@ Current storage layout:
 
 - Inputs: candle streams, strategy rules, runtime configuration, user run controls.
 - Dependencies: runtime contract, execution contract, indicator authoring contract.
-- Outputs: indicator snapshots, signals/overlays, strategy intents, runtime events, playback artifacts.
+- Outputs: indicator typed outputs, canonical overlays, strategy intents, runtime events, playback artifacts.
 - Side effects: persistence writes, execution adapter calls, telemetry/network publishing.
 
 ## 4) Core components and data flow
@@ -130,7 +130,7 @@ Persistence boundaries:
 
 - Strict ownership boundaries reduce flexibility for ad-hoc shortcuts.
 - Single-path semantics can require contract evolution before adding features.
-- Deterministic replay constraints increase implementation discipline cost.
+- Deterministic walk-forward execution constraints increase implementation discipline cost.
 
 ## 8) Risks accepted
 
@@ -203,20 +203,20 @@ Why it matters:
 
 ---
 
-## 2) Signal Runtime (Indicator Signal Evaluation)
+## 2) Signal Output Evaluation
 
 Purpose:
-- Reads indicator snapshots and emits indicator signals.
+- Reads canonical indicator `signal` outputs and evaluates strategy conditions.
 
 Important note:
-- This is not the trade execution engine.
-- It is signal evaluation built on top of indicator state snapshots.
+- This is not a separate top-level signals subsystem.
+- It is signal evaluation built on top of indicator runtime outputs.
 
 Current status:
 - Runtime per-bar snapshot signal emission is the canonical path.
 
 Direction:
-- Do not introduce batch/research signal generation paths for platform behavior.
+- Do not introduce a separate platform signal contract or module for behavior already owned by indicator outputs.
 
 ---
 
@@ -280,9 +280,9 @@ Canonical flow:
 1. Candle arrives
 2. Indicator State Engine updates
 3. Snapshot is produced
-4. Signal Runtime reads snapshot
+4. Strategy/QuantLab read canonical `signal` outputs
 5. Overlay Runtime reads snapshot
-6. Strategy Evaluation consumes signals
+6. Strategy Evaluation consumes typed outputs
 7. Bot Runtime executes decisions
 8. Playback visualizes the same timeline
 
@@ -290,8 +290,8 @@ Canonical flow:
 
 ## Where Confusion Usually Happens
 
-1. "Signal engine" vs "execution engine"
-- Signal runtime evaluates indicator signals.
+1. "Signal evaluation" vs "execution engine"
+- Strategy/runtime evaluates indicator `signal` outputs.
 - Bot runtime executes trades.
 
 2. Multiple paths for similar outputs
@@ -307,7 +307,6 @@ Canonical flow:
 For each indicator:
 
 - `src/indicators/<name>/domain/`
-- `src/indicators/<name>/signals/`
 - `src/indicators/<name>/overlays/`
 - `src/indicators/<name>/indicator.py`
 - `src/indicators/<name>/plugin.py`
@@ -316,7 +315,7 @@ Benefits:
 - One home per indicator
 - Easier maintenance
 - Cleaner onboarding
-- Better consistency across signals/overlays/runtime
+- Better consistency across signal outputs/overlays/runtime
 
 ---
 
@@ -324,13 +323,13 @@ Benefits:
 
 1. Indicator runtime behavior lives inside indicator modules.
 2. Plugin files are thin wiring only (manifest + engine factory), not business logic.
-3. Signals and overlays for an indicator come from the same indicator-local runtime code.
+3. Signal outputs and overlays for an indicator come from the same indicator-local runtime code.
 4. Strategy composes indicators; indicators do not own cross-indicator strategy composition.
 5. No parallel fallback path for the same artifact type.
 
 ### No-Fallback Policy
 
-For any artifact class (signal, overlay, projection):
+For any artifact class (signal output, overlay, projection):
 - one canonical runtime path
 - one canonical contract
 - fail loud when required payload fields are missing

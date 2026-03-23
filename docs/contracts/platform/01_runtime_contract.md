@@ -24,8 +24,8 @@ Rules:
 - outputs are the only strategy-visible indicator interface,
 - overlays are not strategy inputs,
 - indicator overlays represent the full current visual state for the bar,
-- indicators may prepare immutable source facts before replay when those facts are true source inputs rather than replayed chart history,
-- indicators must not prebuild full chart-history overlays before replay starts,
+- indicators may prepare immutable source facts before walk-forward execution when those facts are true source inputs rather than reconstructed chart history,
+- indicators must not prebuild full chart-history overlays before walk-forward execution starts,
 - `apply_bar()` advances indicator-owned state only; it must not rebuild full-history overlay payloads on every bar,
 - `overlay_snapshot()` is a read of current indicator state and may be requested selectively by consumers,
 - runtime transport may diff those full overlay snapshots and stream only deltas downstream,
@@ -39,7 +39,7 @@ Rules:
 
 Caching is valid only when it preserves runtime semantics:
 - key includes semantic inputs
-- outputs match non-cached replay
+- outputs match non-cached walk-forward execution
 - output readiness and overlay visibility semantics are unchanged
 
 ## Single-Path Rule

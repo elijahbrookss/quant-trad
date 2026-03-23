@@ -8,7 +8,10 @@ tags:
   - signals
   - pipeline
 code_paths:
-  - src/signals
+  - src/engines/indicator_engine
+  - src/strategies
+  - src/overlays
+  - portal/backend/service/indicators/indicator_service
   - portal/backend/service/strategies
 ---
 # Signal Pipeline Architecture
@@ -56,7 +59,7 @@ flowchart TD
     B --> C[indicator_worker _process_signals]
     C --> D[generate_signals_for_instance]
     D --> E[IndicatorSignalExecutor execute]
-    E --> F[signals + runtime_path=engine_snapshot_v1]
+    E --> F[signal output previews + runtime_path=engine_snapshot_v1]
 
     G[Strategy Preview POST /strategies/{id}/preview] --> H[evaluate_strategy_preview]
     H --> I[IndicatorExecutionEngine.step]
@@ -73,16 +76,16 @@ flowchart TD
 
 ## Mentor Notes (Non-Normative)
 
-- QuantLab still has its own indicator signal executor for indicator-level research payloads.
+- QuantLab still has its own indicator signal executor for research requests.
 - Strategy preview and bot runtime now share the same typed-output indicator engine and typed rule evaluator.
-- A trigger in preview is a row derived from typed signal outputs; a signal in bot runtime is a `StrategySignal(epoch, direction)` used for execution.
+- A trigger in preview is a row derived from typed `signal` outputs; a signal in bot runtime is a `StrategySignal(epoch, direction)` used for execution.
 - Wallet movement events are downstream of decision/execution events, not emitted directly by indicator signals.
 - If this conflicts with Strict contract, Strict contract wins.
 
 ## 3) Inputs, outputs, and side effects
 
 Inputs:
-- QuantLab: `POST /api/indicators/{inst_id}/signals` with `start/end/interval/symbol/datasource/exchange/config`.
+- QuantLab: `POST /api/indicators/{inst_id}/signals` with `start/end/interval/config` and required `instrument_id` (plus optional display-oriented `symbol/datasource/exchange` context).
 - Strategy preview: `POST /api/strategies/{strategy_id}/preview` with `start/end/interval/instrument_ids/config`.
 - Bot runtime: each candle in the runtime loop after `start()`.
 
@@ -93,27 +96,34 @@ Dependencies:
 - runtime event and wallet gateway contracts for bot execution.
 
 Outputs:
-- QuantLab: indicator payload with `signals`, `runtime_path`, `runtime_invariants`.
+- QuantLab: indicator payload with flattened signal preview rows derived from canonical `signal` outputs, standard chart `overlays`, `runtime_path`, and `runtime_invariants`.
 - Strategy preview: per-instrument `trigger_rows` and canonical `overlays`.
 - Bot runtime: queued `StrategySignal` objects and runtime events (`SIGNAL_EMITTED`, `DECISION_*`, `ENTRY_FILLED`, `EXIT_FILLED`, wallet projections).
 
 Side effects:
 - QuantLab writes async job rows and worker status transitions.
+- QuantLab signal display uses standard overlay-contract artifacts; no client-only signal render path exists.
 - Strategy preview replays the typed indicator engine over the requested candle window and emits no separate overlay projection path.
 - Bot runtime persists runtime events and updates wallet projections from emitted events.
 
 ## 4) Core components and data flow
 
 QuantLab indicator signals:
-- Controller enqueues `JOB_TYPE_SIGNALS` with partition key `datasource|exchange|symbol|interval|inst_id`.
+- Controller enqueues `JOB_TYPE_SIGNALS` with partition key `datasource|exchange|symbol|instrument_id|interval|inst_id`.
+- Before enqueue, the controller computes an exact request fingerprint from indicator revision plus market window/config and reuses either:
+  - an in-flight matching async job, or
+  - a recent succeeded result within the QuantLab result-cache TTL.
 - Shared indicator workers claim signal and stats jobs from the same async queue pool by `created_at` (with partition slot), run `generate_signals_for_instance` for signal jobs, and enforce `runtime_path == engine_snapshot_v1`.
+- `IndicatorSignalExecutor` loads candles through the canonical candle service using the same instrument-aware `DataContext` semantics as runtime graph construction and strategy preview.
+- QuantLab signal adaptation does not publish a separate top-level signal contract module. It flattens occurrences from canonical indicator `signal` outputs into research preview rows, derives `event_time`, `timeframe_seconds`, and canonical `series_key` from walk-forward execution context, requires `instrument_id`, and preserves signal-output fields like `event_key`, optional `pattern_id`, and `known_at`.
+- QuantLab signal responses emit standard overlay entries in the same response path (`type=indicator_signal`, `source=signal`) so chart rendering stays on the shared overlay contract rather than a separate client projection.
 - Response returns once async job reaches `succeeded`; failed/timeout/not-found map to HTTP errors.
 
 Strategy preview signals:
 - `run_strategy_preview` delegates to `evaluate_strategy_preview`.
-- For each instrument, preview builds runtime indicators, replays candles through `IndicatorExecutionEngine`, and evaluates rules with `evaluate_typed_rules`.
+- For each instrument, preview builds runtime indicators, executes candles sequentially through `IndicatorExecutionEngine`, and evaluates rules with `evaluate_typed_rules`.
 - Preview returns two downstream-facing products from the same engine timeline:
-  - `trigger_rows` for rule inspection,
+  - `trigger_rows` for rule inspection with `strategy_rule_id`,
   - `overlays` emitted directly from indicator `overlay_snapshot()` payloads, including the canonical `strategy_signal` overlay for preview markers.
 - Preview does not fetch indicator overlays through a separate overlay service path.
 
@@ -129,7 +139,7 @@ Bot runtime signals:
 Ordering keys used:
 - QuantLab job processing order key: `AsyncJobRecord.created_at` within partition slot.
 - Strategy preview signal ordering key: terminal signal epoch selected by rule evaluator.
-- Strategy preview overlay ordering key: final frame emitted by deterministic bar replay.
+- Strategy preview overlay ordering key: final frame emitted by deterministic walk-forward execution over the requested bars.
 - Bot runtime evaluation/consumption order key: candle `epoch` (`int(candle.time.timestamp())`) with `last_evaluated_epoch` and `last_consumed_epoch`.
 - Bot runtime event stream order key: per-run monotonic `seq`.
 
@@ -142,8 +152,9 @@ Authoritative state:
 
 Derived state:
 - QuantLab and preview signal payloads from indicator snapshots.
-- Preview trigger rows and overlays from the same typed indicator replay.
+- Preview trigger rows and overlays from the same typed indicator walk-forward execution.
 - Bot runtime pending signal queue, decision trace, wallet projections.
+- QuantLab request/result reuse is derived from async job rows keyed by exact request fingerprint; it is not a separate candle cache and does not affect bot runtime fetch semantics.
 
 Persistence boundaries:
 - Persisted: async jobs, strategy/rule/filter records, bot runtime events, run artifact payloads.
@@ -157,7 +168,7 @@ Persistence boundaries:
 
 ## 7) Tradeoffs
 
-- QuantLab still uses its own indicator-level signal executor, while strategy preview and bot runtime now share the typed-output path.
+- QuantLab still uses its own research executor, while strategy preview and bot runtime share the typed-output path.
 - QuantLab async jobs improve worker isolation, but add queue latency and at-least-once processing behavior.
 - Strategy preview now mirrors bot runtime rule semantics instead of applying a separate filter gate layer.
 - Bot runtime signal emission depends on declared typed outputs and typed rule nodes, which is strict by design and fails fast on malformed output references or type mismatches.
@@ -166,8 +177,7 @@ Persistence boundaries:
 
 - Current bot runtime rule source is `series.meta["rules"]`; if missing, runtime emits no strategy signals.
 - `Strategy.to_dict()` currently omits `rules`, while series metadata is built from `strategy.to_dict()`. This creates a shipped risk of empty rule evaluation in bot runtime.
-- QuantLab async retries can re-run a job; no payload-level dedupe key is enforced in the signal executor.
-- QuantLab remains on an older indicator signal path than strategy preview and bot runtime.
+- QuantLab still has a distinct research endpoint, but it now derives from the same indicator output contract instead of a separate `src/signals` package.
 
 ## 9) Strict contract
 
@@ -184,6 +194,7 @@ Failure behavior:
 
 Retry and idempotency semantics:
 - QuantLab signal jobs are at-least-once (enqueue with `max_attempts=2`, retry state, stale-running reclaim). Exactly-once is not guaranteed.
+- QuantLab dedupes exact concurrent/recent requests at the async-job boundary by request fingerprint, but duplicate execution is still possible after TTL expiry or retry races.
 - Strategy preview request execution has no internal retry contract.
 - Bot runtime signal consumption is idempotent within a run by `last_consumed_epoch`; event persistence is append-only with monotonic `seq`, but cross-process exactly-once is not guaranteed.
 

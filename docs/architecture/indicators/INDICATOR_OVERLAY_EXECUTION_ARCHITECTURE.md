@@ -29,7 +29,7 @@ This document defines the execution boundary for indicator overlays.
 In scope:
 - QuantLab overlay request execution,
 - async job routing for overlays,
-- runtime replay behavior for overlay collection,
+- runtime walk-forward behavior for overlay collection,
 - dependency-closed indicator graph execution for overlays.
 
 Out of scope:
@@ -45,19 +45,21 @@ flowchart LR
     B --> C[indicator worker claims job]
     C --> D[build dependency-closed runtime graph]
     D --> E[fetch canonical candle window]
-    E --> F[replay IndicatorExecutionEngine over bars]
-    F --> G[collect overlays only on terminal replay step]
+    E --> F[execute IndicatorExecutionEngine sequentially over bars]
+    F --> G[collect overlays only on terminal walk-forward step]
     G --> H[return canonical overlay payload]
 ```
 
 ## Execution rules
 
 - Overlay requests execute through the shared indicator async job queue.
-- Overlay requests do not run CPU-heavy replay on the backend request thread or event loop.
+- Overlay requests do not run CPU-heavy walk-forward execution on the backend request thread or event loop.
+- Before enqueue, QuantLab computes an exact request fingerprint from indicator revision plus window/context and reuses either a matching in-flight job or a recent succeeded result within the QuantLab result-cache TTL.
 - Workers execute the same dependency-closed runtime graph used by other runtime surfaces.
-- Indicators advance state on every replay bar through `apply_bar()`.
-- Overlay collection is requested only on the terminal replay step when the consumer needs only the final current overlay state.
+- Indicators advance state on every walk-forward bar through `apply_bar()`.
+- Overlay collection is requested only on the terminal walk-forward step when the consumer needs only the final current overlay state.
 - Consumers that need full overlay history must assemble that history from the runtime timeline; indicators must not rebuild chart history inside `apply_bar()`.
+- This request/result reuse is scoped to QuantLab and lives at the async-job boundary; it does not add a shared candle cache at `candle_service`, so bot runtime fetch semantics remain unchanged.
 
 ## Dependency semantics
 
@@ -83,7 +85,7 @@ High-signal timing fields:
 - runtime graph build duration
 - source fetch duration
 - candle build duration
-- engine replay duration
+- engine walk-forward duration
 - overlay collection duration
 
 These logs must include indicator id/type plus symbol/timeframe context when available.
@@ -91,6 +93,7 @@ These logs must include indicator id/type plus symbol/timeframe context when ava
 ## Notes
 
 - This architecture removes API-loop blocking for overlay execution, but it does not yet add explicit cancellation or stale-result invalidation at the job layer.
-- Correctness still comes from deterministic runtime replay and dependency-closed execution, not from frontend-side reconstruction.
+- Correctness still comes from deterministic walk-forward execution and dependency-closed execution, not from frontend-side reconstruction.
 - QuantLab may trigger multiple overlay jobs together, but frontend publication is per-indicator:
   each completed indicator replaces only its own overlay slice, and a slower indicator must not block already-finished indicator overlays from appearing.
+- QuantLab chart visibility is chart-local state. Hiding an indicator prunes its published overlay/signal slices from the chart without mutating the persisted indicator `enabled` flag or forcing a backend recompute; walk-forward overlay execution resumes for that indicator only when it becomes visible again or when the user explicitly recomputes.

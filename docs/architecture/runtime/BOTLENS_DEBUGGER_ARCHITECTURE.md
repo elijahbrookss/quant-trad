@@ -193,7 +193,7 @@ A series identity must be stable across:
 The frontend may maintain UI-local selection keys, but it must not redefine canonical series identity.
 
 Legacy merged BotLens rows are not part of this contract.
-Canonical BotLens identity requires both `symbol` and `timeframe`, serialized as `SYMBOL|timeframe`.
+Canonical BotLens identity requires both `instrument_id` and `timeframe`, serialized as `instrument_id|timeframe`.
 Rows such as `series_key=bot` are unsupported and must not be surfaced or normalized into the live/replay series catalog.
 
 ### Candle Identity

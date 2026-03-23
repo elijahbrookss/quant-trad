@@ -214,7 +214,7 @@ Important semantics:
 - the latest BotLens row is a materialized cache, not the execution source of truth,
 - BotLens bootstrap can read the materialized rows,
 - but live execution never reads DB-backed BotLens projections back into the worker timeline.
-- BotLens persistence only accepts canonical per-series keys of the form `SYMBOL|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
+- BotLens persistence only accepts canonical per-series keys of the form `instrument_id|timeframe`; legacy merged `series_key=bot` rows are not part of the runtime contract.
 - report/deepdive consumers read `portal_bot_run_events` directly and project what they need from `runtime.*`, `series_bar.*`, and `botlens.*`.
 
 ## 8.1) Indicator-owned analytics and report capture

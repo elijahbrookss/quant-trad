@@ -92,7 +92,7 @@ Runtime assembly:
 - Overlay-type registration is explicit during runtime setup; runtime import no longer performs hidden registry side effects.
 
 Preparation boundary:
-- `RuntimeSetupPrepareMixin` owns strategy loading, series construction, indicator engine initialization, warmup replay, overlay bootstrap, and building `SeriesExecutionState`.
+- `RuntimeSetupPrepareMixin` owns strategy loading, series construction, indicator engine initialization, warmup walk-forward execution, overlay bootstrap, and building `SeriesExecutionState`.
 - Runtime preparation depends on injected collaborators for strategy loading, market data fetch, indicator metadata, and persistence.
 
 Execution boundary:
@@ -127,7 +127,7 @@ Preparation does the following:
 2. Build `StrategySeries` instances through `src/engines/bot_runtime/strategy/series_builder.py`.
 3. Build `SeriesExecutionState` for each series.
 4. Build runtime indicator instances and initialize `IndicatorExecutionEngine`.
-5. Replay warmup candles through the canonical indicator contract:
+5. Execute warmup candles sequentially through the canonical indicator contract:
    - `apply_bar(bar, dependency_outputs)`
    - `snapshot()`
    - `overlay_snapshot()`

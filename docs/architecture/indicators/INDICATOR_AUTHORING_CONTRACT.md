@@ -41,7 +41,7 @@ In scope:
 - parameter authoring for create/edit flows,
 - typed output authoring,
 - optional indicator-owned overlay authoring,
-- runtime execution rules shared by bot runtime and any future replay/preview consumers.
+- runtime execution rules shared by bot runtime and any future walk-forward/preview consumers.
 
 Out of scope:
 - overlay transport/delta logic,
@@ -200,7 +200,7 @@ For dependent indicators, runtime graph construction must close over explicit up
 - and signal preview
 must all build one runtime engine graph from the requested root indicators plus their bound dependencies.
 
-QuantLab overlay requests execute through the indicator worker queue rather than running replay on the backend request loop. This preserves the same runtime graph semantics while keeping heavy walk-forward execution out of the API process.
+QuantLab overlay requests execute through the indicator worker queue rather than running walk-forward execution on the backend request loop. This preserves the same runtime graph semantics while keeping heavy walk-forward execution out of the API process.
 
 Consumers may request one root indicator and return only that root indicator's overlays or signals, but execution still happens on the full dependency graph so runtime semantics remain identical across surfaces.
 
@@ -247,7 +247,7 @@ Rules:
 - `RuntimeOverlay.value` is already the canonical normalized chart payload,
 - indicators must maintain overlay state incrementally and must not rebuild history-length payloads inside `apply_bar()`,
 - `overlay_snapshot()` should be a cheap read of current indicator-owned state,
-- replay/transport consumers may choose when to request overlays; they are not required to request them on every engine step,
+- walk-forward/transport consumers may choose when to request overlays; they are not required to request them on every engine step,
 - overlay chart routing is driven by overlay metadata including `pane_key`,
 - `price` is the main candlestick pane, while auxiliary panes such as `volatility` and `oscillator` are declared once in shared pane registry infrastructure,
 - panes should group overlays by unit and semantic family, so price-unit metrics and normalized oscillators must not share a pane,
