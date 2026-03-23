@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.series_identity import canonical_series_key
 from engines.bot_runtime.runtime.event_types import SERIES_BAR_TELEMETRY
 from utils.log_context import with_log_context
 
@@ -105,7 +106,7 @@ class RuntimePersistenceMixin:
             "event_time": self._event_timestamp(event_time),
             "known_at": self._event_timestamp(event_time or candle.time),
             "payload": {
-                "series_key": f"{str(series.symbol or '').strip().upper()}|{str(series.timeframe or '').strip().lower()}",
+                "series_key": canonical_series_key(instrument_id, series.timeframe),
                 "strategy_id": str(series.strategy_id or ""),
                 "symbol": str(series.symbol or ""),
                 "timeframe": str(series.timeframe or ""),

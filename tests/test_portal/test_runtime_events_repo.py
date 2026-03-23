@@ -82,9 +82,9 @@ def test_list_bot_run_view_states_filters_noncanonical_series_keys(monkeypatch: 
     fake_db = _FakeDb(
         [[
             _FakeViewStateRow({"series_key": "bot", "seq": 1}),
-            _FakeViewStateRow({"series_key": "BTC|1M", "seq": 2}),
-            _FakeViewStateRow({"series_key": "BTC|", "seq": 3}),
-            _FakeViewStateRow({"series_key": "ETH|5m", "seq": 4}),
+            _FakeViewStateRow({"series_key": "instrument-btc|1M", "seq": 2}),
+            _FakeViewStateRow({"series_key": "instrument-btc|", "seq": 3}),
+            _FakeViewStateRow({"series_key": "instrument-eth|5m", "seq": 4}),
         ]]
     )
     monkeypatch.setattr(runtime_events, "db", fake_db)
@@ -92,6 +92,6 @@ def test_list_bot_run_view_states_filters_noncanonical_series_keys(monkeypatch: 
     rows = runtime_events.list_bot_run_view_states(bot_id="bot-1", run_id="run-1")
 
     assert rows == [
-        {"series_key": "BTC|1m", "seq": 2},
-        {"series_key": "ETH|5m", "seq": 4},
+        {"series_key": "instrument-btc|1m", "seq": 2},
+        {"series_key": "instrument-eth|5m", "seq": 4},
     ]

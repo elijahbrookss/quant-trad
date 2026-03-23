@@ -7,12 +7,12 @@ test('bootstrap initializes bounded state for selected series', () => {
   const next = botlensReducer(initialBotLensState, {
     type: 'BOOTSTRAP_SUCCESS',
     runId: 'run-1',
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     seq: 20,
   })
   assert.equal(next.phase, BOTLENS_PHASES.LIVE)
   assert.equal(next.seq, 20)
-  assert.equal(next.seriesKey, 'BTC|1m')
+  assert.equal(next.seriesKey, 'instrument-btc|1m')
 })
 
 test('history page preserves live/historical phase without owning candle state', () => {
@@ -49,9 +49,9 @@ test('re-bootstrap replaces queued/live state instead of replaying backlog', () 
   const next = botlensReducer(live, {
     type: 'BOOTSTRAP_SUCCESS',
     runId: 'run-1',
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     seq: 60,
   })
   assert.equal(next.seq, 60)
-  assert.equal(next.seriesKey, 'BTC|1m')
+  assert.equal(next.seriesKey, 'instrument-btc|1m')
 })

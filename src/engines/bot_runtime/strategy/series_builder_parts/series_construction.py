@@ -344,7 +344,7 @@ class SeriesBuilderConstructionMixin:
         # Extract risk multiplier for this instrument
         risk_multiplier = instrument_link.risk_multiplier or 1.0
 
-        # Determine time window. Backtests now seed with bounded warmup and replay forward event-by-event.
+        # Determine time window. Backtests now seed with bounded warmup and then execute walk-forward event-by-event.
         replay_start_index = 0
         window_start_iso: Optional[str] = None
         if self.run_type == "backtest":
@@ -496,7 +496,7 @@ class SeriesBuilderConstructionMixin:
         if start_ts >= end_ts:
             raise RuntimeError("backtest_start must be before backtest_end")
 
-        # Bounded seed window before replay start for indicator-state priming.
+        # Bounded seed window before walk-forward start for indicator-state priming.
         tf_delta = timeframe_duration(timeframe)
         if tf_delta is None or tf_delta.total_seconds() <= 0:
             raise RuntimeError(f"Unsupported timeframe '{timeframe}' for warmup fetch")
@@ -519,7 +519,7 @@ class SeriesBuilderConstructionMixin:
                 if candle.time <= start_ts.to_pydatetime()
             ]
         except RuntimeError:
-            # Warmup is bounded and best-effort; replay candles remain mandatory.
+            # Warmup is bounded and best-effort; walk-forward candles remain mandatory.
             warmup_candles = []
         if len(warmup_candles) > safe_warmup_bars:
             warmup_candles = warmup_candles[-safe_warmup_bars:]
@@ -538,7 +538,7 @@ class SeriesBuilderConstructionMixin:
             if candle.time >= start_ts.to_pydatetime() and candle.time <= end_ts.to_pydatetime()
         ]
         if not replay_candles:
-            raise RuntimeError(f"No replay candles found between {backtest_start_iso} and {backtest_end_iso}")
+            raise RuntimeError(f"No walk-forward candles found between {backtest_start_iso} and {backtest_end_iso}")
 
         combined = warmup_candles + replay_candles
         deduped: Dict[int, Candle] = {}

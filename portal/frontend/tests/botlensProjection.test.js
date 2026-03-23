@@ -15,11 +15,12 @@ test('buildProjectionFromWindow preserves canonical series identity and projecti
   const projection = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 20,
-    seriesKey: 'btc|1M',
+    seriesKey: 'instrument-btc|1M',
     window: {
       projection: {
         series: [
           {
+            instrument_id: 'instrument-btc',
             symbol: 'btc',
             timeframe: '1M',
             candles: [
@@ -38,8 +39,8 @@ test('buildProjectionFromWindow preserves canonical series identity and projecti
 
   assert.equal(projection.run_id, 'run-1')
   assert.equal(projection.seq, 20)
-  assert.equal(projection.series_key, 'BTC|1m')
-  assert.equal(projection.series[0].series_key, 'BTC|1m')
+  assert.equal(projection.series_key, 'instrument-btc|1m')
+  assert.equal(projection.series[0].series_key, 'instrument-btc|1m')
   assert.equal(projection.series[0].overlays[0].overlay_id, 'type:regime_overlay')
   assert.equal(projection.trades[0].trade_id, 't-1')
 })
@@ -59,11 +60,12 @@ test('history paging prepends overlapping candles without duplication', () => {
   const seeded = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 5,
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     window: {
       projection: {
         series: [
           {
+            instrument_id: 'instrument-btc',
             symbol: 'BTC',
             timeframe: '1m',
             candles: [
@@ -78,7 +80,7 @@ test('history paging prepends overlapping candles without duplication', () => {
 
   const next = applyHistoryPage({
     projection: seeded,
-    seriesKey: canonicalSeriesKey('BTC', '1m'),
+    seriesKey: canonicalSeriesKey('instrument-btc', '1m'),
     candles: [
       { time: 1767225540, open: 0, high: 0, low: 0, close: 0 },
       { time: 1767225600, open: 1.5, high: 1.5, low: 1.5, close: 1.5 },
@@ -93,11 +95,12 @@ test('applyLiveTail materializes typed series_delta payloads incrementally', () 
   const seeded = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 10,
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     window: {
       projection: {
         series: [
           {
+            instrument_id: 'instrument-btc',
             symbol: 'BTC',
             timeframe: '1m',
             candles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
@@ -115,10 +118,10 @@ test('applyLiveTail materializes typed series_delta payloads incrementally', () 
 
   const next = applyLiveTail({
     projection: seeded,
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     message: {
       runId: 'run-1',
-      seriesKey: 'BTC|1m',
+      seriesKey: 'instrument-btc|1m',
       seq: 11,
       messageType: 'series_delta',
       payload: {
@@ -126,6 +129,8 @@ test('applyLiveTail materializes typed series_delta payloads incrementally', () 
         logs: [{ message: 'delta log' }],
         decisions: [{ event: 'decision' }],
         seriesDelta: {
+          instrument_id: 'instrument-btc',
+          series_key: 'instrument-btc|1m',
           symbol: 'BTC',
           timeframe: '1m',
           candle: { time: 1767225660, open: 2, high: 2, low: 2, close: 2 },
@@ -160,18 +165,18 @@ test('live continuity check forces resync on sequence gaps', () => {
   const seeded = buildProjectionFromWindow({
     runId: 'run-1',
     seq: 10,
-    seriesKey: 'BTC|1m',
+    seriesKey: 'instrument-btc|1m',
     window: {
       projection: {
-        series: [{ symbol: 'BTC', timeframe: '1m', candles: [] }],
+        series: [{ instrument_id: 'instrument-btc', symbol: 'BTC', timeframe: '1m', candles: [] }],
       },
     },
   })
 
   const continuity = assessLiveContinuity({
     projection: seeded,
-    message: { runId: 'run-1', seriesKey: 'BTC|1m', seq: 13 },
-    seriesKey: 'BTC|1m',
+    message: { runId: 'run-1', seriesKey: 'instrument-btc|1m', seq: 13 },
+    seriesKey: 'instrument-btc|1m',
   })
 
   assert.equal(continuity.action, 'resync')
@@ -181,6 +186,6 @@ test('live continuity check forces resync on sequence gaps', () => {
 test('series identity helpers reject non-canonical legacy keys', () => {
   assert.equal(normalizeSeriesKey('bot'), '')
   assert.equal(normalizeSeriesKey('BOT|'), '')
-  assert.equal(canonicalSeriesKey('BTC', ''), '')
-  assert.equal(canonicalSeriesKey('btc', '1M'), 'BTC|1m')
+  assert.equal(canonicalSeriesKey('instrument-btc', ''), '')
+  assert.equal(canonicalSeriesKey('instrument-btc', '1M'), 'instrument-btc|1m')
 })

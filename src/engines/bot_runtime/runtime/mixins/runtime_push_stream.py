@@ -11,6 +11,7 @@ from queue import Empty, Full, Queue
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.series_identity import canonical_series_key
 from utils.log_context import with_log_context
 
 from ..core import _isoformat
@@ -298,14 +299,22 @@ class RuntimePushStreamMixin:
             candles_count: Optional[int] = None
             trades_count: Optional[int] = None
             if series is not None:
-                series_key = self._strategy_key(series)
-                cache = self._push_series_cache.setdefault(series_key, {})
+                instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
+                instrument_id = str(instrument.get("id") or "").strip()
+                public_series_key = canonical_series_key(instrument_id, series.timeframe)
+                if not public_series_key:
+                    raise RuntimeError(
+                        f"bot_runtime_push_invalid_series_identity: missing instrument_id/timeframe for strategy={series.strategy_id} symbol={series.symbol}"
+                    )
+                cache = self._push_series_cache.setdefault(public_series_key, {})
                 status = str(self.state.get("status") or "").lower()
                 series_state = self._series_state_for(series)
                 bar_index = series_state.bar_index if series_state else 0
                 candles_count = min(bar_index + 1, len(series.candles))
                 series_delta: Dict[str, Any] = {
+                    "series_key": public_series_key,
                     "strategy_id": series.strategy_id,
+                    "instrument_id": instrument_id,
                     "symbol": series.symbol,
                     "timeframe": series.timeframe,
                     "bar_index": bar_index,

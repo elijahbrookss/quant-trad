@@ -6,6 +6,7 @@ import time
 from typing import Callable, TypeVar
 
 from core.settings import get_settings
+from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
 from sqlalchemy import or_
 from sqlalchemy.exc import DBAPIError, OperationalError
 
@@ -17,15 +18,7 @@ _DB_WRITE_RETRY_ATTEMPTS = max(1, int(_DATABASE_SETTINGS.write_retry_attempts))
 
 
 def _normalize_botlens_series_key(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    symbol, separator, timeframe = text.partition("|")
-    normalized_symbol = symbol.strip().upper()
-    normalized_timeframe = timeframe.strip().lower()
-    if not separator or "|" in timeframe or not normalized_symbol or not normalized_timeframe:
-        return ""
-    return f"{normalized_symbol}|{normalized_timeframe}"
+    return normalize_public_series_key(value)
 
 
 def _is_transient_connection_error(exc: Exception) -> bool:

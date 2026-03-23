@@ -38,11 +38,12 @@ async def _noop() -> None:
     return
 
 
-def _projection(*, candle_time: int, series_key: str = "BTC|1m") -> dict:
-    symbol, timeframe = str(series_key).split("|", 1)
+def _projection(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> dict:
+    instrument_id, timeframe = str(series_key).split("|", 1)
     return {
         "series": [
             {
+                "instrument_id": instrument_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "candles": [
@@ -66,8 +67,8 @@ def _projection(*, candle_time: int, series_key: str = "BTC|1m") -> dict:
     }
 
 
-def _runtime_delta(*, candle_time: int, series_key: str = "BTC|1m") -> dict:
-    symbol, timeframe = str(series_key).split("|", 1)
+def _runtime_delta(*, candle_time: int, series_key: str = "instrument-btc|1m", symbol: str = "BTC") -> dict:
+    instrument_id, timeframe = str(series_key).split("|", 1)
     return {
         "event": "bar_closed",
         "runtime": {"status": "running", "warnings": ["runtime warning"]},
@@ -77,6 +78,7 @@ def _runtime_delta(*, candle_time: int, series_key: str = "BTC|1m") -> dict:
         "series": [
             {
                 "series_key": series_key,
+                "instrument_id": instrument_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "candle": {
@@ -105,7 +107,7 @@ def _runtime_delta(*, candle_time: int, series_key: str = "BTC|1m") -> dict:
     }
 
 
-def _window(*, seq: int, series_key: str = "BTC|1m") -> dict:
+def _window(*, seq: int, series_key: str = "instrument-btc|1m") -> dict:
     projection = _projection(candle_time=seq, series_key=series_key)
     return {
         "run_id": "run-1",
@@ -149,7 +151,7 @@ def test_process_ingest_bootstrap_persists_latest_projection(monkeypatch: pytest
                     "kind": "botlens_series_bootstrap",
                     "bot_id": "bot-1",
                     "run_id": "run-1",
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "run_seq": 1,
                     "series_seq": 1,
                     "projection": _projection(candle_time=1),
@@ -159,12 +161,12 @@ def test_process_ingest_bootstrap_persists_latest_projection(monkeypatch: pytest
             }
         )
 
-        latest = hub._latest_view_state[("bot-1", "run-1", "BTC|1m")]
+        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
         assert latest["seq"] == 1
-        assert latest["payload"]["series"][0]["series_key"] == "BTC|1m"
-        assert persisted_rows[0]["series_key"] == "BTC|1m"
+        assert latest["payload"]["series"][0]["series_key"] == "instrument-btc|1m"
+        assert persisted_rows[0]["series_key"] == "instrument-btc|1m"
         assert persisted_events[0]["event_type"] == BOTLENS_SERIES_BOOTSTRAP
-        assert persisted_events[0]["payload"]["projection"]["series"][0]["series_key"] == "BTC|1m"
+        assert persisted_events[0]["payload"]["projection"]["series"][0]["series_key"] == "instrument-btc|1m"
         assert published_updates[0]["seq"] == 1
 
     asyncio.run(scenario())
@@ -187,7 +189,7 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
 
         async with hub._lock:
             hub._run_stream_session_id["run-1"] = "session-1"
-            hub._series_viewers[("run-1", "BTC|1m")][ws] = {"last_seq": 1, "replaying": False}
+            hub._series_viewers[("run-1", "instrument-btc|1m")][ws] = {"last_seq": 1, "replaying": False}
 
         await hub._process_ingest(
             {
@@ -195,7 +197,7 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
                     "kind": "botlens_series_bootstrap",
                     "bot_id": "bot-1",
                     "run_id": "run-1",
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "run_seq": 1,
                     "series_seq": 1,
                     "projection": _projection(candle_time=1),
@@ -210,7 +212,7 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
                     "kind": "botlens_series_delta",
                     "bot_id": "bot-1",
                     "run_id": "run-1",
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "run_seq": 2,
                     "series_seq": 2,
                     "runtime_delta": _runtime_delta(candle_time=2),
@@ -220,7 +222,7 @@ def test_process_ingest_delta_materializes_projection_and_broadcasts(monkeypatch
             }
         )
 
-        latest = hub._latest_view_state[("bot-1", "run-1", "BTC|1m")]
+        latest = hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")]
         assert latest["seq"] == 2
         assert [row["time"] for row in latest["payload"]["series"][0]["candles"]] == [1, 2]
         assert latest["payload"]["series"][0]["overlays"][0]["overlay_id"] == "overlay:regime"
@@ -252,10 +254,10 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
 
         hub._publish_runtime_update = fake_publish_runtime_update  # type: ignore[method-assign]
         hub._invalidate_run_live_continuity = fake_invalidate_run_live_continuity  # type: ignore[method-assign]
-        hub._latest_view_state[("bot-1", "run-1", "BTC|1m")] = {
+        hub._latest_view_state[("bot-1", "run-1", "instrument-btc|1m")] = {
             "run_id": "run-1",
             "bot_id": "bot-1",
-            "series_key": "BTC|1m",
+            "series_key": "instrument-btc|1m",
             "seq": 2,
             "schema_version": 1,
             "payload": _projection(candle_time=2),
@@ -269,7 +271,7 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
                     "kind": "botlens_series_delta",
                     "bot_id": "bot-1",
                     "run_id": "run-1",
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "run_seq": 4,
                     "series_seq": 4,
                     "runtime_delta": _runtime_delta(candle_time=4),
@@ -284,7 +286,7 @@ def test_process_ingest_delta_invalidates_run_on_series_gap(monkeypatch: pytest.
                 "run_id": "run-1",
                 "reason": "seq_gap",
                 "details": {
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "previous_seq": 2,
                     "incoming_seq": 4,
                     "seq_gap": 1,
@@ -300,11 +302,11 @@ def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(mo
         hub = BotTelemetryHub()
         hub._ensure_workers = _noop  # type: ignore[method-assign]
         monkeypatch.setattr(stream, "get_series_window", lambda **kwargs: _window(seq=10))
-        hub._series_live_tail_ring[("run-1", "BTC|1m")].append(
+        hub._series_live_tail_ring[("run-1", "instrument-btc|1m")].append(
             {
                 "type": "botlens_live_tail",
                 "run_id": "run-1",
-                "series_key": "BTC|1m",
+                "series_key": "instrument-btc|1m",
                 "schema_version": 1,
                 "seq": 11,
                 "known_at": "2026-01-01T00:01:00Z",
@@ -317,7 +319,8 @@ def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(mo
                     "logs": [],
                     "decisions": [],
                     "series_delta": {
-                        "series_key": "BTC|1m",
+                        "series_key": "instrument-btc|1m",
+                        "instrument_id": "instrument-btc",
                         "symbol": "BTC",
                         "timeframe": "1m",
                         "candle": {"time": 11, "open": 11, "high": 11, "low": 11, "close": 11},
@@ -327,7 +330,7 @@ def test_add_series_viewer_sends_atomic_bootstrap_then_replays_buffered_delta(mo
         )
         ws = FakeWebSocket()
 
-        await hub.add_series_viewer(run_id="run-1", series_key="BTC|1m", ws=ws)
+        await hub.add_series_viewer(run_id="run-1", series_key="instrument-btc|1m", ws=ws)
 
         assert ws.accepted is True
         assert [message["type"] for message in ws.messages] == ["botlens_live_bootstrap", "botlens_live_tail"]
@@ -341,11 +344,11 @@ def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: 
         hub = BotTelemetryHub()
         hub._ensure_workers = _noop  # type: ignore[method-assign]
         monkeypatch.setattr(stream, "get_series_window", lambda **kwargs: _window(seq=4))
-        hub._series_live_tail_ring[("run-1", "BTC|1m")].append(
+        hub._series_live_tail_ring[("run-1", "instrument-btc|1m")].append(
             {
                 "type": "botlens_live_tail",
                 "run_id": "run-1",
-                "series_key": "BTC|1m",
+                "series_key": "instrument-btc|1m",
                 "schema_version": 1,
                 "seq": 7,
                 "known_at": "2026-01-01T00:01:00Z",
@@ -358,7 +361,8 @@ def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: 
                     "logs": [],
                     "decisions": [],
                     "series_delta": {
-                        "series_key": "BTC|1m",
+                        "series_key": "instrument-btc|1m",
+                        "instrument_id": "instrument-btc",
                         "symbol": "BTC",
                         "timeframe": "1m",
                         "candle": {"time": 7, "open": 7, "high": 7, "low": 7, "close": 7},
@@ -368,7 +372,7 @@ def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: 
         )
         ws = FakeWebSocket()
 
-        await hub.add_series_viewer(run_id="run-1", series_key="BTC|1m", ws=ws)
+        await hub.add_series_viewer(run_id="run-1", series_key="instrument-btc|1m", ws=ws)
 
         assert [message["type"] for message in ws.messages] == [
             "botlens_live_bootstrap",
@@ -376,6 +380,6 @@ def test_add_series_viewer_emits_resync_when_replay_buffer_has_gap(monkeypatch: 
         ]
         assert ws.closed is True
         assert ws.closed_code == 1013
-        assert ("run-1", "BTC|1m") not in hub._series_viewers
+        assert ("run-1", "instrument-btc|1m") not in hub._series_viewers
 
     asyncio.run(scenario())

@@ -7,8 +7,13 @@ pytest.importorskip("sqlalchemy")
 from portal.backend.service.bots import botlens_series_service as svc
 
 
-def _projection(*, series_key: str = "BTC|1m", candle_times: list[int] | None = None) -> dict:
-    symbol, timeframe = str(series_key).split("|", 1)
+def _projection(
+    *,
+    series_key: str = "instrument-btc|1m",
+    symbol: str = "BTC",
+    candle_times: list[int] | None = None,
+) -> dict:
+    instrument_id, timeframe = str(series_key).split("|", 1)
     candles = [
         {
             "time": time_value,
@@ -22,6 +27,7 @@ def _projection(*, series_key: str = "BTC|1m", candle_times: list[int] | None = 
     return {
         "series": [
             {
+                "instrument_id": instrument_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "candles": candles,
@@ -37,8 +43,14 @@ def _projection(*, series_key: str = "BTC|1m", candle_times: list[int] | None = 
     }
 
 
-def _delta(*, series_key: str = "BTC|1m", candle_time: int, trade_id: str = "trade-1") -> dict:
-    symbol, timeframe = str(series_key).split("|", 1)
+def _delta(
+    *,
+    series_key: str = "instrument-btc|1m",
+    symbol: str = "BTC",
+    candle_time: int,
+    trade_id: str = "trade-1",
+) -> dict:
+    instrument_id, timeframe = str(series_key).split("|", 1)
     return {
         "event": "bar_closed",
         "runtime": {"status": "running", "warnings": ["runtime warning"]},
@@ -47,6 +59,7 @@ def _delta(*, series_key: str = "BTC|1m", candle_time: int, trade_id: str = "tra
         "series": [
             {
                 "series_key": series_key,
+                "instrument_id": instrument_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "candle": {
@@ -87,11 +100,11 @@ def test_get_series_window_reads_latest_per_series_view_row(monkeypatch: pytest.
         },
     )
 
-    result = svc.get_series_window(run_id="run-1", series_key="BTC|1m", to="now", limit=2)
+    result = svc.get_series_window(run_id="run-1", series_key="instrument-btc|1m", to="now", limit=2)
 
     assert result["seq"] == 8
     assert [row["time"] for row in result["window"]["candles"]] == [2, 3]
-    assert result["window"]["selected_series"]["series_key"] == "BTC|1m"
+    assert result["window"]["selected_series"]["series_key"] == "instrument-btc|1m"
     assert result["window"]["runtime"]["status"] == "running"
 
 
@@ -103,15 +116,15 @@ def test_get_series_window_raises_when_requested_series_is_missing(monkeypatch: 
         "list_bot_run_view_states",
         lambda **kwargs: [
             {
-                "series_key": "ETH|5m",
+                "series_key": "instrument-eth|5m",
                 "seq": 4,
-                "payload": _projection(series_key="ETH|5m", candle_times=[10, 11]),
+                "payload": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[10, 11]),
             }
         ],
     )
 
-    with pytest.raises(ValueError, match="series 'BTC\\|1m' was not found for run_id=run-1"):
-        svc.get_series_window(run_id="run-1", series_key="BTC|1m", to="now", limit=5)
+    with pytest.raises(ValueError, match="series 'instrument-btc\\|1m' was not found for run_id=run-1"):
+        svc.get_series_window(run_id="run-1", series_key="instrument-btc|1m", to="now", limit=5)
 
 
 def test_list_series_keys_uses_latest_per_series_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,21 +134,21 @@ def test_list_series_keys_uses_latest_per_series_rows(monkeypatch: pytest.Monkey
         "list_bot_run_view_states",
         lambda **kwargs: [
             {
-                "series_key": "BTC|1m",
+                "series_key": "instrument-btc|1m",
                 "seq": 8,
-                "payload": _projection(series_key="BTC|1m", candle_times=[1, 2]),
+                "payload": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
             },
             {
-                "series_key": "ETH|5m",
+                "series_key": "instrument-eth|5m",
                 "seq": 4,
-                "payload": _projection(series_key="ETH|5m", candle_times=[3, 4]),
+                "payload": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[3, 4]),
             },
         ],
     )
 
     result = svc.list_series_keys(run_id="run-1")
 
-    assert result == {"run_id": "run-1", "series": ["BTC|1m", "ETH|5m"]}
+    assert result == {"run_id": "run-1", "series": ["instrument-btc|1m", "instrument-eth|5m"]}
 
 
 def test_list_series_keys_ignores_legacy_merged_bot_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +160,7 @@ def test_list_series_keys_ignores_legacy_merged_bot_rows(monkeypatch: pytest.Mon
             {
                 "series_key": "bot",
                 "seq": 8,
-                "payload": _projection(series_key="BTC|1m", candle_times=[1, 2]),
+                "payload": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
             }
         ],
     )
@@ -174,21 +187,21 @@ def test_get_series_history_reconstructs_from_bootstrap_and_delta_events(monkeyp
         lambda **kwargs: [
             {
                 "payload": {
-                    "series_key": "BTC|1m",
-                    "projection": _projection(candle_times=[1, 2]),
+                    "series_key": "instrument-btc|1m",
+                    "projection": _projection(series_key="instrument-btc|1m", candle_times=[1, 2]),
                 }
             },
             {
                 "payload": {
-                    "series_key": "BTC|1m",
+                    "series_key": "instrument-btc|1m",
                     "series_seq": 3,
                     "runtime_delta": _delta(candle_time=3),
                 }
             },
             {
                 "payload": {
-                    "series_key": "ETH|5m",
-                    "projection": _projection(series_key="ETH|5m", candle_times=[20]),
+                    "series_key": "instrument-eth|5m",
+                    "projection": _projection(series_key="instrument-eth|5m", symbol="ETH", candle_times=[20]),
                 }
             },
         ],
@@ -196,7 +209,7 @@ def test_get_series_history_reconstructs_from_bootstrap_and_delta_events(monkeyp
 
     result = svc.get_series_history(
         run_id="run-1",
-        series_key="BTC|1m",
+        series_key="instrument-btc|1m",
         before_ts="1970-01-01T00:00:04Z",
         limit=10,
     )
@@ -221,7 +234,7 @@ def test_get_series_history_uses_latest_projection_when_delta_log_is_empty(monke
 
     result = svc.get_series_history(
         run_id="run-1",
-        series_key="BTC|1m",
+        series_key="instrument-btc|1m",
         before_ts="1970-01-01T00:00:10Z",
         limit=5,
     )

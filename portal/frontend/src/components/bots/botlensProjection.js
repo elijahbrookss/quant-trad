@@ -1,25 +1,26 @@
 import { toFiniteNumber, toSec } from './chartDataUtils.js'
 
-export function canonicalSeriesKey(symbol, timeframe) {
-  const normalizedSymbol = String(symbol || '').trim().toUpperCase()
+export function canonicalSeriesKey(instrumentId, timeframe) {
+  const normalizedInstrumentId = String(instrumentId || '').trim()
   const normalizedTimeframe = String(timeframe || '').trim().toLowerCase()
-  if (!normalizedSymbol || !normalizedTimeframe) return ''
-  return `${normalizedSymbol}|${normalizedTimeframe}`
+  if (!normalizedInstrumentId || !normalizedTimeframe) return ''
+  return `${normalizedInstrumentId}|${normalizedTimeframe}`
 }
 
 export function normalizeSeriesKey(value) {
   const text = String(value || '').trim()
   if (!text) return ''
-  const [symbol, timeframe, ...rest] = text.split('|')
+  const [instrumentId, timeframe, ...rest] = text.split('|')
   if (rest.length || !text.includes('|')) return ''
-  return canonicalSeriesKey(symbol, timeframe)
+  return canonicalSeriesKey(instrumentId, timeframe)
 }
 
 export function canonicalSeriesKeyFromEntry(entry) {
   if (!entry || typeof entry !== 'object') return ''
   const explicit = String(entry.series_key || '').trim()
   if (explicit) return normalizeSeriesKey(explicit)
-  return canonicalSeriesKey(entry.symbol, entry.timeframe)
+  const instrumentId = String(entry.instrument_id || entry?.instrument?.id || '').trim()
+  return canonicalSeriesKey(instrumentId, entry.timeframe)
 }
 
 export function normalizeCandleTime(value) {
@@ -151,11 +152,14 @@ export function applyOverlayDelta(overlays = [], delta = null) {
 
 export function normalizeSeriesEntry(entry, index = 0) {
   if (!entry || typeof entry !== 'object') return null
+  const instrumentId = String(entry.instrument_id || entry?.instrument?.id || '').trim()
   const symbol = String(entry.symbol || '').trim().toUpperCase()
   const timeframe = String(entry.timeframe || '').trim().toLowerCase()
-  const seriesKey = canonicalSeriesKey(symbol, timeframe) || `SERIES_INDEX:${index}`
+  const seriesKey = canonicalSeriesKey(instrumentId, timeframe)
+  if (!seriesKey) return null
   return {
     ...entry,
+    instrument_id: instrumentId,
     symbol,
     timeframe,
     series_key: seriesKey,
@@ -212,7 +216,7 @@ export function buildProjectionFromWindow({ runId, seq, seriesKey, window }) {
   const selectedSeries = sourceWindow.selected_series && typeof sourceWindow.selected_series === 'object'
     ? sourceWindow.selected_series
     : {
-        symbol: String(seriesKey || '').split('|')[0] || '',
+        instrument_id: String(seriesKey || '').split('|')[0] || '',
         timeframe: String(seriesKey || '').split('|')[1] || '',
         candles: Array.isArray(sourceWindow.candles) ? sourceWindow.candles : [],
         overlays: [],

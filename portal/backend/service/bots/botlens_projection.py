@@ -7,6 +7,11 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from engines.bot_runtime.core.series_identity import (
+    canonical_series_key as build_canonical_series_key,
+)
+from engines.bot_runtime.core.series_identity import normalize_series_key as normalize_public_series_key
+
 
 def normalize_candle_time(value: Any) -> Optional[int]:
     if value is None:
@@ -43,29 +48,29 @@ def normalize_candle_time(value: Any) -> Optional[int]:
         return None
 
 
-def canonical_series_key(symbol: Any, timeframe: Any) -> str:
-    normalized_symbol = str(symbol or "").strip().upper()
-    normalized_timeframe = str(timeframe or "").strip().lower()
-    if not normalized_symbol or not normalized_timeframe:
-        return ""
-    return f"{normalized_symbol}|{normalized_timeframe}"
+def canonical_series_key(instrument_id: Any, timeframe: Any) -> str:
+    return build_canonical_series_key(instrument_id, timeframe)
 
 
 def normalize_series_key(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    symbol, separator, timeframe = text.partition("|")
-    if not separator or "|" in timeframe:
-        return ""
-    return canonical_series_key(symbol, timeframe)
+    return normalize_public_series_key(value)
+
+
+def _instrument_id_from_entry(entry: Mapping[str, Any]) -> str:
+    explicit = str(entry.get("instrument_id") or "").strip()
+    if explicit:
+        return explicit
+    instrument = entry.get("instrument")
+    if isinstance(instrument, Mapping):
+        return str(instrument.get("id") or "").strip()
+    return ""
 
 
 def canonical_series_key_from_entry(entry: Mapping[str, Any]) -> str:
     explicit = normalize_series_key(entry.get("series_key"))
     if explicit:
         return explicit
-    return canonical_series_key(entry.get("symbol"), entry.get("timeframe"))
+    return canonical_series_key(_instrument_id_from_entry(entry), entry.get("timeframe"))
 
 
 def canonicalize_candle(candle: Any) -> Optional[Dict[str, Any]]:
@@ -171,17 +176,19 @@ def apply_overlay_delta(overlays: Any, delta: Any) -> List[Dict[str, Any]]:
 def canonicalize_series_entry(entry: Any, index: int = 0) -> Optional[Dict[str, Any]]:
     if not isinstance(entry, Mapping):
         return None
+    instrument_id = _instrument_id_from_entry(entry)
     symbol = str(entry.get("symbol") or "").strip().upper()
     timeframe = str(entry.get("timeframe") or "").strip().lower()
     series = dict(entry)
+    series["instrument_id"] = instrument_id
     series["symbol"] = symbol
     series["timeframe"] = timeframe
-    series["series_key"] = canonical_series_key(symbol, timeframe)
+    series["series_key"] = canonical_series_key(instrument_id, timeframe)
     series["candles"] = merge_candle_streams(entry.get("candles"))
     series["overlays"] = project_overlay_state(entry.get("overlays"))
     series["stats"] = dict(entry.get("stats") or {}) if isinstance(entry.get("stats"), Mapping) else {}
     if not series["series_key"]:
-        series["series_key"] = f"series_index:{index}"
+        return None
     return series
 
 
@@ -227,7 +234,8 @@ def apply_series_runtime_delta(
 
     existing_series = find_series(projection, target_series_key) or {
         "series_key": target_series_key,
-        "symbol": str(target_series_key.split("|")[0] if "|" in target_series_key else ""),
+        "instrument_id": str(target_series_key.split("|")[0] if "|" in target_series_key else ""),
+        "symbol": "",
         "timeframe": str(target_series_key.split("|")[1] if "|" in target_series_key else ""),
         "candles": [],
         "overlays": [],
@@ -235,7 +243,17 @@ def apply_series_runtime_delta(
     }
     next_series = dict(existing_series)
     if isinstance(series_delta, Mapping):
-        for field in ("strategy_id", "symbol", "timeframe", "datasource", "exchange", "instrument", "bar_index"):
+        for field in (
+            "strategy_id",
+            "instrument_id",
+            "symbol",
+            "timeframe",
+            "datasource",
+            "exchange",
+            "instrument",
+            "bar_index",
+            "series_key",
+        ):
             if field in series_delta:
                 next_series[field] = series_delta.get(field)
         candle = series_delta.get("candle")

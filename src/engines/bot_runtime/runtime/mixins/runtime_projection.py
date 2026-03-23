@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from engines.bot_runtime.core.domain import Candle
+from engines.bot_runtime.core.series_identity import canonical_series_key
 from utils.log_context import with_log_context
 
 from ..core import _isoformat
@@ -348,14 +349,23 @@ class RuntimeProjectionMixin:
             series_stats["avg_loss"] = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0.0
             series_stats["largest_win"] = round(max(win_pnls), 4) if win_pnls else 0.0
             series_stats["largest_loss"] = round(min(loss_pnls), 4) if loss_pnls else 0.0
+            instrument = series.instrument if isinstance(series.instrument, Mapping) else {}
+            instrument_id = str(instrument.get("id") or "").strip()
+            series_key = canonical_series_key(instrument_id, series.timeframe)
+            if not series_key:
+                raise RuntimeError(
+                    f"bot_runtime_series_projection_invalid: missing instrument_id/timeframe for strategy={series.strategy_id} symbol={series.symbol}"
+                )
 
             payloads.append(
                 {
+                    "series_key": series_key,
                     "strategy_id": series.strategy_id,
                     "symbol": series.symbol,
                     "timeframe": series.timeframe,
                     "datasource": series.datasource,
                     "exchange": series.exchange,
+                    "instrument_id": instrument_id,
                     "instrument": series.instrument,
                     "candles": self._chart_state_builder.visible_candles(
                         series,
