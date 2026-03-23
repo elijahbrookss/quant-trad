@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from indicators.manifest import IndicatorManifest, IndicatorOutput, IndicatorOverlay, IndicatorParam
+from indicators.manifest import (
+    IndicatorColorPalette,
+    IndicatorManifest,
+    IndicatorOutput,
+    IndicatorOverlay,
+    IndicatorParam,
+)
 
 
 MANIFEST = IndicatorManifest(
@@ -10,6 +16,42 @@ MANIFEST = IndicatorManifest(
     version="v1",
     label="Candle Stats",
     description="Walk-forward candle statistics and volatility metrics for downstream strategy logic.",
+    color_mode="palette",
+    color_palettes=(
+        IndicatorColorPalette(
+            key="bull_bear",
+            label="Bull / Bear",
+            description="Red short ATR, green long ATR, blue z-score.",
+            signal_color="#38bdf8",
+            overlay_colors={
+                "candle_stats_atr_short": "#ef4444",
+                "candle_stats_atr_long": "#22c55e",
+                "candle_stats_atr_zscore": "#38bdf8",
+            },
+        ),
+        IndicatorColorPalette(
+            key="ocean",
+            label="Ocean",
+            description="Cool blue-green palette for volatility tracking.",
+            signal_color="#0ea5e9",
+            overlay_colors={
+                "candle_stats_atr_short": "#0ea5e9",
+                "candle_stats_atr_long": "#14b8a6",
+                "candle_stats_atr_zscore": "#6366f1",
+            },
+        ),
+        IndicatorColorPalette(
+            key="slate",
+            label="Slate",
+            description="Muted slate tones with a neutral signal accent.",
+            signal_color="#94a3b8",
+            overlay_colors={
+                "candle_stats_atr_short": "#64748b",
+                "candle_stats_atr_long": "#cbd5e1",
+                "candle_stats_atr_zscore": "#94a3b8",
+            },
+        ),
+    ),
     params=(
         IndicatorParam(
             key="atr_short_window",

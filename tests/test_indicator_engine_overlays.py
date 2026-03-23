@@ -329,6 +329,11 @@ def test_candle_stats_atr_overlays_are_emitted_in_their_declared_panes() -> None
         polylines = overlay.value["payload"]["polylines"]
         assert len(polylines) == 1
         assert len(polylines[0]["points"]) >= 200
+    assert frame.overlays["candle-stats.atr_short"].value["ui"]["color"] == "#ef4444"
+    assert frame.overlays["candle-stats.atr_short"].value["payload"]["polylines"][0]["color"] == "#ef4444"
+    assert frame.overlays["candle-stats.atr_long"].value["ui"]["color"] == "#22c55e"
+    assert frame.overlays["candle-stats.atr_long"].value["payload"]["polylines"][0]["color"] == "#22c55e"
+    assert frame.overlays["candle-stats.atr_zscore"].value["ui"]["color"] == "#38bdf8"
 
 
 def test_candle_stats_atr_overlays_do_not_wait_for_full_metric_readiness() -> None:

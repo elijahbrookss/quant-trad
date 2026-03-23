@@ -85,6 +85,7 @@ export default function IndicatorCard({
   onDuplicate,
   onGenerateSignals,
   onSelectColor,
+  onSelectPalette,
   onRecompute,
   showSignalAction = true,
   isGeneratingSignals = false,
@@ -95,6 +96,9 @@ export default function IndicatorCard({
   busy = false,
   activeJobId = null,
   isVisible = undefined,
+  showColorControl = true,
+  showPaletteControl = false,
+  paletteOptions = [],
   onRetryCreate,
   onRemoveLocal,
 }) {
@@ -301,45 +305,118 @@ export default function IndicatorCard({
           )}
 
           {/* Color picker popover */}
-          <Popover className="relative">
-            {({ close }) => (
-              <>
-                <PopoverButton
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
-                  title="Change color"
-                >
-                  <Palette className="size-3.5" />
-                </PopoverButton>
-                <Transition
-                  as={Fragment}
-                  enter="transition ease-out duration-100"
-                  enterFrom="opacity-0 translate-y-1"
-                  enterTo="opacity-100 translate-y-0"
-                  leave="transition ease-in duration-75"
-                  leaveFrom="opacity-100 translate-y-0"
-                  leaveTo="opacity-0 translate-y-1"
-                >
-                  <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-xl border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
-                    <div className="grid grid-cols-6 gap-1.5">
-                      {colorSwatches.map((c) => (
-                        <button
-                          key={c}
-                          className="h-5 w-5 rounded-sm border border-white/15 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-ring)]"
-                          style={{ backgroundColor: c }}
-                          onClick={() => {
-                            onSelectColor?.(indicator.id, c);
-                            close();
-                          }}
-                          aria-label={`Set color ${c}`}
-                          disabled={disableActions}
-                        />
-                      ))}
-                    </div>
-                  </PopoverPanel>
-                </Transition>
-              </>
-            )}
-          </Popover>
+          {showColorControl && (
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  <PopoverButton
+                    className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-white/5 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change color"
+                  >
+                    <Palette className="size-3.5" />
+                  </PopoverButton>
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 translate-y-1"
+                    enterTo="opacity-100 translate-y-0"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 translate-y-0"
+                    leaveTo="opacity-0 translate-y-1"
+                  >
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-48 rounded-xl border border-white/12 bg-[#131a2b] p-3 shadow-2xl">
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {colorSwatches.map((c) => (
+                          <button
+                            key={c}
+                            className="h-5 w-5 rounded-sm border border-white/15 transition hover:border-[color:var(--accent-alpha-60)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent-ring)]"
+                            style={{ backgroundColor: c }}
+                            onClick={() => {
+                              onSelectColor?.(indicator.id, c);
+                              close();
+                            }}
+                            aria-label={`Set color ${c}`}
+                            disabled={disableActions}
+                          />
+                        ))}
+                      </div>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
+          )}
+
+          {showPaletteControl && Array.isArray(paletteOptions) && paletteOptions.length > 0 && (
+            <Popover className="relative">
+              {({ close }) => (
+                <>
+                  <PopoverButton
+                    className="flex h-8 items-center justify-center rounded-md border border-white/10 bg-white/5 px-2 text-slate-300 transition hover:border-[color:var(--accent-alpha-40)] hover:bg-[color:var(--accent-alpha-12)] hover:text-white"
+                    title="Change palette"
+                  >
+                    <Palette className="mr-1 size-3.5" />
+                    <span className="text-[11px] font-medium uppercase tracking-[0.18em]">Palette</span>
+                  </PopoverButton>
+                  <Transition
+                    as={Fragment}
+                    enter="transition ease-out duration-100"
+                    enterFrom="opacity-0 translate-y-1"
+                    enterTo="opacity-100 translate-y-0"
+                    leave="transition ease-in duration-75"
+                    leaveFrom="opacity-100 translate-y-0"
+                    leaveTo="opacity-0 translate-y-1"
+                  >
+                    <PopoverPanel className="absolute right-0 top-full z-40 mt-2 w-64 rounded-xl border border-white/12 bg-[#131a2b] p-2 shadow-2xl">
+                      <div className="space-y-1">
+                        {paletteOptions.map((palette) => {
+                          const swatches = Object.values(palette?.overlay_colors || {}).slice(0, 3)
+                          const selectedPalette = (indicator?.color_palette || paletteOptions?.[0]?.key || '') === palette?.key
+                          return (
+                            <button
+                              key={palette?.key}
+                              type="button"
+                              className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                                selectedPalette
+                                  ? 'border-[color:var(--accent-alpha-50)] bg-[color:var(--accent-alpha-10)]'
+                                  : 'border-white/8 bg-white/5 hover:border-[color:var(--accent-alpha-30)]'
+                              }`}
+                              onClick={() => {
+                                onSelectPalette?.(indicator.id, palette?.key);
+                                close();
+                              }}
+                              disabled={disableActions}
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-100">
+                                  {palette?.label || palette?.key || 'Palette'}
+                                </div>
+                                {palette?.description ? (
+                                  <div className="mt-0.5 text-[11px] text-slate-400">
+                                    {palette.description}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                {swatches.map((swatch, index) => (
+                                  <span
+                                    key={`${palette?.key || 'palette'}-${index}`}
+                                    className="h-4 w-4 rounded-sm border border-white/10"
+                                    style={{ backgroundColor: swatch }}
+                                    aria-hidden="true"
+                                  />
+                                ))}
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </PopoverPanel>
+                  </Transition>
+                </>
+              )}
+            </Popover>
+          )}
 
           {/* Visibility toggle - allowed during compute per requirements */}
           <VisibilityToggle

@@ -16,6 +16,7 @@ MANIFEST = IndicatorManifest(
     version="v1",
     label="Regime",
     description="Walk-forward market regime classification built from candle stats.",
+    color_mode="palette",
     params=(
         IndicatorParam(
             key="min_confidence",

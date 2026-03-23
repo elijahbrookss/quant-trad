@@ -93,6 +93,8 @@ class IndicatorFactory:
             except Exception:
                 return meta
             meta["manifest"] = serialize_indicator_manifest(manifest)
+            meta["color_mode"] = manifest.color_mode
+            meta["color_palettes"] = meta["manifest"].get("color_palettes", [])
             typed_outputs, output_prefs = typed_outputs_with_prefs(
                 manifest=manifest,
                 output_prefs=meta.get("output_prefs"),
@@ -247,6 +249,7 @@ class IndicatorFactory:
             "params": deepcopy(record.get("params") or {}),
             "dependencies": deepcopy(record.get("dependencies") or []),
             "color": record.get("color"),
+            "color_palette": record.get("color_palette"),
             "datasource": record.get("datasource"),
             "exchange": record.get("exchange"),
             "enabled": bool(record.get("enabled", True)),

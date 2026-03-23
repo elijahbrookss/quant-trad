@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from engines.indicator_engine.contracts import (
@@ -72,6 +72,15 @@ class IndicatorOverlay:
 
 
 @dataclass(frozen=True)
+class IndicatorColorPalette:
+    key: str
+    label: str
+    description: str = ""
+    signal_color: str | None = None
+    overlay_colors: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class IndicatorDependency:
     indicator_type: str
     output_name: str
@@ -95,6 +104,8 @@ class IndicatorManifest:
     version: str
     label: str
     description: str
+    color_mode: Literal["single", "palette"] = "single"
+    color_palettes: tuple[IndicatorColorPalette, ...] = ()
     params: tuple[IndicatorParam, ...] = ()
     outputs: tuple[IndicatorOutput, ...] = ()
     overlays: tuple[IndicatorOverlay, ...] = ()
@@ -121,6 +132,11 @@ def validate_indicator_manifest(manifest: IndicatorManifest) -> None:
     if not str(manifest.version or "").strip():
         raise RuntimeError(
             f"indicator_manifest_invalid: version required type={manifest_type}"
+        )
+    color_mode = str(manifest.color_mode or "").strip().lower()
+    if color_mode not in {"single", "palette"}:
+        raise RuntimeError(
+            f"indicator_manifest_invalid: color_mode invalid type={manifest_type} color_mode={manifest.color_mode}"
         )
 
     seen_params: set[str] = set()
@@ -170,6 +186,19 @@ def validate_indicator_manifest(manifest: IndicatorManifest) -> None:
                 f"indicator_manifest_invalid: duplicate overlay name type={manifest_type} name={name}"
             )
         seen_overlays.add(name)
+
+    seen_palettes: set[str] = set()
+    for palette in manifest.color_palettes:
+        key = str(palette.key or "").strip()
+        if not key:
+            raise RuntimeError(
+                f"indicator_manifest_invalid: color palette key required type={manifest_type}"
+            )
+        if key in seen_palettes:
+            raise RuntimeError(
+                f"indicator_manifest_invalid: duplicate color palette key type={manifest_type} key={key}"
+            )
+        seen_palettes.add(key)
 
 
 def editable_manifest_params(manifest: IndicatorManifest) -> list[IndicatorParam]:
@@ -251,6 +280,38 @@ def manifest_overlay_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]
     ]
 
 
+def manifest_color_palette_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": palette.key,
+            "label": palette.label,
+            "description": palette.description,
+            "signal_color": palette.signal_color,
+            "overlay_colors": dict(palette.overlay_colors),
+        }
+        for palette in manifest.color_palettes
+    ]
+
+
+def resolve_manifest_color_palette(
+    manifest: IndicatorManifest,
+    value: str | None,
+) -> str | None:
+    palettes = [str(palette.key) for palette in manifest.color_palettes if str(palette.key or "").strip()]
+    if str(manifest.color_mode or "").strip().lower() != "palette":
+        return None
+    if not palettes:
+        return None
+    candidate = str(value or "").strip()
+    if not candidate:
+        return palettes[0]
+    if candidate in palettes:
+        return candidate
+    raise ValueError(
+        f"{manifest.type} indicator received unknown color_palette: {candidate}"
+    )
+
+
 def _serialize_option(option: Any) -> dict[str, Any]:
     if isinstance(option, IndicatorOption):
         return {
@@ -276,6 +337,8 @@ def serialize_indicator_manifest(manifest: IndicatorManifest) -> dict[str, Any]:
         "version": manifest.version,
         "label": manifest.label,
         "description": manifest.description,
+        "color_mode": manifest.color_mode,
+        "color_palettes": manifest_color_palette_catalog(manifest),
         "params": [
             {
                 "key": param.key,

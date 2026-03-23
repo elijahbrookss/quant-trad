@@ -13,7 +13,7 @@ register_overlay_type(
     description="Short ATR line rendered in the volatility pane.",
     renderers={"lightweight": "polyline", "mpl": "line"},
     payload_keys=("polylines",),
-    ui_color="#22c55e",
+    ui_color="#ef4444",
 )
 
 register_overlay_type(
@@ -24,7 +24,7 @@ register_overlay_type(
     description="Long ATR baseline rendered in the volatility pane.",
     renderers={"lightweight": "polyline", "mpl": "line"},
     payload_keys=("polylines",),
-    ui_color="#f59e0b",
+    ui_color="#22c55e",
 )
 
 register_overlay_type(

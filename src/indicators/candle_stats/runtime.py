@@ -231,7 +231,7 @@ class TypedCandleStatsIndicator(Indicator):
                     overlay_type="candle_stats_atr_short",
                     role="atr_short",
                     points=self._atr_short_points,
-                    color="#22c55e",
+                    color="#ef4444",
                 ) if self._atr_short_points else {},
             ),
             "atr_long": RuntimeOverlay(
@@ -241,7 +241,7 @@ class TypedCandleStatsIndicator(Indicator):
                     overlay_type="candle_stats_atr_long",
                     role="atr_long",
                     points=self._atr_long_points,
-                    color="#f59e0b",
+                    color="#22c55e",
                 ) if self._atr_long_points else {},
             ),
             "atr_zscore": RuntimeOverlay(

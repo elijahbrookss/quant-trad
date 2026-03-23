@@ -4,6 +4,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional, Sequence
 
+from indicators.manifest import resolve_manifest_color_palette
 from ..indicator_factory import INDICATOR_MAP as _INDICATOR_MAP
 from ..dependency_bindings import validate_dependency_bindings
 from ..output_prefs import normalize_output_prefs
@@ -33,6 +34,7 @@ class IndicatorInstanceCreator:
         params: Dict[str, Any],
         dependencies: Optional[Sequence[Dict[str, Any]]] = None,
         color: Optional[str] = None,
+        color_palette: Optional[str] = None,
         output_prefs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         definition = self._resolve_type(type_str)
@@ -60,6 +62,7 @@ class IndicatorInstanceCreator:
             "enabled": True,
             "name": name or type_str.replace("_", " ").title(),
             "color": normalize_color(color),
+            "color_palette": resolve_manifest_color_palette(definition.MANIFEST, color_palette),
         }
         if datasource:
             meta["datasource"] = datasource
@@ -95,6 +98,8 @@ class IndicatorInstanceUpdater:
         *,
         color: Optional[str] = None,
         color_provided: bool = False,
+        color_palette: Optional[str] = None,
+        color_palette_provided: bool = False,
     ) -> Dict[str, Any]:
         record = load_indicator_record(inst_id, ctx=self._ctx)
         meta = build_meta_from_record(record, ctx=self._ctx)
@@ -131,6 +136,15 @@ class IndicatorInstanceUpdater:
             not color_provided
             or normalize_color(color) == normalize_color(meta.get("color"))
         )
+        resolved_color_palette = (
+            resolve_manifest_color_palette(definition.MANIFEST, color_palette)
+            if color_palette_provided
+            else meta.get("color_palette")
+        )
+        color_palette_unchanged = (
+            not color_palette_provided
+            or str(resolved_color_palette or "") == str(meta.get("color_palette") or "")
+        )
         datasource_unchanged = (datasource or None) == (meta.get("datasource") or None)
         exchange_unchanged = (exchange or None) == (meta.get("exchange") or None)
         if (
@@ -139,6 +153,7 @@ class IndicatorInstanceUpdater:
             and output_prefs_unchanged
             and name_unchanged
             and color_unchanged
+            and color_palette_unchanged
             and datasource_unchanged
             and exchange_unchanged
         ):
@@ -153,6 +168,8 @@ class IndicatorInstanceUpdater:
         meta_payload["name"] = name or meta.get("name") or type_str.replace("_", " ").title()
         if color_provided:
             meta_payload["color"] = normalize_color(color)
+        if color_palette_provided:
+            meta_payload["color_palette"] = resolved_color_palette
         if datasource:
             meta_payload["datasource"] = datasource
         else:

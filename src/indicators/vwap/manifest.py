@@ -15,6 +15,7 @@ MANIFEST = IndicatorManifest(
     version="v1",
     label="VWAP Bands",
     description="Anchored VWAP with rolling standard-deviation bands.",
+    color_mode="palette",
     params=(
         IndicatorParam(
             key="stddev_window",
