@@ -60,13 +60,13 @@ export async function fetchIndicator(id) {
   return handleResponse(res)
 }
 
-export async function createIndicator({ type, name, params, dependencies = [], color }) {
+export async function createIndicator({ type, name, params, dependencies = [], output_prefs = {}, color }) {
   adapterLogger.debug('create_indicator_request', {
     type,
     hasName: Boolean(name),
     paramKeys: Object.keys(params || {}),
   })
-  const body = { type, name, params, dependencies }
+  const body = { type, name, params, dependencies, output_prefs }
   if (color !== undefined) {
     body.color = color
   }
@@ -79,8 +79,8 @@ export async function createIndicator({ type, name, params, dependencies = [], c
   return handleResponse(res)
 }
 
-export async function updateIndicator(id, { type, name, params, dependencies = [], color }) {
-  const body = { type, name, params, dependencies }
+export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color }) {
+  const body = { type, name, params, dependencies, output_prefs }
   if (color !== undefined) {
     body.color = color
   }
@@ -170,7 +170,7 @@ export async function fetchIndicatorOverlays(id, { start, end, interval, symbol,
 
 export async function generateIndicatorSignals(
   id,
-  { start, end, interval, symbol, datasource, exchange, config } = {},
+  { start, end, interval, symbol, datasource, exchange, instrument_id, config } = {},
 ) {
   const payload = {
     start,
@@ -181,6 +181,7 @@ export async function generateIndicatorSignals(
   if (symbol) payload.symbol = symbol;
   if (datasource) payload.datasource = datasource;
   if (exchange) payload.exchange = exchange;
+  if (instrument_id) payload.instrument_id = instrument_id;
 
   const cfgEntries = Object.entries(config || {}).filter(([, v]) => v !== undefined && v !== null);
   if (cfgEntries.length) {

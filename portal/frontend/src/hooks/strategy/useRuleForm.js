@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { RULE_FORM_DEFAULT } from '../../utils/strategy/formDefaults.js'
 import { extractRuleFlow } from '../../components/strategy/rules/ruleUtils.js'
+import { indicatorHasAuthorableOutputs } from '../../utils/indicatorOutputs.js'
 
 const EMPTY_GUARD = {
   type: 'context_match',
@@ -11,11 +12,6 @@ const EMPTY_GUARD = {
   field: '',
   operator: '>',
   value: '',
-}
-
-const getOutputsByType = (indicator, outputType) => {
-  const typedOutputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
-  return typedOutputs.filter((entry) => entry?.type === outputType)
 }
 
 const useRuleForm = ({
@@ -38,8 +34,14 @@ const useRuleForm = ({
   }, [indicators])
 
   const signalIndicators = useMemo(
-    () => (indicators || []).filter((indicator) => getOutputsByType(indicator, 'signal').length > 0),
-    [indicators],
+    () => (indicators || []).filter((indicator) => indicatorHasAuthorableOutputs(
+      indicator,
+      'signal',
+      {
+        selectedOutputName: indicator?.id === form.trigger?.indicator_id ? form.trigger?.output_name : '',
+      },
+    )),
+    [form.trigger?.indicator_id, form.trigger?.output_name, indicators],
   )
 
   useEffect(() => {

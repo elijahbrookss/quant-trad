@@ -5,21 +5,21 @@ import { ArrowRight, Plus, Trash2, X } from 'lucide-react'
 import DropdownSelect from '../../ChartComponent/DropdownSelect.jsx'
 import { Button } from '../../ui'
 import useRuleForm from '../../../hooks/strategy/useRuleForm.js'
+import { getAuthorableOutputsByType, getIndicatorOutputsByType } from '../../../utils/indicatorOutputs.js'
 import { buildRuleConditionSummary, buildRuleDefaultName } from './ruleUtils.js'
 
-const outputOptionsForType = (indicator, outputType) => {
-  const outputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
-  return outputs
-    .filter((entry) => entry?.type === outputType)
-    .map((entry) => ({
-      value: entry.name,
-      label: entry.label || entry.name,
-      meta: entry,
-    }))
-}
+const outputOptionsForType = (indicator, outputType, options = {}) => (
+  getAuthorableOutputsByType(indicator, outputType, options).map((entry) => ({
+    value: entry.name,
+    label: entry.label || entry.name,
+    description: entry?.enabled === false ? 'Disabled in indicator settings; kept for existing rules.' : '',
+    badge: entry?.enabled === false ? 'Disabled' : undefined,
+    meta: entry,
+  }))
+)
 
 const eventOptions = (indicator, outputName) => {
-  const outputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
+  const outputs = getIndicatorOutputsByType(indicator, 'signal')
   const output = outputs.find((entry) => entry?.name === outputName)
   return Array.isArray(output?.event_keys)
     ? output.event_keys.map((entry) => ({ value: entry, label: entry }))
@@ -27,7 +27,7 @@ const eventOptions = (indicator, outputName) => {
 }
 
 const contextStateOptions = (indicator, outputName) => {
-  const outputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
+  const outputs = getIndicatorOutputsByType(indicator, 'context')
   const output = outputs.find((entry) => entry?.name === outputName)
   return Array.isArray(output?.state_keys)
     ? output.state_keys.map((entry) => ({ value: entry, label: entry }))
@@ -35,7 +35,7 @@ const contextStateOptions = (indicator, outputName) => {
 }
 
 const metricFieldOptions = (indicator, outputName) => {
-  const outputs = Array.isArray(indicator?.typed_outputs) ? indicator.typed_outputs : []
+  const outputs = getIndicatorOutputsByType(indicator, 'metric')
   const output = outputs.find((entry) => entry?.name === outputName)
   return Array.isArray(output?.fields)
     ? output.fields.map((entry) => ({ value: entry, label: entry }))
@@ -93,7 +93,9 @@ export const RuleDrawer = ({
   })
 
   const triggerIndicator = indicatorMap.get(form.trigger.indicator_id)
-  const triggerOutputOptions = outputOptionsForType(triggerIndicator, 'signal')
+  const triggerOutputOptions = outputOptionsForType(triggerIndicator, 'signal', {
+    selectedOutputName: form.trigger.output_name,
+  })
   const triggerEventOptions = eventOptions(triggerIndicator, form.trigger.output_name)
   const conditionSummary = useMemo(
     () => buildRuleConditionSummary({
@@ -389,7 +391,7 @@ export const RuleDrawer = ({
                     <li>One signal trigger is required.</li>
                     <li>Context and metric guards are optional.</li>
                     <li>At most two guards are supported in v1.</li>
-                    <li>Strategies evaluate typed outputs only.</li>
+                    <li>Indicator signal toggles only affect authoring availability and previews. Runtime follows the signals referenced by your strategy rules.</li>
                   </ul>
                 </div>
               </aside>

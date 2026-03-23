@@ -2,6 +2,7 @@ import { Dialog, DialogPanel, DialogTitle, Switch } from '@headlessui/react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { fetchIndicatorTypes, fetchIndicatorType, fetchIndicators } from '../adapters/indicator.adapter.js'
+import { buildSignalOutputEnabledMap, buildSignalOutputPrefs, getIndicatorOutputsByType } from '../utils/indicatorOutputs.js'
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx'
 
 const EMPTY_META = {
@@ -262,6 +263,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
   const [name, setName] = useState(initial?.name || '')
   const [params, setParams] = useState({})
   const [dependencyBindings, setDependencyBindings] = useState({})
+  const [signalOutputEnabled, setSignalOutputEnabled] = useState({})
   const [meta, setMeta] = useState(EMPTY_META)
   const [metaError, setMetaError] = useState(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -284,6 +286,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     setMetaError(null)
     setParams(initial?.params || {})
     setDependencyBindings({})
+    setSignalOutputEnabled({})
     setShowAdvanced(false)
   }, [initial, isOpen])
 
@@ -306,6 +309,13 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
             initial?.id,
           ),
         )
+        setSignalOutputEnabled(
+          buildSignalOutputEnabledMap({
+            outputs: nextMeta.outputs,
+            typed_outputs: initial?.type === typeId ? initial?.typed_outputs : undefined,
+            output_prefs: initial?.type === typeId ? initial?.output_prefs : undefined,
+          }),
+        )
         setShowAdvanced(false)
 
       })
@@ -317,7 +327,17 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     return () => {
       cancelled = true
     }
-  }, [availableIndicators, initial?.dependencies, initial?.id, initial?.params, isOpen, typeId])
+  }, [
+    availableIndicators,
+    initial?.dependencies,
+    initial?.id,
+    initial?.output_prefs,
+    initial?.params,
+    initial?.typed_outputs,
+    initial?.type,
+    isOpen,
+    typeId,
+  ])
 
   const fields = useMemo(() => editableParams(meta), [meta])
   const { coreFields, optionalFields, requiredKeys } = useMemo(() => {
@@ -412,9 +432,17 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
     () => (Array.isArray(meta.dependencies) ? meta.dependencies : []),
     [meta.dependencies],
   )
+  const signalOutputs = useMemo(() => getIndicatorOutputsByType(meta, 'signal'), [meta])
 
   const handleDependencyChange = (outputName) => (indicatorId) => {
     setDependencyBindings((prev) => ({ ...prev, [outputName]: indicatorId }))
+  }
+
+  const handleSignalOutputToggle = (outputName) => (enabled) => {
+    setSignalOutputEnabled((prev) => ({
+      ...prev,
+      [outputName]: Boolean(enabled),
+    }))
   }
 
   const handleSubmit = () => {
@@ -448,6 +476,7 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
       name: name.trim(),
       params: preparedParams,
       dependencies: preparedDependencies,
+      output_prefs: buildSignalOutputPrefs(meta, signalOutputEnabled),
     })
   }
 
@@ -607,6 +636,50 @@ export default function IndicatorModalV2({ isOpen, initial, error, onClose, onSa
                                 No compatible {formatIndicatorType(dependency.indicator_type)} indicators are available.
                               </p>
                             )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {signalOutputs.length > 0 && (
+                  <div className="space-y-3 rounded-lg border border-white/12 bg-slate-900/60 p-4">
+                    <div>
+                      <h4 className="text-sm font-semibold text-white">Signal outputs</h4>
+                      <p className="text-xs text-slate-400">
+                        Signal outputs auto-discover from the indicator manifest. Disable them here to hide them from authoring and preview surfaces only. Bot runtime still evaluates whatever signals your strategy rules reference.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {signalOutputs.map((output) => {
+                        const outputName = String(output?.name || '').trim()
+                        const enabled = signalOutputEnabled[outputName] !== false
+                        return (
+                          <div
+                            key={outputName}
+                            className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 px-4 py-3 shadow-sm"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <label className="text-sm font-semibold text-white">
+                                  {output.label || outputName}
+                                </label>
+                                <p className="text-xs text-slate-400">{outputName}</p>
+                              </div>
+                              <Switch
+                                checked={enabled}
+                                onChange={handleSignalOutputToggle(outputName)}
+                                className={`${enabled ? 'bg-emerald-500/70' : 'bg-slate-600/60'} relative inline-flex h-6 w-11 items-center rounded-full transition`}
+                              >
+                                <span className={`${enabled ? 'translate-x-6' : 'translate-x-1'} inline-block h-4 w-4 transform rounded-full bg-white transition`} />
+                              </Switch>
+                            </div>
+                            <p className="text-xs text-slate-300/80">
+                              {enabled
+                                ? 'Available in indicator signal previews and rule creation.'
+                                : 'Hidden from indicator signal previews and new rule creation.'}
+                            </p>
                           </div>
                         )
                       })}
