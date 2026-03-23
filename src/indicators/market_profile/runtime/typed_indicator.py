@@ -8,11 +8,13 @@ from typing import Any, Mapping
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import Indicator, RuntimeOverlay, RuntimeOutput
 from indicators.manifest import build_runtime_spec
-from signals.overlays.registry import register_overlay_type
-from signals.overlays.schema import build_overlay
+from overlays.registry import register_overlay_type
+from overlays.schema import build_overlay
 
-from ..compute.internal.runtime_profiles import profile_identity, resolve_effective_profiles
+from ..compute.internal.runtime_profiles import IncrementalRuntimeProfileResolver, profile_identity
 from ..manifest import MANIFEST
+from .outputs import build_market_profile_outputs, build_not_ready_outputs
+from .state import derive_market_profile_bar_state
 
 
 register_overlay_type(
@@ -61,6 +63,11 @@ class TypedMarketProfileIndicator(Indicator):
         self._profiles_payload = list(source_facts.get("profiles") or [])
         self._symbol = str(source_facts.get("symbol") or "")
         self._extend_to_end = bool(self._profile_params.get("extend_value_area_to_chart_end"))
+        self._profile_resolver = IncrementalRuntimeProfileResolver(
+            profiles_payload=self._profiles_payload,
+            profile_params=self._profile_params,
+            symbol=self._symbol or None,
+        )
         self._previous_profile_key: str | None = None
         self._previous_location: str | None = None
         self._current_bar_time = datetime.min
@@ -68,15 +75,7 @@ class TypedMarketProfileIndicator(Indicator):
         self._current_transform_summary: dict[str, Any] = {}
         self._current_overlay_summary: dict[str, Any] = {}
         self._overlay_ready = False
-        self._outputs: dict[str, RuntimeOutput] = {
-            "value_area_metrics": RuntimeOutput(bar_time=datetime.min, ready=False, value={}),
-            "value_location": RuntimeOutput(bar_time=datetime.min, ready=False, value={}),
-            "balance_state": RuntimeOutput(bar_time=datetime.min, ready=False, value={}),
-            "balance_breakout": RuntimeOutput(bar_time=datetime.min, ready=False, value={}),
-        }
-        self._overlays: dict[str, RuntimeOverlay] = {
-            "value_area": RuntimeOverlay(bar_time=datetime.min, ready=False, value={}),
-        }
+        self._outputs: dict[str, RuntimeOutput] = build_not_ready_outputs(datetime.min)
 
     def apply_bar(self, bar: Any, inputs: Mapping[Any, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
@@ -86,86 +85,39 @@ class TypedMarketProfileIndicator(Indicator):
 
         self._current_bar_time = bar.time
         current_epoch = int(bar.time.timestamp())
-        effective_profiles, transform_summary = resolve_effective_profiles(
-            profiles_payload=self._profiles_payload,
-            profile_params=self._profile_params,
+        effective_profiles, transform_summary = self._profile_resolver.resolve(
             current_epoch=current_epoch,
-            symbol=self._symbol or None,
         )
+        self._current_transform_summary = dict(transform_summary or {})
         if not effective_profiles:
-            self._current_effective_profiles = []
-            self._current_transform_summary = dict(transform_summary or {})
-            self._current_overlay_summary = {}
-            self._overlay_ready = False
-            not_ready = RuntimeOutput(bar_time=bar.time, ready=False, value={})
-            self._outputs = {
-                "value_area_metrics": not_ready,
-                "value_location": not_ready,
-                "balance_state": not_ready,
-                "balance_breakout": not_ready,
-            }
-            self._previous_profile_key = None
-            self._previous_location = None
+            self._reset_outputs(bar.time)
             return
 
         active_profile = effective_profiles[-1]
-        active_profile_key = profile_identity(active_profile)
-        if self._previous_profile_key != active_profile_key:
-            self._previous_location = None
-        self._previous_profile_key = active_profile_key
-
-        close = float(bar.close)
-        val = float(active_profile.val)
-        vah = float(active_profile.vah)
-        poc = float(active_profile.poc)
-        location = "inside_value"
-        if close > vah:
-            location = "above_value"
-        elif close < val:
-            location = "below_value"
-        balance_state = "balanced" if location == "inside_value" else "imbalanced"
-        events: list[dict[str, str]] = []
-        if self._previous_location == "inside_value" and location == "above_value":
-            events.append({"key": "balance_breakout_long"})
-        elif self._previous_location == "inside_value" and location == "below_value":
-            events.append({"key": "balance_breakout_short"})
-        self._previous_location = location
+        bar_state = derive_market_profile_bar_state(
+            bar=bar,
+            active_profile=active_profile,
+            previous_profile_key=self._previous_profile_key,
+            previous_location=self._previous_location,
+        )
+        self._previous_profile_key = bar_state.active_profile_key
+        self._previous_location = bar_state.location
         self._current_effective_profiles = list(effective_profiles)
-        self._current_transform_summary = dict(transform_summary or {})
         self._current_overlay_summary = {
-            "location": location,
-            "balance_state": balance_state,
-            "active_profile_key": active_profile_key,
+            "location": bar_state.location,
+            "balance_state": bar_state.balance_state,
+            "active_profile_key": bar_state.active_profile_key,
         }
         self._overlay_ready = True
+        self._outputs = build_market_profile_outputs(bar_state)
 
-        self._outputs = {
-            "value_area_metrics": RuntimeOutput(
-                bar_time=bar.time,
-                ready=True,
-                value={
-                    "poc": poc,
-                    "vah": vah,
-                    "val": val,
-                    "value_area_width": max(vah - val, 0.0),
-                },
-            ),
-            "value_location": RuntimeOutput(
-                bar_time=bar.time,
-                ready=True,
-                value={"state_key": location},
-            ),
-            "balance_state": RuntimeOutput(
-                bar_time=bar.time,
-                ready=True,
-                value={"state_key": balance_state},
-            ),
-            "balance_breakout": RuntimeOutput(
-                bar_time=bar.time,
-                ready=True,
-                value={"events": events},
-            ),
-        }
+    def _reset_outputs(self, bar_time: datetime) -> None:
+        self._current_effective_profiles = []
+        self._current_overlay_summary = {}
+        self._overlay_ready = False
+        self._outputs = build_not_ready_outputs(bar_time)
+        self._previous_profile_key = None
+        self._previous_location = None
 
     def _build_overlay(
         self,

@@ -67,7 +67,7 @@ def test_market_profile_runtime_indicator_emits_signal_output_without_overlay_ma
         indicator_id="mp-1",
         version="v1",
         params={"bin_size": 1.0, "price_precision": 2},
-        overlay_payload={
+        source_facts={
             "symbol": "ES",
             "profiles": [
                 {
@@ -113,7 +113,7 @@ def test_market_profile_runtime_indicator_waits_until_projected_strategy_bar_clo
         indicator_id="mp-1",
         version="v1",
         params={"bin_size": 1.0, "price_precision": 2},
-        overlay_payload={
+        source_facts={
             "symbol": "ES",
             "profiles": [
                 {
