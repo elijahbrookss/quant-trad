@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Mapping, Sequence, Tuple
 
+from .signal_output import assert_signal_output_event
+
 OutputType = Literal["signal", "context", "metric"]
 
 
@@ -97,7 +99,7 @@ class Indicator(ABC):
         return {}
 
     def configure_replay_window(self, *, history_bars: int | None = None) -> None:
-        """Allow replay consumers to provide window-specific execution hints."""
+        """Allow walk-forward window consumers to provide execution hints."""
         _ = history_bars
 
 
@@ -228,10 +230,12 @@ def _validate_signal_output(output_name: str, value: Mapping[str, Any]) -> None:
             raise RuntimeError(
                 f"indicator_output_invalid: signal event must be mapping output={output_name} index={index}"
             )
-        if set(event.keys()) != {"key"} or not isinstance(event.get("key"), str):
+        try:
+            assert_signal_output_event(event)
+        except RuntimeError as exc:
             raise RuntimeError(
-                f"indicator_output_invalid: signal event shape output={output_name} index={index}"
-            )
+                f"indicator_output_invalid: signal event shape output={output_name} index={index} detail={exc}"
+            ) from exc
 
 
 def _validate_context_output(output_name: str, value: Mapping[str, Any]) -> None:
@@ -276,8 +280,8 @@ def _validate_canonical_overlay(
     overlay_type: str,
     value: Mapping[str, Any],
 ) -> None:
-    from signals.overlays.builtins import ensure_builtin_overlays_registered
-    from signals.overlays.registry import get_overlay_spec, validate_overlay_payload
+    from overlays.builtins import ensure_builtin_overlays_registered
+    from overlays.registry import get_overlay_spec, validate_overlay_payload
 
     actual_type = str(value.get("type") or "").strip()
     if actual_type != overlay_type:

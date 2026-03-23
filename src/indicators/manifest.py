@@ -235,6 +235,10 @@ def manifest_output_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]]
     return catalog
 
 
+def manifest_signal_output_names(manifest: IndicatorManifest) -> list[str]:
+    return [output.name for output in manifest.outputs if output.type == "signal"]
+
+
 def manifest_overlay_catalog(manifest: IndicatorManifest) -> list[dict[str, Any]]:
     return [
         {
