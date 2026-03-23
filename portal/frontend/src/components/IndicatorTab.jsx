@@ -18,6 +18,12 @@ import {
   seedIndicatorArtifactSliceCache,
   writeIndicatorArtifactSliceCache,
 } from './indicatorOverlaySlices.js'
+import {
+  getIndicatorColorPalettes,
+  getIndicatorSignalColor,
+  supportsCustomIndicatorColor,
+  supportsIndicatorPaletteSelection,
+} from '../utils/indicatorColors.js'
 import { indicatorHasAuthorableOutputs } from '../utils/indicatorOutputs.js'
 // import IndicatorModal from './IndicatorModal'
 import IndicatorModalV2 from './IndicatorModal.v2.jsx'
@@ -26,6 +32,15 @@ import { useChartState } from '../contexts/ChartStateContext'
 import IndicatorCard from './IndicatorCard.jsx';
 import DeleteIndicatorModal from './DeleteIndicatorModal.jsx';
 import DropdownSelect from './ChartComponent/DropdownSelect.jsx';
+import ActiveSignalInspectionBanner from './ActiveSignalInspectionBanner.jsx';
+import IndicatorSignalList from './IndicatorSignalList.jsx';
+import {
+  buildSignalInspectionKey,
+  formatSignalEventLabel,
+  formatSignalReferenceText,
+  resolveSignalCursorEpoch,
+  sortSignalsNewestFirst,
+} from './indicatorSignalDebug.js';
 import { createLogger } from '../utils/logger.js';
 
 
@@ -140,16 +155,24 @@ const normalizedVisibilityMap = (value) => (
   value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 );
 
-const buildVisibleArtifactSets = (list = [], visibilityById = {}) => {
+const buildVisibleArtifactSets = (list = [], visibilityById = {}, activeInspection = null) => {
   const visibleIds = new Set(
     (list || [])
       .filter((indicator) => indicator?.enabled !== false && visibilityById?.[indicator.id] !== false)
       .map((indicator) => indicator?.id)
       .filter(Boolean),
   );
+  const inspectionIndicatorId = activeInspection?.indicatorId;
+  const indicatorIds = new Set(visibleIds);
+  const inspectionIds = new Set();
+  if (inspectionIndicatorId && visibleIds.has(inspectionIndicatorId)) {
+    indicatorIds.delete(inspectionIndicatorId);
+    inspectionIds.add(inspectionIndicatorId);
+  }
   return {
-    indicator: visibleIds,
+    indicator: indicatorIds,
     signal: visibleIds,
+    inspection: inspectionIds,
   };
 };
 
@@ -183,6 +206,7 @@ export const IndicatorSection = ({ chartId }) => {
   const noticeTimerRef = useRef(null);
   const [deleteModal, setDeleteModal] = useState({ open: false, indicatorId: null, indicatorName: '' });
   const overlayRefreshSeqRef = useRef(0);
+  const [selectedSignalKey, setSelectedSignalKey] = useState(null);
 
 
   const { updateChart, getChart } = useChartState()
@@ -193,6 +217,13 @@ export const IndicatorSection = ({ chartId }) => {
   // Read current chart slice
   const chartState = getChart(chartId)
   const indicatorVisibilityById = normalizedVisibilityMap(chartState?.indicatorVisibilityById)
+  const signalEventsByIndicator = chartState?.signalEventsByIndicator && typeof chartState.signalEventsByIndicator === 'object'
+    ? chartState.signalEventsByIndicator
+    : {};
+  const activeSignalInspection = chartState?.activeSignalInspection && typeof chartState.activeSignalInspection === 'object'
+    ? chartState.activeSignalInspection
+    : null;
+  const [inspectionBusyKey, setInspectionBusyKey] = useState(null);
 
   const mergeIndicatorLists = useCallback((incoming = [], previous = undefined) => {
     const prevList = Array.isArray(previous) ? previous : (Array.isArray(indicatorsRef.current) ? indicatorsRef.current : []);
@@ -365,22 +396,31 @@ export const IndicatorSection = ({ chartId }) => {
     return required.filter((key) => !contextPayload[key]);
   }, [contextPayload]);
 
-  const buildVisibleOverlaysFromCache = useCallback((sliceCache, list, colors, visibilityMap) => {
+  const buildVisibleOverlaysFromCache = useCallback((sliceCache, list, colors, visibilityMap, activeInspectionOverride = undefined) => {
     const safeList = Array.isArray(list) ? list : [];
     const allowedIndicatorIds = new Set(safeList.map((indicator) => indicator?.id).filter(Boolean));
-    const seededCache = seedIndicatorArtifactSliceCache(sliceCache || {}, (getChart(chartId) || {}).overlays || []);
+    const latestChart = getChart(chartId) || {};
+    const activeInspection = activeInspectionOverride === undefined
+      ? latestChart?.activeSignalInspection || null
+      : activeInspectionOverride;
+    const seededCache = seedIndicatorArtifactSliceCache(sliceCache || {}, latestChart?.overlays || []);
     const prunedCache = pruneIndicatorArtifactSliceCache(seededCache, allowedIndicatorIds);
     const visibleOverlays = rebuildIndicatorArtifactsFromCache(
       prunedCache,
-      buildVisibleArtifactSets(safeList, visibilityMap || {}),
+      buildVisibleArtifactSets(safeList, visibilityMap || {}, activeInspection),
     );
     return {
       sliceCache: prunedCache,
-      overlays: applyIndicatorColors(visibleOverlays, colors || {}),
+      overlays: applyIndicatorColors(visibleOverlays, colors || {}, safeList),
     };
   }, [chartId, getChart]);
 
-  const commitOverlaySlice = useCallback((indicatorId, source, nextSlice, { list, colors, overlayLoading = false } = {}) => {
+  const commitOverlaySlice = useCallback((indicatorId, source, nextSlice, {
+    list,
+    colors,
+    overlayLoading = false,
+    activeInspection = undefined,
+  } = {}) => {
     const latestChart = getChart(chartId) || {};
     const safeList = Array.isArray(list) ? list : indicatorsRef.current;
     const nextSliceCache = writeIndicatorArtifactSliceCache(
@@ -400,14 +440,82 @@ export const IndicatorSection = ({ chartId }) => {
       safeList,
       nextColorMap,
       normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
+      activeInspection,
     );
-    updateChart(chartId, {
+    const nextPatch = {
       indicatorArtifactSlices: sliceCache,
       overlays,
       overlayLoading,
-    });
+    };
+    if (activeInspection !== undefined) {
+      nextPatch.activeSignalInspection = activeInspection;
+    }
+    updateChart(chartId, nextPatch);
     return { sliceCache, overlays };
   }, [buildVisibleOverlaysFromCache, chartId, getChart, updateChart]);
+
+  const clearActiveSignalInspection = useCallback(({ list, colors } = {}) => {
+    const latestChart = getChart(chartId) || {};
+    const safeList = Array.isArray(list) ? list : indicatorsRef.current;
+    const nextColorMap = colors || buildColorMap(safeList);
+    const nextState = buildVisibleOverlaysFromCache(
+      latestChart?.indicatorArtifactSlices || {},
+      safeList,
+      nextColorMap,
+      normalizedVisibilityMap(latestChart?.indicatorVisibilityById),
+      null,
+    );
+    updateChart(chartId, {
+      indicatorArtifactSlices: nextState.sliceCache,
+      overlays: nextState.overlays,
+      activeSignalInspection: null,
+    });
+  }, [buildVisibleOverlaysFromCache, chartId, getChart, updateChart]);
+
+  const navigateToSignal = useCallback((signal) => {
+    const signalKey = buildSignalInspectionKey(signal);
+    setSelectedSignalKey(signalKey);
+    const cursorEpoch = resolveSignalCursorEpoch(signal);
+    if (!Number.isFinite(cursorEpoch)) {
+      setError('Cannot focus signal: signal is missing a valid known_at/event_time.');
+      return;
+    }
+    const handles = getChart(chartId)?.handles;
+    const focusFn = handles?.focusAtTime;
+    if (typeof focusFn !== 'function') {
+      warn('signal_navigation_unavailable', {
+        indicatorId: signal?.indicator_id,
+        eventKey: signal?.event_key,
+      });
+      return;
+    }
+    const focused = focusFn(Number(cursorEpoch));
+    if (!focused) {
+      warn('signal_navigation_failed', {
+        indicatorId: signal?.indicator_id,
+        eventKey: signal?.event_key,
+        cursorEpoch,
+      });
+    }
+  }, [chartId, getChart, setError, warn]);
+
+  useEffect(() => {
+    if (!activeSignalInspection?.indicatorId) return;
+    const stillPresent = indicators.some((indicator) => indicator?.id === activeSignalInspection.indicatorId);
+    if (!stillPresent) {
+      clearActiveSignalInspection({ list: indicators, colors: buildColorMap(indicators) });
+    }
+  }, [activeSignalInspection?.indicatorId, clearActiveSignalInspection, indicators]);
+
+  useEffect(() => {
+    if (!selectedSignalKey) return;
+    const exists = Object.values(signalEventsByIndicator || {}).some((signals) => (
+      Array.isArray(signals) && signals.some((signal) => buildSignalInspectionKey(signal) === selectedSignalKey)
+    ));
+    if (!exists) {
+      setSelectedSignalKey(null);
+    }
+  }, [selectedSignalKey, signalEventsByIndicator]);
 
   const requireContextPayload = useCallback(
     (reason = 'unknown') => {
@@ -463,6 +571,7 @@ export const IndicatorSection = ({ chartId }) => {
       overlays: [],
       indicatorArtifactSlices: {},
       signalEventsByIndicator: {},
+      activeSignalInspection: null,
       overlayLoading: true,
     });
 
@@ -489,10 +598,10 @@ export const IndicatorSection = ({ chartId }) => {
   useEffect(() => {
     const overlays = (getChart(chartId)?.overlays) || [];
     if (!overlays.length) return;
-    const recolored = applyIndicatorColors(overlays, indColors);
+    const recolored = applyIndicatorColors(overlays, indColors, indicators);
     updateChart(chartId, { overlays: recolored });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [indColors, chartId]);
+  }, [indColors, indicators, chartId]);
 
   // Refresh overlays for enabled indicators
   // ensure enabled indicators carry current chart symbol/interval before fetching overlays
@@ -504,7 +613,7 @@ export const IndicatorSection = ({ chartId }) => {
 
     const ctx = requireContextPayload('overlay_refresh');
     if (!chartState || !ctx) {
-      updateChart(chartId, { overlays: [], indicatorArtifactSlices: {}, overlayLoading: false });
+      updateChart(chartId, { overlays: [], indicatorArtifactSlices: {}, activeSignalInspection: null, overlayLoading: false });
       return;
     }
 
@@ -519,7 +628,7 @@ export const IndicatorSection = ({ chartId }) => {
         updateChart(chartId, { indicators: sortedWorking });
       } catch (e) {
         logError('indicator_seed_failed', e);
-        updateChart(chartId, { overlays: [], indicatorArtifactSlices: {}, overlayLoading: false });
+        updateChart(chartId, { overlays: [], indicatorArtifactSlices: {}, activeSignalInspection: null, overlayLoading: false });
         return;
       }
     }
@@ -547,12 +656,14 @@ export const IndicatorSection = ({ chartId }) => {
       working,
       nextColorMap,
       visibilityById,
+      null,
     );
     sliceCache = seededVisibleState.sliceCache;
     let mergedOverlays = seededVisibleState.overlays;
     updateChart(chartId, {
       indicatorArtifactSlices: sliceCache,
       overlays: mergedOverlays,
+      activeSignalInspection: null,
       overlayLoading: true,
     });
 
@@ -567,12 +678,14 @@ export const IndicatorSection = ({ chartId }) => {
         working,
         nextColorMap,
         normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
+        null,
       );
       sliceCache = nextState.sliceCache;
       mergedOverlays = nextState.overlays;
       updateChart(chartId, {
         indicatorArtifactSlices: sliceCache,
         overlays: mergedOverlays,
+        activeSignalInspection: null,
         overlayLoading: true,
       });
     };
@@ -670,10 +783,12 @@ export const IndicatorSection = ({ chartId }) => {
       working,
       nextColorMap,
       normalizedVisibilityMap((getChart(chartId) || {}).indicatorVisibilityById),
+      null,
     );
     updateChart(chartId, {
       indicatorArtifactSlices: finalOverlays.sliceCache,
       overlays: finalOverlays.overlays,
+      activeSignalInspection: null,
       overlayLoading: false,
     });
     info('overlay_refresh_complete', {
@@ -828,6 +943,7 @@ export const IndicatorSection = ({ chartId }) => {
         overlays: [],
         indicatorArtifactSlices: {},
         signalEventsByIndicator: {},
+        activeSignalInspection: null,
         overlayLoading: true,
       });
 
@@ -1012,6 +1128,9 @@ export const IndicatorSection = ({ chartId }) => {
         overlays: nextOverlayState.overlays,
         overlayLoading: false,
       })
+      if (!nextVisible && activeSignalInspection?.indicatorId === id) {
+        clearActiveSignalInspection({ list: latestIndicators, colors: nextColorMap })
+      }
       const hasIndicatorSlice = Array.isArray(nextOverlayState.sliceCache?.[id]?.indicator)
       if (nextVisible && target.enabled && !target?._local && !hasIndicatorSlice) {
         await refreshEnabledOverlays(latestIndicators)
@@ -1055,6 +1174,9 @@ export const IndicatorSection = ({ chartId }) => {
     }
 
     const indicator = indicators.find((ind) => ind.id === id);
+    if (activeSignalInspection?.indicatorId === id) {
+      clearActiveSignalInspection();
+    }
 
     // Get fresh chart state right before calling runSignalGeneration
     // to avoid stale closure issues
@@ -1087,6 +1209,72 @@ export const IndicatorSection = ({ chartId }) => {
     }
   };
 
+  const inspectSignalOverlayState = useCallback(async (indicatorId, signal) => {
+    const indicator = indicatorsRef.current.find((entry) => entry?.id === indicatorId);
+    if (!indicator) {
+      setError('Cannot inspect signal: indicator not found.');
+      return;
+    }
+
+    navigateToSignal(signal);
+
+    const cursorEpoch = resolveSignalCursorEpoch(signal);
+    if (!Number.isFinite(cursorEpoch)) {
+      setError('Cannot inspect signal: signal is missing a valid known_at/event_time.');
+      return;
+    }
+
+    const ctx = requireContextPayload('inspect_signal_overlay');
+    if (!ctx) return;
+
+    const inspectionKey = buildSignalInspectionKey(signal);
+    setInspectionBusyKey(inspectionKey);
+    info('signal_overlay_inspection_start', {
+      indicatorId,
+      eventKey: signal?.event_key,
+      cursorEpoch,
+    });
+
+    try {
+      const payload = await fetchIndicatorOverlays(indicatorId, {
+        ...ctx,
+        cursor_epoch: cursorEpoch,
+      });
+      const overlays = normalizeIndicatorArtifactResponse(indicator, payload, { defaultSource: 'inspection' });
+      const nextInspection = {
+        indicatorId,
+        signalKey: inspectionKey,
+        eventKey: signal?.event_key || null,
+        label: formatSignalEventLabel(signal?.event_key),
+        reference: formatSignalReferenceText(signal),
+        cursorEpoch,
+        cursorTime: payload?.overlay_state?.cursor_time || null,
+      };
+      commitOverlaySlice(indicatorId, 'inspection', overlays, {
+        list: indicatorsRef.current,
+        colors: buildColorMap(indicatorsRef.current),
+        overlayLoading: false,
+        activeInspection: nextInspection,
+      });
+      setError(null);
+      info('signal_overlay_inspection_complete', {
+        indicatorId,
+        eventKey: signal?.event_key,
+        cursorEpoch,
+        overlays: overlays.length,
+      });
+    } catch (err) {
+      setError(err?.message || 'Failed to inspect signal overlay state.');
+      logError('signal_overlay_inspection_failed', {
+        indicatorId,
+        eventKey: signal?.event_key,
+        cursorEpoch,
+      }, err);
+    } finally {
+      setInspectionBusyKey(null);
+    }
+  }, [clearActiveSignalInspection, commitOverlaySlice, info, logError, navigateToSignal, requireContextPayload, setError]);
+
 
   const openEditModal = (indicator = null) => {
     if (indicator) {
@@ -1102,6 +1290,7 @@ export const IndicatorSection = ({ chartId }) => {
     if (guardBusy('select_color')) return;
     const indicator = indicators.find((ind) => ind.id === indicatorId);
     if (!indicator) return;
+    if (!supportsCustomIndicatorColor(indicator)) return;
 
     const normalizedColor = typeof color === 'string' && color.trim()
       ? color.trim()
@@ -1158,6 +1347,52 @@ export const IndicatorSection = ({ chartId }) => {
     }
   };
 
+  const handleSelectPalette = async (indicatorId, paletteKey) => {
+    if (guardBusy('select_palette')) return;
+    const indicator = indicators.find((ind) => ind.id === indicatorId);
+    if (!indicator) return;
+    if (!supportsIndicatorPaletteSelection(indicator)) return;
+
+    const normalizedPalette = typeof paletteKey === 'string' && paletteKey.trim()
+      ? paletteKey.trim()
+      : null;
+
+    const optimisticIndicators = indicators.map((ind) => (
+      ind.id === indicatorId ? { ...ind, color_palette: normalizedPalette } : ind
+    ));
+    setIndicators(optimisticIndicators);
+    updateChart(chartId, { indicators: optimisticIndicators });
+
+    try {
+      const updated = await updateIndicator(indicatorId, {
+        type: indicator.type,
+        name: indicator.name,
+        params: indicator.params,
+        dependencies: indicator.dependencies || [],
+        color_palette: normalizedPalette,
+      });
+      if (updated) {
+        setIndicators((prev) => {
+          const next = prev.map((ind) => (ind.id === indicatorId ? updated : ind));
+          updateChart(chartId, { indicators: next });
+          return next;
+        });
+      }
+    } catch (e) {
+      setError(e.message);
+      logError('indicator_palette_update_failed', e);
+      setIndicators((prev) => {
+        const next = prev.map((ind) => (
+          ind.id === indicatorId
+            ? { ...ind, color_palette: indicator.color_palette ?? null }
+            : ind
+        ));
+        updateChart(chartId, { indicators: next });
+        return next;
+      });
+    }
+  };
+
   const handleDuplicate = async (id) => {
     if (!id) return
     if (guardBusy('duplicate_indicator')) return;
@@ -1196,6 +1431,9 @@ export const IndicatorSection = ({ chartId }) => {
     )));
 
     try {
+      if (activeSignalInspection?.indicatorId === id) {
+        clearActiveSignalInspection({ list: indicatorsRef.current, colors: buildColorMap(indicatorsRef.current) });
+      }
       const payload = await fetchIndicatorOverlays(id, ctx);
       const nextOverlays = normalizeIndicatorArtifactResponse(indicator, payload, { defaultSource: 'indicator' });
       commitOverlaySlice(id, 'indicator', nextOverlays, {
@@ -1249,6 +1487,9 @@ export const IndicatorSection = ({ chartId }) => {
   const signalsLoadingByIndicator = chartState?.signalsLoadingByIndicator && typeof chartState.signalsLoadingByIndicator === 'object'
     ? chartState.signalsLoadingByIndicator
     : {}
+  const activeInspectionIndicator = activeSignalInspection?.indicatorId
+    ? indicators.find((indicator) => indicator?.id === activeSignalInspection.indicatorId) || null
+    : null;
 
   const typeOptions = useMemo(() => {
     const unique = new Set();
@@ -1537,6 +1778,12 @@ export const IndicatorSection = ({ chartId }) => {
             </div>
           )}
 
+          <ActiveSignalInspectionBanner
+            activeInspection={activeSignalInspection}
+            indicatorName={activeInspectionIndicator?.name || activeInspectionIndicator?.type || null}
+            onClear={() => clearActiveSignalInspection()}
+          />
+
           <div className="space-y-2">
             {paginatedIndicators.map(indicator => {
               const isGenerating = Boolean(signalsLoadingByIndicator?.[indicator.id])
@@ -1544,31 +1791,51 @@ export const IndicatorSection = ({ chartId }) => {
               const disableSignals = actionLocked || isGenerating
               const isSelected = selectedIds.has(indicator.id)
               const isVisible = indicatorIsVisibleOnChart(indicator, indicatorVisibilityById)
+              const paletteOptions = getIndicatorColorPalettes(indicator)
+              const displayColor = supportsCustomIndicatorColor(indicator)
+                ? (indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR)
+                : (getIndicatorSignalColor(indicator) || DEFAULT_INDICATOR_COLOR)
+              const signalRows = Array.isArray(signalEventsByIndicator?.[indicator.id])
+                ? sortSignalsNewestFirst(signalEventsByIndicator[indicator.id]).slice(0, 5)
+                : []
               return (
-                <IndicatorCard
-                  key={indicator.id}
-                  indicator={indicator}
-                  color={indColors[indicator.id] ?? DEFAULT_INDICATOR_COLOR}
-                  onToggle={toggleVisibility}
-                  onEdit={openEditModal}
-                  onDelete={handleDelete}
-                  onDuplicate={handleDuplicate}
-                  onGenerateSignals={generateSignals}
-                  onSelectColor={handleSelectColor}
-                  onRecompute={handleRecomputeOverlays}
-                  showSignalAction={showSignalAction}
-                  colorSwatches={COLOR_SWATCHES}
-                  isGeneratingSignals={isGenerating}
-                  disableSignalAction={disableSignals}
-                  selected={isSelected}
-                  onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
-                  duplicatePending={duplicateBusyId === indicator.id}
-                  busy={actionLocked}
-                  activeJobId={jobState.indicatorId}
-                  isVisible={isVisible}
-                  onRetryCreate={() => retryCreate(indicator)}
-                  onRemoveLocal={() => removeLocalIndicator(indicator.id)}
-                />
+                <div key={indicator.id} className="space-y-2">
+                  <IndicatorCard
+                    indicator={indicator}
+                    color={displayColor}
+                    onToggle={toggleVisibility}
+                    onEdit={openEditModal}
+                    onDelete={handleDelete}
+                    onDuplicate={handleDuplicate}
+                    onGenerateSignals={generateSignals}
+                    onSelectColor={handleSelectColor}
+                    onSelectPalette={handleSelectPalette}
+                    onRecompute={handleRecomputeOverlays}
+                    showSignalAction={showSignalAction}
+                    colorSwatches={COLOR_SWATCHES}
+                    paletteOptions={paletteOptions}
+                    isGeneratingSignals={isGenerating}
+                    disableSignalAction={disableSignals}
+                    selected={isSelected}
+                    onSelectionToggle={() => toggleIndicatorSelection(indicator.id)}
+                    duplicatePending={duplicateBusyId === indicator.id}
+                    busy={actionLocked}
+                    activeJobId={jobState.indicatorId}
+                    isVisible={isVisible}
+                    showColorControl={supportsCustomIndicatorColor(indicator)}
+                    showPaletteControl={supportsIndicatorPaletteSelection(indicator)}
+                    onRetryCreate={() => retryCreate(indicator)}
+                    onRemoveLocal={() => removeLocalIndicator(indicator.id)}
+                  />
+                  <IndicatorSignalList
+                    signals={signalRows}
+                    selectedSignalKey={selectedSignalKey}
+                    activeInspectionKey={activeSignalInspection?.signalKey || null}
+                    inspectionBusyKey={inspectionBusyKey}
+                    onSelectSignal={navigateToSignal}
+                    onInspectSignal={(signal) => inspectSignalOverlayState(indicator.id, signal)}
+                  />
+                </div>
               )
             })}
 

@@ -474,6 +474,29 @@ export const ChartComponent = ({ chartId }) => {
     venueRef.current = providerMgmt.venueId;
   }, [providerMgmt.venueId]);
 
+  const focusAtTime = useCallback((epoch) => {
+    const chart = chartRef.current;
+    const scaleApi = chart?.timeScale?.();
+    const targetEpoch = Number(epoch);
+    if (!scaleApi || !Number.isFinite(targetEpoch)) return false;
+
+    const currentRange = scaleApi.getVisibleRange?.();
+    const currentSpan = Number(currentRange?.to) - Number(currentRange?.from);
+    const timeframeSeconds = parseTimeframeToSeconds(intervalRef.current) || 3600;
+    const resolvedSpan = Number.isFinite(currentSpan) && currentSpan > 0
+      ? currentSpan
+      : timeframeSeconds * 48;
+    const leftSpan = Math.max(timeframeSeconds * 8, resolvedSpan * 0.45);
+    const rightSpan = Math.max(timeframeSeconds * 8, resolvedSpan * 0.55);
+
+    scaleApi.setVisibleRange({
+      from: targetEpoch - leftSpan,
+      to: targetEpoch + rightSpan,
+    });
+    scaleApi.scrollToPosition?.(0, false);
+    return true;
+  }, []);
+
   const showWarning = useCallback((message) => {
     setRangeWarning(message);
     if (timeframeWarningRef.current) clearTimeout(timeframeWarningRef.current);
@@ -938,7 +961,8 @@ export const ChartComponent = ({ chartId }) => {
 
     registerChart?.(chartId, {
       get chart() { return chartRef.current; },
-      get series() { return seriesRef.current; }
+      get series() { return seriesRef.current; },
+      focusAtTime,
     });
 
     void loadChartData({ loaderReason: 'initial' });

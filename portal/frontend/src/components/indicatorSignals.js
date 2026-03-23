@@ -1,4 +1,8 @@
 import { createLogger } from '../utils/logger.js';
+import {
+  getIndicatorSignalColor,
+  getPaletteOverlayColor,
+} from '../utils/indicatorColors.js';
 import { normalizeIndicatorArtifactResponse } from './indicatorArtifacts.js';
 import {
   rebuildIndicatorArtifactsFromCache,
@@ -17,18 +21,40 @@ export const hexToRgba = (hex, a = 0.18) => {
   return `rgba(${n[0]},${n[1]},${n[2]},${a})`;
 };
 
-export const applyIndicatorColors = (overlays = [], colors = {}) =>
-  (overlays || []).map(ov => {
+const normalizeColor = (value) => (
+  typeof value === 'string' && value.trim() ? value.trim() : null
+);
+
+const buildIndicatorMetaMap = (indicators = []) => {
+  if (!Array.isArray(indicators)) return {};
+  return indicators.reduce((acc, indicator) => {
+    if (!indicator?.id) return acc;
+    acc[indicator.id] = indicator;
+    return acc;
+  }, {});
+};
+
+export const applyIndicatorColors = (overlays = [], colors = {}, indicators = []) => {
+  const indicatorsById = Array.isArray(indicators) ? buildIndicatorMetaMap(indicators) : (indicators || {});
+  return (overlays || []).map(ov => {
     if (!ov || !ov.ind_id || !ov.payload) return ov;
-    const color = colors[ov.ind_id] || ov.color;
+    const indicator = indicatorsById?.[ov.ind_id] || null;
+    const colorPolicy = ov?.ui?.color_policy;
+    const paletteOverlayColor = normalizeColor(getPaletteOverlayColor(indicator, ov?.type));
+    const signalColor = ov?.source === 'signal'
+      ? normalizeColor(getIndicatorSignalColor(indicator))
+      : null;
+    const lockedOverlayColor = colorPolicy === 'overlay' ? normalizeColor(ov?.ui?.color) || normalizeColor(ov?.color) : null;
+    const color = signalColor || paletteOverlayColor || lockedOverlayColor || colors[ov.ind_id] || ov.color;
     if (!color) return ov;
+    const forceExplicitColor = Boolean(signalColor || paletteOverlayColor);
 
     const price_lines = Array.isArray(ov.payload.price_lines)
-      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color: pl.color || color } : pl))
+      ? ov.payload.price_lines.map(pl => (pl ? { ...pl, color: forceExplicitColor ? color : (pl.color || color) } : pl))
       : ov.payload.price_lines;
 
     const markers = Array.isArray(ov.payload.markers)
-      ? ov.payload.markers.map(m => (m ? { ...m, color: m.color || color } : m))
+      ? ov.payload.markers.map(m => (m ? { ...m, color: forceExplicitColor ? color : (m.color || color) } : m))
       : ov.payload.markers;
 
     const boxes = Array.isArray(ov.payload.boxes)
@@ -36,8 +62,10 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
           if (!b) return b;
           return {
             ...b,
-            color: b.color || hexToRgba(color, 0.1),
-            border: b.border || { color: hexToRgba(color, 0.7), width: 1 },
+            color: forceExplicitColor ? hexToRgba(color, 0.1) : (b.color || hexToRgba(color, 0.1)),
+            border: forceExplicitColor
+              ? { ...(b.border || {}), color: hexToRgba(color, 0.7), width: b?.border?.width || 1 }
+              : (b.border || { color: hexToRgba(color, 0.7), width: 1 }),
           };
         })
       : ov.payload.boxes;
@@ -45,11 +73,11 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
     const tintHex = hexToRgba(color, 0.7);
 
     const segments = Array.isArray(ov.payload.segments)
-      ? ov.payload.segments.map(s => (s ? { ...s, color: s.color || tintHex } : s))
+      ? ov.payload.segments.map(s => (s ? { ...s, color: forceExplicitColor ? tintHex : (s.color || tintHex) } : s))
       : ov.payload.segments;
 
     const polylines = Array.isArray(ov.payload.polylines)
-      ? ov.payload.polylines.map(l => (l ? { ...l, color: l.color || tintHex } : l))
+      ? ov.payload.polylines.map(l => (l ? { ...l, color: forceExplicitColor ? tintHex : (l.color || tintHex) } : l))
       : ov.payload.polylines;
 
     return {
@@ -58,6 +86,7 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       ui: {
         ...(ov.ui || {}),
         color,
+        color_policy: colorPolicy || 'indicator',
       },
       payload: {
         ...ov.payload,
@@ -69,17 +98,26 @@ export const applyIndicatorColors = (overlays = [], colors = {}) =>
       },
     };
   });
+};
 
-const buildVisibleArtifactSets = (indicators = [], visibilityByIndicator = {}) => {
+const buildVisibleArtifactSets = (indicators = [], visibilityByIndicator = {}, activeInspection = null) => {
   const visibleIndicatorIds = new Set(
     (indicators || [])
       .filter((entry) => entry?.enabled !== false && visibilityByIndicator?.[entry.id] !== false)
       .map((entry) => entry?.id)
       .filter(Boolean)
   );
+  const inspectionIndicatorId = activeInspection?.indicatorId;
+  const indicatorIds = new Set(visibleIndicatorIds);
+  const inspectionIds = new Set();
+  if (inspectionIndicatorId && visibleIndicatorIds.has(inspectionIndicatorId)) {
+    indicatorIds.delete(inspectionIndicatorId);
+    inspectionIds.add(inspectionIndicatorId);
+  }
   return {
-    indicator: visibleIndicatorIds,
+    indicator: indicatorIds,
     signal: visibleIndicatorIds,
+    inspection: inspectionIds,
   };
 };
 
@@ -167,6 +205,7 @@ export async function runSignalGeneration({
       latestState?.indicatorVisibilityById && typeof latestState.indicatorVisibilityById === 'object'
         ? latestState.indicatorVisibilityById
         : {},
+      latestState?.activeSignalInspection || null,
     );
     const nextSliceCache = writeIndicatorArtifactSliceCache(
       seedIndicatorArtifactSliceCache(latestState?.indicatorArtifactSlices || {}, latestState?.overlays || []),
@@ -176,7 +215,18 @@ export async function runSignalGeneration({
         nextSlice: signalOverlays,
       },
     );
-    const nextOverlays = rebuildIndicatorArtifactsFromCache(nextSliceCache, retainBySource);
+    const indicatorList = Array.isArray(latestState?.indicators) ? latestState.indicators : [];
+    const indicatorColors = indicatorList.reduce((acc, entry) => {
+      if (!entry?.id) return acc;
+      const color = normalizeColor(entry?.color);
+      if (color) acc[entry.id] = color;
+      return acc;
+    }, {});
+    const nextOverlays = applyIndicatorColors(
+      rebuildIndicatorArtifactsFromCache(nextSliceCache, retainBySource),
+      indicatorColors,
+      indicatorList,
+    );
     const prevSignals = latestState?.signalEventsByIndicator || {};
     updateChart(chartId, {
       overlays: nextOverlays,

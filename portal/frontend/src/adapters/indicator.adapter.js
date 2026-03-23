@@ -60,7 +60,7 @@ export async function fetchIndicator(id) {
   return handleResponse(res)
 }
 
-export async function createIndicator({ type, name, params, dependencies = [], output_prefs = {}, color }) {
+export async function createIndicator({ type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
   adapterLogger.debug('create_indicator_request', {
     type,
     hasName: Boolean(name),
@@ -69,6 +69,9 @@ export async function createIndicator({ type, name, params, dependencies = [], o
   const body = { type, name, params, dependencies, output_prefs }
   if (color !== undefined) {
     body.color = color
+  }
+  if (color_palette !== undefined) {
+    body.color_palette = color_palette
   }
   const res = await fetch(`${API_BASE_URL}/indicators/`, {
     method: 'POST',
@@ -79,10 +82,13 @@ export async function createIndicator({ type, name, params, dependencies = [], o
   return handleResponse(res)
 }
 
-export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color }) {
+export async function updateIndicator(id, { type, name, params, dependencies = [], output_prefs = {}, color, color_palette }) {
   const body = { type, name, params, dependencies, output_prefs }
   if (color !== undefined) {
     body.color = color
+  }
+  if (color_palette !== undefined) {
+    body.color_palette = color_palette
   }
   const res = await fetch(`${API_BASE_URL}/indicators/${id}`, {
     method: 'PUT',
@@ -148,7 +154,20 @@ export async function duplicateIndicator(id, { name } = {}) {
   return handleResponse(res)
 }
 
-export async function fetchIndicatorOverlays(id, { start, end, interval, symbol, datasource, exchange, instrument_id }) {
+export async function fetchIndicatorOverlays(
+  id,
+  {
+    start,
+    end,
+    interval,
+    symbol,
+    datasource,
+    exchange,
+    instrument_id,
+    cursor_epoch,
+    cursor_time,
+  },
+) {
   adapterLogger.debug('fetch_indicator_overlays_request', {
     id,
     start,
@@ -158,11 +177,20 @@ export async function fetchIndicatorOverlays(id, { start, end, interval, symbol,
     datasource,
     exchange,
     instrument_id,
+    cursor_epoch,
+    cursor_time,
   })
+  const payload = { start, end, interval, symbol, datasource, exchange, instrument_id }
+  if (cursor_epoch !== undefined && cursor_epoch !== null) {
+    payload.cursor_epoch = cursor_epoch
+  }
+  if (cursor_time) {
+    payload.cursor_time = cursor_time
+  }
   const res = await fetch(`${API_BASE_URL}/indicators/${id}/overlays`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ start, end, interval, symbol, datasource, exchange, instrument_id }),
+    body: JSON.stringify(payload),
     mode: 'cors',
   });
   return handleResponse(res);
