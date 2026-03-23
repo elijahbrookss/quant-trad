@@ -21,6 +21,9 @@ const mockIndicator = {
     lookback_window: 50,
     threshold: 0.5,
   },
+  typed_outputs: [
+    { name: 'breakout', type: 'signal', enabled: true },
+  ],
   enabled: true,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
@@ -135,6 +138,17 @@ describe('IndicatorCard', () => {
   });
 
   describe('Blocking Compute UX', () => {
+    it('hides Generate Signals when the indicator has no signal outputs', () => {
+      render(
+        <IndicatorCard
+          {...defaultProps}
+          indicator={{ ...mockIndicator, typed_outputs: [{ name: 'value_area', type: 'metric' }] }}
+          showSignalAction={false}
+        />
+      );
+      expect(screen.queryByText('Generate')).not.toBeInTheDocument();
+    });
+
     it('disables Generate Signals button during signal generation', () => {
       render(<IndicatorCard {...defaultProps} isGeneratingSignals={true} />);
       const generateButton = screen.getByRole('button', { name: /working/i });

@@ -86,6 +86,7 @@ export default function IndicatorCard({
   onGenerateSignals,
   onSelectColor,
   onRecompute,
+  showSignalAction = true,
   isGeneratingSignals = false,
   disableSignalAction = false,
   selected = false,
@@ -93,6 +94,7 @@ export default function IndicatorCard({
   duplicatePending = false,
   busy = false,
   activeJobId = null,
+  isVisible = undefined,
   onRetryCreate,
   onRemoveLocal,
 }) {
@@ -136,7 +138,8 @@ export default function IndicatorCard({
   const displayName = indicator?.name?.trim() || typeLabel || "Indicator";
   const lastUpdated = indicator?.updated_at || indicator?.created_at || null;
   const relativeTime = formatRelativeTime(lastUpdated);
-  const isVisible = !!indicator?.enabled;
+
+  const visibleOnChart = typeof isVisible === "boolean" ? isVisible : indicator?.enabled !== false;
 
   // Determine status - only show transient states
   const statusKey = useMemo(() => {
@@ -178,7 +181,7 @@ export default function IndicatorCard({
   };
 
   // Hidden state styling - subtle desaturation
-  const hiddenStyles = !isVisible ? "opacity-60 saturate-[0.85]" : "";
+  const hiddenStyles = !visibleOnChart ? "opacity-60 saturate-[0.85]" : "";
 
   return (
     <div
@@ -270,30 +273,32 @@ export default function IndicatorCard({
         {/* Actions section */}
         <div className="flex items-center gap-2 shrink-0">
           {/* Generate Signals button */}
-          <button
-            type="button"
-            onClick={() => onGenerateSignals?.(indicator.id)}
-            className={`
-              inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition
-              ${
-                disableSignalAction || isGeneratingSignals
-                  ? "cursor-not-allowed border border-white/10 text-slate-500"
-                  : "border border-emerald-400/30 text-emerald-200 hover:border-emerald-300/50 hover:bg-emerald-500/10"
-              }
-            `}
-            title={isGeneratingSignals ? "Generating signals..." : "Generate signals"}
-            disabled={disableSignalAction || isGeneratingSignals}
-            aria-busy={isGeneratingSignals}
-          >
-            {isGeneratingSignals ? (
-              <>
-                <Loader2 className="size-3 animate-spin" />
-                <span>Working</span>
-              </>
-            ) : (
-              <span>Generate</span>
-            )}
-          </button>
+          {showSignalAction && (
+            <button
+              type="button"
+              onClick={() => onGenerateSignals?.(indicator.id)}
+              className={`
+                inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition
+                ${
+                  disableSignalAction || isGeneratingSignals
+                    ? "cursor-not-allowed border border-white/10 text-slate-500"
+                    : "border border-emerald-400/30 text-emerald-200 hover:border-emerald-300/50 hover:bg-emerald-500/10"
+                }
+              `}
+              title={isGeneratingSignals ? "Generating signals..." : "Generate signals"}
+              disabled={disableSignalAction || isGeneratingSignals}
+              aria-busy={isGeneratingSignals}
+            >
+              {isGeneratingSignals ? (
+                <>
+                  <Loader2 className="size-3 animate-spin" />
+                  <span>Working</span>
+                </>
+              ) : (
+                <span>Generate</span>
+              )}
+            </button>
+          )}
 
           {/* Color picker popover */}
           <Popover className="relative">
@@ -338,7 +343,7 @@ export default function IndicatorCard({
 
           {/* Visibility toggle - allowed during compute per requirements */}
           <VisibilityToggle
-            visible={isVisible}
+            visible={visibleOnChart}
             onChange={() => onToggle?.(indicator.id)}
             disabled={busy && statusKey !== "computing" && statusKey !== "updating"}
             size="sm"
