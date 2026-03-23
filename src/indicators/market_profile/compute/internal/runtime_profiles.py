@@ -260,7 +260,14 @@ def _should_log_resolution(
     if previous == signature:
         return False
     _LAST_RESOLUTION_LOG_SIGNATURE[key] = signature
-    return True
+    if previous is None:
+        return True
+    previous_known, previous_merged = previous
+    if int(merged_profiles) != int(previous_merged):
+        return True
+    if int(known_profiles) <= max(3, int(min_merge_sessions or 0)):
+        return True
+    return int(known_profiles) % 25 == 0
 
 
 def resolve_effective_profiles(

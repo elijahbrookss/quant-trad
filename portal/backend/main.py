@@ -20,6 +20,17 @@ from overlays.builtins import ensure_builtin_overlays_registered
 _SETTINGS = get_settings()
 
 
+class _HealthAccessFilter(logging.Filter):
+    """Drop routine health-probe access logs without muting real API traffic."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = getattr(record, "args", ())
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        path = str(args[2] or "")
+        return "/api/health" not in path
+
+
 def _allowed_origins() -> List[str]:
     """Load allowed origins from centralized settings."""
 
@@ -34,6 +45,9 @@ def _configure_logging() -> None:
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(existing, _HealthAccessFilter) for existing in access_logger.filters):
+        access_logger.addFilter(_HealthAccessFilter())
 
 def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()

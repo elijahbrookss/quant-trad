@@ -511,7 +511,6 @@ class MarketProfileIndicator(ComputeIndicator):
         for start_idx, end_idx in zip(start_indices.tolist(), end_indices.tolist()):
             group = df.iloc[start_idx:end_idx]
             session_date = session_keys[start_idx].date()
-            logger.debug("Processing session: %s, bars: %d", session_date, len(group))
 
             # Build TPO histogram
             tpo_hist = build_tpo_histogram(group, self.bin_size, self._bin_precision)
@@ -534,13 +533,17 @@ class MarketProfileIndicator(ComputeIndicator):
             )
 
             profiles.append(profile)
-            logger.debug(
-                "Profile for %s: POC=%.{prec}f, VAH=%.{prec}f, VAL=%.{prec}f".replace("{prec}", str(self.price_precision)),
-                session_date,
-                profile.poc,
-                profile.vah,
-                profile.val,
-            )
 
         logger.info("Completed daily profile computation. Total profiles: %d", len(profiles))
+        if logger.isEnabledFor(logging.DEBUG) and profiles:
+            sample = [
+                {
+                    "session": profiles[index].start.date().isoformat(),
+                    "poc": float(profiles[index].poc),
+                    "vah": float(profiles[index].vah),
+                    "val": float(profiles[index].val),
+                }
+                for index in range(min(3, len(profiles)))
+            ]
+            logger.debug("market_profile_daily_profiles_built | total=%s sample=%s", len(profiles), sample)
         return profiles
